@@ -726,13 +726,14 @@ class Gameplay(state.State):
     def update(self, events):
         if not self.spectator_mode:
             self.player.loop()
-        else:
-            # Filter events for spectator mode (Allow ESC, TAB, and navigation keys)
+        elif not self.substates:
+            # Filter events for spectator mode when idle (Allow ESC, TAB, Chat, RETURN, Brackets, PageUp/Down, and Comma/Period)
             allowed_keys = [
-                pygame.K_TAB, pygame.K_ESCAPE,
-                pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_RETURN
+                pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
+                pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
+                pygame.K_COMMA, pygame.K_PERIOD
             ]
-            events = [e for e in events if e.type != pygame.KEYDOWN or e.key in allowed_keys]
+            events = [e for e in events if e.type not in (pygame.KEYDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN) or (e.type == pygame.KEYDOWN and e.key in allowed_keys)]
         if not self.player.drownable and self.player.drown_clock.elapsed >= 30000 and not self.player.dead: self.player.drownable=True
         if self.player.in_water and self.player.drown_clock.elapsed>=3000 and not self.player.dead and self.player.drownable and not self.player.lock_weapon: 
             self.player.hp -= 5

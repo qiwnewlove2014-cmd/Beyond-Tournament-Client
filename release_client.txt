@@ -1,0 +1,21 @@
+# 🎉 Final Hour Client - The Awakening Update (v1.0.0)
+
+*(Note: The internal client build version shown in-game is `v0.33.6`, unified under public release `v1.0.0`)*
+
+Welcome to the official public release of the **Final Hour Client**!
+We have completely overhauled the client experience, transforming it into a deeply immersive, feature-rich audiogame platform. 
+
+## 🎧 Advanced Audio & Systems
+- **PA Megaphone System:** Experience realistic stadium-style broadcasts. Our engine now simulates dynamic speaker positioning and physical line-of-sight audio occlusion (sound is blocked by solid walls).
+- **In-Game Music Bot:** Powered by YouTube integrations (`yt-dlp` & `ffmpeg`), you can now seamlessly stream and listen to your favorite music directly inside the game world together with other players.
+
+## 🎮 Overhauled UX & Mechanics
+- **Multi-Account Manager:** The newly designed main menu features a robust account manager, allowing you to easily save, switch, and delete multiple profiles locally.
+- **Spectator Mode:** Press TAB to seamlessly switch perspectives. Our audio engine smoothly fades and transitions sounds when spectating other players.
+- **Expanded Controls:** Enjoy an expanded hotbar for your weapons and items, alongside dedicated quick-binds for the new Builder and Helper menus.
+
+## 🚀 Rock-Solid Stability
+- **Smart Crash Reporter:** We've implemented a brand-new GUI crash reporter. If the shadows prove too much and the game falters, you'll receive a clean, readable dialog box to help us track down the bug immediately.
+- **Resource Pooling:** A rewritten OpenAL EFX object pooling system ensures you never run out of audio channels during intense zombie hordes.
+
+Jump in, grab your gear, and survive the Final Hour. 🌒
