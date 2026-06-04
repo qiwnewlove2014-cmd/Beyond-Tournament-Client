@@ -192,7 +192,7 @@ class AudioStreamer(threading.Thread):
             pass
 
     def _send_to_network(self, data):
-        """Downmix Stereo to Mono, encode as Opus, and send to network.
+        """Downmix Stereo to Mono, scale volume, encode as Opus, and send to network.
         
         No manual rate limiting needed here — the ffmpeg -re flag paces output
         at exactly real-time speed, so stdout.read() already blocks ~20ms per
@@ -210,6 +210,11 @@ class AudioStreamer(threading.Thread):
             # Downmix 16-bit stereo → 16-bit mono
             import audioop
             mono_data = audioop.tomono(data, 2, 0.5, 0.5)
+
+            # [NEW] Scale the PCM stream volume according to self.volume before network broadcast
+            if self.volume != 100:
+                # self.volume is 0-100, so the factor is self.volume / 100.0
+                mono_data = audioop.mul(mono_data, 2, self.volume / 100.0)
 
             from . import consts
             encoded = self.encoder.encode(bytearray(mono_data))
@@ -780,6 +785,8 @@ class MapMusicBot:
 
     def set_volume(self, volume):
         self.volume = max(0, min(100, volume))
+        if self.streamer:
+            self.streamer.volume = self.volume
         options.set("music_bot_volume", self.volume)
         music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
         gain = (self.volume / 100) * music_vol
