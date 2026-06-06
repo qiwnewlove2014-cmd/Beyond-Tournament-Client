@@ -354,8 +354,8 @@ class EventHandeler:
 
         stage = data.get("data", {}).get("stage", "")
         msg_length = data.get("data", {}).get("msg_length", 200)
-        min_val = None
-        max_val = None
+        min_val = data.get("data", {}).get("min_val", None)
+        max_val = data.get("data", {}).get("max_val", None)
         
         if hasattr(self.gameplay, 'map') and self.gameplay.map:
             if stage.endswith('X'):
@@ -367,6 +367,17 @@ class EventHandeler:
             elif stage.endswith('Z'):
                 min_val = self.gameplay.map.minz
                 max_val = self.gameplay.map.maxz
+
+        if stage == 'volume':
+            min_val, max_val = 0, 100
+        elif stage == 'delay':
+            min_val, max_val = 0.0, 0.5
+        elif stage in ['reverb_decay', 'decayTime']:
+            min_val, max_val = 0.1, 20.0
+        elif stage in ['reverb_diffusion', 'diffusion']:
+            min_val, max_val = 0.0, 1.0
+        elif stage in ['price', 'cost', 'weaponCost', 'ammoCost', 'minpoints']:
+            min_val, max_val = 0, 999999999
 
         self.gameplay.add_substate(self.game.input.run(
             data["prompt"], 
