@@ -247,10 +247,12 @@ class EventHandeler:
         options = []
         for i in data["options"]:
             options.append(
-                (i["title"], functools.partial(on_select, i["value"], i["close"]))
+                (i["title"], functools.partial(on_select, i["value"], i["close"]), i.get("preview_sound"))
             )
-        options.append(("Close", self.gameplay.pop_last_substate))
+        options.append(("Close", self.gameplay.pop_last_substate, None))
         m.add_items(options)
+        m.sound_browse_mode = bool(data.get("sound_browse_mode", False))
+        m.block_space = data.get("event", "").startswith("builder_")
         menus.set_default_sounds(m)
         self.gameplay.add_substate(m)
 

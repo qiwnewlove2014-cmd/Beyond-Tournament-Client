@@ -38,6 +38,33 @@ class Menu(state.State):
         self.music = ""
         self.mus=None
         self.music_volume = None
+        self.preview_volume = 100
+        self.sound_browse_mode = False
+        self.block_space = False
+
+    def stop_preview_sound(self):
+        if "menu_preview" in self.direct_soundgroup.labeled_sources:
+            snd = self.direct_soundgroup.labeled_sources.pop("menu_preview")
+            if snd and snd.source:
+                try:
+                    self.game.automate(
+                        snd.source, "gain", 0.0, 300,
+                        callback=snd.destroy, cancelable=False
+                    )
+                except Exception:
+                    snd.source.stop()
+                    snd.destroy()
+
+
+    def toggle_preview(self):
+        """If preview is playing, fade it out. If not playing, replay current item."""
+        snd = self.direct_soundgroup.labeled_sources.get("menu_preview")
+        if snd and snd.source and snd.source.state.name != "STOPPED":
+            self.stop_preview_sound()
+            speech.speak("Stopped", id="preview_toggle")
+        else:
+            if self.pos >= 0:
+                self.speak_current_item()
 
     def return_first_match(self, text, current_index=0):
         """return the first index that has an item that matches the text"""
@@ -89,16 +116,21 @@ class Menu(state.State):
         self.music_volume = gain
 
     def speak_current_item(self):
-        text = self.items[self.pos][0]
+        item = self.items[self.pos]
+        text = item[0]
         if callable(text):
             text = text()
         speech.speak(text, id="menu_item")
+        
+        if len(item) > 2 and item[2]:
+            self.direct_soundgroup.play(item[2], cat="ui", id="menu_preview", volume=self.preview_volume)
 
     def update(self, events):
         super().update(events)
         for event in events:
             if event.type == pg.KEYDOWN:
                 key = event.key
+
                 if self.up_down and key == pg.K_DOWN:
                     self.move_down()
 
@@ -111,8 +143,13 @@ class Menu(state.State):
                 elif self.up_down and key == pg.K_HOME:
                     self.move_top()
 
-                elif key == pg.K_RETURN or key == pg.K_SPACE:
+                elif key == pg.K_RETURN:
                     if self.pos != -1:
+                        self.select_current_item()
+                elif key == pg.K_SPACE:
+                    if self.sound_browse_mode:
+                        self.toggle_preview()
+                    elif not self.block_space and self.pos != -1:
                         self.select_current_item()
                 elif key == pg.K_ESCAPE:
                     # activate the last option, we'll assume it exits the menu.
@@ -128,6 +165,22 @@ class Menu(state.State):
 
                 elif key == pg.K_PAGEUP and self.music_volume is not None:
                     self.set_music_volume(self.music_volume + 5)
+                
+                elif key == pg.K_LEFT and not self.left_right and self.sound_browse_mode:
+                    if self.preview_volume > 0:
+                        self.preview_volume = max(0, self.preview_volume - 5)
+                        speech.speak(f"{self.preview_volume}")
+                        snd = self.direct_soundgroup.labeled_sources.get("menu_preview")
+                        if snd and snd.source:
+                            snd.source.gain = (self.preview_volume / 100) * (self.direct_soundgroup.parent.volume_categories.get("ui", [100])[0] / 100)
+                
+                elif key == pg.K_RIGHT and not self.left_right and self.sound_browse_mode:
+                    if self.preview_volume < 100:
+                        self.preview_volume = min(100, self.preview_volume + 5)
+                        speech.speak(f"{self.preview_volume}")
+                        snd = self.direct_soundgroup.labeled_sources.get("menu_preview")
+                        if snd and snd.source:
+                            snd.source.gain = (self.preview_volume / 100) * (self.direct_soundgroup.parent.volume_categories.get("ui", [100])[0] / 100)
                 elif event.unicode:
                     new_pos = self.return_first_match(event.unicode, self.pos)
                     if new_pos != self.pos:
@@ -200,6 +253,7 @@ class Menu(state.State):
         speech.speak(f"music volume set to {self.music_volume}%", id="music_volume")
 
     def exit(self):
+        self.stop_preview_sound()
         super().exit()
         options.save()
         if self.mus != None:
@@ -209,3 +263,4 @@ class Menu(state.State):
             )
         if self.close:
             self.direct_soundgroup.play(self.close, cat="ui")
+
