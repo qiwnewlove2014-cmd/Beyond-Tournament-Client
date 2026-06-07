@@ -267,8 +267,20 @@ class Virtual_input:
         speak(message, True, id="text_entry_title")
         self.clear()
         self.hidden = password  # Update hidden state
-        self.min_val = min_val
-        self.max_val = max_val
+        
+        if "(map " in message.lower():
+            self.min_val = -999999999
+            self.max_val = 999999999
+        else:
+            lower_msg = message.lower()
+            is_coord = any(c in lower_msg for c in ["min x", "min y", "min z", "max x", "max y", "max z", "minx", "miny", "minz", "maxx", "maxy", "maxz"])
+            if is_coord:
+                self.min_val = -999999999
+                self.max_val = max_val
+            else:
+                self.min_val = min_val
+                self.max_val = max_val
+            
         self.maximum_message_length = msg_length
         if default != "":
             self.insert_character(str(default))
