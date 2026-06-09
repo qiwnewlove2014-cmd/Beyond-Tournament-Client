@@ -37,10 +37,18 @@ class Entity(Object):
         self.name = name
         self.has_radio = False
         self.dead = False  # Required for camera.move reverb check
+        self.water_filter = None
+        self._water_automation = None
     
     @property
     def player(self):
         return self._player
+
+    @property
+    def water_muffling(self):
+        # Maps self.depth (0.0 to 1.0) to GAINHF (0.02 to 0.50)
+        # 1.0 (surface) = 0.50, 0.0 (bottom) = 0.02
+        return 0.02 + 0.48 * max(0.0, min(1.0, self.depth))
 
     @player.setter
     def player(self, value):
@@ -114,26 +122,6 @@ class Entity(Object):
                     gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
                 self.vc_source.gain = gain
                 self.music_source.gain = gain
-            if not self.soundgroup.muted:
-                result = self.map.valid_straight_path(
-                    self.vc_source.position,
-                    self.game.audio_mngr.position
-                )
-                if result is None: pass
-                elif result == True: 
-                    try: del self.vc_source.direct_filter
-                    except: pass
-                    try: del self.music_source.direct_filter
-                    except: pass
-                else: 
-                    if len(self.soundgroup.filter) > 0: 
-                        self.vc_source.direct_filter = self.soundgroup.filter[-1]
-                        self.music_source.direct_filter = self.soundgroup.filter[-1]
-                    else: 
-                        try: del self.vc_source.direct_filter
-                        except: pass
-                        try: del self.music_source.direct_filter
-                        except: pass
         self.soundgroup.position = (self.x, self.y, self.z)
         tile = self.map.get_tile_at(self.x, self.y, self.z)
         # start/stop falling if the current tile is air.
@@ -251,6 +239,19 @@ class Entity(Object):
                     self.vc_source.gain = gain
                     self.music_source.gain = gain
 
+                    # Real-time filter sync with soundgroup filter state (optimized)
+                    current_filter = self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None
+                    if getattr(self, '_last_applied_filter', -1) != current_filter:
+                        self._last_applied_filter = current_filter
+                        if current_filter is not None:
+                            self.vc_source.direct_filter = current_filter
+                            self.music_source.direct_filter = current_filter
+                        else:
+                            try: del self.vc_source.direct_filter
+                            except Exception: pass
+                            try: del self.music_source.direct_filter
+                            except Exception: pass
+
                 if self.vc_source.buffers_queued == 0 and not self.is_user: 
                     try:
                         buffer = self.game.audio_mngr.context.gen_buffer()
@@ -353,47 +354,84 @@ class Entity(Object):
                         except: pass
             return automation_water
         
+        def cancel_active_automation():
+            if getattr(self, '_water_automation', None) is not None:
+                if self._water_automation in self.game.automations:
+                    try:
+                        self.game.automations.remove(self._water_automation)
+                    except ValueError:
+                        pass
+                self._water_automation = None
+
+        def get_water_filter():
+            if getattr(self, 'water_filter', None) is None:
+                self.water_filter = self.game.audio_mngr.gen_filter(type="LOWPASS")
+            return self.water_filter
+
         if not self.in_water and self.map.get_tile_at(self.x, self.y, self.z) == "underwater":
             self.game.audio_mngr.play_unbound("foley/swim/start/", self.x, self.y, self.z)
             self.in_water = True
             self.game.exclude_water.append(self.soundgroup)
-            muffling = 0.05 * self.depth
+            muffling = self.water_muffling
             
-            # Create filter ONLY when entering water
-            filter = self.game.audio_mngr.gen_filter(type="LOWPASS")
+            # Cancel any existing water automation first
+            cancel_active_automation()
+
+            # Reuse or create water filter
+            filter_obj = get_water_filter()
             
-            if not self.game.ignore_others_water: self.game.automate(
-                None, None,
-                muffling, 500,
-                step_callback = create_water_automation(filter), start_value=1.0
-            )
+            if not self.game.ignore_others_water:
+                def on_complete():
+                    if getattr(self, '_water_automation', None) == task:
+                        self._water_automation = None
+
+                task = self.game.automate(
+                    None, None,
+                    muffling, 500,
+                    step_callback = create_water_automation(filter_obj), start_value=1.0,
+                    callback=on_complete
+                )
+                self._water_automation = task
 
         if self.in_water and self.map.get_tile_at(self.x, self.y, self.z) != "underwater":
             self.game.audio_mngr.play_unbound("foley/swim/end/", self.x, self.y, self.z)
-            muffling = 0.05 * self.depth
+            muffling = self.water_muffling
             
-            # Create filter ONLY when exiting water
-            filter = self.game.audio_mngr.gen_filter(type="LOWPASS")
+            # Cancel any existing water automation first
+            cancel_active_automation()
 
-            if not self.game.ignore_others_water: self.game.automate(
-                None, None,
-                1.0, 500,
-                step_callback = create_water_automation(filter), start_value=muffling
-            )
+            # Reuse or create water filter
+            filter_obj = get_water_filter()
+
+            if not self.game.ignore_others_water:
+                def on_complete():
+                    if getattr(self, '_water_automation', None) == task:
+                        self._water_automation = None
+
+                task = self.game.automate(
+                    None, None,
+                    1.0, 500,
+                    step_callback = create_water_automation(filter_obj), start_value=muffling,
+                    callback=on_complete
+                )
+                self._water_automation = task
             self.in_water=False
             self.game.exclude_water.pop(self.game.exclude_water.index(self.soundgroup))
 
         if round(self.depth, 3) != round(self.recorded_depth,3) and self.in_water:
-            muffling = 0.05 * round(self.depth,3)
+            muffling = self.water_muffling
             
-            # Create filter ONLY when changing depth
-            filter = self.game.audio_mngr.gen_filter(type="LOWPASS")
+            # Cancel any active enter/exit water automation first
+            cancel_active_automation()
 
-            self.game.automate(
-                None, None,
-                muffling, 50,
-                step_callback = create_water_automation(filter), start_value=0.05*round(self.recorded_depth,3)
-            )
+            # Apply muffling directly to the reused water filter without spawning a new automate task
+            filter_obj = get_water_filter()
+            if filter_obj:
+                filter_obj.set("GAINHF", muffling)
+                self.soundgroup.apply_filter(filter_obj, replace=True)
+                if self.player:
+                    self.vc_source.direct_filter = filter_obj
+                    self.music_source.direct_filter = filter_obj
             self.recorded_depth = round(self.depth,3)
 
     @property 
@@ -405,6 +443,16 @@ class Entity(Object):
         self._hp = value if 0 <= value <= 100 else self._hp
     
     def destroy(self):
+        # Cancel any active water automation task
+        if getattr(self, '_water_automation', None) is not None:
+            if self._water_automation in self.game.automations:
+                try:
+                    self.game.automations.remove(self._water_automation)
+                except ValueError:
+                    pass
+            self._water_automation = None
+        self.water_filter = None
+
         if self.player: 
             self.vc_compression.put(None)
             # Release OpenAL sources for player entities
