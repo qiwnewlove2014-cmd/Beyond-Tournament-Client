@@ -26,7 +26,7 @@ def _find_ffmpeg():
     # 1. Check ffmpeg-downloader path
     try:
         from ffmpeg_downloader import ffmpeg_path
-        if os.path.exists(ffmpeg_path):
+        if ffmpeg_path and os.path.exists(ffmpeg_path):
             return ffmpeg_path
     except ImportError:
         pass

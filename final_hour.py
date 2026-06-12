@@ -33,8 +33,6 @@ def main():
 
 import sys
 import traceback
-import tkinter as tk
-from tkinter import scrolledtext
 
 def show_crash_dialog(error_text):
     """
@@ -42,6 +40,9 @@ def show_crash_dialog(error_text):
     Points the user to report this error.
     """
     try:
+        import tkinter as tk
+        from tkinter import scrolledtext
+        
         root = tk.Tk()
         root.withdraw()  # Hide the root window
 

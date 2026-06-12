@@ -7,10 +7,13 @@ if not exist final_hour\ (
     md final_hour\data
     )
 echo building...
-python -m nuitka --assume-yes-for-downloads --quiet --standalone --python-flag=no_site --user-plugin=CyalPlugin.py --windows-disable-console --windows-force-stderr=%program%final_hour.log --windows-force-stdout=%program%final_hour.log --include-package-data=certifi final_hour.py
+python -m nuitka --assume-yes-for-downloads --quiet --standalone --python-flag=no_site --user-plugin=CyalPlugin.py --enable-plugin=tk-inter --windows-disable-console --windows-force-stderr=%program%final_hour.log --windows-force-stdout=%program%final_hour.log --include-package-data=certifi final_hour.py
 xcopy /S /Q  dlls_windows\* final_hour\
 copy *.mhr final_hour\
 copy default_keyconfig.json final_hour\
+copy *.dll final_hour\
+copy ffmpeg.exe final_hour\
+copy oalinst.exe final_hour\
 xcopy /E /I /Q final_hour.dist final_hour
 echo build completed...
 echo copying required data...
@@ -19,8 +22,4 @@ xcopy /E /I /Q urlextract final_hour\urlextract\
 if exist final_hour.dist\ (
     rmdir /s /q final_hour.dist
     )
-if exist final_hour.build\ (
-    rmdir /s /q final_hour.build
-   
- )
 echo build complete!

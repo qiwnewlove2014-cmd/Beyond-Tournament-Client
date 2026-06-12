@@ -355,11 +355,16 @@ class EventHandeler:
             self.client.send(consts.CHANNEL_MENUS, data["event"], {"value": value, "data": data["data"]})
 
         stage = data.get("data", {}).get("stage", "")
+        input_type = data.get("data", {}).get("type", "")
         msg_length = data.get("data", {}).get("msg_length", 200)
         min_val = data.get("data", {}).get("min_val", None)
         max_val = data.get("data", {}).get("max_val", None)
         
-        if hasattr(self.gameplay, 'map') and self.gameplay.map:
+        if input_type == "createMap":
+            if stage.endswith('X') or stage.endswith('Y') or stage.endswith('Z'):
+                min_val = -999999999
+                max_val = 999999999
+        elif hasattr(self.gameplay, 'map') and self.gameplay.map:
             if stage.endswith('X'):
                 min_val = self.gameplay.map.minx
                 max_val = self.gameplay.map.maxx
