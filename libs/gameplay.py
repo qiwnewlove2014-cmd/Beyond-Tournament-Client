@@ -474,13 +474,10 @@ class Gameplay(state.State):
                 try:
                     if self.megaphone_eq_slot: 
                         self.game.audio_mngr.efx.send(src, 0, self.megaphone_eq_slot)
-                        print(f"[MEGAPHONE EFX] Applied EQ to speaker {i}")
                     if speaker_reverb_slot:  # Only apply if reverb was created (decay > 0.1)
                         self.game.audio_mngr.efx.send(src, 1, speaker_reverb_slot)
-                        print(f"[MEGAPHONE EFX] Applied Reverb to speaker {i}")
                     if self.megaphone_compressor_slot: 
                         self.game.audio_mngr.efx.send(src, 2, self.megaphone_compressor_slot)
-                        print(f"[MEGAPHONE EFX] Applied Compressor to speaker {i}")
                 except Exception as e:
                     print(f"[MEGAPHONE EFX] Error applying effects: {e}")
             
@@ -488,7 +485,6 @@ class Gameplay(state.State):
             if self.megaphone_lowpass_filter:
                 try:
                     src.direct_filter = self.megaphone_lowpass_filter
-                    print(f"[MEGAPHONE EFX] Applied LowPass filter to speaker {i}")
                 except Exception as e:
                     print(f"[MEGAPHONE] Could not apply filter: {e}")
                 
@@ -545,7 +541,6 @@ class Gameplay(state.State):
                     
                     # Store reflection reference
                     self.megaphone_speaker_data[-1]['reflection_source'] = reflection_src
-                    print(f"[MEGAPHONE] Ground reflection created at Z={reflection_z} for speaker at {pos}")
                 except Exception as e:
                     print(f"[MEGAPHONE] Error creating ground reflection: {e}")
 
@@ -776,7 +771,6 @@ class Gameplay(state.State):
                     if i < len(self.megaphone_sources):
                         self.megaphone_sources[i].position = pos
                 self.megaphone_positioned = True
-                print(f"[MEGAPHONE] Speakers positioned at map edges: {edges}")
         
         # === MEGAPHONE DYNAMIC REVERB SYNC ===
         # Synchronize megaphone speakers with the player's local reverb zone

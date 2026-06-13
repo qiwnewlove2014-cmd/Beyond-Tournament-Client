@@ -456,7 +456,6 @@ class EventHandeler:
         self.gameplay.player.double_tap_root_beer = data["value"]
 
     def speed_cola(self, data):
-        print("hi")
         if not data:
             return
         if "value" not in data:
