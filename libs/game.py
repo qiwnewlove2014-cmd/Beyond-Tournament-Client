@@ -82,6 +82,7 @@ class Game:
         self.direct_soundgroup = self.audio_mngr.create_soundgroup(True)
         self.instance_mngr = instance_manager.InstanceManager()
         self.instance_mngr.update_title()
+        self.reconnecting = False
 
     def start(self):
         if len(sys.argv) > 3:
@@ -441,11 +442,38 @@ class Game:
         if self.network:
             self.network.put(None)
             self.network.join()
-        menus.main_menu(self)
+            self.network = None
+        
+        if getattr(self, "reconnecting", False):
+            self.replace(self.reconnect_state)
+        else:
+            menus.main_menu(self)
 
     def connection_error(self):
-        menus.main_menu(self)
-        speak("Connection error [timeout]", False)
+        if getattr(self, "reconnecting", False):
+            self.replace(self.reconnect_state)
+        else:
+            menus.main_menu(self)
+            speak("Connection error [timeout]", False)
+
+    def reconnect_state(self):
+        if not hasattr(self, "reconnect_clock"):
+            self.reconnect_clock = self.new_clock()
+            self.reconnect_clock.elapsed = 3000  # Trigger immediately on first run
+        
+        if self.reconnect_clock.elapsed >= 3000:
+            self.reconnect_clock.restart()
+            speak("Connecting to the server. Please wait...", False)
+            try:
+                self.network = networking.Client(
+                    self,
+                    options.get("host", "127.0.0.1"),
+                    options.get("port", 13000),
+                    event_handeler.EventHandeler,
+                )
+                self.replace(self.login2)
+            except OSError:
+                pass
 
     def cancel(self, message="Canceled."):
         self.pop()

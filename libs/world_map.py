@@ -4,7 +4,7 @@ from .objects import entity
 import cyal.exceptions
 from .speech import speak
 
-from math import sqrt, trunc
+from math import sqrt, trunc, floor
 
 
 class Map:
@@ -496,17 +496,17 @@ class BaseMapObj:
         # 🛡️ Protection: Return false if any coordinate is None
         if x is None or y is None or z is None:
             return False
-        x = int(x)
-        y = int(y)
-        z = int(z)
         try:
+            ix = floor(x)
+            iy = floor(y)
+            iz = floor(z)
             return (
-                x >= int(self.minx)
-                and x <= int(self.maxx)
-                and y >= int(self.miny)
-                and y <= int(self.maxy)
-                and z >= int(self.minz)
-                and z <= int(self.maxz)
+                ix >= floor(self.minx)
+                and ix <= floor(self.maxx)
+                and iy >= floor(self.miny)
+                and iy <= floor(self.maxy)
+                and iz >= floor(self.minz)
+                and iz <= floor(self.maxz)
             )
         except TypeError as e:
             return False

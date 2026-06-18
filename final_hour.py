@@ -1,6 +1,7 @@
 import pygame
 import os
 import cyal.listener
+from libs import yt_dlp_deps
 
 # Ensure the working directory is the script's own directory,
 # so relative paths (data/, libs/, etc.) work regardless of how

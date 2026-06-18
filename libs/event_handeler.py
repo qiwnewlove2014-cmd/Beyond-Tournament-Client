@@ -33,6 +33,7 @@ class EventHandeler:
         )
 
     def connected(self, data):
+        self.game.reconnecting = False
         self.client.put(("connected", True))
         self.game.replace(self.gameplay)
         self.gameplay.player.name = data["username"]
@@ -208,7 +209,7 @@ class EventHandeler:
                 cat=data.get("cat", "miscelaneous"),
                 volume=data.get("volume", 100),
             )
-            if data["dist_path"]:
+            if data.get("dist_path"):
                 entity.play_sound_dist(
                     data["dist_path"],
                     data["looping"],
@@ -242,6 +243,9 @@ class EventHandeler:
             entity.face(data["angle"], entity.vfacing, entity.bfacing)
 
     def quit(self, data):
+        msg = data.get("message", "").lower()
+        if "reboot" in msg or "restart" in msg or "rebooting" in msg:
+            self.game.reconnecting = True
         self.game.put(lambda: self.gameplay.quit("quit"))
         speak(data.get("message", "your connection was closed."), True)
 
