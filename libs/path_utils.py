@@ -12,6 +12,64 @@ def random_item(dir):
         return ""
 
 
+_cycle_states = {}
+
+
+def get_next_cycle_item(dir_path):
+    """Returns the next sequential item for attack/hit sounds in a 2 -> 1 -> 3 cycle,
+    otherwise falls back to random_item."""
+    norm_path = os.path.normpath(dir_path).replace("\\", "/")
+    if not os.path.isdir(norm_path):
+        return dir_path
+    
+    try:
+        files = os.listdir(norm_path)
+    except Exception as e:
+        print(f"Error listing dir {norm_path}: {e}")
+        return dir_path
+
+    # Check if there are attack or hit files
+    attack_files = sorted([f for f in files if f.lower().startswith("attack") and f.lower().endswith(".ogg")])
+    hit_files = sorted([f for f in files if f.lower().startswith("hit") and f.lower().endswith(".ogg")])
+    
+    if attack_files:
+        ordered = []
+        for digit in ['2', '1', '3']:
+            for f in attack_files:
+                if digit in f:
+                    ordered.append(f)
+                    break
+        for f in attack_files:
+            if f not in ordered:
+                ordered.append(f)
+        
+        if ordered:
+            idx = _cycle_states.get(norm_path, 0)
+            chosen_file = ordered[idx % len(ordered)]
+            _cycle_states[norm_path] = (idx + 1) % len(ordered)
+            return f"{norm_path}/{chosen_file}"
+
+    if hit_files:
+        ordered = []
+        for digit in ['2', '1', '3']:
+            for f in hit_files:
+                if digit in f:
+                    ordered.append(f)
+                    break
+        for f in hit_files:
+            if f not in ordered:
+                ordered.append(f)
+        
+        if ordered:
+            idx = _cycle_states.get(norm_path, 0)
+            chosen_file = ordered[idx % len(ordered)]
+            _cycle_states[norm_path] = (idx + 1) % len(ordered)
+            return f"{norm_path}/{chosen_file}"
+
+    return random_item(dir_path)
+
+
+
 def copy_folder(src, dst):
     """
     Copy all files and folders from src to dst, overwriting existing files and folders in dst

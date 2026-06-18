@@ -128,7 +128,7 @@ class AudioManager():
                     except e:
                         print(e)
         if path.split("/")[0] != "data": path= f"data/{path}"
-        if not path.endswith(".ogg"): path = path_utils.random_item(path)
+        if not path.endswith(".ogg"): path = path_utils.get_next_cycle_item(path)
         path = os.path.relpath(path)
         if path in self.buffers.keys():
             return self.buffers[path]
