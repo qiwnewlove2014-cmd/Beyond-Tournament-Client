@@ -19,7 +19,8 @@ echo build completed...
 echo copying required data...
 xcopy /E /I /Q data final_hour\data\
 xcopy /E /I /Q urlextract final_hour\urlextract\
-xcopy /E /I /Q "C:\Users\Mongkol\AppData\Local\Programs\Python\Python313\Lib\site-packages\yt_dlp" "final_hour\yt_dlp"
+FOR /F "tokens=*" %%g IN ('python -c "import yt_dlp, os; print(os.path.dirname(yt_dlp.__file__))"') do (SET YT_DLP_PATH=%%g)
+xcopy /E /I /Q "%YT_DLP_PATH%" "final_hour\yt_dlp"
 if exist final_hour.dist\ (
     rmdir /s /q final_hour.dist
     )
