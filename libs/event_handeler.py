@@ -149,12 +149,16 @@ class EventHandeler:
     def rebuild_elements(self, data):
         elements = data["elements"]
         map = self.gameplay.map
+        has_megaphone = False
         for element in elements:
             type = element["type"]
             id = element["data"]["id"]
+            if type == "megaphoneSpeaker":
+                has_megaphone = True
             if hasattr(map, f"spawn_{type}"):
                 getattr(map, f"spawn_{type}")(**element["data"])
-        self.gameplay.setup_megaphone_speakers()
+        if has_megaphone:
+            self.gameplay.setup_megaphone_speakers()
 
     def spawn_entity(self, data):
         entity = self.gameplay.map.spawn_entity(

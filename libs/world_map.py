@@ -442,6 +442,12 @@ class Map:
         """Returns the maximum z"""
         return self.maxz
 
+    def spawn_playerSpawn(self, **kwargs):
+        pass
+
+    def spawn_zombieSpawn(self, **kwargs):
+        pass
+
     def spawn_entity(self, name, x, y, z, hp=100):
         if self.entities.get(name):
             self.entities[name].destroy()
