@@ -49,7 +49,14 @@ class Vector:
 
     @property
     def get_tuple(self):
-        return round(self.x, 1), round(self.y, 1), round(self.z, 1)
+        rx = round(self.x, 1)
+        ry = round(self.y, 1)
+        rz = round(self.z, 1)
+        return (
+            int(rx) if isinstance(rx, int) or rx.is_integer() else rx,
+            int(ry) if isinstance(ry, int) or ry.is_integer() else ry,
+            int(rz) if isinstance(rz, int) or rz.is_integer() else rz,
+        )
 
 
 def move(coords, deg, pitch=0.0, factor=1.0):
@@ -73,6 +80,12 @@ def move(coords, deg, pitch=0.0, factor=1.0):
     r.x = x + steplength * sin(radians(deg))
     r.y = y + steplength * cos(radians(deg))
     r.z = to_int(z) + factor * sin(radians(pitch))
+    
+    # If walking straight (along grid axes), force coordinates to snap to exact integer values
+    if round(deg) % 90 == 0:
+        r.x = round(r.x)
+        r.y = round(r.y)
+        
     return r
 
 
