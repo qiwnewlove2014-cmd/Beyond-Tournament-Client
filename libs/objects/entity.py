@@ -78,7 +78,10 @@ class Entity(Object):
                 ("edge", 0.5),
                 ("gain", 0.2)
             )
-            if self.distortion_slot is not None: self.distortion_slot.target = self.eq_slot
+            try:
+                if self.distortion_slot is not None: self.distortion_slot.target = self.eq_slot
+            except Exception as e:
+                print(f"[Entity] Warning: Failed to chain distortion to equalizer target: {e}")
             self.soundgroup.parent.efx.send(self.radio_source, 1, self.distortion_slot)
             self.vc_compression = voice_chat.voice_chat_compression(self.game)
 
