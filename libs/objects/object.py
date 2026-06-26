@@ -20,6 +20,22 @@ class Object:
         self, sound, looping=False, cat="miscelaneous", id="", rel_x=0, rel_y=0, rel_z=0, volume=100
     ):
         try:
+            is_focus = False
+            try:
+                if hasattr(self.game, 'gameplay') and getattr(self.game.gameplay.camera, 'focus_object', None) == self:
+                    is_focus = True
+            except Exception:
+                pass
+            
+            if is_focus and hasattr(self.game, 'direct_soundgroup'):
+                return self.game.direct_soundgroup.play(
+                    sound,
+                    looping=looping,
+                    cat=cat,
+                    id=id,
+                    volume=volume
+                )
+
             return self.soundgroup.play(
                 sound,
                 looping=looping,
@@ -38,6 +54,16 @@ class Object:
         self, sound, looping=False, volume=100, id="", rel_x=0, rel_y=0, rel_z=0, cat="miscelaneous"
     ):
         try:
+            is_focus = False
+            try:
+                if hasattr(self.game, 'gameplay') and getattr(self.game.gameplay.camera, 'focus_object', None) == self:
+                    is_focus = True
+            except Exception:
+                pass
+            
+            if is_focus and hasattr(self.game, 'direct_soundgroup'):
+                return
+
             return self.soundgroup.play(
                 sound,
                 looping=looping,

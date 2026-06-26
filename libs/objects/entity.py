@@ -2,6 +2,7 @@ import os
 from random import randint as random
 from .. import options
 from .. import voice_chat
+from ..logger import log
 
 import cyal.exceptions
 
@@ -214,14 +215,21 @@ class Entity(Object):
         self.fall_clock.restart()
         self.play_sound("foley/fall/start.ogg")
         self.falling = True
+        log(f"[DEBUG.FALL] {self.name} started falling at X={self.x}, Y={self.y}, Z={self.z}. Playing foley/fall/start.ogg")
 
     def fall_stop(self):
         self.falling = False
+        tile = self.map.get_tile_at(self.x, self.y, self.z)
+        log(f"[DEBUG.FALL] {self.name} landed on surface '{tile}' at X={self.x}, Y={self.y}, Z={self.z}. Playing foley/fall/end.ogg")
         self.play_sound("foley/fall/end.ogg")
         # sound-simulate landing hard on a platform.
-        for _ in range(random(3, 7)):
+        steps_count = random(3, 7)
+        log(f"[DEBUG.FALL] Simulating hard landing impact: scheduling {steps_count} rapid step sounds for surface '{tile}'...")
+        for i in range(steps_count):
+            delay = random(10, 100)
+            log(f"[DEBUG.FALL] Scheduling step sound #{i+1} with delay of {delay}ms")
             self.game.call_after(
-                random(10, 100), lambda: self.move(self.x, self.y, self.z, mode="run")
+                delay, lambda: self.move(self.x, self.y, self.z, mode="run")
             )
 
     def loop(self):

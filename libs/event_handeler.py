@@ -277,6 +277,10 @@ class EventHandeler:
         m.add_items(options)
         m.sound_browse_mode = bool(data.get("sound_browse_mode", False))
         m.block_space = data.get("event", "").startswith("builder_")
+        # Store menu context so Ctrl+C / Ctrl+V shortcuts know which event and
+        # selected value to act on (used by the builder copy/paste clipboard).
+        m.menu_event = data.get("event", "")
+        m.menu_values = [i["value"] for i in data["options"]]
         menus.set_default_sounds(m)
         self.gameplay.add_substate(m)
 

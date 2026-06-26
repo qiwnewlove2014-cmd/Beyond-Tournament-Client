@@ -2,6 +2,7 @@ from .. import consts
 from ..speech import speak
 from .entity import Entity
 from random import randint as random
+from ..logger import log
 
 
 class Player(Entity):
@@ -69,12 +70,17 @@ class Player(Entity):
         pass
 
     def fall_stop(self):
+        tile = self.map.get_tile_at(self.x, self.y, self.z)
+        log(f"[DEBUG.PLAYER.FALL] Player fall_stop() triggered. Surface: '{tile}', Fall distance: {self.fall_distance}")
         super().fall_stop()
+        old_hp = self.hp
         self.hp = self.hp - (self.fall_distance / 2 + random(-3, 3))
+        log(f"[DEBUG.PLAYER.FALL] Calculated HP damage. HP before: {old_hp:.1f}, HP after: {self.hp:.1f}. Sending set_hp to server.")
         self.game.network.send(consts.CHANNEL_MISC, "set_hp", {"amount": self.hp})
         self.fall_distance = 0
         self.stunned = True
         self.stunned_clock.restart()
+        log(f"[DEBUG.PLAYER.FALL] Playing death/start.ogg for self player impact.")
         self.play_sound("death/start.ogg", cat="self")
         if self.hp <= 0 or self.hp > 100:
             self.hp = 100

@@ -41,6 +41,9 @@ class Menu(state.State):
         self.preview_volume = 100
         self.sound_browse_mode = False
         self.block_space = False
+        # Menu context for builder copy/paste shortcuts (set by make_menu).
+        self.menu_event = ""
+        self.menu_values = []
 
     def stop_preview_sound(self):
         if "menu_preview" in self.direct_soundgroup.labeled_sources:
@@ -146,6 +149,15 @@ class Menu(state.State):
                 elif key == pg.K_RETURN:
                     if self.pos != -1:
                         self.select_current_item()
+                elif key == pg.K_c and event.mod & pg.KMOD_CTRL:
+                    # Builder copy: only meaningful in the element list menu
+                    if self.menu_event == "edit_element_select" and 0 <= self.pos < len(self.menu_values):
+                        value = self.menu_values[self.pos]
+                        self.game.network.send(consts.CHANNEL_MENUS, "builder_copy_element", {"value": value})
+                elif key == pg.K_v and event.mod & pg.KMOD_CTRL:
+                    # Builder paste: only meaningful in the main builder menu
+                    if self.menu_event == "builder_menu_select":
+                        self.game.network.send(consts.CHANNEL_MENUS, "builder_paste_element", {"value": "paste"})
                 elif key == pg.K_SPACE:
                     if self.sound_browse_mode:
                         self.toggle_preview()
