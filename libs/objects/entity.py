@@ -129,25 +129,31 @@ class Entity(Object):
         self.soundgroup.position = (self.x, self.y, self.z)
         tile = self.map.get_tile_at(self.x, self.y, self.z)
         # start/stop falling if the current tile is air.
-        if not self.falling and tile in ["air", ""]:
-            self.fall_start()
-        elif self.falling and tile not in ["air", "", "deep_water"]:
-            self.fall_stop()
+        if getattr(self.game, 'pong_mode', False):
+            self.falling = False
+        else:
+            if not self.falling and tile in ["air", ""]:
+                self.fall_start()
+            elif self.falling and tile not in ["air", "", "deep_water"]:
+                self.fall_stop()
         if play_sound and not self.falling:
-            if mode == "run" and not os.path.exists(
-                f"{consts.SOUNDPREPEND}/steps/{tile}/run"
-            ):
-                mode = "walk"
-            cat="zombies"
-            if self == self.map.player: cat = "self"
-            elif not self.name.startswith("zomby"): cat = "players"
-            self.play_sound(
-                f"steps/{tile}/{mode}",
-                rel_z=-1,
-                cat=cat
-            )
+            if getattr(self.game, 'pong_mode', False) and getattr(self, 'is_user', False):
+                pass # suppress normal footstep; server plays pong-specific move sound
+            else:
+                if mode == "run" and not os.path.exists(
+                    f"{consts.SOUNDPREPEND}/steps/{tile}/run"
+                ):
+                    mode = "walk"
+                cat="zombies"
+                if self == self.map.player: cat = "self"
+                elif not self.name.startswith("zomby"): cat = "players"
+                self.play_sound(
+                    f"steps/{tile}/{mode}",
+                    rel_z=-1,
+                    cat=cat
+                )
 
-    def face(self, hdeg, vdeg, bdeg=0, play_sound=False):
+    def face(self, hdeg, vdeg, bdeg=0, play_sound=False, force=False):
         if play_sound:
             self.play_sound("foley/turn/end.ogg", cat="players")
         self.hfacing = hdeg % 360
@@ -203,8 +209,14 @@ class Entity(Object):
                         return False
                     self.move(*dist, mode=mode)
                     return True
+                
+                # Handle wall collision sound
+                bump_sound = f"walls/{disttile}.ogg"
+                if getattr(self.game, 'pong_mode', False) and getattr(self, 'is_user', False):
+                    bump_sound = "Pong/Border.ogg"
+
                 self.play_sound(
-                    f"walls/{disttile}.ogg",
+                    bump_sound,
                     rel_x=dist[0] - self.x,
                     rel_y=dist[1] - self.y,
                     rel_z=1,

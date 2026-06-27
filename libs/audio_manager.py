@@ -173,7 +173,7 @@ class AudioManager():
                     gain = (self.volume_categories[cat][0] / 100) * (source.volume / 100)
                     if not source.muted: source.source.gain = gain
 
-    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100):
+    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0):
         if self.muted and not looping: return
         direction=self.make_orientation(*direction)
         buffer = self.load_buffer(path)
@@ -186,7 +186,8 @@ class AudioManager():
             (self.volume_categories[cat][0]/100),
             direction=direction, 
             position=(x,y,z), 
-            velocity=velocity
+            velocity=velocity,
+            pitch=pitch
         )
         if direct:
             source.direct_channels=True

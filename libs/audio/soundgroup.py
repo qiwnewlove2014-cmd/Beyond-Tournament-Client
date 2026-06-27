@@ -103,7 +103,7 @@ class SoundGroup:
                 for source in self.unlabeled_sources: source.source.direction = self.parent.make_orientation(*value)
     
 
-    def play(self, path, looping=False, id="", dist=False, cat="miscelaneous", rel_x=0, rel_y=0, rel_z=0, volume=100, ):
+    def play(self, path, looping=False, id="", dist=False, cat="miscelaneous", rel_x=0, rel_y=0, rel_z=0, volume=100, pitch=1.0):
         if self.parent.muted and not looping or self.parent.muted and id not in ["", None]: return
         buffer = self.parent.load_buffer(path)
         if not buffer: 
@@ -118,7 +118,8 @@ class SoundGroup:
                 (self.parent.volume_categories[cat][0]/100),
                 direction=self.orientation, 
                 position=(self.position[0]+rel_x, self.position[1]+rel_y, self.position[2]+rel_z), 
-                velocity=self.velocity
+                velocity=self.velocity,
+                pitch=pitch
             )
         except MemoryError as e:
             print(f"{e}")
@@ -131,10 +132,14 @@ class SoundGroup:
                 (self.parent.volume_categories[cat][0]/100),
                 direction=self.orientation, 
                 position=(self.position[0]+rel_x, self.position[1]+rel_y, self.position[2]+rel_z), 
-                velocity=self.velocity
+                velocity=self.velocity,
+                pitch=pitch
             )
         if self.direct:
-            source.direct_channels=True
+            if buffer.channels > 1:
+                source.direct_channels = True
+            else:
+                source.direct_channels = False
             source.spatialize = False
         else:
             source.direct_channels = False
@@ -307,6 +312,11 @@ class SoundGroup:
                     print("[SoundGroup] LOWPASS filter could not be created.")
                     return None
             return self.cached_filter
+
+        # Bypass occlusion entirely in Pong mode
+        if getattr(getattr(map, 'game', None), 'pong_mode', False):
+            self.apply_filter(None, replace=True, clear=True)
+            return
 
         if not self.muted:
             # Check for physical occlusion (walls)

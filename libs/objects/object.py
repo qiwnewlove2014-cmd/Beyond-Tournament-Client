@@ -17,7 +17,7 @@ class Object:
         self.soundgroup.position = (x, y, z)
 
     def play_sound(
-        self, sound, looping=False, cat="miscelaneous", id="", rel_x=0, rel_y=0, rel_z=0, volume=100
+        self, sound, looping=False, cat="miscelaneous", id="", rel_x=0, rel_y=0, rel_z=0, volume=100, pitch=1.0
     ):
         try:
             is_focus = False
@@ -33,7 +33,8 @@ class Object:
                     looping=looping,
                     cat=cat,
                     id=id,
-                    volume=volume
+                    volume=volume,
+                    pitch=pitch
                 )
 
             return self.soundgroup.play(
@@ -44,14 +45,15 @@ class Object:
                 rel_x=rel_x,
                 rel_y=rel_y,
                 rel_z = rel_z,
-                volume=volume
+                volume=volume,
+                pitch=pitch
             )
         except Exception as e:
             print("\a", e)
             traceback.print_exc()
 
     def play_sound_dist(
-        self, sound, looping=False, volume=100, id="", rel_x=0, rel_y=0, rel_z=0, cat="miscelaneous"
+        self, sound, looping=False, volume=100, id="", rel_x=0, rel_y=0, rel_z=0, cat="miscelaneous", pitch=1.0
     ):
         try:
             is_focus = False
@@ -73,7 +75,8 @@ class Object:
                 rel_y=rel_y,
                 rel_z=rel_z,
                 dist=True,
-                volume=volume
+                volume=volume,
+                pitch=pitch
             )
         except Exception as e:
             print("\a", e)

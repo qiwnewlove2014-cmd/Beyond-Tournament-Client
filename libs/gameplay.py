@@ -51,6 +51,7 @@ class Gameplay(state.State):
         self.pingging = False
         self.pa_test_mode = False  # PA Test Mode for testing megaphone speakers
         self.game_started = False   # Track if game has started (blocks PA Test Mode)
+        self.pong_mode = False      # True when player is in an active Pong match (suppresses normal footsteps)
         self.keys_held = {
             kc.get("strafe_left", pygame.K_q): self.strafe_left,
             kc.get("strafe_right", pygame.K_e): self.strafe_right,
@@ -958,6 +959,9 @@ class Gameplay(state.State):
                 if key[i]:
                     self.keys_held[i](pygame.key.get_mods())
         for event in events:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
+                self.game.network.send(consts.CHANNEL_MAP, "pong_serve", {})
+                continue
             if self.spectator_mode:
                 allowed_keys = [
                     pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
@@ -1093,17 +1097,23 @@ class Gameplay(state.State):
     # movement
     def strafe_left(self, mod):
         tile_factor = 3.0 if self.map.get_tile_at(self.player.x, self.player.y, self.player.z) in ["deep_water", "underwater"] else 1.0
-        if self.player.movement_clock.elapsed >= self.player.movetime * tile_factor:
+        effective_movetime = 60 if getattr(self.game, 'pong_mode', False) else (self.player.runtime if getattr(self, 'running', False) else self.player.movetime)
+        if self.player.movement_clock.elapsed >= effective_movetime * tile_factor:
             self.player.movement_clock.restart()
-            self.player.walk(left=True, send=True)
+            mode = "run" if (getattr(self, 'running', False) or getattr(self.game, 'pong_mode', False)) else "walk"
+            self.player.walk(left=True, mode=mode, send=True)
 
     def strafe_right(self, mod):
         tile_factor = 3.0 if self.map.get_tile_at(self.player.x, self.player.y, self.player.z) in ["deep_water", "underwater"] else 1.0
-        if self.player.movement_clock.elapsed >= self.player.movetime * tile_factor:
+        effective_movetime = 60 if getattr(self.game, 'pong_mode', False) else (self.player.runtime if getattr(self, 'running', False) else self.player.movetime)
+        if self.player.movement_clock.elapsed >= effective_movetime * tile_factor:
             self.player.movement_clock.restart()
-            self.player.walk(right=True, send=True)
+            mode = "run" if (getattr(self, 'running', False) or getattr(self.game, 'pong_mode', False)) else "walk"
+            self.player.walk(right=True, mode=mode, send=True)
 
     def move_forward(self, mod, turn=False):
+        if getattr(self.game, 'pong_mode', False):
+            return
         if turn and self.turn_mod:
             self.player.face(0, 0)
             self.turning = True
@@ -1118,6 +1128,9 @@ class Gameplay(state.State):
             self.player.walk(mode=mode, send=True)
 
     def turn_left(self, mod, turn=False):
+        if getattr(self.game, 'pong_mode', False):
+            self.strafe_left(mod)
+            return
         if self.player.locked:
             return
         if turn:
@@ -1137,6 +1150,8 @@ class Gameplay(state.State):
                 speak(string_utils.direction(self.player.hfacing))
 
     def move_back(self, mod, turn=False):
+        if getattr(self.game, 'pong_mode', False):
+            return
         if turn and self.turn_mod:
             self.player.turning_clock.restart()
             self.player.face(self.player.hfacing + 180, 0)
@@ -1152,6 +1167,9 @@ class Gameplay(state.State):
             self.player.walk(back=True, mode=mode, send=True)
 
     def turn_right(self, mod, turn=False):
+        if getattr(self.game, 'pong_mode', False):
+            self.strafe_right(mod)
+            return
         if self.player.locked:
             return
         if turn:
@@ -1186,6 +1204,8 @@ class Gameplay(state.State):
 
 
     def pitch_down(self, mod, turn=False):
+        if getattr(self.game, 'pong_mode', False):
+            return
         if self.player.locked:
             return
         if turn:
@@ -1205,6 +1225,8 @@ class Gameplay(state.State):
                 self.player.face(self.player.hfacing, self.player.vfacing - 1)
 
     def pitch_up(self, mod, turn=False):
+        if getattr(self.game, 'pong_mode', False):
+            return
         if self.player.locked:
             return
         if turn:

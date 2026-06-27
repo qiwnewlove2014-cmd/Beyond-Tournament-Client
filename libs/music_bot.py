@@ -30,8 +30,12 @@ def _find_ffmpeg():
             return ffmpeg_path
     except ImportError:
         pass
-    # 2. Check next to executable
-    exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    # 2. Check next to executable (handle PyInstaller frozen state)
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+    else:
+        exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        
     for name in ["ffmpeg.exe", "ffmpeg"]:
         p = os.path.join(exe_dir, name)
         if os.path.exists(p):

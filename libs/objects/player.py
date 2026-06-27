@@ -27,6 +27,9 @@ class Player(Entity):
         
 
     def move(self, x, y, z, play_sound=True, mode="walk", send=False):
+        # In pong mode, suppress normal footstep sounds — server sends Pong/Move.ogg separately
+        if getattr(self.game, 'pong_mode', False):
+            play_sound = False
         super().move(x, y, z, play_sound, mode)
         if send and self.game.network:
             self.send_movement(mode)
@@ -55,6 +58,10 @@ class Player(Entity):
         send=False,
         swim=False
     ):
+        if getattr(self.game, 'pong_mode', False):
+            # In pong, only allow sideways movement (left/right strafing)
+            if not left and not right:
+                return False
         if self.bfacing < 30 and self.bfacing > -30 and self.locked == False or self.map.get_tile_at(self.x, self.y, self.z) in ["deep_water", "underwater"] and self.locked == False:
             value = super().walk(back, left, right, down, up, mode)
             if send and value:
@@ -63,8 +70,11 @@ class Player(Entity):
         elif self.bfacing < -30 and self.map.get_tile_at(self.x, self.y, self.z) not in ["deep_water", "underwater"] or self.bfacing > 30 and self.map.get_tile_at(self.x, self.y, self.z) not in ["deep_water", "underwater"]:
             speak("you are unbalanced, perhaps streighten up first? ")
 
-    def face(self, *args, **kwargs):
-        super().face(*args, **kwargs)
+    def face(self, hdeg, vdeg, bdeg=0, play_sound=False, force=False):
+        if getattr(self.game, 'pong_mode', False) and not force:
+            # Lock turning in Pong mode
+            return
+        super().face(hdeg, vdeg, bdeg, play_sound)
 
     def death(self):
         pass

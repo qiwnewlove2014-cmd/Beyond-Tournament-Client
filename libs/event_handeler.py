@@ -169,6 +169,9 @@ class EventHandeler:
         if data.get("player", False):
             entity.player = True
             
+        if data["name"] == "ball":
+            entity.soundgroup.play("Pong/rolling.ogg", looping=True, id="ball_roll", cat="miscelaneous")
+            
         if data.get("beacon", False) and options.get("beacons"):
             try: 
                 entity.beacon = entity.play_sound(
@@ -212,6 +215,7 @@ class EventHandeler:
                 id=data.get("id", ""),
                 cat=data.get("cat", "miscelaneous"),
                 volume=data.get("volume", 100),
+                pitch=data.get("pitch", 1.0)
             )
             if data.get("dist_path"):
                 entity.play_sound_dist(
@@ -219,18 +223,33 @@ class EventHandeler:
                     data["looping"],
                     data["volume"],
                     data.get("id", ""),
-                    cat=data.get("cat", "miscelaneous")
+                    cat=data.get("cat", "miscelaneous"),
+                    pitch=data.get("pitch", 1.0)
                 )
 
     def play_direct(self, data):
+        from .logger import log
+        log(f"[DEBUG.AUDIO] play_direct received: {data['sound']}")
         self.game.direct_soundgroup.play(
             data["sound"], data["looping"], data["id"], volume=data["volume"], cat=data.get("cat", "miscelaneous")
         )
 
     def play_unbound(self, data):
-        self.game.audio_mngr.play_unbound(
+        snd = self.game.audio_mngr.play_unbound(
             data["sound"], data["x"], data["y"], data["z"], False, volume=data["volume"], cat=data.get("cat", "miscelaneous")
         )
+        if snd and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'map', None):
+            reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
+            if reverb and reverb.reverb:
+                try:
+                    self.game.audio_mngr.efx.send(snd.source, 0, reverb.reverb)
+                except Exception:
+                    pass
+
+    def set_game_mode(self, data):
+        """Receive game mode from server (e.g. 'pong' or 'normal') and update game state."""
+        mode = data.get("mode", "normal")
+        self.game.pong_mode = (mode == "pong")
 
     def move(self, data):
         entity = self.gameplay.map.entities.get(data["name"])
@@ -244,7 +263,7 @@ class EventHandeler:
             entity.move(
                 data["x"], data["y"], data["z"], data["play_sound"], data["mode"]
             )
-            entity.face(data["angle"], entity.vfacing, entity.bfacing)
+            entity.face(data["angle"], entity.vfacing, entity.bfacing, force=True)
 
     def quit(self, data):
         msg = data.get("message", "").lower()
