@@ -250,6 +250,7 @@ class EventHandeler:
         """Receive game mode from server (e.g. 'pong' or 'normal') and update game state."""
         mode = data.get("mode", "normal")
         self.game.pong_mode = (mode == "pong")
+        self.game.pong_speed = data.get("speed", 60)
 
     def move(self, data):
         entity = self.gameplay.map.entities.get(data["name"])

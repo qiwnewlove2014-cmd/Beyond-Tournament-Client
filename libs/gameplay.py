@@ -1097,7 +1097,7 @@ class Gameplay(state.State):
     # movement
     def strafe_left(self, mod):
         tile_factor = 3.0 if self.map.get_tile_at(self.player.x, self.player.y, self.player.z) in ["deep_water", "underwater"] else 1.0
-        effective_movetime = 60 if getattr(self.game, 'pong_mode', False) else (self.player.runtime if getattr(self, 'running', False) else self.player.movetime)
+        effective_movetime = getattr(self.game, 'pong_speed', 60) if getattr(self.game, 'pong_mode', False) else (self.player.runtime if getattr(self, 'running', False) else self.player.movetime)
         if self.player.movement_clock.elapsed >= effective_movetime * tile_factor:
             self.player.movement_clock.restart()
             mode = "run" if (getattr(self, 'running', False) or getattr(self.game, 'pong_mode', False)) else "walk"
@@ -1105,7 +1105,7 @@ class Gameplay(state.State):
 
     def strafe_right(self, mod):
         tile_factor = 3.0 if self.map.get_tile_at(self.player.x, self.player.y, self.player.z) in ["deep_water", "underwater"] else 1.0
-        effective_movetime = 60 if getattr(self.game, 'pong_mode', False) else (self.player.runtime if getattr(self, 'running', False) else self.player.movetime)
+        effective_movetime = getattr(self.game, 'pong_speed', 60) if getattr(self.game, 'pong_mode', False) else (self.player.runtime if getattr(self, 'running', False) else self.player.movetime)
         if self.player.movement_clock.elapsed >= effective_movetime * tile_factor:
             self.player.movement_clock.restart()
             mode = "run" if (getattr(self, 'running', False) or getattr(self.game, 'pong_mode', False)) else "walk"
