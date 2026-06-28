@@ -631,7 +631,7 @@ class Ambience(BaseMapObj):
                     "gain",
                     (self.volume / 100)
                     * (self.map.game.audio_mngr.volume_categories[self.type][0] / 100),
-                    500,
+                    3000,
                     callback=lambda: setattr(self.sound, "muted", False),
                 )
 
@@ -646,7 +646,7 @@ class Ambience(BaseMapObj):
                         self.sound.source,
                         "gain",
                         0.0,
-                        500,
+                        1500,
                         callback=lambda: setattr(self.sound, "muted", True),
                     )
                 except cyal.exceptions.InvalidOperationError:
