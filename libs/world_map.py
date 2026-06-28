@@ -636,10 +636,14 @@ class Ambience(BaseMapObj):
                 )
 
     def leave(self, destroy=False):
-        evt = consts.EVT_DESTROY if destroy else 0
+        def _on_fade_complete():
+            if self.sound:
+                setattr(self.sound, "muted", True)
+                if destroy:
+                    self.sound.destroy()
+
         if self.playing:
             self.playing = False
-            # self.sound.fade(to=0, fade_time=self.fade_time, evt=evt)
             if self.sound:
                 try:
                     self.map.game.automate(
@@ -647,12 +651,14 @@ class Ambience(BaseMapObj):
                         "gain",
                         0.0,
                         1500,
-                        callback=lambda: setattr(self.sound, "muted", True),
+                        callback=_on_fade_complete,
                     )
                 except cyal.exceptions.InvalidOperationError:
-                    pass
-        if self.sound and destroy:
-            self.sound.destroy()
+                    if destroy:
+                        self.sound.destroy()
+        else:
+            if self.sound and destroy:
+                self.sound.destroy()
 
 
 class Tile(BaseMapObj):
