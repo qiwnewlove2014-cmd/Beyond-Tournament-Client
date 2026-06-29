@@ -60,6 +60,7 @@ class Entity(Object):
                 print(e)
                 self.vc_source, self.radio_source, self.music_source = self.game.audio_mngr.context.gen_sources(3) 
             self.vc_source.position = (self.x, self.y, self.z)
+            self.vc_source.reference_distance = 1.7  # Boost volume to ~20% at 8 meters
             self.music_source.position = (self.x, self.y, self.z)
             self.music_source.rolloff_factor = 2.0
             self.music_source.reference_distance = 5.0
