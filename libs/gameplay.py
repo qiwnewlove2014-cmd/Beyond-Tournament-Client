@@ -42,6 +42,9 @@ class Gameplay(state.State):
         self.camera.set_focus_object(self.player)
         self.music_volume = options.get("volume_music", 25)
         self.spectator_mode = False
+        # When spectating a Pong match, the server sends the arena bounds so we can
+        # park the listener at the field edge for stereo. None for non-pong matches.
+        self.pong_arena = None
         self.running = False
         self.turning = False
         self.can_run = True
@@ -140,9 +143,7 @@ class Gameplay(state.State):
             kc.get("open_main_menu", pygame.K_BACKSPACE): lambda mod: (
                 self.chat2("/mainmenu")
             ),
-            kc.get("check_stats", pygame.K_p): lambda mod: (
-                self.game.network.send(consts.CHANNEL_MISC, "stats", {})
-            ),
+            kc.get("check_stats", pygame.K_p): self._p_or_spectator_cam,
             pygame.K_TAB: self.spectator_switch_player,  # Switch spectator target
             kc.get(
                 "export_buffers", pygame.K_BACKQUOTE
@@ -178,12 +179,36 @@ class Gameplay(state.State):
     def spectator_switch_player(self, mod):
         if not self.spectator_mode:
             return
-        
+
         # Fade out current target's audio
         if self.camera.focus_object:
             self.fade_out_entity_audio(self.camera.focus_object)
-        
+
         self.game.network.send(consts.CHANNEL_MISC, "spectator_switch_player", {})
+
+    def _p_or_spectator_cam(self, mod):
+        """P key does double duty: in spectator mode of a Pong match it cycles
+        the sideline camera angle; otherwise it shows the player stats."""
+        if self.spectator_mode and self.pong_arena:
+            self.spectator_cycle_cam_mode()
+        else:
+            self.game.network.send(consts.CHANNEL_MISC, "stats", {})
+
+    def spectator_cycle_cam_mode(self):
+        """Cycle the Pong spectator ear: follow -> east edge -> west edge -> follow.
+        east/west park the listener at the field edge facing across it, so both
+        teams are heard left/right in stereo instead of from one player's head."""
+        if not self.pong_arena:
+            return
+        order = ["follow", "east", "west"]
+        try:
+            idx = order.index(self.camera.spectator_cam_mode)
+        except ValueError:
+            idx = -1
+        next_mode = order[(idx + 1) % len(order)]
+        self.camera.set_spectator_cam_mode(next_mode, self.pong_arena)
+        labels = {"follow": "Following player", "east": "East side of the field", "west": "West side of the field"}
+        speak(labels.get(next_mode, next_mode))
 
     def fade_out_entity_audio(self, entity):
         """Fade out or stop all sounds from an entity"""
@@ -727,7 +752,7 @@ class Gameplay(state.State):
             allowed_keys = [
                 pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
                 pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
-                pygame.K_COMMA, pygame.K_PERIOD
+                pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p
             ]
             events = [e for e in events if e.type == pygame.KEYDOWN and e.key in allowed_keys]
         if not self.spectator_mode:
@@ -966,7 +991,7 @@ class Gameplay(state.State):
                 allowed_keys = [
                     pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
                     pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
-                    pygame.K_COMMA, pygame.K_PERIOD
+                    pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p
                 ]
                 if event.type == pygame.KEYDOWN and event.key in self.keys_pressed and event.key in allowed_keys:
                     self.keys_pressed[event.key](event.mod)

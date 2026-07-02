@@ -558,15 +558,22 @@ class EventHandeler:
     def spectator_join(self, data):
         self.gameplay.spectator_mode = True
         self.gameplay.running = False
-        speak("Entered spectator mode. Press TAB to switch players.")
+        # If spectating a Pong match, the server sends the arena bounds so we can
+        # offer sideline camera angles (east/west edge of the field).
+        self.gameplay.pong_arena = data.get("pong_arena") if data else None
+        # Reset any previous spectator cam mode when (re)entering.
+        self.gameplay.camera.reset_spectator_cam_mode()
+        # The server already speaks the spectating hint (including the Pong P-key
+        # hint when applicable), so the client stays quiet here to avoid overlap.
 
     def spectator_leave(self, data):
         self.gameplay.spectator_mode = False
         self.gameplay.running = True
-        
-        # Reset camera to local player
+        self.gameplay.pong_arena = None
+        # Reset sideline cam mode and return camera to local player
+        self.gameplay.camera.reset_spectator_cam_mode()
         self.gameplay.camera.set_focus_object(self.gameplay.player)
-        
+
         speak("You have left spectator mode.")
 
     def spectator_update(self, data):

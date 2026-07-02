@@ -20,6 +20,11 @@ class Camera:
         self.x = 0.0
         self.y = 0.0
         self.z = 0.0
+        # Sideline spectator camera (Pong). "follow" = locked to focus object (first
+        # person); "east"/"west" = parked at the field edge so both teams are heard
+        # in stereo (left/right).
+        self.spectator_cam_mode = "follow"
+        self.spectator_arena = None
 
     def set_focus_object(self, target):
         if self.focus_object:
@@ -32,6 +37,53 @@ class Camera:
         target.on_turn = self.turn
         self.move(target.x, target.y, target.z)
         self.turn(target.hfacing, target.vfacing, target.bfacing)
+
+    def reset_spectator_cam_mode(self):
+        """Return to first-person 'follow' mode (called on spectate enter/leave)."""
+        self.spectator_arena = None
+        if self.spectator_cam_mode != "follow":
+            self.spectator_cam_mode = "follow"
+            # Re-attach the focus object so its move/turn drive the listener again.
+            if self.focus_object:
+                self.set_focus_object(self.focus_object)
+
+    def set_spectator_cam_mode(self, mode, arena):
+        """Switch the spectator ear between first-person and the field sidelines.
+        mode: "follow" | "east" | "west". arena: dict with min_x,max_x,p1_y,p2_y,z.
+        In east/west the listener is parked at the field edge, facing across it,
+        so both teams are heard left/right in stereo. The focus object's move/turn
+        callbacks are detached so its movement can't yank the ear back.
+        """
+        self.spectator_cam_mode = mode
+        self.spectator_arena = arena
+        if mode == "follow":
+            # Re-attach focus object callbacks for first-person tracking.
+            if self.focus_object:
+                self.set_focus_object(self.focus_object)
+            return
+        # Detach focus object callbacks so it stops driving the listener.
+        if self.focus_object:
+            if self.focus_object.on_move == self.move:
+                self.focus_object.on_move = None
+            if self.focus_object.on_turn == self.turn:
+                self.focus_object.on_turn = None
+        self._apply_sideline_position()
+
+    def _apply_sideline_position(self):
+        """Position the listener at the chosen sideline and face across the field."""
+        arena = self.spectator_arena
+        if not arena or not self.focus_object:
+            return
+        mid_y = (arena["p1_y"] + arena["p2_y"]) / 2
+        z = arena["z"]
+        if self.spectator_cam_mode == "east":
+            x = arena["max_x"] + 1
+            self.move(x, mid_y, z)
+            self.turn(270, 0, 0)  # face west, across the field
+        elif self.spectator_cam_mode == "west":
+            x = arena["min_x"] - 1
+            self.move(x, mid_y, z)
+            self.turn(90, 0, 0)  # face east, across the field
 
     def move(self, x, y, z):
         ambiences_to_pause = list(
