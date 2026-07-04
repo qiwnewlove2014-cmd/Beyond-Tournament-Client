@@ -11,6 +11,7 @@ python -m nuitka --assume-yes-for-downloads --quiet --standalone --low-memory --
 xcopy /S /Q  dlls_windows\* "Beyond Tournament\"
 copy *.mhr "Beyond Tournament\"
 copy default_keyconfig.json "Beyond Tournament\"
+copy "..\final-hour-server-public-main\changelog.txt" "Beyond Tournament\"
 copy *.dll "Beyond Tournament\"
 copy ffmpeg.exe "Beyond Tournament\"
 copy oalinst.exe "Beyond Tournament\"
