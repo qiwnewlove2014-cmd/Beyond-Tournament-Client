@@ -1,4 +1,4 @@
 import semver
 
-version = semver.VersionInfo(major=0, minor=33, patch=6)
-note = "β"
+version = semver.VersionInfo(major=1, minor=0, patch=0)
+note = ""

@@ -1,5 +1,5 @@
 """
-MapMusicBot — YouTube Music Bot for Final Hour
+MapMusicBot — YouTube Music Bot for Beyond Tournament
 Searches YouTube via yt-dlp and streams audio in real-time via ffmpeg → OpenAL.
 Also supports local file playback as fallback.
 """

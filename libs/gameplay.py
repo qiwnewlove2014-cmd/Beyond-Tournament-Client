@@ -207,8 +207,18 @@ class Gameplay(state.State):
             idx = -1
         next_mode = order[(idx + 1) % len(order)]
         self.camera.set_spectator_cam_mode(next_mode, self.pong_arena)
-        labels = {"follow": "Following player", "east": "East side of the field", "west": "West side of the field"}
-        speak(labels.get(next_mode, next_mode))
+        if next_mode == "follow":
+            speak("Following player")
+        else:
+            # Announce which team is on which side based on the sideline geometry.
+            # EAST (facing 270/west): Team 1 (p1_y, smaller Y) is LEFT, Team 2 RIGHT.
+            # WEST (facing 90/east):  mirrored — Team 2 LEFT, Team 1 RIGHT.
+            t1 = getattr(self, "pong_team1", "Team 1")
+            t2 = getattr(self, "pong_team2", "Team 2")
+            if next_mode == "east":
+                speak(f"East side. {t1} on your left, {t2} on your right.")
+            else:
+                speak(f"West side. {t2} on your left, {t1} on your right.")
 
     def fade_out_entity_audio(self, entity):
         """Fade out or stop all sounds from an entity"""

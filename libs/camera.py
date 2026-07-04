@@ -70,20 +70,39 @@ class Camera:
         self._apply_sideline_position()
 
     def _apply_sideline_position(self):
-        """Position the listener at the chosen sideline and face across the field."""
+        """Position the listener at the chosen sideline and face across the field.
+        The stand-off distance scales with the field width so the camera works for
+        any future arena size without manual tuning.
+
+        NOTE: this bypasses the full move() pipeline on purpose. move() runs the
+        ambience/zone/music enter-leave logic based on the listener's tile, and a
+        sideline seat is outside the field where those elements don't reach — so
+        going through move() would kill the ambient bed/music. Here we only push
+        the raw listener position + orientation, keeping the focus object's
+        ambient/music state intact."""
         arena = self.spectator_arena
         if not arena or not self.focus_object:
             return
         mid_y = (arena["p1_y"] + arena["p2_y"]) / 2
         z = arena["z"]
+        # Stand-off scales with field width (~10%): a 17-wide field gives ~1.7,
+        # a larger field pushes the listener further out for clean stereo.
+        field_width = arena["max_x"] - arena["min_x"]
+        standoff = max(1, field_width * 0.1)
         if self.spectator_cam_mode == "east":
-            x = arena["max_x"] + 1
-            self.move(x, mid_y, z)
+            self.x = arena["max_x"] + standoff
             self.turn(270, 0, 0)  # face west, across the field
         elif self.spectator_cam_mode == "west":
-            x = arena["min_x"] - 1
-            self.move(x, mid_y, z)
+            self.x = arena["min_x"] - standoff
             self.turn(90, 0, 0)  # face east, across the field
+        else:
+            return
+        self.y = mid_y
+        self.z = z
+        # Only update the raw listener position + scanner origin, not the
+        # ambience/zone/music state (which belongs to the focus object).
+        self.game.audio_mngr.position = (self.x, self.y, self.z)
+        self.soundgroup.position = (self.x, self.y, self.z)
 
     def move(self, x, y, z):
         ambiences_to_pause = list(

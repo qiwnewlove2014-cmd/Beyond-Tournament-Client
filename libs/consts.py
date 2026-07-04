@@ -3,7 +3,7 @@ EVT_DESTROY = 101
 OS_LINUX = 201
 OS_MAC = 202
 OS_WINDOWS = 203
-TITLE = "Final Hour"
+TITLE = "Beyond Tournament"
 SOUNDPREPEND = "data/"
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 13000
@@ -23,4 +23,4 @@ CHANNEL_MUSICBOT = 22
 SOUNDSPREPEND="/data/"
 
 # 🔢 Version for server compatibility check
-CLIENT_VERSION = "0.33.6"
+CLIENT_VERSION = "1.0"

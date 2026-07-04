@@ -579,7 +579,13 @@ class EventHandeler:
     def spectator_update(self, data):
         if not self.gameplay.spectator_mode:
             return
-            
+
+        # Pong matches include team names + game mode so the spectator client can
+        # announce which team is on which side when parked at a sideline angle.
+        # Other game types don't send these, so default to plain labels.
+        self.gameplay.pong_team1 = data.get("team1_name", "Team 1")
+        self.gameplay.pong_team2 = data.get("team2_name", "Team 2")
+
         for p_data in data["players"]:
             name = p_data["name"]
             if name == self.gameplay.player.name:

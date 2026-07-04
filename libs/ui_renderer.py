@@ -3,7 +3,7 @@ import os
 
 class UIRenderer:
     """
-    UI Renderer - จัดการการวาดกราฟิกทั้งหมดให้ Final Hour
+    UI Renderer - จัดการการวาดกราฟิกทั้งหมดให้ Beyond Tournament
     Designed for Blind Developers: Extensive Logging & Fallback support
     """
     def __init__(self, screen):
@@ -212,9 +212,9 @@ class UIRenderer:
             self.screen.blit(img, (x, y))
         else:
             # Fallback Text Logo
-            logo_surf = self.font_logo.render("FINAL HOUR", True, (255, 50, 50))
+            logo_surf = self.font_logo.render("Beyond Tournament", True, (255, 50, 50))
             # Add Shadow
-            shadow_surf = self.font_logo.render("FINAL HOUR", True, (0, 0, 0))
+            shadow_surf = self.font_logo.render("Beyond Tournament", True, (0, 0, 0))
             
             x = (self.width - logo_surf.get_width()) // 2
             self.screen.blit(shadow_surf, (x+4, y+4))

@@ -92,7 +92,7 @@ class Game:
             options.set("heard_intro", True)
             sound = self.audio_mngr.play_unbound("intro.ogg", 0, 0, 0, False, direct=True)
             self.suspend(14.5)
-            speak("Final Hour!")
+            speak("Beyond Tournament!")
             self.suspend(4.5)
         if "__compiled__" in globals():
             self.append(updater.Updater(self))
