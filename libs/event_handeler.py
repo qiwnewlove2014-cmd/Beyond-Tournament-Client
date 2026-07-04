@@ -250,7 +250,20 @@ class EventHandeler:
         """Receive game mode from server (e.g. 'pong' or 'normal') and update game state."""
         mode = data.get("mode", "normal")
         self.game.pong_mode = (mode == "pong")
+        self.game.pong_arcade = data.get("arcade", False)
+        self.game.pong_training = data.get("training", False)
         self.game.pong_speed = data.get("speed", 60)
+        
+        # If entering a competition or training match, forcefully disable music bot broadcast
+        if self.game.pong_mode and not self.game.pong_arcade:
+            if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
+                if self.gameplay.music_bot.broadcast_enabled:
+                    self.gameplay.music_bot.broadcast_enabled = False
+                    from .speech import speak
+                    if self.game.pong_training:
+                        speak("Music broadcast was disabled because you entered a training match.")
+                    else:
+                        speak("Music broadcast was disabled because you entered a competition match.")
 
     def move(self, data):
         entity = self.gameplay.map.entities.get(data["name"])

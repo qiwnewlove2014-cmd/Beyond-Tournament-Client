@@ -488,6 +488,14 @@ class MapMusicBot:
 
     def toggle_broadcast(self):
         """Toggle network broadcasting on/off."""
+        if getattr(self.game, 'pong_mode', False) and not getattr(self.game, 'pong_arcade', False):
+            from .speech import speak
+            if getattr(self.game, 'pong_training', False):
+                speak("Broadcasting is disabled in training mode.")
+            else:
+                speak("Broadcasting is disabled in competition matches.")
+            return
+
         self.broadcast_enabled = not self.broadcast_enabled
         from .speech import speak
         if self.broadcast_enabled:

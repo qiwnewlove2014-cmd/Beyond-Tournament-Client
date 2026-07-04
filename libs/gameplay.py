@@ -762,7 +762,8 @@ class Gameplay(state.State):
             allowed_keys = [
                 pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
                 pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
-                pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p
+                pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p,
+                pygame.K_m, pygame.K_F9, pygame.K_F10
             ]
             events = [e for e in events if e.type == pygame.KEYDOWN and e.key in allowed_keys]
         if not self.spectator_mode:
@@ -1001,7 +1002,8 @@ class Gameplay(state.State):
                 allowed_keys = [
                     pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
                     pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
-                    pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p
+                    pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p,
+                    pygame.K_m, pygame.K_F9, pygame.K_F10
                 ]
                 if event.type == pygame.KEYDOWN and event.key in self.keys_pressed and event.key in allowed_keys:
                     self.keys_pressed[event.key](event.mod)
