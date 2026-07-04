@@ -1,11 +1,14 @@
-# 🎉 Final Hour Client - The Awakening Update (v1.0.0)
+# 🎉 Beyond Tournament Client - The Awakening Update (v1.0.0)
 
 *(Note: The internal client build version shown in-game is `v0.33.6`, unified under public release `v1.0.0`)*
 
-Welcome to the official public release of the **Final Hour Client**!
+Welcome to the official public release of the **Beyond Tournament Client**!
 We have completely overhauled the client experience, transforming it into a deeply immersive, feature-rich audiogame platform. 
 
 ## 🎧 Advanced Audio & Systems
+- **Music Bot Privacy Update:** The in-game Music Bot now starts in a private listening mode by default to prevent accidental live broadcasts. Players must intentionally toggle broadcasting (via Alt+M) to share music with the server.
+- **Enhanced Connection Security:** We have upgraded the connection protocol to seamlessly drop outdated software or mismatched connections at the core network layer, guaranteeing tighter stability.
+- **Major System Maintenance:** Completed a visual and structural overhaul of internal files, separating user configuration paths into a more optimal layout for long-term support.
 - **PA Megaphone System:** Experience realistic stadium-style broadcasts. Our engine now simulates dynamic speaker positioning and physical line-of-sight audio occlusion (sound is blocked by solid walls).
 - **In-Game Music Bot:** Powered by YouTube integrations (`yt-dlp` & `ffmpeg`), you can now seamlessly stream and listen to your favorite music directly inside the game world together with other players.
 
@@ -18,4 +21,5 @@ We have completely overhauled the client experience, transforming it into a deep
 - **Smart Crash Reporter:** We've implemented a brand-new GUI crash reporter. If the shadows prove too much and the game falters, you'll receive a clean, readable dialog box to help us track down the bug immediately.
 - **Resource Pooling:** A rewritten OpenAL EFX object pooling system ensures you never run out of audio channels during intense zombie hordes.
 
-Jump in, grab your gear, and survive the Final Hour. 🌒
+Jump in, grab your gear, and survive the Beyond Tournament. 🌒
+

@@ -476,7 +476,7 @@ class MapMusicBot:
         # Settings
         self.volume = options.get("music_bot_volume", 50)
         self.enabled = options.get("music_bot_enabled", True)
-        self.broadcast_enabled = True  # Toggle for sending to network
+        self.broadcast_enabled = False  # Disabled by default (Private listening mode)
 
         # Search state
         self.searching = False
