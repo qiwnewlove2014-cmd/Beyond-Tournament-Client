@@ -1,11 +1,11 @@
-# Final Hour
+# Beyond Tournament
 
-Final Hour is an open-source, audio-based game inspired by the Zombies mode in the Call of Duty series. Players can team up online to fight off hordes of zombies, aiming for high scores, kill counts, and an enjoyable experience.
+Beyond Tournament is an open-source, audio-based game inspired by the Zombies mode in the Call of Duty series. Players can team up online to fight off hordes of zombies, aiming for high scores, kill counts, and an enjoyable experience.
 
 ## ✨ Features & Recent Improvements
 
 *   **Online Co-op Gameplay:** Play with friends and other players online to survive against the undead.
-*   **Immersive 3D Audio Experience:** Designed entirely as an audio game, Final Hour provides a rich, directional soundscape for players, complete with footstep tracking, proximity voice chat, and radar beeps.
+*   **Immersive 3D Audio Experience:** Designed entirely as an audio game, Beyond Tournament provides a rich, directional soundscape for players, complete with footstep tracking, proximity voice chat, and radar beeps.
 *   **Refined Spectator & Ghost Systems:** Watch matches without interfering. The spectator mode has been overhauled with dedicated keybinds for chat scrolling and channel switching, while ensuring your physical presence remains completely undetected by zombies and other players' radars.
 *   **Inspired by Call of Duty Zombies:** Experience gameplay mechanics, weapons, and items reminiscent of the Aether timeline in the Call of Duty Zombies series.
 *   **Cross-Platform:** While primarily developed on Windows, the game is built with cross-platform compatibility in mind.
@@ -74,7 +74,7 @@ To build an executable version of the game, follow these steps:
 
 ## Contributing
 
-Contributions are welcome! If you'd like to contribute to Final Hour, please follow these steps:
+Contributions are welcome! If you'd like to contribute to Beyond Tournament, please follow these steps:
 
 1.  Fork the repository.
 2.  Create a new branch for your feature or bug fix.
@@ -93,3 +93,4 @@ This project is licensed under the GNU General Public License v3.0. See the [LIC
 *   This project is heavily inspired by the Zombies mode in the Call of Duty series, particularly the Aether storyline.
 *   We utilize resources from the Call of Duty fan community for weapon stats, character quotes, and gameplay mechanics.
 *   A special thanks to the creators of the original Call of Duty Zombies for their incredible work.
+

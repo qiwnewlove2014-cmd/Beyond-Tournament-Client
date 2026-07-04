@@ -1,6 +1,6 @@
 @echo off
 title final-hour terminal output
-echo Starting Final Hour Client...
+echo Starting Beyond Tournament Client...
 python final_hour.py
 if errorlevel 1 (
     echo.

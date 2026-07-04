@@ -1,4 +1,4 @@
-Hello Final Hour team!
+Hello Beyond Tournament team!
 
 First of all, thank you for the amazing work on this open-source client. I've developed a few quality-of-life improvements aimed at enhancing the overall player and spectator experience.
 
@@ -10,3 +10,4 @@ First of all, thank you for the amazing work on this open-source client. I've de
 I hope you find these additions valuable for the community. Looking forward to your feedback!
 
 Best regards!
+
