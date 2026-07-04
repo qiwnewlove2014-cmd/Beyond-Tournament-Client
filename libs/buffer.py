@@ -140,16 +140,16 @@ buffers = []
 
 def export_buffers():
     path = ""
-    if not os.path.isdir(os.path.expanduser("~/Documents") + "/final_hour"):
+    if not os.path.isdir(os.path.expanduser("~/Documents") + "/Beyond Tournament"):
         if os.path.isdir(os.path.expanduser("~/documents")): 
-            path = os.path.expanduser("~/Documents") + "/final_hour"
+            path = os.path.expanduser("~/Documents") + "/Beyond Tournament"
             os.mkdir(path)
         else:
             if not os.path.isdir("./logs"): 
                 path = "./logs/"
                 os.mkdir(path)
     else:
-        path = os.path.expanduser("~/Documents") + "/final_hour"
+        path = os.path.expanduser("~/Documents") + "/Beyond Tournament"
 
     for i in buffers:
         f = open(

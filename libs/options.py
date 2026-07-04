@@ -7,7 +7,7 @@ import appdirs
 
 from . import consts
 
-config_dirs = appdirs.AppDirs("final_hour")
+config_dirs = appdirs.AppDirs("Beyond Tournament")
 # defaults.
 prefs = {
     "beacons": True,

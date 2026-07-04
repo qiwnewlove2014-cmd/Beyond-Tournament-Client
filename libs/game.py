@@ -113,7 +113,7 @@ class Game:
             path_utils.copy_folder("./", param)
             last_cwd = os.getcwd()
             subprocess.Popen(
-                [f"{param}/final_hour.exe", "rm_dir", last_cwd, str(os.getpid())],
+                [f"{param}/Beyond Tournament.exe", "rm_dir", last_cwd, str(os.getpid())],
                 cwd=param,
             )
             return self.exit()

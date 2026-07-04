@@ -12,7 +12,7 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 def main():
     from libs import logger
     logger.clear_log()
-    logger.log("Starting Final Hour Client...")
+    logger.log("Starting Beyond Tournament Client...")
     
     from libs import options
 
@@ -49,7 +49,7 @@ def show_crash_dialog(error_text):
 
         # Create custom dialog
         dialog = tk.Toplevel(root)
-        dialog.title("Final Hour Client - Critical Error")
+        dialog.title("Beyond Tournament Client - Critical Error")
         dialog.geometry("800x600")
         
         # Label

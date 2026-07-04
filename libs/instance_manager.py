@@ -17,7 +17,7 @@ class InstanceManager:
     def acquire_lock(self):
         temp_dir = tempfile.gettempdir()
         for i in range(1, 11):
-            lock_path = os.path.join(temp_dir, f"final_hour_instance_{i}.lock")
+            lock_path = os.path.join(temp_dir, f"beyond_tournament_instance_{i}.lock")
             is_stale = False
             if os.path.exists(lock_path):
                 try:
@@ -28,7 +28,7 @@ class InstanceManager:
                     else:
                         proc = psutil.Process(pid)
                         proc_cmd = " ".join(proc.cmdline()).lower()
-                        if "final_hour" not in proc_cmd and "python" not in proc_cmd:
+                        if "beyond_tournament" not in proc_cmd.lower() and "python" not in proc_cmd.lower():
                             is_stale = True
                 except Exception:
                     is_stale = True
@@ -59,7 +59,7 @@ class InstanceManager:
         temp_dir = tempfile.gettempdir()
         count = 0
         for i in range(1, 11):
-            lock_path = os.path.join(temp_dir, f"final_hour_instance_{i}.lock")
+            lock_path = os.path.join(temp_dir, f"beyond_tournament_instance_{i}.lock")
             if os.path.exists(lock_path):
                 try:
                     with open(lock_path, "r") as f:
