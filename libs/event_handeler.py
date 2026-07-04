@@ -39,6 +39,10 @@ class EventHandeler:
         self.gameplay.player.name = data["username"]
         if hasattr(self.game, 'instance_mngr'):
             self.game.instance_mngr.set_character(data["username"])
+        
+        self.game.available_languages = data.get("available_languages", {})
+        self.game.current_language = data.get("current_language", "th")
+
         # Store staff status for PA Test Mode (with safe fallback)
         try:
             self.gameplay.is_staff = bool(data.get("is_staff", False))
@@ -661,3 +665,9 @@ class EventHandeler:
                 pass
         else:
             speak(f"Target {target_name} not found")
+
+    def open_language_menu(self, data):
+        available_langs = data.get("available_languages", {})
+        language_counts = data.get("language_counts", {})
+        current = data.get("current_language", "th")
+        self.gameplay.show_language_menu(available_langs, language_counts, current)

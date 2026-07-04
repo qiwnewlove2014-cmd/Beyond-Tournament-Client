@@ -1567,10 +1567,54 @@ class Gameplay(state.State):
         speak(f"Music Bot volume: {new_vol} percent.")
 
     def reset_pitch(self, mod):
+        if mod & pygame.KMOD_CTRL:
+            self.open_language_menu(mod)
+            return
         if not self.player.locked:
             self.player.face(self.player.hfacing, 0, self.player.bfacing)
             speak("You now have a pitch of 0 degrees")
             self.player.play_sound("foley/turn/stop.ogg", cat="self")
+
+    def open_language_menu(self, mod):
+        self.game.network.send(consts.CHANNEL_MISC, "request_language_menu", {})
+
+    def show_language_menu(self, available_langs, language_counts, current):
+        if not available_langs:
+            speak("No language channels available.")
+            return
+
+        items = []
+        for code, name in available_langs.items():
+            def make_cb(c):
+                return lambda: self.set_channel_language(c)
+            
+            count = language_counts.get(code, 0)
+            player_str = f" {count} players" if count > 0 else ""
+            
+            display_text = f"Current {name}{player_str}" if code == current else f"{name}{player_str}"
+            items.append((display_text, make_cb(code)))
+        
+        items.append(("Cancel", lambda: None))
+        m = menu.Menu(self.game, "Select your channel language", parrent=self, autoclose=True)
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        
+        # Try to focus the current language
+        try:
+            curr_idx = list(available_langs.keys()).index(current)
+            m.pos = curr_idx
+        except ValueError:
+            pass
+        self.add_substate(m)
+        if m.pos >= 0:
+            current_item_text = m.items[m.pos][0]
+            if callable(current_item_text):
+                current_item_text = current_item_text()
+            speak(current_item_text, interupt=False)
+
+    def set_channel_language(self, lang_code):
+        self.game.current_language = lang_code
+        self.game.network.send(consts.CHANNEL_MISC, "change_language", {"language": lang_code})
 
     def reset_bank(self, mod):
         if not self.player.locked:
