@@ -4,6 +4,28 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.1.0] The Minigames & Competition Update — 2026-07-05
+--------------------------------------------------------------------------------
+
+• Minigames & Arcade Features
+- **Pong Statistics Tracking:** Added persistent database tracking for Pong (1v1 Wins, 2v2 Wins, Losses, and Longest Rally).
+- **Anti-Farming Protections:** Competitive Pong matches will instantly invalidate and disable stat tracking if a human player leaves and an AI substitutes in, ensuring the leaderboard remains fair.
+- **Instant Record Saving:** The Longest Rally record is now saved immediately to the database upon scoring a goal, preventing players from losing their epic rally records if a match is abandoned.
+- **Leaderboard Categorization:** The main leaderboard is now cleanly divided into "Zombie Game" and "Minigames" categories, preventing competitive stats from getting cluttered.
+- **Pong Movement Keybinding Fix:** Fixed an issue where players with custom keybindings could not move the paddle using Arrow Keys. The game now intelligently blocks the physical Q and E keys during a match without overriding the player's custom keyboard layout.
+- **Arcade Table Power Requirements:** Arcade Tables are now fully integrated into the map's electrical grid.
+  - Players must interact with a "Power Switch" to restore power before tables can be used.
+  - If a map lacks a Power Switch, the table safely locks itself and instructs the player to contact a builder.
+- **Arcade AI Start Mechanics:** Playing against the AI at an Arcade Table no longer auto-starts the match instantly. Players are now prompted to manually start the match via the main menu, giving them time to position themselves.
+
+• Audio & Music System
+- **Music Bot Privacy:** The integrated Music Bot now defaults to "Private Listening Mode" upon activation to prevent accidental server-wide broadcasts. Players must explicitly toggle broadcasting (Alt+M) to share their stream.
+- **Music Bot Broadcast Constraints:** Added strict rules to prevent audio trolling during Pong matches.
+  - Broadcasting is now strictly disabled in Competition and Training arenas. (Players attempting to broadcast will receive an automated voice warning).
+  - Arcade matches remain unrestricted, allowing sandbox players to broadcast freely.
+  - Spectators in a Competition match can now freely access their personal Music Bot (M, F9, F10) for private listening without interrupting the match.
+
+--------------------------------------------------------------------------------
 [v1.0.0] The "Beyond Tournament" Overhaul — 2026-07-04
 --------------------------------------------------------------------------------
 
@@ -18,7 +40,6 @@ Welcome to version 1.0! This massive update officially rebrands the project to "
   - Production Mode (Compiled Executable): The client automatically generates a debug log file next to the `.exe` to capture crashes and unhandled exceptions for easier player troubleshooting.
 - **Map Isolation & State Protection:** Completely isolated Minigames (Pong) from live map edits. If a builder reloads or edits the host map, players inside Arcade Tables will no longer experience visual stutters or persistent sound loops.
 - **Standalone Arena Reload Fix:** Fixed a bug where standalone Pong arenas (created via main menu) were incorrectly isolated from map reloads, preventing hosts from updating music or map objects mid-match.
-- **Leaderboard Categorization:** The main leaderboard is now cleanly divided into "Zombie Game" and "Minigames" categories, preventing competitive stats from getting cluttered.
 
 • Social & Communication
 - **Dynamic Channel Language System:** Implemented a massive multi-language Global Chat system supporting over 180 languages worldwide (e.g., Thai, English, Japanese, and many more).
@@ -34,19 +55,6 @@ Welcome to version 1.0! This massive update officially rebrands the project to "
     - Players in foreign language channels will receive all global system messages dynamically translated into their preferred language.
 
 • Gameplay & Audio Updates
-- **Pong Movement Keybinding Fix:** Fixed an issue where players with custom keybindings could not move the paddle using Arrow Keys. The game now intelligently blocks the physical Q and E keys during a match without overriding the player's custom keyboard layout.
-- **Pong Statistics Tracking:** Added persistent database tracking for Pong (1v1 Wins, 2v2 Wins, Losses, and Longest Rally).
-- **Anti-Farming Protections:** Competitive Pong matches will instantly invalidate and disable stat tracking if a human player leaves and an AI substitutes in, ensuring the leaderboard remains fair.
-- **Instant Record Saving:** The Longest Rally record is now saved immediately to the database upon scoring a goal, preventing players from losing their epic rally records if a match is abandoned.
-- **Arcade Table Power Requirements:** Arcade Tables are now fully integrated into the map's electrical grid.
-  - Players must interact with a "Power Switch" to restore power before tables can be used.
-  - If a map lacks a Power Switch, the table safely locks itself and instructs the player to contact a builder.
-- **Arcade AI Start Mechanics:** Playing against the AI at an Arcade Table no longer auto-starts the match instantly. Players are now prompted to manually start the match via the main menu, giving them time to position themselves.
-- **Music Bot Privacy:** The integrated Music Bot now defaults to "Private Listening Mode" upon activation to prevent accidental server-wide broadcasts. Players must explicitly toggle broadcasting (Alt+M) to share their stream.
-- **Music Bot Broadcast Constraints:** Added strict rules to prevent audio trolling during Pong matches.
-  - Broadcasting is now strictly disabled in Competition and Training arenas. (Players attempting to broadcast will receive an automated voice warning).
-  - Arcade matches remain unrestricted, allowing sandbox players to broadcast freely.
-  - Spectators in a Competition match can now freely access their personal Music Bot (M, F9, F10) for private listening without interrupting the match.
 - **Reverb & PA Fixes:** Fixed severe OpenAL EFX resource leaks where changing maps frequently caused Megaphone (PA System) audio to corrupt the environmental 3D reverb, turning it into a buzzing mono sound.  
 
 --------------------------------------------------------------------------------
