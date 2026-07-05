@@ -1,0 +1,133 @@
+• Beyond Tournament — Official Changelog
+• This document tracks the development history and patch notes
+• for the Beyond Tournament project (Server & Client core).
+• ============================================================
+
+--------------------------------------------------------------------------------
+[v1.0.0] The "Beyond Tournament" Overhaul — 2026-07-04
+--------------------------------------------------------------------------------
+
+• 🚀 The Launch of v1.0
+Welcome to version 1.0! This massive update officially rebrands the project to "Beyond Tournament" and introduces critical structural, networking, and security improvements to finalize the core foundation of the game.
+
+• Core System & Security
+- **Project Rebrand:** All internal and external references have been officially migrated to the new "Beyond Tournament" branding.
+- **Enhanced Connection Security (Silent Drops):** Implemented strict protocol version checking. Connections from outdated clients or unauthorized software are now seamlessly dropped at the protocol layer to protect server stability and prevent packet sniffing.
+- **Smart Logging (Client):** Radically improved how the client handles debug logs. 
+  - Developer Mode (Running via Scripts): The client will no longer generate a `client_debug.log` file, keeping development directories perfectly clean.
+  - Production Mode (Compiled Executable): The client automatically generates a debug log file next to the `.exe` to capture crashes and unhandled exceptions for easier player troubleshooting.
+- **Map Isolation & State Protection:** Completely isolated Minigames (Pong) from live map edits. If a builder reloads or edits the host map, players inside Arcade Tables will no longer experience visual stutters or persistent sound loops.
+- **Standalone Arena Reload Fix:** Fixed a bug where standalone Pong arenas (created via main menu) were incorrectly isolated from map reloads, preventing hosts from updating music or map objects mid-match.
+- **Leaderboard Categorization:** The main leaderboard is now cleanly divided into "Zombie Game" and "Minigames" categories, preventing competitive stats from getting cluttered.
+
+• Social & Communication
+- **Dynamic Channel Language System:** Implemented a massive multi-language Global Chat system supporting over 180 languages worldwide (e.g., Thai, English, Japanese, and many more).
+  - **Database Persistence:** The server automatically remembers each player's chat language preference across sessions.
+  - **Smart Default:** New players, or those who haven't selected a language, will automatically default to the Thai (th) channel.
+  - **Live Player Counts:** The `Ctrl+L` language menu now fetches real-time data from the server, displaying the exact number of players currently active in each language channel (e.g., "Thai 5 players"). Channels with 0 players will simply show the language name.
+  - **Accessibility & UX Improvements:** 
+    - The menu automatically focuses on the player's current language upon opening.
+    - Improved TTS (Text-to-Speech) formatting to clearly announce the current selection without interrupting the menu title (e.g., "Select your channel language... Current Thai 5 players").
+  - **Live Server Broadcast Translation:** Integrated a real-time translation engine for the Message of the Day (MOTD) and Global Server Announcements (e.g., Reboot warnings).
+    - Uses a lazy-caching mechanism to ensure zero login delay and prevent API rate-limits.
+    - Excludes Thai ('th') and English ('en') channels from translation to preserve the original text for the primary player base.
+    - Players in foreign language channels will receive all global system messages dynamically translated into their preferred language.
+
+• Gameplay & Audio Updates
+- **Pong Statistics Tracking:** Added persistent database tracking for Pong (1v1 Wins, 2v2 Wins, Losses, and Longest Rally).
+- **Anti-Farming Protections:** Competitive Pong matches will instantly invalidate and disable stat tracking if a human player leaves and an AI substitutes in, ensuring the leaderboard remains fair.
+- **Instant Record Saving:** The Longest Rally record is now saved immediately to the database upon scoring a goal, preventing players from losing their epic rally records if a match is abandoned.
+- **Arcade Table Power Requirements:** Arcade Tables are now fully integrated into the map's electrical grid.
+  - Players must interact with a "Power Switch" to restore power before tables can be used.
+  - If a map lacks a Power Switch, the table safely locks itself and instructs the player to contact a builder.
+- **Arcade AI Start Mechanics:** Playing against the AI at an Arcade Table no longer auto-starts the match instantly. Players are now prompted to manually start the match via the main menu, giving them time to position themselves.
+- **Music Bot Privacy:** The integrated Music Bot now defaults to "Private Listening Mode" upon activation to prevent accidental server-wide broadcasts. Players must explicitly toggle broadcasting (Alt+M) to share their stream.
+- **Music Bot Broadcast Constraints:** Added strict rules to prevent audio trolling during Pong matches.
+  - Broadcasting is now strictly disabled in Competition and Training arenas. (Players attempting to broadcast will receive an automated voice warning).
+  - Arcade matches remain unrestricted, allowing sandbox players to broadcast freely.
+  - Spectators in a Competition match can now freely access their personal Music Bot (M, F9, F10) for private listening without interrupting the match.
+- **Reverb & PA Fixes:** Fixed severe OpenAL EFX resource leaks where changing maps frequently caused Megaphone (PA System) audio to corrupt the environmental 3D reverb, turning it into a buzzing mono sound.  
+
+--------------------------------------------------------------------------------
+[v0.9.0] The Spectator & 2v2 Update — 2026-07-02
+--------------------------------------------------------------------------------
+
+• 2v2 Team Doubles Mode
+- Introduced full 2v2 support for both Multiplayer and Solo (Co-op) modes.
+- Lobby capacities dynamically enforce player limits (4 players for 2v2).
+- Serves automatically alternate between teammates every 4 total points.
+- Expanded the Announcer System to include dynamic, escalating hype commentary specifically tailored for 2v2 tournaments.
+
+• Spectator System
+- Added a full Spectator Mode allowing players to spectate active public Pong matches.
+- Introduced the "Sideline Camera" feature, which positions the spectator at the East or West edge of the arena with perfect 3D stereo separation.
+- Automatic camera orientation: The server dynamically informs the spectator which team is on their left/right based on their camera facing angle.
+- Spectators hear goal sounds at a boosted 250% volume for maximum hype.
+
+• UI & Main Menu Reorganization
+- Replaced the cluttered flat main menu with a categorized 4-item structure:
+  1. Zombie Game (Contains public/private/random match flows)
+  2. Minigame (Contains all Pong AI and Multiplayer creation flows)
+  3. Spectate a Match
+  4. View the Leaderboard
+
+--------------------------------------------------------------------------------
+[v0.8.0] The Advanced AI Update — 2026-06-25
+--------------------------------------------------------------------------------
+
+• Artificial Intelligence Overhaul
+- Introduced 6 distinct AI Difficulty Levels (Beginner to Nightmare).
+- Added complex trajectory prediction logic. (Nightmare difficulty now predicts 99% of ball trajectories perfectly).
+- Implemented an "Aggressiveness and Surprise Wide-Shot" system, causing higher-level AI to execute unpredictable, sharp-angled swings to break player rhythm.
+- The AI now prioritizes targeting human opponents over other AI in 2v2 mode.
+
+• Rage-Quit Protection & Failsafes
+- Implemented Seamless AI Drop-In: If a human player rage-quits or disconnects mid-match, an AI instantly takes over their paddle without interrupting the game. The match only terminates if zero human players remain on the server.
+
+• New Modes & Win Conditions
+- **Competition Mode:** First to reach 7, 11, or 21 points wins.
+- **Training Mode:** Play endlessly without a score limit. Includes a "Constant Speed" toggle to disable ball acceleration for timing practice.
+
+--------------------------------------------------------------------------------
+[v0.7.0] The Physics & Sound Update — 2026-06-15
+--------------------------------------------------------------------------------
+
+• Improved Ball Physics
+- Completely rewrote the ball's directional (Vx) calculations. Steering the ball left or right using paddle offset is now highly responsive and no longer relies on stale accumulated data.
+- Added a speed-proportional Vx cap. Shot angles are now artificially limited based on ball speed to prevent uncontrollable sharp bounces when the ball reaches hyper-speed.
+
+• Audio & Immersiveness
+- **Dynamic Paddle Pitch:** Paddle movement sounds now dynamically scale in pitch (1.0 to 1.6) based on how far the paddle is from the center of the arena.
+- **Cinematic Power Switch:** Added a 3-stage cinematic audio sequence (Unlock > Processing > Activation) when flipping the main power switch.
+- **3D Spatial Audio:** Implemented a persistent rolling sound loop for the ball entity that correctly tracks its 3D coordinates.
+
+--------------------------------------------------------------------------------
+[v0.5.0] The Arcade Table Foundations — 2026-06-05
+--------------------------------------------------------------------------------
+
+• Arcade Systems
+- Rebranded standard "Minigame Tables" to "Arcade Tables".
+- Fixed severe logical bugs where players leaving an Arcade Table would spawn inside walls or fall through the floor. Z-axis positioning is now strictly locked to floor logic.
+- Prevented Arcade matches from spawning invisible collision platforms on the host map, preventing map pollution.
+- Players are now guaranteed to rejoin their previous "Survey/Exploration" session upon exiting an Arcade game, restoring their main menu state correctly.
+
+--------------------------------------------------------------------------------
+[v0.3.0] The Builder Tools Update — 2026-05-20
+--------------------------------------------------------------------------------
+
+• Map Building & Editing
+- Overhauled the Builder Snap Logic: Walls and floors now reliably snap corner-to-corner without overlapping hitboxes.
+- Fixed an issue where copying and pasting large structures would cause the game server to hard-lock (Paste Game-Lock).
+- Fixed duplicate property fields when editing Door configurations.
+- Implemented a reboot duration cap for building servers.
+
+--------------------------------------------------------------------------------
+[v0.1.0] The Alpha Launch — 2026-05-01
+--------------------------------------------------------------------------------
+
+• Project Genesis
+- Initial prototype launch of the server network.
+- Established basic TCP/UDP networking, player movement, and chat synchronization.
+- Introduced the core "Pong" mechanic as a proof-of-concept minigame.
+- Implemented early spatial voice chat testing.
+- The journey begins here!
