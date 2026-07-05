@@ -88,6 +88,10 @@ class Game:
         self.instance_mngr = instance_manager.InstanceManager()
         self.instance_mngr.update_title()
         self.reconnecting = False
+        
+        try:
+            anti_cheat.set_game_reference(self)
+        except Exception: pass
 
     def start(self):
         if len(sys.argv) > 3:

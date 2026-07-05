@@ -66,6 +66,12 @@ class SecureFloat:
 import psutil
 import ctypes
 
+_game = None
+
+def set_game_reference(game_ref):
+    global _game
+    _game = game_ref
+
 def detect_cheat_engine():
     """Returns True if Cheat Engine process or window is found."""
     # 1. Process Name Detection
@@ -123,6 +129,18 @@ def _speedhack_watchdog():
         # 1. Global Process Check
         if detect_cheat_engine():
             print("CRITICAL: Cheat Engine process detected! Exiting...")
+            try:
+                from libs import logger
+                logger.error("CRITICAL: Cheat Engine process detected! Client is shutting down for competitive integrity.")
+            except: pass
+
+            global _game
+            if _game and hasattr(_game, "network") and _game.network:
+                try:
+                    from libs import consts
+                    _game.network.send(consts.CHANNEL_MISC, "cheat_detected", {"reason": "Cheat Engine Process Detected"})
+                    time.sleep(0.5)
+                except: pass
             os._exit(1)
         
         # 2. Speedhack Check
@@ -134,6 +152,17 @@ def _speedhack_watchdog():
         
         if game_delta > (real_delta * 1.5):
             print(f"CRITICAL: Speedhack detected! (Real: {real_delta:.2f}s | Game: {game_delta:.2f}s). Exiting...")
+            try:
+                from libs import logger
+                logger.error(f"CRITICAL: Speedhack detected! (Real: {real_delta:.2f}s | Game: {game_delta:.2f}s). Client is shutting down.")
+            except: pass
+
+            if _game and hasattr(_game, "network") and _game.network:
+                try:
+                    from libs import consts
+                    _game.network.send(consts.CHANNEL_MISC, "cheat_detected", {"reason": f"Speedhack Detected (Game Time > Real Time)"})
+                    time.sleep(0.5)
+                except: pass
             os._exit(1)
             
         last_real_time = current_real_time
