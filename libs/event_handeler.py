@@ -284,9 +284,6 @@ class EventHandeler:
             entity.face(data["angle"], entity.vfacing, entity.bfacing, force=True)
 
     def quit(self, data):
-        msg = data.get("message", "").lower()
-        if "reboot" in msg or "restart" in msg or "rebooting" in msg:
-            self.game.reconnecting = True
         self.game.put(lambda: self.gameplay.quit("quit"))
         speak(data.get("message", "your connection was closed."), True)
 
