@@ -31,6 +31,7 @@ from . import (
     automation,
     instance_manager,
     anti_cheat,
+    keyboard_layout,
 )
 from .speech import speak
 from .os_tools import get_os
@@ -354,6 +355,10 @@ class Game:
             with self.lock:
                 self.update(self.delta)
                 self.events = pygame.event.get()
+                
+                # Normalize Thai keyboard layout keycodes to English for hotkeys
+                self.events = keyboard_layout.normalize_events(self.events)
+                
                 for event in self.events:
                     if (
                         event.type == pygame.KEYDOWN

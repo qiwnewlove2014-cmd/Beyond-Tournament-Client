@@ -9,6 +9,7 @@
 
 • Core System & Security
 - **Global Anti-Cheat Framework:** Implemented a strict Client-Side anti-tamper system. The game now actively monitors for unauthorized third-party memory modification tools and time-manipulation software (Speedhacks). If cheating software is detected running in the background, the client will terminate immediately to protect competitive integrity.
+- **Thai Keyboard Layout Compatibility:** Fixed an issue where players using the Thai keyboard layout (or other non-English layouts) were unable to trigger hotkeys (such as opening the chat with '/' or moving with 'WASD'). The game engine now seamlessly normalizes keystrokes in the background, allowing players to use all hotkeys normally while still being able to type native characters perfectly in the chat.
 
 • Minigames & Arcade Features
 - **Pong Statistics Tracking:** Added persistent database tracking for Pong (1v1 Wins, 2v2 Wins, Losses, and Longest Rally).
