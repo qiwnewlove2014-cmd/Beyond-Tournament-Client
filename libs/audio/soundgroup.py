@@ -187,6 +187,12 @@ class SoundGroup:
     
     
     def destroy(self):
+        if getattr(self, 'cached_filter', None) is not None:
+            try:
+                self.cached_filter.delete()
+            except Exception:
+                pass
+            self.cached_filter = None
         with self.context.batch():
             for sound in self.labeled_sources.values():
                 sound.destroy()

@@ -478,6 +478,21 @@ class Entity(Object):
                 except ValueError:
                     pass
             self._water_automation = None
+            
+        # Remove from exclude_water to prevent SoundGroup memory leak
+        if getattr(self, 'in_water', False):
+            try:
+                if hasattr(self.game, 'exclude_water') and self.soundgroup in self.game.exclude_water:
+                    self.game.exclude_water.remove(self.soundgroup)
+            except ValueError:
+                pass
+                
+        # Explicitly delete water_filter
+        if getattr(self, 'water_filter', None) is not None:
+            try:
+                self.water_filter.delete()
+            except Exception:
+                pass
         self.water_filter = None
 
         if self.player: 
