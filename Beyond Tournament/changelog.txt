@@ -34,6 +34,7 @@ Welcome to version 1.0! This massive update officially rebrands the project to "
     - Players in foreign language channels will receive all global system messages dynamically translated into their preferred language.
 
 • Gameplay & Audio Updates
+- **Pong Movement Keybinding Fix:** Fixed an issue where players with custom keybindings could not move the paddle using Arrow Keys. The game now intelligently blocks the physical Q and E keys during a match without overriding the player's custom keyboard layout.
 - **Pong Statistics Tracking:** Added persistent database tracking for Pong (1v1 Wins, 2v2 Wins, Losses, and Longest Rally).
 - **Anti-Farming Protections:** Competitive Pong matches will instantly invalidate and disable stat tracking if a human player leaves and an AI substitutes in, ensuring the leaderboard remains fair.
 - **Instant Record Saving:** The Longest Rally record is now saved immediately to the database upon scoring a goal, preventing players from losing their epic rally records if a match is abandoned.
