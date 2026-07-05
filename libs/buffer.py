@@ -153,7 +153,7 @@ def export_buffers():
 
     for i in buffers:
         f = open(
-             path + i.name + ".log",
+             os.path.join(path, i.name + ".log"),
             "ab",
         )
         text = f"\r\nexported at {absolute_time()}" + "\n"
