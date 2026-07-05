@@ -21,6 +21,10 @@ def main():
     from libs.version import version, note
 
     pygame.init()
+    
+    from libs import anti_cheat
+    anti_cheat.start_speedhack_watchdog()
+    
     pygame.display.set_caption(
         f"{consts.TITLE}, version {version.major}.{version.minor}.{version.patch} {note}"
     )

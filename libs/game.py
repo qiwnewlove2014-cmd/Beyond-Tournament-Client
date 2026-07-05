@@ -30,6 +30,7 @@ from . import (
     path_utils,
     automation,
     instance_manager,
+    anti_cheat,
 )
 from .speech import speak
 from .os_tools import get_os
@@ -48,6 +49,9 @@ class Game:
         self.lock = threading.RLock()
         self.queue = queue.SimpleQueue()
         self.get = self.queue.get_nowait
+        
+        # Anti-Cheat Testing Variable
+        self.test_money = anti_cheat.SecureInt(5000)
         self.clocks = weakref.WeakSet()
         self.keyconfig = Keyconfig(
             f"{options.config_dirs.user_config_dir}/keyconfig.json"
@@ -330,6 +334,10 @@ class Game:
 
     def loop(self):
         while True:
+            # Continuously verify the anti-cheat shadow value
+            # If Cheat Engine modifies this in memory, get() will crash the game!
+            self.test_money.get()
+            
             self.loop_function()
 
     def loop_function(self):
