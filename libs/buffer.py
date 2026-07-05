@@ -152,8 +152,9 @@ def export_buffers():
         path = os.path.expanduser("~/Documents") + "/Beyond Tournament"
 
     for i in buffers:
+        safe_name = i.name.replace("/", "_").replace("\\", "_")
         f = open(
-             os.path.join(path, i.name + ".log"),
+             os.path.join(path, safe_name + ".log"),
             "ab",
         )
         text = f"\r\nexported at {absolute_time()}" + "\n"

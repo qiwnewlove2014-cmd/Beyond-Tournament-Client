@@ -84,7 +84,7 @@ class EventHandeler:
         else:
             speak(data["text"], data["interupt"], not data["buffer"])
             if data["sound"]:
-                self.game.direct_soundgroup.play(data["sounds"])
+                self.game.direct_soundgroup.play(data["sound"])
 
     def online(self, data):
         buffer.add_item(
