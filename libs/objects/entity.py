@@ -86,6 +86,15 @@ class Entity(Object):
                 print(f"[Entity] Warning: Failed to chain distortion to equalizer target: {e}")
             self.soundgroup.parent.efx.send(self.radio_source, 1, self.distortion_slot)
             self.vc_compression = voice_chat.voice_chat_compression(self.game)
+            
+            # Apply initial reverb to the newly created voice/music sources
+            reverb = self.map.get_reverb_at(self.x, self.y, self.z)
+            if reverb and reverb.reverb:
+                try:
+                    self.soundgroup.parent.efx.send(self.vc_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
+                    self.soundgroup.parent.efx.send(self.music_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
+                except Exception:
+                    pass
 
 
 
