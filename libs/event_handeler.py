@@ -297,13 +297,13 @@ class EventHandeler:
 
     def make_menu(self, data):
         menu_id = f"{data.get('event', '')}_{data.get('title', '')}"
-        is_builder_menu = data.get("event", "").startswith("builder_")
+        is_memory_enabled = data.get("event", "").startswith("weapon_")
         
         if not hasattr(self.game, "menu_memory"):
             self.game.menu_memory = {}
 
         def on_select(value, close, index):
-            if not is_builder_menu:
+            if is_memory_enabled:
                 self.game.menu_memory[menu_id] = index
             if close:
                 self.gameplay.pop_last_substate()
@@ -323,14 +323,14 @@ class EventHandeler:
         options.append(("Close", on_close, None))
         m.add_items(options)
         
-        if not is_builder_menu:
+        if is_memory_enabled:
             saved_pos = self.game.menu_memory.get(menu_id, 0)
             if 0 <= saved_pos < len(m.items):
                 m.pos = saved_pos
             else:
-                m.pos = 0
+                m.pos = -1
         else:
-            m.pos = 0
+            m.pos = -1
         m.sound_browse_mode = bool(data.get("sound_browse_mode", False))
         m.block_space = data.get("event", "").startswith("builder_")
         # Store menu context so Ctrl+C / Ctrl+V shortcuts know which event and
