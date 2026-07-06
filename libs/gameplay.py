@@ -363,14 +363,26 @@ class Gameplay(state.State):
         if hasattr(self, 'megaphone_sources'):
             for i, src in enumerate(self.megaphone_sources):
                 if src:
+                    # Detach EFX slots to prevent driver-level feedback/buzz
+                    if hasattr(self.game.audio_mngr, 'efx'):
+                        for send_idx in range(4):
+                            try:
+                                self.game.audio_mngr.efx.send(src, send_idx, None)
+                            except Exception:
+                                pass
                     try:
-                        # Force stop and decouple from buffers
                         src.stop()
-                        src.buffer = None 
+                        src.buffer = None
+                    except Exception:
+                        pass
+                    try:
                         while src.buffers_queued > 0:
                             src.unqueue_buffers()
+                    except Exception:
+                        pass
+                    try:
                         src.delete()
-                    except Exception as e:
+                    except Exception:
                         pass
         
         self.megaphone_sources = []
@@ -675,12 +687,23 @@ class Gameplay(state.State):
         # Cleanup megaphone sources
         if hasattr(self, 'megaphone_sources'):
             for src in self.megaphone_sources:
-                try:
-                    src.stop()
-                    src.buffer = None
-                    src.delete()
-                except Exception:
-                    pass
+                if src:
+                    # Detach EFX slots to prevent driver-level feedback/buzz
+                    if hasattr(self.game.audio_mngr, 'efx'):
+                        for send_idx in range(4):
+                            try:
+                                self.game.audio_mngr.efx.send(src, send_idx, None)
+                            except Exception:
+                                pass
+                    try:
+                        src.stop()
+                        src.buffer = None
+                    except Exception:
+                        pass
+                    try:
+                        src.delete()
+                    except Exception:
+                        pass
             self.megaphone_sources.clear()
 
     def exit(self):

@@ -325,17 +325,20 @@ class voice_chat_compression(threading.Thread):
                         if packet is None:
                             continue  # Still pre-buffering
                         
-                        # Clear processed buffers
+                        # Clear processed buffers and keep one to recycle
+                        buf = None
                         try:
                             while src.buffers_processed > 0:
-                                src.unqueue_buffers()
+                                result = src.unqueue_buffers()
+                                if result is not None:
+                                    if isinstance(result, (list, tuple)):
+                                        buf = result[0]
+                                    else:
+                                        buf = result
                         except Exception:
                             pass
                         
-                        # Queue the packet from jitter buffer
-                        if src.buffers_processed > 0: 
-                            buf = src.unqueue_buffers()[0]
-                        else: 
+                        if buf is None: 
                             buf = self.game.audio_mngr.context.gen_buffer()
                         
                         try:
@@ -370,15 +373,19 @@ class voice_chat_compression(threading.Thread):
                 # === NORMAL VOICE CHAT: Direct playback (no jitter buffer needed) ===
                 sources_to_play = []
                 for idx, src in enumerate(sources):
+                    buf = None
                     try:
                         while src.buffers_processed > 0:
-                            src.unqueue_buffers()
+                            result = src.unqueue_buffers()
+                            if result is not None:
+                                if isinstance(result, (list, tuple)):
+                                    buf = result[0]
+                                else:
+                                    buf = result
                     except Exception:
                         pass
                     
-                    if src.buffers_processed > 0: 
-                        buf = src.unqueue_buffers()[0]
-                    else: 
+                    if buf is None: 
                         buf = self.game.audio_mngr.context.gen_buffer()
                     
                     buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
@@ -400,8 +407,19 @@ class voice_chat_compression(threading.Thread):
             if channelID == consts.CHANNEL_MEGAPHONE: return
             
             if not gameplay.voice_channels[channelID].has_radio or not gameplay.player.has_radio: return
-            if radio_source.buffers_processed > 0: buffer = radio_source.unqueue_buffers()[0]
-            else: buffer = self.game.audio_mngr.context.gen_buffer()
+            buffer = None
+            try:
+                if radio_source.buffers_processed > 0:
+                    result = radio_source.unqueue_buffers()
+                    if result is not None:
+                        if isinstance(result, (list, tuple)):
+                            buffer = result[0]
+                        else:
+                            buffer = result
+            except Exception:
+                pass
+            if buffer is None:
+                buffer = self.game.audio_mngr.context.gen_buffer()
             buffer.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
             radio_source.queue_buffers(buffer)
             if radio_source.state == cyal.SourceState.STOPPED or radio_source.state == cyal.SourceState.INITIAL: radio_source.play()
@@ -471,12 +489,17 @@ class MusicCompression:
 
                 state = music_source.state
 
-                # Only drain processed buffers when PLAYING.
-                # When STOPPED — do NOT drain, let queue build up so we can restart.
+                # Recycle or generate buffer
+                buf = None
                 if state == cyal.SourceState.PLAYING:
                     try:
                         while music_source.buffers_processed > 0:
-                            music_source.unqueue_buffers()
+                            result = music_source.unqueue_buffers()
+                            if result is not None:
+                                if isinstance(result, (list, tuple)):
+                                    buf = result[0]
+                                else:
+                                    buf = result
                     except Exception:
                         pass
 
@@ -486,11 +509,11 @@ class MusicCompression:
                 except Exception:
                     return
 
-                # Get a fresh buffer (OpenAL reclaims old ones automatically)
-                try:
-                    buf = self.game.audio_mngr.context.gen_buffer()
-                except Exception:
-                    return
+                if buf is None:
+                    try:
+                        buf = self.game.audio_mngr.context.gen_buffer()
+                    except Exception:
+                        return
 
                 # Fill and queue
                 buf.set_data(bytes(pcm), sample_rate=48000, format=cyal.BufferFormat.MONO16)

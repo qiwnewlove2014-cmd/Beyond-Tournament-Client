@@ -583,11 +583,14 @@ class Reverb(BaseMapObj):
 
     def destroy(self):
         with contextlib.suppress(Exception):
-            # Return the auxiliary effect slot to the pool for reuse.
-            # We NEVER delete slots — they are pre-allocated and recycled.
-            # This is the standard approach in professional audio engines.
             if self.reverb:
-                self.map.game.audio_mngr.release_effect_slot(self.reverb)
+                # Detach from audio manager sends if it was the active reverb
+                am = self.map.game.audio_mngr
+                for send_idx, slot in enumerate(am.sends):
+                    if slot == self.reverb:
+                        am.apply_effect(None, send_idx)
+                
+                am.release_effect_slot(self.reverb)
                 self.reverb = None
 
 
