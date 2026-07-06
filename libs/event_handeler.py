@@ -296,19 +296,41 @@ class EventHandeler:
         speak(data.get("message", "Coppied"))
 
     def make_menu(self, data):
-        def on_select(value, close):
+        menu_id = f"{data.get('event', '')}_{data.get('title', '')}"
+        is_builder_menu = data.get("event", "").startswith("builder_")
+        
+        if not hasattr(self.game, "menu_memory"):
+            self.game.menu_memory = {}
+
+        def on_select(value, close, index):
+            if not is_builder_menu:
+                self.game.menu_memory[menu_id] = index
             if close:
                 self.gameplay.pop_last_substate()
             self.client.send(consts.CHANNEL_MENUS, data["event"], {"value": value})
 
+        def on_close():
+            if menu_id in self.game.menu_memory:
+                del self.game.menu_memory[menu_id]
+            self.gameplay.pop_last_substate()
+
         m = menu.Menu(self.game, data["title"])
         options = []
-        for i in data["options"]:
+        for idx, i in enumerate(data["options"]):
             options.append(
-                (i["title"], functools.partial(on_select, i["value"], i["close"]), i.get("preview_sound"))
+                (i["title"], functools.partial(on_select, i["value"], i["close"], idx), i.get("preview_sound"))
             )
-        options.append(("Close", self.gameplay.pop_last_substate, None))
+        options.append(("Close", on_close, None))
         m.add_items(options)
+        
+        if not is_builder_menu:
+            saved_pos = self.game.menu_memory.get(menu_id, 0)
+            if 0 <= saved_pos < len(m.items):
+                m.pos = saved_pos
+            else:
+                m.pos = 0
+        else:
+            m.pos = 0
         m.sound_browse_mode = bool(data.get("sound_browse_mode", False))
         m.block_space = data.get("event", "").startswith("builder_")
         # Store menu context so Ctrl+C / Ctrl+V shortcuts know which event and
