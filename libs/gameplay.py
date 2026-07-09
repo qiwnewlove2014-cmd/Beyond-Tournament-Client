@@ -22,6 +22,7 @@ from . import (
     options,
     volume_mixer,
     music_bot,
+    movement,
 )
 from .speech import speak
 from .objects import player
@@ -55,6 +56,10 @@ class Gameplay(state.State):
         self.pa_test_mode = False  # PA Test Mode for testing megaphone speakers
         self.game_started = False   # Track if game has started (blocks PA Test Mode)
         self.pong_mode = False      # True when player is in an active Pong match (suppresses normal footsteps)
+        self.tracking_target = None
+        self.tracking_clock = None
+        self.facing_sound_clock = self.game.new_clock()
+        self.is_facing_target = False
         self.keys_held = {
             kc.get("strafe_left", pygame.K_q): self.strafe_left,
             kc.get("strafe_right", pygame.K_e): self.strafe_right,
@@ -71,6 +76,7 @@ class Gameplay(state.State):
         }
         self.keys_pressed = {
             pygame.K_TAB: self.spectator_switch_player,
+            kc.get("tracking_menu", pygame.K_t): self.open_tracking_menu,
             kc.get("voice_chat", pygame.K_g): self.voice_chat_start,  # Push-to-Talk mode
             pygame.K_RETURN: self.buffer_options,
             kc.get("open_volume_mixer", pygame.K_F7): lambda mod: self.add_substate(volume_mixer.volume_mixer(self.game, parent=self)),
@@ -810,6 +816,48 @@ class Gameplay(state.State):
         if hasattr(self, 'music_bot') and self.music_bot:
             self.music_bot.loop()
         
+        # === Tracking beacon & facing sound update ===
+        if getattr(self, "tracking_target", None) is not None:
+            target_type, obj, pos = self.tracking_target
+            
+            # If target is a dynamic entity, check if it's dead
+            if target_type == "entity":
+                if obj.dead:
+                    speak("Tracking target lost.")
+                    self.tracking_target = None
+                else:
+                    # If still in entities, update position; otherwise keep last known position
+                    if obj.name in self.map.entities:
+                        pos = (obj.x, obj.y, obj.z)
+                        self.tracking_target = (target_type, obj, pos)
+                    
+            if getattr(self, "tracking_target", None) is not None:
+                # Play facing.ogg at target's 3D coordinates every 1.2 seconds.
+                # Pitch rises when facing the target and falls when walking past
+                # / facing away, so it reads like a radar sweep.
+                if self.tracking_clock.elapsed >= 1200:
+                    self.tracking_clock.restart()
+                    pitch = self._beacon_pitch(pos[0], pos[1])
+                    snd = self.game.audio_mngr.play_unbound(
+                        "ui/facing.ogg",
+                        pos[0], pos[1], pos[2],
+                        looping=False,
+                        volume=35,
+                        cat="miscelaneous",
+                        pitch=pitch,
+                    )
+                    if snd and snd.source:
+                        snd.source.reference_distance = 15.0
+                        snd.source.rolloff_factor = 0.5
+
+                        # Apply player's current reverb slot for map environmental reverb
+                        reverb_slot = getattr(self, 'current_player_reverb_slot', None)
+                        if reverb_slot:
+                            try:
+                                self.game.audio_mngr.efx.send(snd.source, 3, reverb_slot)
+                            except Exception:
+                                pass
+        
         # === FIXED MAP-EDGE MEGAPHONE SPEAKERS ===
         # Position speakers at middle of each map edge (only once when map is loaded)
         # Coordinate System: X=left/right, Y=forward/back, Z=up/down
@@ -1343,6 +1391,257 @@ class Gameplay(state.State):
             self.player.play_sound("foley/run/stop.ogg", cat="self")
             self.running = False
             self.player.movetime = self.player.walktime
+
+    # tracking system
+    def get_relative_direction_string(self, tx, ty, tz):
+        dx = tx - self.player.x
+        dy = ty - self.player.y
+        
+        rad = math.atan2(dx, dy)
+        deg = math.degrees(rad)
+        
+        rel = deg - self.player.hfacing
+        
+        while rel <= -180:
+            rel += 360
+        while rel > 180:
+            rel -= 360
+            
+        abs_deg = round(abs(rel))
+        
+        if abs_deg < 15:
+            dir_str = "Straight in front"
+        elif abs_deg > 165:
+            dir_str = "Behind"
+        elif rel > 0:
+            if abs_deg < 60:
+                dir_str = "Front-Right"
+            elif abs_deg < 120:
+                dir_str = "Right"
+            else:
+                dir_str = "Back-Right"
+        else:
+            if abs_deg < 60:
+                dir_str = "Front-Left"
+            elif abs_deg < 120:
+                dir_str = "Left"
+            else:
+                dir_str = "Back-Left"
+                
+        diff_z = tz - self.player.z
+        if diff_z > 2:
+            dir_str += " (Above)"
+        elif diff_z < -2:
+            dir_str += " (Below)"
+
+        return dir_str
+
+    def _format_target_location(self, dist, tx, ty, tz):
+        """Build the 'X tiles, direction' suffix shown next to a trackable.
+        When the player is standing on the object (dist == 0), report 'right here'
+        instead of a compass direction, since the bearing is meaningless there."""
+        if dist <= 0:
+            return "right here"
+        direction_str = self.get_relative_direction_string(tx, ty, tz)
+        return f"{dist} tiles, {direction_str}"
+
+    def _beacon_pitch(self, tx, ty):
+        """Compute a tracking-beacon pitch (0.8..1.2) from how squarely the
+        player is facing the target. Facing it head-on -> highest pitch;
+        walking past / facing away -> lowest. This sits on top of the 3D
+        positional volume, so it reads like a radar sweep."""
+        dx = tx - self.player.x
+        dy = ty - self.player.y
+        rad = math.atan2(dx, dy)
+        rel = math.degrees(rad) - self.player.hfacing
+        while rel <= -180:
+            rel += 360
+        while rel > 180:
+            rel -= 360
+        # cos(0)=1 (front) -> 1.2 ; cos(90)=0 (side) -> 1.0 ; cos(180)=-1 (behind) -> 0.8
+        return 1.0 + 0.2 * math.cos(math.radians(rel))
+
+    def open_tracking_menu(self, mod):
+        if self.player.dead:
+            return
+
+        # If Alt+T is pressed and we are currently tracking something, report status directly
+        if mod & pygame.KMOD_ALT and getattr(self, "tracking_target", None) is not None:
+            target_type, obj, pos = self.tracking_target
+            if target_type == "entity":
+                pos = (obj.x, obj.y, obj.z)
+
+            dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, pos[0], pos[1], pos[2]))
+            location_str = self._format_target_location(dist, pos[0], pos[1], pos[2])
+
+            name = self._get_target_label(target_type, obj)
+            speak(f"Tracking {name}: {location_str}")
+            return
+
+        trackables = self._gather_trackables()
+
+        # Sort closest first
+        trackables.sort(key=lambda x: x[0])
+
+        # Build menu items
+        menu_items = []
+
+        # Prepend "Stop Tracking" if currently tracking
+        if getattr(self, "tracking_target", None) is not None:
+            menu_items.append(("Stop Tracking", self.stop_tracking))
+
+        for dist, label, location_str, target_info in trackables:
+            callback = partial(self.start_tracking, target_info)
+            menu_items.append((f"{label}: {location_str}", callback))
+
+        menu_items.append(("Cancel", self.pop_last_substate))
+
+        if not menu_items or (len(menu_items) == 1 and menu_items[0][0] == "Cancel"):
+            speak("No trackable objects nearby.")
+            return
+
+        # Display menu using Menu
+        m = menu.Menu(self.game, "Select object to track", parrent=self)
+        m.add_items(menu_items)
+        menus.set_default_sounds(m)
+        self.add_substate(m)
+
+    def _clean_name(self, name):
+        """Clean up a raw object/entity name for display.
+        Strips trailing id suffixes, maps known names, and splits CamelCase."""
+        import re
+        name = re.sub(r'[-_]\d+$', '', name)  # removes -11 or _1
+        name = re.sub(r'\d+$', '', name)      # removes trailing numbers
+        if name.lower().startswith("zomby"):
+            return "Zombie"
+        if name.lower() == "powerswitch":
+            return "Power Switch"
+        return re.sub(r'(?<!^)(?=[A-Z])', ' ', name).strip()
+
+    def _get_target_label(self, target_type, obj):
+        """Resolve the human-readable label for a tracked target of any type.
+        Pulls the real item name from server-synced data automatically."""
+        if target_type == "door":
+            return "Door"
+        if target_type == "wallbuy":
+            # weaponName is the real weapon name, e.g. "MP7"
+            return obj.weaponName or "Weapon Buy"
+        if target_type == "interactable":
+            return getattr(obj, "label", None) or "Interactable"
+        if target_type == "perkMachine":
+            return getattr(obj, "label", None) or "Perk Machine"
+        if target_type == "minigameTable":
+            return getattr(obj, "label", None) or "Arcade"
+        if target_type == "zone":
+            return getattr(obj, "zonename", None) or "Zone"
+        if target_type == "entity":
+            return self._clean_name(obj.name)
+        return "Object"
+
+    def _gather_trackables(self):
+        """Collect all trackable objects around the player.
+        Returns a list of (dist, label, location_str, (type_key, obj, pos)).
+        location_str is the full 'X tiles, direction' (or 'right here' when on top).
+        Excludes zombies, hellhounds, and walls."""
+        trackables = []
+
+        # 1. Gather Doors (filter out duplicate door IDs)
+        seen_door_ids = set()
+        for door in self.map.door_list:
+            if door.id in seen_door_ids:
+                continue
+            seen_door_ids.add(door.id)
+
+            cx = (door.minx + door.maxx) / 2
+            cy = (door.miny + door.maxy) / 2
+            cz = (door.minz + door.maxz) / 2
+            dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, cx, cy, cz))
+            location_str = self._format_target_location(dist, cx, cy, cz)
+            trackables.append((dist, "Door", location_str, ("door", door, (cx, cy, cz))))
+
+        # 2. Gather Wallbuys (show real weapon name + cost)
+        for wb in self.map.wallbuy_list:
+            cx = (wb.minx + wb.maxx) / 2
+            cy = (wb.miny + wb.maxy) / 2
+            cz = (wb.minz + wb.maxz) / 2
+            dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, cx, cy, cz))
+            location_str = self._format_target_location(dist, cx, cy, cz)
+            label = f"{wb.weaponName}, {wb.weaponCost} points" if wb.weaponName else "Weapon Buy"
+            trackables.append((dist, label, location_str, ("wallbuy", wb, (cx, cy, cz))))
+
+        # 3. Gather Interactables
+        for obj in self.map.interactable_list:
+            cx = (obj.minx + obj.maxx) / 2
+            cy = (obj.miny + obj.maxy) / 2
+            cz = (obj.minz + obj.maxz) / 2
+            dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, cx, cy, cz))
+            location_str = self._format_target_location(dist, cx, cy, cz)
+            label = obj.label or "Interactable"
+            trackables.append((dist, label, location_str, ("interactable", obj, (cx, cy, cz))))
+
+        # 4. Gather Perk Machines
+        for obj in self.map.perk_machine_list:
+            cx = (obj.minx + obj.maxx) / 2
+            cy = (obj.miny + obj.maxy) / 2
+            cz = (obj.minz + obj.maxz) / 2
+            dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, cx, cy, cz))
+            location_str = self._format_target_location(dist, cx, cy, cz)
+            label = obj.label or "Perk Machine"
+            trackables.append((dist, label, location_str, ("perkMachine", obj, (cx, cy, cz))))
+
+        # 5. Gather Minigame/Arcade Tables
+        for obj in self.map.minigame_table_list:
+            cx = (obj.minx + obj.maxx) / 2
+            cy = (obj.miny + obj.maxy) / 2
+            cz = (obj.minz + obj.maxz) / 2
+            dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, cx, cy, cz))
+            location_str = self._format_target_location(dist, cx, cy, cz)
+            label = obj.label or "Arcade"
+            trackables.append((dist, label, location_str, ("minigameTable", obj, (cx, cy, cz))))
+
+        # 6. Gather Zones (named areas)
+        for zone in self.map.zone_list:
+            cx = (zone.minx + zone.maxx) / 2
+            cy = (zone.miny + zone.maxy) / 2
+            cz = (zone.minz + zone.maxz) / 2
+            dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, cx, cy, cz))
+            location_str = self._format_target_location(dist, cx, cy, cz)
+            label = zone.zonename or "Zone"
+            trackables.append((dist, label, location_str, ("zone", zone, (cx, cy, cz))))
+
+        # 7. Gather Entities (excluding local player, dead entities, zombies, and hellhounds)
+        for name, ent in self.map.entities.items():
+            if name == self.player.name or ent.dead:
+                continue
+
+            lower_name = name.lower()
+            if lower_name.startswith("zomby") or "zombie" in lower_name or lower_name.startswith("hellhound") or "dog" in lower_name:
+                continue
+
+            ent.name = name  # Force correct name in case it was "None"
+            dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, ent.x, ent.y, ent.z))
+            location_str = self._format_target_location(dist, ent.x, ent.y, ent.z)
+            cleaned_label = self._clean_name(name)
+            trackables.append((dist, cleaned_label, location_str, ("entity", ent, (ent.x, ent.y, ent.z))))
+
+        return trackables
+
+    def start_tracking(self, target_info):
+        self.tracking_target = target_info
+        target_type, obj, pos = target_info
+
+        name = self._get_target_label(target_type, obj)
+        speak(f"Tracking {name}.")
+        self.tracking_clock = self.game.new_clock()
+        self.is_facing_target = False
+        if len(self.substates) > 0:
+            self.pop_last_substate()
+
+    def stop_tracking(self):
+        self.tracking_target = None
+        speak("Tracking stopped.")
+        if len(self.substates) > 0:
+            self.pop_last_substate()
 
     # stats
     def speak_location(self, mod):

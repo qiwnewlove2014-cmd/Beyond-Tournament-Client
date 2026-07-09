@@ -36,6 +36,11 @@ class Map:
         self.reverb_list = []
         self.megaphone_speakers = []
         self.entities = {}
+        # Triggerable items (synchronised from server for tracking/scan)
+        self.wallbuy_list = []
+        self.interactable_list = []
+        self.perk_machine_list = []
+        self.minigame_table_list = []
 
     def valid_straight_path(self, position1, position2):
         x1, y1, z1 = position1
@@ -117,6 +122,10 @@ class Map:
         self.tile_list.clear()
         self.zone_list.clear()
         self.door_list.clear()
+        self.wallbuy_list.clear()
+        self.interactable_list.clear()
+        self.perk_machine_list.clear()
+        self.minigame_table_list.clear()
         for i in self.ambience_list.copy():
             i.leave(destroy=True)
         self.ambience_list.clear()
@@ -418,6 +427,106 @@ class Map:
         doorobj = Door(id, minx, maxx, miny, maxy, minz, maxz)
         self.door_list.append(doorobj)
 
+    def spawn_wallbuy(
+        self,
+        minx=0,
+        maxx=0,
+        miny=0,
+        maxy=0,
+        minz=0,
+        maxz=0,
+        id="",
+        weaponName="",
+        weaponCost=0,
+        ammoCost=0,
+        **kwargs,
+    ):
+        """Spawns a wallbuy (weapon buy station). Uses id-based replace so it
+        is rebuild-safe."""
+        wb = Wallbuy(id, minx, maxx, miny, maxy, minz, maxz, weaponName, weaponCost, ammoCost)
+        index = -1
+        for i, element in enumerate(self.wallbuy_list):
+            if element.id == id:
+                index = i
+                break
+        if index > -1:
+            self.wallbuy_list[index] = wb
+        else:
+            self.wallbuy_list.append(wb)
+
+    def spawn_interactable(
+        self,
+        minx=0,
+        maxx=0,
+        miny=0,
+        maxy=0,
+        minz=0,
+        maxz=0,
+        id="",
+        innerText="",
+        **kwargs,
+    ):
+        """Spawns a generic interactable object."""
+        obj = Interactable(id, minx, maxx, miny, maxy, minz, maxz, innerText)
+        index = -1
+        for i, element in enumerate(self.interactable_list):
+            if element.id == id:
+                index = i
+                break
+        if index > -1:
+            self.interactable_list[index] = obj
+        else:
+            self.interactable_list.append(obj)
+
+    def spawn_perkMachine(
+        self,
+        minx=0,
+        maxx=0,
+        miny=0,
+        maxy=0,
+        minz=0,
+        maxz=0,
+        id="",
+        perk="",
+        name="",
+        **kwargs,
+    ):
+        """Spawns a perk machine."""
+        obj = PerkMachine(id, minx, maxx, miny, maxy, minz, maxz, perk, name)
+        index = -1
+        for i, element in enumerate(self.perk_machine_list):
+            if element.id == id:
+                index = i
+                break
+        if index > -1:
+            self.perk_machine_list[index] = obj
+        else:
+            self.perk_machine_list.append(obj)
+
+    def spawn_minigameTable(
+        self,
+        minx=0,
+        maxx=0,
+        miny=0,
+        maxy=0,
+        minz=0,
+        maxz=0,
+        id="",
+        game_type="pong",
+        **kwargs,
+    ):
+        """Spawns an arcade/minigame table."""
+        obj = MinigameTable(id, minx, maxx, miny, maxy, minz, maxz, game_type)
+        index = -1
+        for i, element in enumerate(self.minigame_table_list):
+            if element.id == id:
+                index = i
+                break
+        if index > -1:
+            self.minigame_table_list[index] = obj
+        else:
+            self.minigame_table_list.append(obj)
+
     def get_min_x(self):
         """Returns the minimum x"""
         return self.minx
@@ -451,7 +560,7 @@ class Map:
     def spawn_entity(self, name, x, y, z, hp=100):
         if self.entities.get(name):
             self.entities[name].destroy()
-        self.entities[name] = entity.Entity(self.game, self, x, y, z, hp)
+        self.entities[name] = entity.Entity(self.game, self, x, y, z, hp, name=name)
         return self.entities[name]
 
     def get_entities_at(self, x, y, z):
@@ -682,6 +791,56 @@ class Zone(BaseMapObj):
     def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, name):
         super(Zone, self).__init__(id, minx, maxx, miny, maxy, minz, maxz, "zone")
         self.zonename = name
+
+
+class Wallbuy(BaseMapObj):
+    """A wall-mounted weapon buy station. Mirrors server Wallbuy bounds (±1)."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, weaponName="", weaponCost=0, ammoCost=0):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "wallbuy")
+        self.weaponName = weaponName
+        self.weaponCost = weaponCost
+        self.ammoCost = ammoCost
+
+    def in_bound(self, x, y, z):
+        # Match server: wallbuy is interactable from ±1 tile around its bounds
+        if x is None or y is None or z is None:
+            return False
+        try:
+            ix = floor(x); iy = floor(y); iz = floor(z)
+            return (
+                ix >= floor(self.minx) - 1 and ix <= floor(self.maxx) + 1
+                and iy >= floor(self.miny) - 1 and iy <= floor(self.maxy) + 1
+                and iz >= floor(self.minz) - 1 and iz <= floor(self.maxz) + 1
+            )
+        except TypeError:
+            return False
+
+
+class Interactable(BaseMapObj):
+    """A generic interactable object (lever, switch, button, etc.)."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, innerText=""):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "interactable")
+        self.label = innerText or "Interactable"
+
+
+class PerkMachine(BaseMapObj):
+    """A perk-a-cola machine. Display name comes from server 'name' or 'perk'."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, perk="", name=""):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "perkMachine")
+        self.perk = perk
+        self.label = name or perk or "Perk Machine"
+
+
+class MinigameTable(BaseMapObj):
+    """An arcade/minigame table (e.g. Pong)."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, game_type="pong"):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "minigameTable")
+        self.game_type = game_type
+        self.label = f"Arcade ({game_type})"
 
 
 class Pannable(BaseMapObj):
