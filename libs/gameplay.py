@@ -399,6 +399,7 @@ class Gameplay(state.State):
         self.megaphone_sources = []
         self.megaphone_speaker_data = []
         self.megaphone_player_sources = {}  # {sender_id: {'sources': [...], 'last_active': float}}
+        self.megaphone_lock_owner = None
         vc_sources = []
         
         initial_positions = []
@@ -1406,6 +1407,20 @@ class Gameplay(state.State):
             smooth_factor = 0.15  # 15% transition per frame (~250-300ms total fade duration)
             global_vol = options.get("megaphone_volume", 100) / 100.0
             
+            # Find the most recently active speaker to implement talkover ducking
+            now = time.time()
+            most_recent_sender_id = None
+            max_active_time = 0.0
+            if hasattr(self, 'megaphone_player_sources'):
+                for sid, entry in self.megaphone_player_sources.items():
+                    last_act = entry.get('last_active', 0.0)
+                    if last_act > max_active_time:
+                        max_active_time = last_act
+                        most_recent_sender_id = sid
+            
+            # A speaker is active if they spoke in the last 400ms
+            most_recent_active = (most_recent_sender_id is not None and (now - max_active_time < 0.4))
+            
             for i, data in enumerate(self.megaphone_speaker_data):
                 try:
                     # 1. Interpolate physical templates
@@ -1478,10 +1493,14 @@ class Gameplay(state.State):
                         
                     # 2. Interpolate active per-player sources
                     if hasattr(self, 'megaphone_player_sources'):
-                        for player_entry in self.megaphone_player_sources.values():
+                        for sid, player_entry in self.megaphone_player_sources.items():
                             if 'sources' in player_entry and 'filters' in player_entry:
                                 prim_idx = 2 * i
                                 refl_idx = 2 * i + 1
+                                
+                                # Duck player volume if another player is currently speaking more recently
+                                is_other_active = most_recent_active and (sid != most_recent_sender_id)
+                                duck_mult = 0.25 if is_other_active else 1.0
                                 
                                 # Interpolate player primary source
                                 if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None and player_entry['filters'][prim_idx] is not None:
@@ -1489,7 +1508,7 @@ class Gameplay(state.State):
                                     flt = player_entry['filters'][prim_idx]
                                     
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][prim_idx]
+                                    t_vol = player_entry['targets_vol'][prim_idx] * duck_mult
                                     c_vol = player_entry['currents_vol'][prim_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
@@ -1527,7 +1546,7 @@ class Gameplay(state.State):
                                     flt = player_entry['filters'][refl_idx]
                                     
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][refl_idx]
+                                    t_vol = player_entry['targets_vol'][refl_idx] * duck_mult
                                     c_vol = player_entry['currents_vol'][refl_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
@@ -2709,6 +2728,12 @@ class Gameplay(state.State):
                  return
             if consts.CHANNEL_MEGAPHONE not in self.voice_channels and hasattr(self, 'megaphone_sources') and not self.megaphone_sources:
                  speak("System: No public address system available directly in this area.")
+                 return
+            
+            # Check if megaphone is locked by a staff broadcast
+            lock_owner = getattr(self, 'megaphone_lock_owner', None)
+            if lock_owner and lock_owner != getattr(self.player, 'name', ''):
+                 speak(f"System: Megaphone is currently locked for a staff broadcast by {lock_owner}.")
                  return
         
         # Route to appropriate channel based on mode

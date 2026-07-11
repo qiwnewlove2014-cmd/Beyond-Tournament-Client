@@ -523,6 +523,14 @@ class MapMusicBot:
             speak("Music broadcast enabled. Others can hear the music.")
         else:
             speak("Music broadcast disabled. Private listening mode.")
+            if self.broadcast_to_megaphone:
+                self.broadcast_to_megaphone = False
+                from . import consts
+                self.game.network.send(
+                    consts.CHANNEL_MISC,
+                    "megaphone_broadcast_lock",
+                    {"locked": False}
+                )
 
     def _create_stream_source(self):
         """Create a fresh OpenAL source for streaming.
@@ -612,6 +620,14 @@ class MapMusicBot:
                 status_text = "enabled" if self.broadcast_to_megaphone else "disabled"
                 speak(f"Broadcast to megaphone {status_text}.")
                 m.speak_current_item()
+                
+                # Send lock request to the server
+                from . import consts
+                self.game.network.send(
+                    consts.CHANNEL_MISC,
+                    "megaphone_broadcast_lock",
+                    {"locked": self.broadcast_to_megaphone}
+                )
                 
             items.append((get_megaphone_label, toggle_megaphone_routing))
 

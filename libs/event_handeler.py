@@ -588,6 +588,10 @@ class EventHandeler:
         from . import megaphone_settings
         self.gameplay.add_substate(megaphone_settings.megaphone_settings(self.game, self.gameplay))
 
+    def megaphone_lock_state(self, data):
+        """Handle megaphone lock state broadcasts from server"""
+        self.gameplay.megaphone_lock_owner = data.get("owner")
+
     def buffer(self, data):
         """Handle buffer notifications from server (e.g., powerup messages)"""
         buffer.add_item(
