@@ -297,35 +297,7 @@ class voice_chat_compression(threading.Thread):
                 
                 # === MEGAPHONE: Use Jitter Buffer for smooth playback ===
                 if channelID == consts.CHANNEL_MEGAPHONE:
-                    # Count active sources for dynamic ducking
-                    active_count = sum(1 for src in sources if hasattr(src, 'state') and src.state != cyal.SourceState.STOPPED)
-                    update_active_speakers(active_count)
-                    
-                    # Calculate dynamic volume reduction based on speaker count
-                    # LESS AGGRESSIVE: Preserve volume while still preventing clipping
-                    # 1 speaker = 100%, 2 speakers = 85% each, 3+ = 70% each
-                    speaker_count = get_active_speaker_count()
-                    if speaker_count >= 3:
-                        volume_factor = 0.7  # Was 0.5 - too quiet with reverb
-                    elif speaker_count >= 2:
-                        volume_factor = 0.85  # Was 0.7 - too quiet with reverb
-                    else:
-                        volume_factor = 1.0
-                    
-                    # Apply soft limiter with dynamic parameters based on speaker count
-                    # LESS AGGRESSIVE limiting to preserve audio clarity
-                    dynamic_threshold = 0.5 - (speaker_count - 1) * 0.05  # Gentler adjustment
-                    dynamic_threshold = max(0.35, dynamic_threshold)  # Don't go below 35%
-                    dynamic_ratio = 6.0 + (speaker_count - 1) * 1.0  # Gentler compression
-                    
-                    limited_data = soft_limit_audio(bytes(data), threshold=dynamic_threshold, ratio=dynamic_ratio)
-                    
-                    # Additional volume reduction for multi-speaker scenarios
-                    if volume_factor < 1.0:
-                        try:
-                            limited_data = audioop.mul(limited_data, 2, volume_factor)
-                        except Exception:
-                            pass
+                    limited_data = soft_limit_audio(bytes(data), threshold=0.8, ratio=6.0)
                     
                     # Single jitter buffer per sender — ensures all speakers play the same frame simultaneously
                     buffer_key = sender_id if sender_id is not None else "megaphone_shared"
@@ -561,9 +533,11 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet):
             result = src.unqueue_buffers()
             if result is not None:
                 if isinstance(result, (list, tuple)):
-                    buf = result[0]
+                    if buf is None:
+                        buf = result[0]
                 else:
-                    buf = result
+                    if buf is None:
+                        buf = result
     except Exception:
         pass
     
@@ -626,6 +600,10 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
     except AttributeError:
         player_pos = (0.0, 0.0, 0.0)
         
+    global _speaker_last_calc_time
+    if '_speaker_last_calc_time' not in globals():
+        _speaker_last_calc_time = {}
+        
     for idx, src in enumerate(sources):
         if src is None:
             continue
@@ -641,51 +619,41 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             static_delay = spk_data.get('delay', 0.0)
             speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
             
-        # Calculate dynamic propagation delay (speed of sound = 343 m/s)
-        if not is_reflection:
-            # Direct path: Speaker -> Player
-            dx = player_pos[0] - speaker_pos[0]
-            dy = player_pos[1] - speaker_pos[1]
-            dz = player_pos[2] - speaker_pos[2]
-            distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-            propagation_delay = distance / 343.0
-        else:
-            # Ground reflection path: Speaker -> Ground -> Player
-            ground_level = gameplay.map.minz if hasattr(gameplay, 'map') and hasattr(gameplay.map, 'minz') else 0.0
-            dist_spk_to_ground = abs(speaker_pos[2] - ground_level)
-            
-            dx = player_pos[0] - speaker_pos[0]
-            dy = player_pos[1] - speaker_pos[1]
-            dz = player_pos[2] - ground_level
-            dist_ground_to_player = math.sqrt(dx*dx + dy*dy + dz*dz)
-            
-            distance = dist_spk_to_ground + dist_ground_to_player
-            propagation_delay = distance / 343.0
-            
-        total_delay = static_delay + propagation_delay
-        frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
-        
         queue_key = (sender_id, idx)
-        if queue_key not in _speaker_delay_queues:
-            _speaker_delay_queues[queue_key] = collections.deque()
-        dq = _speaker_delay_queues[queue_key]
+        now = time.time()
+        last_calc = _speaker_last_calc_time.get(queue_key, 0)
         
-        if frames_delay > 0:
-            dq.append(packet)
-            # Catch up if player moved closer and queue has too many old packets
-            while len(dq) > frames_delay + 1:
-                dq.popleft()
-                
-            if len(dq) <= frames_delay:
-                play_packet = bytes(len(packet))
+        # If no packets received for > 0.5s OR if the source starved (underrun), recalculate and re-apply initial delay
+        if now - last_calc > 0.5 or src.state != cyal.SourceState.PLAYING:
+            # Calculate static propagation delay for this transmission (speed of sound = 343 m/s)
+            if not is_reflection:
+                dx = player_pos[0] - speaker_pos[0]
+                dy = player_pos[1] - speaker_pos[1]
+                dz = player_pos[2] - speaker_pos[2]
+                distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                propagation_delay = distance / 343.0
             else:
-                play_packet = dq.popleft()
-        else:
-            if len(dq) > 0:
-                dq.clear()
-            play_packet = packet
+                ground_level = gameplay.map.minz if hasattr(gameplay, 'map') and hasattr(gameplay.map, 'minz') else 0.0
+                dist_spk_to_ground = abs(speaker_pos[2] - ground_level)
+                dx = player_pos[0] - speaker_pos[0]
+                dy = player_pos[1] - speaker_pos[1]
+                dz = player_pos[2] - ground_level
+                dist_ground_to_player = math.sqrt(dx*dx + dy*dy + dz*dz)
+                distance = dist_spk_to_ground + dist_ground_to_player
+                propagation_delay = distance / 343.0
+                
+            total_delay = static_delay + propagation_delay
+            frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
             
-        _queue_packet_to_source(gameplay, idx, src, play_packet)
+            # Instantly push all silence frames to the OpenAL source to prevent starvation/stutter
+            silence_packet = bytes(len(packet))
+            for _ in range(frames_delay):
+                _queue_packet_to_source(gameplay, idx, src, silence_packet)
+                
+        _speaker_last_calc_time[queue_key] = now
+        
+        # Queue the actual audio packet
+        _queue_packet_to_source(gameplay, idx, src, packet)
 
 
 def tick_megaphone_delay(gameplay):
@@ -704,18 +672,17 @@ def tick_megaphone_delay(gameplay):
         # This prevents the tick loop from interfering with active network speech playback
         if current_time - last_pkt_time >= 0.04:
             if current_time - last_time >= 0.02:
-                # Check if any delay queue has pending frames
                 has_delayed_audio = False
-                for idx in range(len(sources)):
+                for idx, src in enumerate(sources):
+                    if src is None: continue
                     queue_key = (sender_id, idx)
                     if queue_key in _speaker_delay_queues and len(_speaker_delay_queues[queue_key]) > 0:
                         has_delayed_audio = True
-                        break
+                        play_packet = _speaker_delay_queues[queue_key].popleft()
+                        _queue_packet_to_source(gameplay, idx, src, play_packet)
                         
                 if has_delayed_audio:
                     _last_play_times[sender_id] = current_time
-                    dummy_packet = bytes(1920)
-                    queue_and_delay_frame(gameplay, sender_id, sources, dummy_packet)
 
 
 

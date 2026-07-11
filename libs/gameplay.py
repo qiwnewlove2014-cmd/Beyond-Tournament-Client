@@ -338,6 +338,16 @@ class Gameplay(state.State):
             return
         self.last_megaphone_setup = time.time()
 
+        # Clear speaker delay queues in voice_chat to force recalculation of propagation delays for new positions
+        try:
+            from libs import voice_chat
+            if hasattr(voice_chat, '_speaker_delay_queues'):
+                voice_chat._speaker_delay_queues.clear()
+            if hasattr(voice_chat, '_speaker_last_calc_time'):
+                voice_chat._speaker_last_calc_time.clear()
+        except Exception as e:
+            print(f"Error clearing speaker delay queues: {e}")
+
         # Stop existing compression thread explicitly to prevent ID overlaps
         if consts.CHANNEL_MEGAPHONE in self.voice_channels:
              try:
