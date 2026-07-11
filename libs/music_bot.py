@@ -246,13 +246,33 @@ class AudioStreamer(threading.Thread):
             import audioop
             mono_data = audioop.tomono(data, 2, 0.5, 0.5)
 
-            # Scale the PCM stream volume according to self.volume before network broadcast
-            if self.volume != 100:
-                mono_data = audioop.mul(mono_data, 2, self.volume / 100.0)
+            # Scale the PCM stream volume according to self.volume and the dynamic ducking multiplier before network broadcast
+            current_volume_scale = (self.volume / 100.0)
+            if self.bot:
+                current_volume_scale *= getattr(self.bot, 'duck_multiplier', 1.0)
+            
+            if current_volume_scale != 1.0:
+                try:
+                    mono_data = audioop.mul(mono_data, 2, current_volume_scale)
+                except Exception:
+                    pass
 
             from . import consts
+            target_channel = consts.CHANNEL_MUSICBOT
+            if self.bot and self.bot.broadcast_to_megaphone:
+                target_channel = consts.CHANNEL_MEGAPHONE
+                
+                # Check if there is mic PCM data queued to mix
+                if hasattr(self.bot, 'mic_pcm_queue') and self.bot.mic_pcm_queue:
+                    try:
+                        mic_data = self.bot.mic_pcm_queue.popleft()
+                        # Mix the two mono 16-bit PCM streams together
+                        mono_data = audioop.add(mono_data, mic_data, 2)
+                    except Exception:
+                        pass
+            
             encoded = self.encoder.encode(bytearray(mono_data))
-            self.game.network.send(consts.CHANNEL_MUSICBOT, "n/a", encoded, reliable=False)
+            self.game.network.send(target_channel, "n/a", encoded, reliable=False)
         except Exception:
             pass
 
@@ -477,6 +497,7 @@ class MapMusicBot:
         self.volume = options.get("music_bot_volume", 50)
         self.enabled = options.get("music_bot_enabled", True)
         self.broadcast_enabled = False  # Disabled by default (Private listening mode)
+        self.broadcast_to_megaphone = False
 
         # Search state
         self.searching = False
@@ -572,9 +593,32 @@ class MapMusicBot:
         items = [
             ("Search YouTube", go_search),
             ("Choose Local File", go_local),
+        ]
+        
+        # Check if staff to show megaphone routing option
+        is_staff = getattr(gp, 'is_staff', False) if gp else False
+        if is_staff:
+            def get_megaphone_label():
+                status = "ON" if self.broadcast_to_megaphone else "OFF"
+                return f"Broadcast to Megaphone: {status}"
+                
+            def toggle_megaphone_routing():
+                if not self.broadcast_enabled:
+                    self.game.direct_soundgroup.play("ui/error.ogg", cat="ui")
+                    speak("Cannot change option. Please turn on podcast first by pressing Alternate M.")
+                    return
+                
+                self.broadcast_to_megaphone = not self.broadcast_to_megaphone
+                status_text = "enabled" if self.broadcast_to_megaphone else "disabled"
+                speak(f"Broadcast to megaphone {status_text}.")
+                m.speak_current_item()
+                
+            items.append((get_megaphone_label, toggle_megaphone_routing))
+
+        items.extend([
             ("Help", go_help),
             ("Cancel", lambda: gp.pop_last_substate())
-        ]
+        ])
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -972,6 +1016,28 @@ class MapMusicBot:
         """Called every frame — check if track ended + sync reverb"""
         if not self.enabled:
             return
+
+        # Smooth volume ducking interpolation
+        gp = self._find_gameplay()
+        is_speaking_on_mega = False
+        if gp and gp.voice_chat and gp.voice_chat.recording and getattr(gp, 'voice_chat_using_megaphone', False):
+            is_speaking_on_mega = True
+
+        target_duck = 0.2 if (is_speaking_on_mega and self.broadcast_to_megaphone) else 1.0
+        
+        if not hasattr(self, 'duck_multiplier'):
+            self.duck_multiplier = 1.0
+        
+        # LERP towards target (10% step per frame ~300ms transition)
+        self.duck_multiplier += (target_duck - self.duck_multiplier) * 0.1
+        
+        # Apply updated gain to local stream source
+        if self.stream_source and (self.playing or self.paused):
+            try:
+                music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
+                self.stream_source.gain = (self.volume / 100) * music_vol * self.duck_multiplier
+            except Exception:
+                pass
 
         # Sync reverb even when paused so it matches when resumed
         if self.stream_source and (self.playing or self.paused):

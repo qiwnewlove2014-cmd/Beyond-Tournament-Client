@@ -2592,6 +2592,7 @@ class Gameplay(state.State):
 
         self.voice_chat.audio_input.start()
         self.voice_chat.recording = True
+        self.voice_chat_using_megaphone = use_megaphone
         self.game.direct_soundgroup.play("ui/voxon.ogg", volume=20)
 
     def voice_chat_stop(self, mod):
@@ -2604,6 +2605,7 @@ class Gameplay(state.State):
             
         self.voice_chat.audio_input.stop()
         self.voice_chat.recording = False
+        self.voice_chat_using_megaphone = False
         self.game.call_after(40, self.voice_chat.voice_chat_finish)
         self.game.direct_soundgroup.play("ui/voxoff.ogg")
 

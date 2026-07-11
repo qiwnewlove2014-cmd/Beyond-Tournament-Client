@@ -108,6 +108,7 @@ class MegaphoneJitterBuffer:
         # Playback state
         self.is_playing = False
         self.frames_received = 0
+        self.last_pop_time = 0.0
         
         # Timing
         self.last_output_time = 0
@@ -138,6 +139,13 @@ class MegaphoneJitterBuffer:
         Returns None if buffer is not ready (pre-buffering) or empty.
         """
         with self.lock:
+            current_time = time.time()
+            
+            # If we have been silent/empty for a long time (>300ms), reset pre-buffering state
+            if self.is_playing and current_time - self.last_pop_time > 0.3:
+                self.is_playing = False
+                self.frames_received = 0
+            
             # Pre-buffering: Wait until we have enough packets
             if not self.is_playing:
                 if len(self.packet_queue) >= self.PRE_BUFFER_FRAMES:
@@ -149,11 +157,11 @@ class MegaphoneJitterBuffer:
             # Get next packet
             if len(self.packet_queue) > 0:
                 self.packets_played += 1
+                self.last_pop_time = current_time
                 return self.packet_queue.popleft()
             else:
-                # Buffer underrun - stop playback, will restart with pre-buffering
-                self.is_playing = False
-                self.frames_received = 0
+                # Minor underrun: Do NOT reset is_playing immediately.
+                # Allow the next incoming packet to play without waiting for a full pre-buffer cycle.
                 return None
     
     def should_output(self):
@@ -430,7 +438,23 @@ class VoiceChatRecord(threading.Thread):
                 buf = bytearray(960 * 2)
                 self.audio_input.capture_samples(buf)
                 
-                self.vc_compression.put(buf)
+                # Check if Music Bot is streaming to Megaphone
+                music_bot = None
+                if hasattr(self.game, 'stack'):
+                    for st in reversed(self.game.stack):
+                        if hasattr(st, 'music_bot') and st.music_bot:
+                            music_bot = st.music_bot
+                            break
+                
+                gp = music_bot._find_gameplay() if music_bot else None
+                voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
+
+                if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone and voice_using_mega:
+                    if not hasattr(music_bot, 'mic_pcm_queue'):
+                        music_bot.mic_pcm_queue = collections.deque(maxlen=10)
+                    music_bot.mic_pcm_queue.append(bytes(buf))
+                else:
+                    self.vc_compression.put(buf)
 
     def voice_chat_finish(self):
         self.voice_chat_finish2()
@@ -439,7 +463,24 @@ class VoiceChatRecord(threading.Thread):
         if self.audio_input.available_samples < 960: return self.audio_input.capture_samples(bytearray(self.audio_input.available_samples*2))
         buf = bytearray(1920)
         self.audio_input.capture_samples(buf)
-        self.vc_compression.put(buf)
+        
+        # Check if Music Bot is streaming to Megaphone
+        music_bot = None
+        if hasattr(self.game, 'stack'):
+            for st in reversed(self.game.stack):
+                if hasattr(st, 'music_bot') and st.music_bot:
+                    music_bot = st.music_bot
+                    break
+        
+        gp = music_bot._find_gameplay() if music_bot else None
+        voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
+
+        if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone and voice_using_mega:
+            if not hasattr(music_bot, 'mic_pcm_queue'):
+                music_bot.mic_pcm_queue = collections.deque(maxlen=10)
+            music_bot.mic_pcm_queue.append(bytes(buf))
+        else:
+            self.vc_compression.put(buf)
     
     def close(self):
         self.vc_compression.put(None)
