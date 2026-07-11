@@ -600,31 +600,66 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
     except AttributeError:
         player_pos = (0.0, 0.0, 0.0)
         
-    global _speaker_last_calc_time
+    global _speaker_last_calc_time, _speaker_current_delays
     if '_speaker_last_calc_time' not in globals():
         _speaker_last_calc_time = {}
+        _speaker_current_delays = {}
         
+    try:
+        player_pos = (gameplay.camera.focus_object.x, gameplay.camera.focus_object.y, gameplay.camera.focus_object.z)
+    except AttributeError:
+        player_pos = (0.0, 0.0, 0.0)
+        
+    now = time.time()
+    last_calc = _speaker_last_calc_time.get(sender_id, 0)
+    
+    # 1. Unqueue all processed buffers and count active buffers to get the true playhead position
+    active_counts = []
     for idx, src in enumerate(sources):
         if src is None:
+            active_counts.append(0)
             continue
+        try:
+            while src.buffers_processed > 0:
+                result = src.unqueue_buffers()
+                if result is not None:
+                    gameplay.voice_chat_buffer_pool.append(result)
+        except:
+            pass
+        active_counts.append(src.buffers_queued)
+
+    # 2. Check if this is a new transmission or if any active source completely starved (hit 0)
+    is_new_transmission = (now - last_calc > 0.5)
+    any_starved = False
+    
+    for i, count in enumerate(active_counts):
+        if sources[i] is not None and count == 0:
+            any_starved = True
+            break
             
-        spk_idx = idx // 2
-        is_reflection = (idx % 2 == 1)
+    needs_resync = is_new_transmission or any_starved
+    
+    # 3. Only recalculate delays and pad if the stream was broken (starved or new)
+    # This prevents micro-stutters during normal jitter and allows OpenAL's Doppler to naturally stretch the audio
+    if needs_resync:
+        _speaker_current_delays[sender_id] = []
         
-        static_delay = 0.0
-        speaker_pos = (0.0, 0.0, 0.0)
-        
-        if hasattr(gameplay, 'megaphone_speaker_data') and spk_idx < len(gameplay.megaphone_speaker_data):
-            spk_data = gameplay.megaphone_speaker_data[spk_idx]
-            static_delay = spk_data.get('delay', 0.0)
-            speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
+        for idx, src in enumerate(sources):
+            if src is None:
+                _speaker_current_delays[sender_id].append(0)
+                continue
+                
+            spk_idx = idx // 2
+            is_reflection = (idx % 2 == 1)
             
-        queue_key = (sender_id, idx)
-        now = time.time()
-        last_calc = _speaker_last_calc_time.get(queue_key, 0)
-        
-        # If no packets received for > 0.5s OR if the source starved (underrun), recalculate and re-apply initial delay
-        if now - last_calc > 0.5 or src.state != cyal.SourceState.PLAYING:
+            static_delay = 0.0
+            speaker_pos = (0.0, 0.0, 0.0)
+            
+            if hasattr(gameplay, 'megaphone_speaker_data') and spk_idx < len(gameplay.megaphone_speaker_data):
+                spk_data = gameplay.megaphone_speaker_data[spk_idx]
+                static_delay = spk_data.get('delay', 0.0)
+                speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
+                
             # Calculate static propagation delay for this transmission (speed of sound = 343 m/s)
             if not is_reflection:
                 dx = player_pos[0] - speaker_pos[0]
@@ -644,16 +679,24 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                 
             total_delay = static_delay + propagation_delay
             frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
+            _speaker_current_delays[sender_id].append(frames_delay)
             
-            # Instantly push all silence frames to the OpenAL source to prevent starvation/stutter
-            silence_packet = bytes(len(packet))
-            for _ in range(frames_delay):
-                _queue_packet_to_source(gameplay, idx, src, silence_packet)
-                
-        _speaker_last_calc_time[queue_key] = now
-        
-        # Queue the actual audio packet
-        _queue_packet_to_source(gameplay, idx, src, packet)
+            # Instantly push silence frames to restore perfect spatial stagger
+            target_active = frames_delay
+            current_active = active_counts[idx]
+            pad_frames = target_active - current_active
+            
+            if pad_frames > 0:
+                silence_packet = bytes(len(packet))
+                for _ in range(pad_frames):
+                    _queue_packet_to_source(gameplay, idx, src, silence_packet)
+                    
+    _speaker_last_calc_time[sender_id] = now
+    
+    # 4. Queue the actual audio packet to all sources
+    for idx, src in enumerate(sources):
+        if src is not None:
+            _queue_packet_to_source(gameplay, idx, src, packet)
 
 
 def tick_megaphone_delay(gameplay):

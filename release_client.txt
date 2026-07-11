@@ -10,6 +10,7 @@ We have completely overhauled the client experience, transforming it into a deep
 - **Enhanced Connection Security:** We have upgraded the connection protocol to seamlessly drop outdated software or mismatched connections at the core network layer, guaranteeing tighter stability.
 - **Major System Maintenance:** Completed a visual and structural overhaul of internal files, separating user configuration paths into a more optimal layout for long-term support.
 - **PA Megaphone System:** Experience realistic stadium-style broadcasts. Our engine now simulates dynamic speaker positioning and physical line-of-sight audio occlusion (sound is blocked by solid walls).
+- **Global PA Synchronization:** Radically improved the Megaphone broadcast stability and spatial accuracy. The system now natively supports true Doppler shifts while running, and employs real-time global audio synchronization to completely eliminate micro-stutters and delay drift (loss of spatial stagger) during network fluctuations.
 - **Megaphone Propagation & Echoes:** Upgraded the PA broadcast system to calculate real-time sound propagation delay based on physical distance (speed of sound), resolving sound localization issues and preventing multi-speaker collapse. Ground reflection acoustics have also been restored for player voice chat, creating a realistic, localized 3D bounce echo.
 - **In-Game Music Bot:** Powered by YouTube integrations (`yt-dlp` & `ffmpeg`), you can now seamlessly stream and listen to your favorite music directly inside the game world together with other players.
 
