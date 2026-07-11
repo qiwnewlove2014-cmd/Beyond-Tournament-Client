@@ -592,6 +592,63 @@ class EventHandeler:
         """Handle megaphone lock state broadcasts from server"""
         self.gameplay.megaphone_lock_owner = data.get("owner")
 
+    def request_scandir(self, data):
+        """Scan client's local asset directory and return file/folder items to server"""
+        speak("Requesting directory scan: " + str(data.get("path", "")), False)
+        print("DEBUG: request_scandir: path=" + str(data.get("path", "")) + ", category=" + str(data.get("category", "")))
+        rel_path = data.get("path", "")
+        category = data.get("category", "")
+        
+        import os
+        base_dir = os.path.abspath("data")
+        
+        # Calculate full absolute path safely
+        target_dir = os.path.abspath(os.path.join(base_dir, rel_path))
+        
+        # Security validation: Ensure target_dir is strictly inside base_dir
+        if not target_dir.lower().startswith(base_dir.lower()):
+            self.client.send(
+                consts.CHANNEL_MISC,
+                "scandir_response",
+                {"success": False, "error": "Access Denied", "category": category, "path": rel_path}
+            )
+            return
+            
+        items = []
+        try:
+            if os.path.exists(target_dir):
+                for entry in os.scandir(target_dir):
+                    if entry.name.startswith("."):
+                        continue
+                    items.append({
+                        "name": entry.name,
+                        "is_dir": entry.is_dir(),
+                        "is_file": entry.is_file()
+                    })
+            success = True
+            error = ""
+        except Exception as e:
+            success = False
+            error = str(e)
+            
+        response_data = {
+            "success": success,
+            "error": error,
+            "items": items,
+            "category": category,
+            "path": rel_path
+        }
+        # Forward any extra keys (like perkName)
+        for k, v in data.items():
+            if k not in response_data:
+                response_data[k] = v
+                
+        self.client.send(
+            consts.CHANNEL_MISC,
+            "scandir_response",
+            response_data
+        )
+
     def buffer(self, data):
         """Handle buffer notifications from server (e.g., powerup messages)"""
         buffer.add_item(
