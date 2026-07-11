@@ -534,23 +534,27 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet):
         src.queue_buffers(buf)
     except (cyal.exceptions.InvalidOperationError, cyal.exceptions.ALError): 
         return
-    
-    # Start playing if stopped
+        # Start playing if stopped
     if src.state == cyal.SourceState.STOPPED or src.state == cyal.SourceState.INITIAL:
-        # Re-apply EFX effects before playing
+        # Re-apply EFX effects before playing using the source's unique filter
         spk_idx = idx // 2
         is_reflection = (idx % 2 == 1)
         if hasattr(gameplay, 'megaphone_speaker_data') and spk_idx < len(gameplay.megaphone_speaker_data):
             speaker_data = gameplay.megaphone_speaker_data[spk_idx]
             
-            # Apply correct direct filter (muffled for reflection, lowpass for primary)
+            # Lookup unique filter belonging to this source
             filter_to_apply = None
-            if is_reflection:
-                if hasattr(gameplay, 'megaphone_muffled_filter'):
-                    filter_to_apply = gameplay.megaphone_muffled_filter
-            else:
-                if hasattr(gameplay, 'megaphone_lowpass_filter'):
-                    filter_to_apply = gameplay.megaphone_lowpass_filter
+            if hasattr(gameplay, 'megaphone_player_sources'):
+                for entry in gameplay.megaphone_player_sources.values():
+                    if 'sources' in entry and src in entry['sources']:
+                        src_idx = entry['sources'].index(src)
+                        if 'filters' in entry and src_idx < len(entry['filters']):
+                            filter_to_apply = entry['filters'][src_idx]
+                        break
+            
+            # Fallback to physical templates
+            if filter_to_apply is None:
+                filter_to_apply = speaker_data.get('refl_filter' if is_reflection else 'filter')
 
             if hasattr(gameplay.game.audio_mngr, 'efx'):
                 if hasattr(gameplay, 'megaphone_eq_slot') and gameplay.megaphone_eq_slot:

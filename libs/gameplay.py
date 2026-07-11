@@ -527,24 +527,27 @@ class Gameplay(state.State):
                     print(f"[MEGAPHONE] Error creating per-speaker reverb: {e}")
                     speaker_reverb_slot = None
             
+            # Create unique filter for primary speaker template
+            p_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+            if p_filter:
+                try:
+                    p_filter.set("GAIN", 0.85)
+                    p_filter.set("GAINHF", 0.4)
+                    src.direct_filter = p_filter
+                except Exception as e:
+                    print(f"[MEGAPHONE] Error initializing primary filter: {e}")
+            
             # Apply effects - only apply reverb if speaker_reverb_slot was created
             if hasattr(self.game.audio_mngr, 'efx'):
                 try:
                     if self.megaphone_eq_slot: 
-                        self.game.audio_mngr.efx.send(src, 0, self.megaphone_eq_slot)
+                        self.game.audio_mngr.efx.send(src, 0, self.megaphone_eq_slot, filter=p_filter)
                     if speaker_reverb_slot:  # Only apply if reverb was created (decay > 0.1)
-                        self.game.audio_mngr.efx.send(src, 1, speaker_reverb_slot)
+                        self.game.audio_mngr.efx.send(src, 1, speaker_reverb_slot, filter=p_filter)
                     if self.megaphone_compressor_slot: 
-                        self.game.audio_mngr.efx.send(src, 2, self.megaphone_compressor_slot)
+                        self.game.audio_mngr.efx.send(src, 2, self.megaphone_compressor_slot, filter=p_filter)
                 except Exception as e:
                     print(f"[MEGAPHONE EFX] Error applying effects: {e}")
-            
-            # Apply low-pass filter for PA cabinet sound
-            if self.megaphone_lowpass_filter:
-                try:
-                    src.direct_filter = self.megaphone_lowpass_filter
-                except Exception as e:
-                    print(f"[MEGAPHONE] Could not apply filter: {e}")
                 
             self.megaphone_sources.append(src)
             vc_sources.append(src)
@@ -562,7 +565,14 @@ class Gameplay(state.State):
                     'inner': inner_cone,
                     'outer': outer_cone,
                     'outer_gain': outer_gain
-                }
+                },
+                'filter': p_filter,
+                'target_gain': 0.85,
+                'current_gain': 0.85,
+                'target_gainhf': 0.4,
+                'current_gainhf': 0.4,
+                'target_vol': final_vol,
+                'current_vol': final_vol
             })
             
             # === GROUND REFLECTION (Virtual Source) ===
@@ -590,16 +600,41 @@ class Gameplay(state.State):
                     reflection_src.cone_outer_angle = 240
                     reflection_src.cone_outer_gain = 0.5
                     
-                    # Apply heavier low-pass (ground absorbs high frequencies)
-                    # This makes the echo sound "warmer" and more distant
-                    if self.megaphone_muffled_filter:
-                        reflection_src.direct_filter = self.megaphone_muffled_filter
+                    # Create unique filter for reflection source
+                    r_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+                    if r_filter:
+                        try:
+                            r_filter.set("GAIN", 0.6)
+                            r_filter.set("GAINHF", 0.05)
+                            reflection_src.direct_filter = r_filter
+                        except Exception as e:
+                            print(f"[MEGAPHONE] Error initializing reflection filter: {e}")
+                    
+                    if hasattr(self.game.audio_mngr, 'efx'):
+                        try:
+                            if self.megaphone_eq_slot:
+                                self.game.audio_mngr.efx.send(reflection_src, 0, self.megaphone_eq_slot, filter=r_filter)
+                            if speaker_reverb_slot:
+                                self.game.audio_mngr.efx.send(reflection_src, 1, speaker_reverb_slot, filter=r_filter)
+                            if self.megaphone_compressor_slot:
+                                self.game.audio_mngr.efx.send(reflection_src, 2, self.megaphone_compressor_slot, filter=r_filter)
+                        except Exception:
+                            pass
                     
                     self.megaphone_sources.append(reflection_src)
                     vc_sources.append(reflection_src)
                     
-                    # Store reflection reference
-                    self.megaphone_speaker_data[-1]['reflection_source'] = reflection_src
+                    # Store reflection references and states in the primary speaker's data dict
+                    self.megaphone_speaker_data[-1].update({
+                        'reflection_source': reflection_src,
+                        'refl_filter': r_filter,
+                        'refl_target_gain': 0.6,
+                        'refl_current_gain': 0.6,
+                        'refl_target_gainhf': 0.05,
+                        'refl_current_gainhf': 0.05,
+                        'refl_target_vol': final_vol * 0.4,
+                        'refl_current_vol': final_vol * 0.4
+                    })
                 except Exception as e:
                     print(f"[MEGAPHONE] Error creating ground reflection: {e}")
 
@@ -669,6 +704,7 @@ class Gameplay(state.State):
 
         # Create new sources cloning physical speaker positions
         sources = []
+        filters = []
         global_vol = options.get("megaphone_volume", 100) / 100.0
 
         for i, spk_data in enumerate(self.megaphone_speaker_data):
@@ -677,6 +713,7 @@ class Gameplay(state.State):
                 continue
 
             src = None
+            p_filter = None
             try:
                 src = self.game.audio_mngr.context.gen_source()
 
@@ -697,24 +734,27 @@ class Gameplay(state.State):
                 src.cone_outer_angle = cone.get('outer', 360)
                 src.cone_outer_gain = cone.get('outer_gain', 0.2)
 
+                # Create unique filter for player source
+                p_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+                if p_filter:
+                    try:
+                        p_filter.set("GAIN", 0.85)
+                        p_filter.set("GAINHF", 0.4)
+                        src.direct_filter = p_filter
+                    except Exception as e:
+                        print(f"[MEGAPHONE] Error initializing player filter: {e}")
+
                 # Apply shared EFX sends (eq, reverb, compressor)
                 if hasattr(self.game.audio_mngr, 'efx'):
                     try:
                         if hasattr(self, 'megaphone_eq_slot') and self.megaphone_eq_slot:
-                            self.game.audio_mngr.efx.send(src, 0, self.megaphone_eq_slot)
+                            self.game.audio_mngr.efx.send(src, 0, self.megaphone_eq_slot, filter=p_filter)
                         if spk_data.get('reverb_slot'):
-                            self.game.audio_mngr.efx.send(src, 1, spk_data['reverb_slot'])
+                            self.game.audio_mngr.efx.send(src, 1, spk_data['reverb_slot'], filter=p_filter)
                         if hasattr(self, 'megaphone_compressor_slot') and self.megaphone_compressor_slot:
-                            self.game.audio_mngr.efx.send(src, 2, self.megaphone_compressor_slot)
+                            self.game.audio_mngr.efx.send(src, 2, self.megaphone_compressor_slot, filter=p_filter)
                         if hasattr(self, 'current_player_reverb_slot') and self.current_player_reverb_slot not in (None, 'UNINIT'):
-                            self.game.audio_mngr.efx.send(src, 3, self.current_player_reverb_slot)
-                    except Exception:
-                        pass
-
-                # Apply lowpass filter for PA cabinet sound
-                if hasattr(self, 'megaphone_lowpass_filter') and self.megaphone_lowpass_filter:
-                    try:
-                        src.direct_filter = self.megaphone_lowpass_filter
+                            self.game.audio_mngr.efx.send(src, 3, self.current_player_reverb_slot, filter=p_filter)
                     except Exception:
                         pass
 
@@ -722,9 +762,11 @@ class Gameplay(state.State):
                 print(f"[MEGAPHONE] Error creating per-player primary source for sender {sender_id}: {e}")
 
             sources.append(src)
+            filters.append(p_filter)
 
             # 2. Clone reflection source if it exists
             refl_src = None
+            r_filter = None
             if src is not None and 'reflection_source' in spk_data:
                 try:
                     refl_src = self.game.audio_mngr.context.gen_source()
@@ -746,33 +788,66 @@ class Gameplay(state.State):
                     refl_src.cone_outer_angle = refl_template.cone_outer_angle
                     refl_src.cone_outer_gain = refl_template.cone_outer_gain
                     
+                    # Create unique filter for reflection source
+                    r_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+                    if r_filter:
+                        try:
+                            r_filter.set("GAIN", 0.6)
+                            r_filter.set("GAINHF", 0.05)
+                            refl_src.direct_filter = r_filter
+                        except Exception as e:
+                            print(f"[MEGAPHONE] Error initializing player reflection filter: {e}")
+                    
                     # Apply EFX sends
                     if hasattr(self.game.audio_mngr, 'efx'):
                         try:
                             if hasattr(self, 'megaphone_eq_slot') and self.megaphone_eq_slot:
-                                self.game.audio_mngr.efx.send(refl_src, 0, self.megaphone_eq_slot)
+                                self.game.audio_mngr.efx.send(refl_src, 0, self.megaphone_eq_slot, filter=r_filter)
                             if spk_data.get('reverb_slot'):
-                                self.game.audio_mngr.efx.send(refl_src, 1, spk_data['reverb_slot'])
+                                self.game.audio_mngr.efx.send(refl_src, 1, spk_data['reverb_slot'], filter=r_filter)
                             if hasattr(self, 'megaphone_compressor_slot') and self.megaphone_compressor_slot:
-                                self.game.audio_mngr.efx.send(refl_src, 2, self.megaphone_compressor_slot)
+                                self.game.audio_mngr.efx.send(refl_src, 2, self.megaphone_compressor_slot, filter=r_filter)
                         except Exception:
                             pass
                             
-                    # Apply muffled filter
-                    if hasattr(self, 'megaphone_muffled_filter') and self.megaphone_muffled_filter:
-                        try:
-                            refl_src.direct_filter = self.megaphone_muffled_filter
-                        except Exception:
-                            pass
                 except Exception as e:
                     print(f"[MEGAPHONE] Error creating per-player reflection source for sender {sender_id}: {e}")
 
             sources.append(refl_src)
+            filters.append(r_filter)
 
         if sources:
+            targets_vol = []
+            targets_gain = []
+            targets_gainhf = []
+            
+            for idx, src_obj in enumerate(sources):
+                spk_idx = idx // 2
+                is_refl = (idx % 2 == 1)
+                
+                # Fetch corresponding physical template data
+                spk_data = self.megaphone_speaker_data[spk_idx]
+                base_v = spk_data['base_volume'] * global_vol
+                
+                if not is_refl:
+                    targets_vol.append(base_v)
+                    targets_gain.append(0.85)
+                    targets_gainhf.append(0.4)
+                else:
+                    targets_vol.append(base_v * 0.4)
+                    targets_gain.append(0.6)
+                    targets_gainhf.append(0.05)
+                    
             self.megaphone_player_sources[sender_id] = {
                 'sources': sources,
-                'last_active': _time.time()
+                'filters': filters,
+                'last_active': _time.time(),
+                'targets_vol': targets_vol,
+                'currents_vol': list(targets_vol),
+                'targets_gain': targets_gain,
+                'currents_gain': list(targets_gain),
+                'targets_gainhf': targets_gainhf,
+                'currents_gainhf': list(targets_gainhf)
             }
             return sources
         return None
@@ -785,6 +860,16 @@ class Gameplay(state.State):
             return
 
         entry = self.megaphone_player_sources[sender_id]
+        
+        # Delete unique filters to prevent memory leaks
+        if 'filters' in entry:
+            for f in entry['filters']:
+                if f:
+                    try:
+                        f.delete()
+                    except Exception:
+                        pass
+
         for src in entry['sources']:
             if src is None:
                 continue
@@ -900,6 +985,14 @@ class Gameplay(state.State):
         # Return per-speaker reverb slots to pool + cleanup reflection sources
         if hasattr(self, 'megaphone_speaker_data'):
             for data in self.megaphone_speaker_data:
+                # Delete unique filters to prevent memory leaks
+                for f_key in ['filter', 'refl_filter']:
+                    f = data.get(f_key)
+                    if f:
+                        try:
+                            f.delete()
+                        except Exception:
+                            pass
                 if data.get('reverb_slot'):
                     self.game.audio_mngr.release_effect_slot(data['reverb_slot'])
                 if data.get('reflection_source'):
@@ -1137,7 +1230,7 @@ class Gameplay(state.State):
                                 self.game.audio_mngr.efx.send(src, 3, new_local_reverb_slot, filter=current_flt)
                             except Exception:
                                 pass
- 
+        
         # === DIRECTIONAL MUFFLED SOUND + LINE-OF-SIGHT OCCLUSION ===
         # Every 10 frames, check if player is behind speaker OR blocked by wall
         if hasattr(self, 'megaphone_speaker_data') and hasattr(self, 'megaphone_muffled_check_counter'):
@@ -1145,6 +1238,9 @@ class Gameplay(state.State):
             if self.megaphone_muffled_check_counter >= 10:
                 self.megaphone_muffled_check_counter = 0
                 player_pos = (self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
+                global_vol = options.get("megaphone_volume", 100) / 100.0
+                is_underwater = getattr(self.camera.focus_object, 'in_water', False)
+                
                 for i, data in enumerate(self.megaphone_speaker_data):
                     try:
                         speaker_pos = data['position']
@@ -1159,19 +1255,17 @@ class Gameplay(state.State):
                         is_blocked = self._check_speaker_occlusion(speaker_pos, player_pos)
                         
                         # === DIRECTIONAL CHECK (Horizontal only) ===
-                        # Only check X-Y direction, ignore Z difference
-                        # This prevents high speakers from sounding muffled to players below
-                        # Since speakers aim outward (toward map center), not straight down
                         dot_horizontal = (dx * data['direction'][0] + 
                                          dy * data['direction'][1])
                         is_behind = dot_horizontal < 0
                         
-                        # === DISTANCE ATTENUATION (OpenAL hardware handles distance; we apply occlusion/cone modifiers) ===
+                        # === DISTANCE ATTENUATION ===
                         distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-                        occlusion_multiplier = 1.0
+                        data['distance'] = distance
                         
-                        is_underwater = getattr(self.camera.focus_object, 'in_water', False)
-                        target_filter = None
+                        occlusion_multiplier = 1.0
+                        target_gain = 0.85
+                        target_gainhf = 0.4
                         
                         # Mute completely if outside custom hearing range (prevents sound leak beyond limits)
                         spk_hearing_range = data.get('hearing_range', 0.0)
@@ -1180,102 +1274,197 @@ class Gameplay(state.State):
                         else:
                             if is_underwater:
                                 # Player is underwater - filter megaphone heavily
-                                target_filter = getattr(self, 'megaphone_underwater_filter', None)
+                                target_gain = 0.8
+                                target_gainhf = 0.02
                                 # Extra volume attenuation based on player depth
                                 depth = getattr(self.camera.focus_object, 'depth', 1.0)
                                 occlusion_multiplier = max(0.1, depth * 0.3)
                             elif is_blocked or is_behind:
                                 # Behind speaker OR blocked by wall - apply muffled filter
-                                target_filter = getattr(self, 'megaphone_muffled_filter', None)
+                                target_gain = 0.6
+                                target_gainhf = 0.05
                                 if is_blocked:
                                     occlusion_multiplier = 0.3  # 30% through wall
                                 else:
                                     occlusion_multiplier = 0.5  # 50% behind speaker
-                            else:
-                                # Clear line of sight and in front - apply normal filter
-                                target_filter = getattr(self, 'megaphone_normal_filter', None)
- 
-                        global_vol = options.get("megaphone_volume", 100) / 100.0
+                                
                         target_vol = data['base_volume'] * global_vol * occlusion_multiplier
 
-                        # Gather all active OpenAL sources associated with this speaker (template + all players)
-                        # We store tuples of (source, is_reflection) to apply correct filters/gains
-                        sources_to_update = [(data['source'], False)]
-                        if 'reflection_source' in data:
-                            sources_to_update.append((data['reflection_source'], True))
+                        # Store targets on physical template speaker
+                        data['target_vol'] = target_vol
+                        data['target_gain'] = target_gain
+                        data['target_gainhf'] = target_gainhf
+                        
+                        data['refl_target_vol'] = target_vol * 0.4
+                        data['refl_target_gain'] = 0.6
+                        data['refl_target_gainhf'] = 0.05
 
+                        # Store targets on player cloned sources
                         if hasattr(self, 'megaphone_player_sources'):
                             for player_entry in self.megaphone_player_sources.values():
                                 if 'sources' in player_entry:
-                                    # Primary source is at index 2 * i
                                     prim_idx = 2 * i
-                                    if prim_idx < len(player_entry['sources']):
-                                        p_src = player_entry['sources'][prim_idx]
-                                        if p_src is not None:
-                                            sources_to_update.append((p_src, False))
-                                    # Reflection source is at index 2 * i + 1
                                     refl_idx = 2 * i + 1
+                                    
+                                    if prim_idx < len(player_entry['sources']):
+                                        player_entry['targets_vol'][prim_idx] = target_vol
+                                        player_entry['targets_gain'][prim_idx] = target_gain
+                                        player_entry['targets_gainhf'][prim_idx] = target_gainhf
+                                        
                                     if refl_idx < len(player_entry['sources']):
-                                        r_src = player_entry['sources'][refl_idx]
-                                        if r_src is not None:
-                                            sources_to_update.append((r_src, True))
-
-                        # Apply updates to all sources simultaneously
-                        for src, is_refl in sources_to_update:
-                            # Ground reflection is always muffled and at 40% of the primary volume
-                            if is_refl:
-                                actual_target_filter = getattr(self, 'megaphone_muffled_filter', None)
-                                actual_target_vol = target_vol * 0.4
-                            else:
-                                actual_target_filter = target_filter
-                                actual_target_vol = target_vol
-
-                            current_filter = getattr(src, 'direct_filter', None) if hasattr(src, 'direct_filter') else None
-                            
-                            if current_filter != actual_target_filter:
-                                if actual_target_filter:
-                                    src.direct_filter = actual_target_filter
-                                else:
-                                    try: del src.direct_filter
-                                    except AttributeError: pass
-                                    
-                                try:
-                                    eq_slot = getattr(self, 'megaphone_eq_slot', None)
-                                    rev_slot = data.get('reverb_slot', getattr(self, 'megaphone_reverb_slot', None))
-                                    comp_slot = getattr(self, 'megaphone_compressor_slot', None)
-                                    loc_rev_slot = getattr(self, 'current_player_reverb_slot', None)
-                                    
-                                    if eq_slot: self.game.audio_mngr.efx.send(src, 0, eq_slot, filter=actual_target_filter)
-                                    if rev_slot: self.game.audio_mngr.efx.send(src, 1, rev_slot, filter=actual_target_filter)
-                                    if comp_slot: self.game.audio_mngr.efx.send(src, 2, comp_slot, filter=actual_target_filter)
-                                    if loc_rev_slot: self.game.audio_mngr.efx.send(src, 3, loc_rev_slot, filter=actual_target_filter)
-                                except Exception:
-                                    pass
-                            
-                            # === VOLUME SMOOTHING ===
-                            # Prevent sudden volume jumps and micro-clicks
-                            current_gain = src.gain
-                            smooth_factor = 0.1  # 10% toward target per update (very smooth)
-                            
-                            # Only update if difference is significant (prevents micro-clicks)
-                            gain_diff = abs(actual_target_vol - current_gain)
-                            if gain_diff > 0.01:  # Threshold: 1% change minimum
-                                new_gain = current_gain + (actual_target_vol - current_gain) * smooth_factor
-                                src.gain = new_gain
-                            
-                            # === AIR ABSORPTION ===
-                            # High frequencies attenuate faster over distance
-                            if distance > 0:
-                                # Air absorption coefficient (reduces high-freq energy)
-                                # At 200m, reduce HF gain to 30%
-                                air_absorption = max(0.3, 1.0 - (distance / 200.0))
-                                try:
-                                    if hasattr(src, 'air_absorption_factor'):
-                                        src.air_absorption_factor = 1.0 - air_absorption
-                                except Exception:
-                                    pass
-                    except Exception as e:
+                                        player_entry['targets_vol'][refl_idx] = target_vol * 0.4
+                                        player_entry['targets_gain'][refl_idx] = 0.6
+                                        player_entry['targets_gainhf'][refl_idx] = 0.05
+                    except Exception:
                         pass
+
+        # === SMOOTH PARAMETER INTERPOLATION (Every Frame) ===
+        if hasattr(self, 'megaphone_speaker_data'):
+            smooth_factor = 0.15  # 15% transition per frame (~250-300ms total fade duration)
+            global_vol = options.get("megaphone_volume", 100) / 100.0
+            
+            for i, data in enumerate(self.megaphone_speaker_data):
+                try:
+                    # 1. Interpolate physical templates
+                    # Template primary source
+                    if data.get('source') and data.get('filter'):
+                        # LERP volume
+                        t_vol = data.get('target_vol', data['base_volume'] * global_vol)
+                        c_vol = data.get('current_vol', t_vol)
+                        new_vol = c_vol + (t_vol - c_vol) * smooth_factor
+                        data['current_vol'] = new_vol
+                        data['source'].gain = new_vol
+                        
+                        # LERP filter gain
+                        t_g = data.get('target_gain', 0.85)
+                        c_g = data.get('current_gain', t_g)
+                        new_g = c_g + (t_g - c_g) * smooth_factor
+                        data['current_gain'] = new_g
+                        data['filter'].set("GAIN", new_g)
+                        
+                        # LERP filter gainhf
+                        t_ghf = data.get('target_gainhf', 0.4)
+                        c_ghf = data.get('current_gainhf', t_ghf)
+                        new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
+                        data['current_gainhf'] = new_ghf
+                        data['filter'].set("GAINHF", new_ghf)
+                        
+                    # Template reflection source
+                    if data.get('reflection_source') and data.get('refl_filter'):
+                        t_vol = data.get('refl_target_vol', data['base_volume'] * global_vol * 0.4)
+                        c_vol = data.get('refl_current_vol', t_vol)
+                        new_vol = c_vol + (t_vol - c_vol) * smooth_factor
+                        data['refl_current_vol'] = new_vol
+                        data['reflection_source'].gain = new_vol
+                        
+                        t_g = data.get('refl_target_gain', 0.6)
+                        c_g = data.get('refl_current_gain', t_g)
+                        new_g = c_g + (t_g - c_g) * smooth_factor
+                        data['refl_current_gain'] = new_g
+                        data['refl_filter'].set("GAIN", new_g)
+                        
+                        t_ghf = data.get('refl_target_gainhf', 0.05)
+                        c_ghf = data.get('refl_current_gainhf', t_ghf)
+                        new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
+                        data['refl_current_gainhf'] = new_ghf
+                        data['refl_filter'].set("GAINHF", new_ghf)
+                        
+                    # 2. Interpolate active per-player sources
+                    if hasattr(self, 'megaphone_player_sources'):
+                        for player_entry in self.megaphone_player_sources.values():
+                            if 'sources' in player_entry and 'filters' in player_entry:
+                                prim_idx = 2 * i
+                                refl_idx = 2 * i + 1
+                                
+                                # Interpolate player primary source
+                                if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None and player_entry['filters'][prim_idx] is not None:
+                                    src = player_entry['sources'][prim_idx]
+                                    flt = player_entry['filters'][prim_idx]
+                                    
+                                    # Volume
+                                    t_vol = player_entry['targets_vol'][prim_idx]
+                                    c_vol = player_entry['currents_vol'][prim_idx]
+                                    new_vol = c_vol + (t_vol - c_vol) * smooth_factor
+                                    player_entry['currents_vol'][prim_idx] = new_vol
+                                    src.gain = new_vol
+                                    
+                                    # Filter GAIN
+                                    t_g = player_entry['targets_gain'][prim_idx]
+                                    c_g = player_entry['currents_gain'][prim_idx]
+                                    new_g = c_g + (t_g - c_g) * smooth_factor
+                                    player_entry['currents_gain'][prim_idx] = new_g
+                                    flt.set("GAIN", new_g)
+                                    
+                                    # Filter GAINHF
+                                    t_ghf = player_entry['targets_gainhf'][prim_idx]
+                                    c_ghf = player_entry['currents_gainhf'][prim_idx]
+                                    new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
+                                    player_entry['currents_gainhf'][prim_idx] = new_ghf
+                                    flt.set("GAINHF", new_ghf)
+                                    
+                                # Interpolate player reflection source
+                                if refl_idx < len(player_entry['sources']) and player_entry['sources'][refl_idx] is not None and player_entry['filters'][refl_idx] is not None:
+                                    src = player_entry['sources'][refl_idx]
+                                    flt = player_entry['filters'][refl_idx]
+                                    
+                                    # Volume
+                                    t_vol = player_entry['targets_vol'][refl_idx]
+                                    c_vol = player_entry['currents_vol'][refl_idx]
+                                    new_vol = c_vol + (t_vol - c_vol) * smooth_factor
+                                    player_entry['currents_vol'][refl_idx] = new_vol
+                                    src.gain = new_vol
+                                    
+                                    # Filter GAIN
+                                    t_g = player_entry['targets_gain'][refl_idx]
+                                    c_g = player_entry['currents_gain'][refl_idx]
+                                    new_g = c_g + (t_g - c_g) * smooth_factor
+                                    player_entry['currents_gain'][refl_idx] = new_g
+                                    flt.set("GAIN", new_g)
+                                    
+                                    # Filter GAINHF
+                                    t_ghf = player_entry['targets_gainhf'][refl_idx]
+                                    c_ghf = player_entry['currents_gainhf'][refl_idx]
+                                    new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
+                                    player_entry['currents_gainhf'][refl_idx] = new_ghf
+                                    flt.set("GAINHF", new_ghf)
+                                    
+                    # 3. Apply air absorption every frame using last calculated distance
+                    dist = data.get('distance', 0.0)
+                    if dist > 0.0:
+                        air_absorption = max(0.3, 1.0 - (dist / 200.0))
+                        
+                        # Apply to template primary
+                        if data.get('source'):
+                            try:
+                                if hasattr(data['source'], 'air_absorption_factor'):
+                                    data['source'].air_absorption_factor = 1.0 - air_absorption
+                            except: pass
+                            
+                        # Apply to template reflection
+                        if data.get('reflection_source'):
+                            try:
+                                if hasattr(data['reflection_source'], 'air_absorption_factor'):
+                                    data['reflection_source'].air_absorption_factor = 1.0 - air_absorption
+                            except: pass
+                            
+                        # Apply to player sources
+                        if hasattr(self, 'megaphone_player_sources'):
+                            for player_entry in self.megaphone_player_sources.values():
+                                if 'sources' in player_entry:
+                                    prim_idx = 2 * i
+                                    refl_idx = 2 * i + 1
+                                    
+                                    if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None:
+                                        try:
+                                            player_entry['sources'][prim_idx].air_absorption_factor = 1.0 - air_absorption
+                                        except: pass
+                                        
+                                    if refl_idx < len(player_entry['sources']) and player_entry['sources'][refl_idx] is not None:
+                                        try:
+                                            player_entry['sources'][refl_idx].air_absorption_factor = 1.0 - air_absorption
+                                        except: pass
+                except Exception as e:
+                    print(f"[MEGAPHONE] Error in per-frame interpolation loop: {e}")
         
         should_block = super().update(events)
         if should_block is True:
