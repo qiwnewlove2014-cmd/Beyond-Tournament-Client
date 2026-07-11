@@ -180,6 +180,9 @@ class MegaphoneJitterBuffer:
 
 # Per-source jitter buffers (one per megaphone speaker)
 _jitter_buffers = {}
+_speaker_delay_queues = {}
+_last_play_times = {}
+_last_packet_times = {}
 
 def get_jitter_buffer(game, source_id):
     """Get or create jitter buffer for a specific audio source"""
@@ -189,9 +192,12 @@ def get_jitter_buffer(game, source_id):
     return _jitter_buffers[source_id]
 
 def reset_jitter_buffers():
-    """Reset all jitter buffers"""
-    global _jitter_buffers
+    """Reset all jitter buffers and delay queues"""
+    global _jitter_buffers, _speaker_delay_queues, _last_play_times, _last_packet_times
     _jitter_buffers = {}
+    _speaker_delay_queues = {}
+    _last_play_times = {}
+    _last_packet_times = {}
 
 # Track active megaphone speakers for dynamic ducking
 _active_megaphone_speakers = 0
@@ -269,10 +275,10 @@ class voice_chat_compression(threading.Thread):
 
 
 
-    def recieve(self, data, vc_source, radio_source, channelID, gameplay):
-        self.put(lambda: self.recieve2(data, vc_source, radio_source, channelID, gameplay))
+    def recieve(self, data, vc_source, radio_source, channelID, gameplay, sender_id=None):
+        self.put(lambda: self.recieve2(data, vc_source, radio_source, channelID, gameplay, sender_id))
 
-    def recieve2(self, data, vc_source, radio_source, channelID, gameplay):
+    def recieve2(self, data, vc_source, radio_source, channelID, gameplay, sender_id=None):
         buffer = None
         data = bytearray(self.decoder.decode(bytearray(data)))
         
@@ -313,61 +319,32 @@ class voice_chat_compression(threading.Thread):
                         except Exception:
                             pass
                     
-                    for idx, src in enumerate(sources):
-                        # Get jitter buffer for this source
-                        jb = get_jitter_buffer(self.game, id(src))
-                        
-                        # Add LIMITED packet to jitter buffer
-                        jb.add_packet(limited_data)
-                        
-                        # Only output if buffer is ready (pre-buffering complete)
-                        packet = jb.get_packet()
-                        if packet is None:
-                            continue  # Still pre-buffering
-                        
-                        # Clear processed buffers and keep one to recycle
-                        buf = None
-                        try:
-                            while src.buffers_processed > 0:
-                                result = src.unqueue_buffers()
-                                if result is not None:
-                                    if isinstance(result, (list, tuple)):
-                                        buf = result[0]
-                                    else:
-                                        buf = result
-                        except Exception:
-                            pass
-                        
-                        if buf is None: 
-                            buf = self.game.audio_mngr.context.gen_buffer()
-                        
-                        try:
-                            buf.set_data(packet, sample_rate=48000, format=cyal.BufferFormat.MONO16)
-                            src.queue_buffers(buf)
-                        except (cyal.exceptions.InvalidOperationError, cyal.exceptions.ALError): 
-                            continue
-                        
-                        # Start playing if stopped
-                        if src.state == cyal.SourceState.STOPPED or src.state == cyal.SourceState.INITIAL:
-                            # Re-apply EFX effects before playing
-                            if hasattr(gameplay, 'megaphone_speaker_data') and idx < len(gameplay.megaphone_speaker_data):
-                                speaker_data = gameplay.megaphone_speaker_data[idx]
-                                if hasattr(self.game.audio_mngr, 'efx'):
-                                    if hasattr(gameplay, 'megaphone_eq_slot') and gameplay.megaphone_eq_slot:
-                                        self.game.audio_mngr.efx.send(src, 0, gameplay.megaphone_eq_slot)
-                                    if speaker_data.get('reverb_slot'):
-                                        self.game.audio_mngr.efx.send(src, 1, speaker_data['reverb_slot'])
-                                    if hasattr(gameplay, 'megaphone_compressor_slot') and gameplay.megaphone_compressor_slot:
-                                        self.game.audio_mngr.efx.send(src, 2, gameplay.megaphone_compressor_slot)
-                                if hasattr(gameplay, 'megaphone_lowpass_filter') and gameplay.megaphone_lowpass_filter:
-                                    try:
-                                        src.direct_filter = gameplay.megaphone_lowpass_filter
-                                    except:
-                                        pass
-                            try:
-                                src.play()
-                            except:
-                                pass
+                    # Single jitter buffer per sender — ensures all speakers play the same frame simultaneously
+                    buffer_key = sender_id if sender_id is not None else "megaphone_shared"
+                    jb = get_jitter_buffer(self.game, buffer_key)
+                    jb.add_packet(limited_data)
+                    
+                    # Get the next frame ONCE for all speakers
+                    packet = jb.get_packet()
+                    if packet is None:
+                        return  # Still pre-buffering, no speaker plays yet
+                    
+                    # Update last play time
+                    global _last_play_times, _speaker_delay_queues, _last_packet_times
+                    _last_play_times[sender_id] = time.time()
+                    
+                    # If this is a new sentence after a pause (>300ms), clear delay queues to prevent echoes from the past
+                    current_time = time.time()
+                    last_pkt_time = _last_packet_times.get(sender_id, 0.0)
+                    _last_packet_times[sender_id] = current_time
+                    if current_time - last_pkt_time > 0.3:
+                        for idx in range(len(sources)):
+                            queue_key = (sender_id, idx)
+                            if queue_key in _speaker_delay_queues:
+                                _speaker_delay_queues[queue_key].clear()
+                    
+                    # Queue and delay the frame for each speaker
+                    queue_and_delay_frame(gameplay, sender_id, sources, packet)
                     return  # Megaphone handled, skip normal processing
                 
                 # === NORMAL VOICE CHAT: Direct playback (no jitter buffer needed) ===
@@ -534,6 +511,110 @@ class MusicCompression:
 
         except Exception as e:
             logger.log_exception(e, "MusicCompression.recieve")
+
+
+def _queue_packet_to_source(gameplay, idx, src, play_packet):
+    buf = None
+    try:
+        while src.buffers_processed > 0:
+            result = src.unqueue_buffers()
+            if result is not None:
+                if isinstance(result, (list, tuple)):
+                    buf = result[0]
+                else:
+                    buf = result
+    except Exception:
+        pass
+    
+    if buf is None: 
+        buf = gameplay.game.audio_mngr.context.gen_buffer()
+    
+    try:
+        buf.set_data(play_packet, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+        src.queue_buffers(buf)
+    except (cyal.exceptions.InvalidOperationError, cyal.exceptions.ALError): 
+        return
+    
+    # Start playing if stopped
+    if src.state == cyal.SourceState.STOPPED or src.state == cyal.SourceState.INITIAL:
+        # Re-apply EFX effects before playing
+        if hasattr(gameplay, 'megaphone_speaker_data') and idx < len(gameplay.megaphone_speaker_data):
+            speaker_data = gameplay.megaphone_speaker_data[idx]
+            if hasattr(gameplay.game.audio_mngr, 'efx'):
+                if hasattr(gameplay, 'megaphone_eq_slot') and gameplay.megaphone_eq_slot:
+                    gameplay.game.audio_mngr.efx.send(src, 0, gameplay.megaphone_eq_slot)
+                if speaker_data.get('reverb_slot'):
+                    gameplay.game.audio_mngr.efx.send(src, 1, speaker_data['reverb_slot'])
+                if hasattr(gameplay, 'megaphone_compressor_slot') and gameplay.megaphone_compressor_slot:
+                    gameplay.game.audio_mngr.efx.send(src, 2, gameplay.megaphone_compressor_slot)
+            if hasattr(gameplay, 'megaphone_lowpass_filter') and gameplay.megaphone_lowpass_filter:
+                try:
+                    src.direct_filter = gameplay.megaphone_lowpass_filter
+                except:
+                    pass
+        try:
+            src.play()
+        except:
+            pass
+
+
+def queue_and_delay_frame(gameplay, sender_id, sources, packet):
+    global _speaker_delay_queues
+    
+    for idx, src in enumerate(sources):
+        delay = 0.0
+        if hasattr(gameplay, 'megaphone_speaker_data') and idx < len(gameplay.megaphone_speaker_data):
+            delay = gameplay.megaphone_speaker_data[idx].get('delay', 0.0)
+            
+        frames_delay = int(delay / 0.02)
+        
+        queue_key = (sender_id, idx)
+        if queue_key not in _speaker_delay_queues:
+            _speaker_delay_queues[queue_key] = collections.deque()
+        dq = _speaker_delay_queues[queue_key]
+        
+        if frames_delay > 0:
+            dq.append(packet)
+            if len(dq) <= frames_delay:
+                play_packet = bytes(len(packet))
+            else:
+                play_packet = dq.popleft()
+        else:
+            if len(dq) > 0:
+                dq.clear()
+            play_packet = packet
+            
+        _queue_packet_to_source(gameplay, idx, src, play_packet)
+
+
+def tick_megaphone_delay(gameplay):
+    global _last_play_times, _speaker_delay_queues, _last_packet_times
+    current_time = time.time()
+    
+    if not hasattr(gameplay, 'megaphone_player_sources') or not gameplay.megaphone_player_sources:
+        return
+        
+    for sender_id, entry in list(gameplay.megaphone_player_sources.items()):
+        sources = entry['sources']
+        last_time = _last_play_times.get(sender_id, 0)
+        last_pkt_time = _last_packet_times.get(sender_id, 0)
+        
+        # Only tick if we haven't received a network packet for at least 40ms (flushing phase)
+        # This prevents the tick loop from interfering with active network speech playback
+        if current_time - last_pkt_time >= 0.04:
+            if current_time - last_time >= 0.02:
+                # Check if any delay queue has pending frames
+                has_delayed_audio = False
+                for idx in range(len(sources)):
+                    queue_key = (sender_id, idx)
+                    if queue_key in _speaker_delay_queues and len(_speaker_delay_queues[queue_key]) > 0:
+                        has_delayed_audio = True
+                        break
+                        
+                if has_delayed_audio:
+                    _last_play_times[sender_id] = current_time
+                    dummy_packet = bytes(1920)
+                    queue_and_delay_frame(gameplay, sender_id, sources, dummy_packet)
 
 
 

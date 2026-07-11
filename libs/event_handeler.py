@@ -534,7 +534,18 @@ class EventHandeler:
 
     def process_voice_data(self, data, channelID):
         if not options.get("voice_chat", True): return
-        if channelID in self.gameplay.voice_channels.keys():
+        if channelID == consts.CHANNEL_MEGAPHONE:
+            # Per-player megaphone: first byte = sender's voice_channel ID
+            if len(data) < 2: return
+            sender_id = data[0]
+            opus_data = data[1:]
+            if channelID in self.gameplay.voice_channels:
+                channel = self.gameplay.voice_channels[channelID]
+                # Get or create per-player speaker sources (separate from shared physical speakers)
+                player_sources = self.gameplay.get_megaphone_player_sources(sender_id)
+                if player_sources:
+                    channel.vc_compression.recieve(opus_data, player_sources, None, channelID, self.gameplay, sender_id)
+        elif channelID in self.gameplay.voice_channels.keys():
             vc_source = self.gameplay.voice_channels[channelID].vc_source
             radio_source = self.gameplay.voice_channels[channelID].radio_source
             self.gameplay.voice_channels[channelID].vc_compression.recieve(data, vc_source, radio_source, channelID, self.gameplay)

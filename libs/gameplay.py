@@ -391,8 +391,14 @@ class Gameplay(state.State):
                     except Exception:
                         pass
         
+        # Cleanup per-player megaphone sources
+        if hasattr(self, 'megaphone_player_sources'):
+            for sid in list(self.megaphone_player_sources.keys()):
+                self._remove_megaphone_player(sid)
+
         self.megaphone_sources = []
         self.megaphone_speaker_data = []
+        self.megaphone_player_sources = {}  # {sender_id: {'sources': [...], 'last_active': float}}
         vc_sources = []
         
         initial_positions = []
@@ -453,12 +459,10 @@ class Gameplay(state.State):
             # Use exact position
             src.position = pos
             
-            # Larger pitch variation for INSTANT stereo separation
-            # Without delay, we need more pitch difference to separate sources immediately
-            # Variation: 0.99 to 1.01 (1% difference per speaker, still subtle but effective)
-            num_speakers = max(len(initial_positions), 1)
-            pitch_variation = 0.99 + (i * 0.02 / num_speakers)
-            src.pitch = pitch_variation
+            # Fixed pitch for ALL speakers — prevents drift between speakers
+            # 3D positions already provide spatial separation, pitch variation causes
+            # playback speed differences that accumulate into audible desync over time
+            src.pitch = 1.0
             
             # Get cone properties from speaker data (with fallback to calculated direction)
             aim_yaw = speaker_data_list[i].get('aim_yaw', 0)
@@ -552,6 +556,7 @@ class Gameplay(state.State):
                 'direction': direction,
                 'base_volume': base_vol,
                 'delay': speaker_delay,
+                'hearing_range': hearing_range,  # Save for update loop!
                 'reverb_slot': speaker_reverb_slot,  # Store for cleanup
                 'cone_settings': {
                     'inner': inner_cone,
@@ -620,6 +625,170 @@ class Gameplay(state.State):
         # This prevents losing PA Test Mode compression reference when map reloads
         if not hasattr(self, 'voice_chat') or self.voice_chat is None:
             self.voice_chat = voice_chat.VoiceChatRecord(self.game, self.player)
+
+
+    # ============================================================================
+    # PER-PLAYER MEGAPHONE SOURCE MANAGEMENT
+    # Each player who speaks through the megaphone gets their own set of OpenAL
+    # sources (one per physical speaker), preventing audio interleaving.
+    # Max 8 concurrent players. Inactive players are auto-cleaned after 5 seconds.
+    # ============================================================================
+
+    MAX_MEGAPHONE_PLAYERS = 8
+
+    def get_megaphone_player_sources(self, sender_id):
+        """Get or create per-player OpenAL sources for megaphone speakers.
+        Clones spatial properties from the physical speaker template sources.
+        Returns a list of sources, or None if no speakers are configured."""
+        import time as _time
+
+        if not hasattr(self, 'megaphone_player_sources'):
+            self.megaphone_player_sources = {}
+
+        # Periodic cleanup of inactive players (throttled: at most once per second)
+        if not hasattr(self, '_last_mega_cleanup') or _time.time() - self._last_mega_cleanup > 1.0:
+            self.cleanup_inactive_megaphone_players()
+            self._last_mega_cleanup = _time.time()
+
+        # If sender already has sources, update timestamp and return
+        if sender_id in self.megaphone_player_sources:
+            self.megaphone_player_sources[sender_id]['last_active'] = _time.time()
+            return self.megaphone_player_sources[sender_id]['sources']
+
+        # Check if we have speaker data to clone from
+        if not hasattr(self, 'megaphone_speaker_data') or not self.megaphone_speaker_data:
+            return None
+
+        # If at capacity, evict least recently active player
+        if len(self.megaphone_player_sources) >= self.MAX_MEGAPHONE_PLAYERS:
+            oldest_id = min(
+                self.megaphone_player_sources,
+                key=lambda k: self.megaphone_player_sources[k]['last_active']
+            )
+            self._remove_megaphone_player(oldest_id)
+
+        # Create new sources cloning physical speaker positions
+        sources = []
+        global_vol = options.get("megaphone_volume", 100) / 100.0
+
+        for i, spk_data in enumerate(self.megaphone_speaker_data):
+            # Skip entries that are ground reflections (they have reflection_source but aren't primary speakers)
+            if 'source' not in spk_data:
+                continue
+
+            try:
+                src = self.game.audio_mngr.context.gen_source()
+
+                # Clone spatial properties from template speaker
+                template = spk_data['source']
+                src.position = spk_data['position']
+                src.gain = spk_data['base_volume'] * global_vol
+                src.relative = False
+                src.rolloff_factor = template.rolloff_factor
+                src.reference_distance = template.reference_distance
+                src.max_distance = template.max_distance
+                src.pitch = template.pitch
+
+                # Clone cone/direction
+                src.direction = spk_data['direction']
+                cone = spk_data.get('cone_settings', {})
+                src.cone_inner_angle = cone.get('inner', 360)
+                src.cone_outer_angle = cone.get('outer', 360)
+                src.cone_outer_gain = cone.get('outer_gain', 0.2)
+
+                # Apply shared EFX sends (eq, reverb, compressor)
+                if hasattr(self.game.audio_mngr, 'efx'):
+                    try:
+                        if hasattr(self, 'megaphone_eq_slot') and self.megaphone_eq_slot:
+                            self.game.audio_mngr.efx.send(src, 0, self.megaphone_eq_slot)
+                        if spk_data.get('reverb_slot'):
+                            self.game.audio_mngr.efx.send(src, 1, spk_data['reverb_slot'])
+                        if hasattr(self, 'megaphone_compressor_slot') and self.megaphone_compressor_slot:
+                            self.game.audio_mngr.efx.send(src, 2, self.megaphone_compressor_slot)
+                    except Exception:
+                        pass
+
+                # Apply lowpass filter for PA cabinet sound
+                if hasattr(self, 'megaphone_lowpass_filter') and self.megaphone_lowpass_filter:
+                    try:
+                        src.direct_filter = self.megaphone_lowpass_filter
+                    except Exception:
+                        pass
+
+                sources.append(src)
+            except Exception as e:
+                print(f"[MEGAPHONE] Error creating per-player source for sender {sender_id}: {e}")
+
+        if sources:
+            self.megaphone_player_sources[sender_id] = {
+                'sources': sources,
+                'last_active': _time.time()
+            }
+            return sources
+        return None
+
+    def _remove_megaphone_player(self, sender_id):
+        """Clean up a specific player's megaphone sources. Detaches EFX, drains buffers, deletes sources."""
+        if not hasattr(self, 'megaphone_player_sources'):
+            return
+        if sender_id not in self.megaphone_player_sources:
+            return
+
+        entry = self.megaphone_player_sources[sender_id]
+        for src in entry['sources']:
+            # Detach EFX sends to prevent driver glitches
+            if hasattr(self.game.audio_mngr, 'efx'):
+                for send_idx in range(4):
+                    try:
+                        self.game.audio_mngr.efx.send(src, send_idx, None)
+                    except Exception:
+                        pass
+            try:
+                src.stop()
+                src.buffer = None
+            except Exception:
+                pass
+            # Drain queued buffers
+            try:
+                while src.buffers_queued > 0:
+                    src.unqueue_buffers()
+            except Exception:
+                pass
+            # Delete source
+            try:
+                src.delete()
+            except Exception:
+                pass
+
+        del self.megaphone_player_sources[sender_id]
+
+        # Also clean up jitter buffer, delay queues, and tracking times keyed by this sender
+        if sender_id in voice_chat._jitter_buffers:
+            del voice_chat._jitter_buffers[sender_id]
+            
+        keys_to_remove = [k for k in voice_chat._speaker_delay_queues.keys() if k[0] == sender_id]
+        for k in keys_to_remove:
+            try:
+                del voice_chat._speaker_delay_queues[k]
+            except KeyError:
+                pass
+                
+        if sender_id in voice_chat._last_play_times:
+            del voice_chat._last_play_times[sender_id]
+            
+        if sender_id in voice_chat._last_packet_times:
+            del voice_chat._last_packet_times[sender_id]
+
+    def cleanup_inactive_megaphone_players(self):
+        """Remove per-player sources that haven't received audio for 5+ seconds."""
+        import time as _time
+        if not hasattr(self, 'megaphone_player_sources'):
+            return
+        now = _time.time()
+        inactive = [sid for sid, entry in self.megaphone_player_sources.items()
+                    if now - entry['last_active'] > 5.0]
+        for sid in inactive:
+            self._remove_megaphone_player(sid)
 
 
     def _check_speaker_occlusion(self, speaker_pos, player_pos):
@@ -784,6 +953,13 @@ class Gameplay(state.State):
         return False  # Clear line-of-sight
 
     def update(self, events):
+        # Tick megaphone delay queues to flush remaining audio when a player finishes speaking
+        if hasattr(self, 'megaphone_player_sources') and self.megaphone_player_sources:
+            if consts.CHANNEL_MEGAPHONE in self.voice_channels:
+                channel = self.voice_channels[consts.CHANNEL_MEGAPHONE]
+                if hasattr(channel, 'vc_compression'):
+                    channel.vc_compression.put(lambda: voice_chat.tick_megaphone_delay(self))
+
         if not self.spectator_mode:
             self.player.loop()
         elif not self.substates:
@@ -878,6 +1054,8 @@ class Gameplay(state.State):
                 for i, pos in enumerate(edges):
                     if i < len(self.megaphone_sources):
                         self.megaphone_sources[i].position = pos
+                        if i < len(self.megaphone_speaker_data):
+                            self.megaphone_speaker_data[i]['position'] = pos
                 self.megaphone_positioned = True
         
         # === MEGAPHONE DYNAMIC REVERB SYNC ===
@@ -927,8 +1105,7 @@ class Gameplay(state.State):
             if self.megaphone_muffled_check_counter >= 10:
                 self.megaphone_muffled_check_counter = 0
                 player_pos = (self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
-                
-                for data in self.megaphone_speaker_data:
+                for i, data in enumerate(self.megaphone_speaker_data):
                     try:
                         speaker_pos = data['position']
                         
@@ -949,110 +1126,93 @@ class Gameplay(state.State):
                                          dy * data['direction'][1])
                         is_behind = dot_horizontal < 0
                         
-                        # === DISTANCE ATTENUATION (Dynamic - based on map size) ===
-                        # Calculate values dynamically for any map size
+                        # === DISTANCE ATTENUATION (OpenAL hardware handles distance; we apply occlusion/cone modifiers) ===
                         distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-                        
-                        # Calculate map diagonal for max_distance
-                        map_width = self.map.maxx - self.map.minx
-                        map_height = self.map.maxy - self.map.miny
-                        map_diagonal = math.sqrt(map_width**2 + map_height**2)
-                        
-                        # Dynamic values based on map size
-                        # ref_distance: 5% of map diagonal, minimum 5, maximum 20
-                        ref_distance = max(5.0, min(20.0, map_diagonal * 0.05))
-                        # max_distance: full diagonal of map
-                        max_distance = max(50.0, map_diagonal)
-                        # rolloff: inversely proportional to map size (smaller map = faster drop)
-                        # Small map (50 units): rolloff = 2.0 (fast drop)
-                        # Large map (500 units): rolloff = 1.0 (slow drop)
-                        rolloff = max(1.0, min(2.5, 100.0 / max(map_diagonal, 40.0)))
-                        
-                        # Inverse distance clamped formula (industry standard)
-                        if distance <= ref_distance:
-                            distance_gain = 1.0
-                        elif distance >= max_distance:
-                            distance_gain = 0.05  # Minimum 5% volume at max distance
-                        else:
-                            # Inverse distance: volume = ref / (ref + rolloff * (dist - ref))
-                            distance_gain = ref_distance / (ref_distance + rolloff * (distance - ref_distance))
-                            distance_gain = max(0.05, distance_gain)  # Clamp to minimum
-                        
-                        # Apply appropriate filter and calculate final volume
-                        global_vol = options.get("megaphone_volume", 100) / 100.0
-                        target_vol = data['base_volume'] * global_vol * distance_gain
+                        occlusion_multiplier = 1.0
                         
                         is_underwater = getattr(self.camera.focus_object, 'in_water', False)
                         target_filter = None
                         
-                        if is_underwater:
-                            # Player is underwater - filter megaphone heavily
-                            target_filter = getattr(self, 'megaphone_underwater_filter', None)
-                            # Extra volume attenuation based on player depth
-                            depth = getattr(self.camera.focus_object, 'depth', 1.0)
-                            # Deepest (0.0 depth factor) -> 10% volume, Surface (1.0) -> 30% volume
-                            muffling_factor = max(0.1, depth * 0.3)
-                            target_vol *= muffling_factor
-                        elif is_blocked or is_behind:
-                            # Behind speaker OR blocked by wall - apply muffled filter
-                            target_filter = getattr(self, 'megaphone_muffled_filter', None)
-                            # Extra volume reduction if blocked by wall
-                            if is_blocked:
-                                target_vol *= 0.3  # 30% through wall
-                            else:
-                                target_vol *= 0.5  # 50% behind speaker
+                        # Mute completely if outside custom hearing range (prevents sound leak beyond limits)
+                        spk_hearing_range = data.get('hearing_range', 0.0)
+                        if spk_hearing_range > 0.0 and distance >= spk_hearing_range:
+                            occlusion_multiplier = 0.0
                         else:
-                            # Clear line of sight and in front - apply normal filter
-                            target_filter = getattr(self, 'megaphone_normal_filter', None)
-
-                        # Only update filters/sends if the target filter has changed (prevents clicking & saves CPU)
-                        current_filter = getattr(data['source'], 'direct_filter', None) if hasattr(data['source'], 'direct_filter') else None
-                        
-                        if current_filter != target_filter:
-                            if target_filter:
-                                data['source'].direct_filter = target_filter
+                            if is_underwater:
+                                # Player is underwater - filter megaphone heavily
+                                target_filter = getattr(self, 'megaphone_underwater_filter', None)
+                                # Extra volume attenuation based on player depth
+                                depth = getattr(self.camera.focus_object, 'depth', 1.0)
+                                occlusion_multiplier = max(0.1, depth * 0.3)
+                            elif is_blocked or is_behind:
+                                # Behind speaker OR blocked by wall - apply muffled filter
+                                target_filter = getattr(self, 'megaphone_muffled_filter', None)
+                                if is_blocked:
+                                    occlusion_multiplier = 0.3  # 30% through wall
+                                else:
+                                    occlusion_multiplier = 0.5  # 50% behind speaker
                             else:
-                                try: del data['source'].direct_filter
-                                except AttributeError: pass
-                                
-                            try:
-                                # IMPORTANT: Must filter EFX sends too, otherwise clear audio bypasses the direct_filter via Reverb/EQ!
-                                eq_slot = getattr(self, 'megaphone_eq_slot', None)
-                                rev_slot = data.get('reverb_slot', getattr(self, 'megaphone_reverb_slot', None))
-                                comp_slot = getattr(self, 'megaphone_compressor_slot', None)
-                                loc_rev_slot = getattr(self, 'current_player_reverb_slot', None)
-                                
-                                if eq_slot: self.game.audio_mngr.efx.send(data['source'], 0, eq_slot, filter=target_filter)
-                                if rev_slot: self.game.audio_mngr.efx.send(data['source'], 1, rev_slot, filter=target_filter)
-                                if comp_slot: self.game.audio_mngr.efx.send(data['source'], 2, comp_slot, filter=target_filter)
-                                if loc_rev_slot: self.game.audio_mngr.efx.send(data['source'], 3, loc_rev_slot, filter=target_filter)
-                            except Exception:
-                                pass
-                        
-                        # === VOLUME SMOOTHING ===
-                        # Prevent sudden volume jumps and micro-clicks
-                        current_gain = data['source'].gain
-                        smooth_factor = 0.1  # 10% toward target per update (very smooth)
-                        
-                        # Only update if difference is significant (prevents micro-clicks)
-                        gain_diff = abs(target_vol - current_gain)
-                        if gain_diff > 0.01:  # Threshold: 1% change minimum
-                            new_gain = current_gain + (target_vol - current_gain) * smooth_factor
-                            data['source'].gain = new_gain
-                        
-                        # === AIR ABSORPTION ===
-                        # High frequencies attenuate faster over distance
-                        if distance > 0:
-                            # Air absorption coefficient (reduces high-freq energy)
-                            # At 200m, reduce HF gain to 30%
-                            air_absorption = max(0.3, 1.0 - (distance / 200.0))
-                            try:
-                                if hasattr(data['source'], 'air_absorption_factor'):
-                                    data['source'].air_absorption_factor = 1.0 - air_absorption
-                            except Exception:
-                                pass  # Not all OpenAL implementations support this
+                                # Clear line of sight and in front - apply normal filter
+                                target_filter = getattr(self, 'megaphone_normal_filter', None)
+ 
+                        global_vol = options.get("megaphone_volume", 100) / 100.0
+                        target_vol = data['base_volume'] * global_vol * occlusion_multiplier
+
+                        # Gather all active OpenAL sources associated with this speaker (template + all players)
+                        sources_to_update = [data['source']]
+                        if hasattr(self, 'megaphone_player_sources'):
+                            for player_entry in self.megaphone_player_sources.values():
+                                if 'sources' in player_entry and i < len(player_entry['sources']):
+                                    sources_to_update.append(player_entry['sources'][i])
+
+                        # Apply updates to all sources simultaneously
+                        for src in sources_to_update:
+                            current_filter = getattr(src, 'direct_filter', None) if hasattr(src, 'direct_filter') else None
+                            
+                            if current_filter != target_filter:
+                                if target_filter:
+                                    src.direct_filter = target_filter
+                                else:
+                                    try: del src.direct_filter
+                                    except AttributeError: pass
+                                    
+                                try:
+                                    eq_slot = getattr(self, 'megaphone_eq_slot', None)
+                                    rev_slot = data.get('reverb_slot', getattr(self, 'megaphone_reverb_slot', None))
+                                    comp_slot = getattr(self, 'megaphone_compressor_slot', None)
+                                    loc_rev_slot = getattr(self, 'current_player_reverb_slot', None)
+                                    
+                                    if eq_slot: self.game.audio_mngr.efx.send(src, 0, eq_slot, filter=target_filter)
+                                    if rev_slot: self.game.audio_mngr.efx.send(src, 1, rev_slot, filter=target_filter)
+                                    if comp_slot: self.game.audio_mngr.efx.send(src, 2, comp_slot, filter=target_filter)
+                                    if loc_rev_slot: self.game.audio_mngr.efx.send(src, 3, loc_rev_slot, filter=target_filter)
+                                except Exception:
+                                    pass
+                            
+                            # === VOLUME SMOOTHING ===
+                            # Prevent sudden volume jumps and micro-clicks
+                            current_gain = src.gain
+                            smooth_factor = 0.1  # 10% toward target per update (very smooth)
+                            
+                            # Only update if difference is significant (prevents micro-clicks)
+                            gain_diff = abs(target_vol - current_gain)
+                            if gain_diff > 0.01:  # Threshold: 1% change minimum
+                                new_gain = current_gain + (target_vol - current_gain) * smooth_factor
+                                src.gain = new_gain
+                            
+                            # === AIR ABSORPTION ===
+                            # High frequencies attenuate faster over distance
+                            if distance > 0:
+                                # Air absorption coefficient (reduces high-freq energy)
+                                # At 200m, reduce HF gain to 30%
+                                air_absorption = max(0.3, 1.0 - (distance / 200.0))
+                                try:
+                                    if hasattr(src, 'air_absorption_factor'):
+                                        src.air_absorption_factor = 1.0 - air_absorption
+                                except Exception:
+                                    pass
                     except Exception as e:
-                        pass  # Silent fail for robustness
+                        pass
         
         should_block = super().update(events)
         if should_block is True:
