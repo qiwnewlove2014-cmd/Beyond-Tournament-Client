@@ -538,18 +538,31 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet):
     # Start playing if stopped
     if src.state == cyal.SourceState.STOPPED or src.state == cyal.SourceState.INITIAL:
         # Re-apply EFX effects before playing
-        if hasattr(gameplay, 'megaphone_speaker_data') and idx < len(gameplay.megaphone_speaker_data):
-            speaker_data = gameplay.megaphone_speaker_data[idx]
+        spk_idx = idx // 2
+        is_reflection = (idx % 2 == 1)
+        if hasattr(gameplay, 'megaphone_speaker_data') and spk_idx < len(gameplay.megaphone_speaker_data):
+            speaker_data = gameplay.megaphone_speaker_data[spk_idx]
+            
+            # Apply correct direct filter (muffled for reflection, lowpass for primary)
+            filter_to_apply = None
+            if is_reflection:
+                if hasattr(gameplay, 'megaphone_muffled_filter'):
+                    filter_to_apply = gameplay.megaphone_muffled_filter
+            else:
+                if hasattr(gameplay, 'megaphone_lowpass_filter'):
+                    filter_to_apply = gameplay.megaphone_lowpass_filter
+
             if hasattr(gameplay.game.audio_mngr, 'efx'):
                 if hasattr(gameplay, 'megaphone_eq_slot') and gameplay.megaphone_eq_slot:
-                    gameplay.game.audio_mngr.efx.send(src, 0, gameplay.megaphone_eq_slot)
+                    gameplay.game.audio_mngr.efx.send(src, 0, gameplay.megaphone_eq_slot, filter=filter_to_apply)
                 if speaker_data.get('reverb_slot'):
-                    gameplay.game.audio_mngr.efx.send(src, 1, speaker_data['reverb_slot'])
+                    gameplay.game.audio_mngr.efx.send(src, 1, speaker_data['reverb_slot'], filter=filter_to_apply)
                 if hasattr(gameplay, 'megaphone_compressor_slot') and gameplay.megaphone_compressor_slot:
-                    gameplay.game.audio_mngr.efx.send(src, 2, gameplay.megaphone_compressor_slot)
-            if hasattr(gameplay, 'megaphone_lowpass_filter') and gameplay.megaphone_lowpass_filter:
+                    gameplay.game.audio_mngr.efx.send(src, 2, gameplay.megaphone_compressor_slot, filter=filter_to_apply)
+            
+            if filter_to_apply:
                 try:
-                    src.direct_filter = gameplay.megaphone_lowpass_filter
+                    src.direct_filter = filter_to_apply
                 except:
                     pass
         try:
@@ -560,13 +573,52 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet):
 
 def queue_and_delay_frame(gameplay, sender_id, sources, packet):
     global _speaker_delay_queues
+    import math
     
+    # Get player (listener) position from camera focus object
+    try:
+        player_pos = (gameplay.camera.focus_object.x, gameplay.camera.focus_object.y, gameplay.camera.focus_object.z)
+    except AttributeError:
+        player_pos = (0.0, 0.0, 0.0)
+        
     for idx, src in enumerate(sources):
-        delay = 0.0
-        if hasattr(gameplay, 'megaphone_speaker_data') and idx < len(gameplay.megaphone_speaker_data):
-            delay = gameplay.megaphone_speaker_data[idx].get('delay', 0.0)
+        if src is None:
+            continue
             
-        frames_delay = int(delay / 0.02)
+        spk_idx = idx // 2
+        is_reflection = (idx % 2 == 1)
+        
+        static_delay = 0.0
+        speaker_pos = (0.0, 0.0, 0.0)
+        
+        if hasattr(gameplay, 'megaphone_speaker_data') and spk_idx < len(gameplay.megaphone_speaker_data):
+            spk_data = gameplay.megaphone_speaker_data[spk_idx]
+            static_delay = spk_data.get('delay', 0.0)
+            speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
+            
+        # Calculate dynamic propagation delay (speed of sound = 343 m/s)
+        if not is_reflection:
+            # Direct path: Speaker -> Player
+            dx = player_pos[0] - speaker_pos[0]
+            dy = player_pos[1] - speaker_pos[1]
+            dz = player_pos[2] - speaker_pos[2]
+            distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+            propagation_delay = distance / 343.0
+        else:
+            # Ground reflection path: Speaker -> Ground -> Player
+            ground_level = gameplay.map.minz if hasattr(gameplay, 'map') and hasattr(gameplay.map, 'minz') else 0.0
+            dist_spk_to_ground = abs(speaker_pos[2] - ground_level)
+            
+            dx = player_pos[0] - speaker_pos[0]
+            dy = player_pos[1] - speaker_pos[1]
+            dz = player_pos[2] - ground_level
+            dist_ground_to_player = math.sqrt(dx*dx + dy*dy + dz*dz)
+            
+            distance = dist_spk_to_ground + dist_ground_to_player
+            propagation_delay = distance / 343.0
+            
+        total_delay = static_delay + propagation_delay
+        frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
         
         queue_key = (sender_id, idx)
         if queue_key not in _speaker_delay_queues:
@@ -575,6 +627,10 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
         
         if frames_delay > 0:
             dq.append(packet)
+            # Catch up if player moved closer and queue has too many old packets
+            while len(dq) > frames_delay + 1:
+                dq.popleft()
+                
             if len(dq) <= frames_delay:
                 play_packet = bytes(len(packet))
             else:

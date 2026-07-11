@@ -672,10 +672,11 @@ class Gameplay(state.State):
         global_vol = options.get("megaphone_volume", 100) / 100.0
 
         for i, spk_data in enumerate(self.megaphone_speaker_data):
-            # Skip entries that are ground reflections (they have reflection_source but aren't primary speakers)
+            # Skip entries that are ground reflections (they are stored under reflection_source in the primary speaker dict)
             if 'source' not in spk_data:
                 continue
 
+            src = None
             try:
                 src = self.game.audio_mngr.context.gen_source()
 
@@ -705,6 +706,8 @@ class Gameplay(state.State):
                             self.game.audio_mngr.efx.send(src, 1, spk_data['reverb_slot'])
                         if hasattr(self, 'megaphone_compressor_slot') and self.megaphone_compressor_slot:
                             self.game.audio_mngr.efx.send(src, 2, self.megaphone_compressor_slot)
+                        if hasattr(self, 'current_player_reverb_slot') and self.current_player_reverb_slot not in (None, 'UNINIT'):
+                            self.game.audio_mngr.efx.send(src, 3, self.current_player_reverb_slot)
                     except Exception:
                         pass
 
@@ -715,9 +718,56 @@ class Gameplay(state.State):
                     except Exception:
                         pass
 
-                sources.append(src)
             except Exception as e:
-                print(f"[MEGAPHONE] Error creating per-player source for sender {sender_id}: {e}")
+                print(f"[MEGAPHONE] Error creating per-player primary source for sender {sender_id}: {e}")
+
+            sources.append(src)
+
+            # 2. Clone reflection source if it exists
+            refl_src = None
+            if src is not None and 'reflection_source' in spk_data:
+                try:
+                    refl_src = self.game.audio_mngr.context.gen_source()
+                    refl_template = spk_data['reflection_source']
+                    
+                    # Reflection is at ground level, directly below the speaker
+                    ground_level = self.map.minz if hasattr(self, 'map') and hasattr(self.map, 'minz') else 0.0
+                    refl_src.position = (spk_data['position'][0], spk_data['position'][1], ground_level + 1.0)
+                    refl_src.gain = spk_data['base_volume'] * global_vol * 0.4  # 40% volume
+                    refl_src.relative = False
+                    refl_src.rolloff_factor = refl_template.rolloff_factor
+                    refl_src.reference_distance = refl_template.reference_distance
+                    refl_src.max_distance = refl_template.max_distance
+                    refl_src.pitch = refl_template.pitch
+                    
+                    # Point upward
+                    refl_src.direction = (0, 0, 1)
+                    refl_src.cone_inner_angle = refl_template.cone_inner_angle
+                    refl_src.cone_outer_angle = refl_template.cone_outer_angle
+                    refl_src.cone_outer_gain = refl_template.cone_outer_gain
+                    
+                    # Apply EFX sends
+                    if hasattr(self.game.audio_mngr, 'efx'):
+                        try:
+                            if hasattr(self, 'megaphone_eq_slot') and self.megaphone_eq_slot:
+                                self.game.audio_mngr.efx.send(refl_src, 0, self.megaphone_eq_slot)
+                            if spk_data.get('reverb_slot'):
+                                self.game.audio_mngr.efx.send(refl_src, 1, spk_data['reverb_slot'])
+                            if hasattr(self, 'megaphone_compressor_slot') and self.megaphone_compressor_slot:
+                                self.game.audio_mngr.efx.send(refl_src, 2, self.megaphone_compressor_slot)
+                        except Exception:
+                            pass
+                            
+                    # Apply muffled filter
+                    if hasattr(self, 'megaphone_muffled_filter') and self.megaphone_muffled_filter:
+                        try:
+                            refl_src.direct_filter = self.megaphone_muffled_filter
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"[MEGAPHONE] Error creating per-player reflection source for sender {sender_id}: {e}")
+
+            sources.append(refl_src)
 
         if sources:
             self.megaphone_player_sources[sender_id] = {
@@ -736,6 +786,8 @@ class Gameplay(state.State):
 
         entry = self.megaphone_player_sources[sender_id]
         for src in entry['sources']:
+            if src is None:
+                continue
             # Detach EFX sends to prevent driver glitches
             if hasattr(self.game.audio_mngr, 'efx'):
                 for send_idx in range(4):
@@ -1034,30 +1086,7 @@ class Gameplay(state.State):
                             except Exception:
                                 pass
         
-        # === FIXED MAP-EDGE MEGAPHONE SPEAKERS ===
-        # Position speakers at middle of each map edge (only once when map is loaded)
-        # Coordinate System: X=left/right, Y=forward/back, Z=up/down
-        if hasattr(self, 'megaphone_sources') and not getattr(self, 'megaphone_positioned', False):
-            # Check if map has real bounds (not default 0-10)
-            if self.map.maxx > 20 or self.map.maxy > 20:
-                # Map is properly loaded, place speakers at edge midpoints
-                height = 55  # Above ground (Z-axis)
-                center_x = (self.map.minx + self.map.maxx) / 2
-                center_y = (self.map.miny + self.map.maxy) / 2
-                # Cardinal positions (middle of each edge)
-                edges = [
-                    (center_x, self.map.maxy, height),  # North (center of top edge)
-                    (self.map.maxx, center_y, height),  # East (center of right edge)
-                    (center_x, self.map.miny, height),  # South (center of bottom edge)
-                    (self.map.minx, center_y, height)   # West (center of left edge)
-                ]
-                for i, pos in enumerate(edges):
-                    if i < len(self.megaphone_sources):
-                        self.megaphone_sources[i].position = pos
-                        if i < len(self.megaphone_speaker_data):
-                            self.megaphone_speaker_data[i]['position'] = pos
-                self.megaphone_positioned = True
-        
+
         # === MEGAPHONE DYNAMIC REVERB SYNC ===
         # Synchronize megaphone speakers with the player's local reverb zone
         # This gives the realistic impression that the PA system is echoing inside the current room
@@ -1097,6 +1126,17 @@ class Gameplay(state.State):
                             self.game.audio_mngr.efx.send(data['reflection_source'], 3, new_local_reverb_slot, filter=current_flt2)
                         except Exception:
                             pass
+            
+            # ALSO sync all active per-player megaphone sources
+            if hasattr(self, 'megaphone_player_sources'):
+                for player_entry in self.megaphone_player_sources.values():
+                    if 'sources' in player_entry:
+                        for src in player_entry['sources']:
+                            try:
+                                current_flt = getattr(src, 'direct_filter', None)
+                                self.game.audio_mngr.efx.send(src, 3, new_local_reverb_slot, filter=current_flt)
+                            except Exception:
+                                pass
  
         # === DIRECTIONAL MUFFLED SOUND + LINE-OF-SIGHT OCCLUSION ===
         # Every 10 frames, check if player is behind speaker OR blocked by wall
@@ -1159,19 +1199,42 @@ class Gameplay(state.State):
                         target_vol = data['base_volume'] * global_vol * occlusion_multiplier
 
                         # Gather all active OpenAL sources associated with this speaker (template + all players)
-                        sources_to_update = [data['source']]
+                        # We store tuples of (source, is_reflection) to apply correct filters/gains
+                        sources_to_update = [(data['source'], False)]
+                        if 'reflection_source' in data:
+                            sources_to_update.append((data['reflection_source'], True))
+
                         if hasattr(self, 'megaphone_player_sources'):
                             for player_entry in self.megaphone_player_sources.values():
-                                if 'sources' in player_entry and i < len(player_entry['sources']):
-                                    sources_to_update.append(player_entry['sources'][i])
+                                if 'sources' in player_entry:
+                                    # Primary source is at index 2 * i
+                                    prim_idx = 2 * i
+                                    if prim_idx < len(player_entry['sources']):
+                                        p_src = player_entry['sources'][prim_idx]
+                                        if p_src is not None:
+                                            sources_to_update.append((p_src, False))
+                                    # Reflection source is at index 2 * i + 1
+                                    refl_idx = 2 * i + 1
+                                    if refl_idx < len(player_entry['sources']):
+                                        r_src = player_entry['sources'][refl_idx]
+                                        if r_src is not None:
+                                            sources_to_update.append((r_src, True))
 
                         # Apply updates to all sources simultaneously
-                        for src in sources_to_update:
+                        for src, is_refl in sources_to_update:
+                            # Ground reflection is always muffled and at 40% of the primary volume
+                            if is_refl:
+                                actual_target_filter = getattr(self, 'megaphone_muffled_filter', None)
+                                actual_target_vol = target_vol * 0.4
+                            else:
+                                actual_target_filter = target_filter
+                                actual_target_vol = target_vol
+
                             current_filter = getattr(src, 'direct_filter', None) if hasattr(src, 'direct_filter') else None
                             
-                            if current_filter != target_filter:
-                                if target_filter:
-                                    src.direct_filter = target_filter
+                            if current_filter != actual_target_filter:
+                                if actual_target_filter:
+                                    src.direct_filter = actual_target_filter
                                 else:
                                     try: del src.direct_filter
                                     except AttributeError: pass
@@ -1182,10 +1245,10 @@ class Gameplay(state.State):
                                     comp_slot = getattr(self, 'megaphone_compressor_slot', None)
                                     loc_rev_slot = getattr(self, 'current_player_reverb_slot', None)
                                     
-                                    if eq_slot: self.game.audio_mngr.efx.send(src, 0, eq_slot, filter=target_filter)
-                                    if rev_slot: self.game.audio_mngr.efx.send(src, 1, rev_slot, filter=target_filter)
-                                    if comp_slot: self.game.audio_mngr.efx.send(src, 2, comp_slot, filter=target_filter)
-                                    if loc_rev_slot: self.game.audio_mngr.efx.send(src, 3, loc_rev_slot, filter=target_filter)
+                                    if eq_slot: self.game.audio_mngr.efx.send(src, 0, eq_slot, filter=actual_target_filter)
+                                    if rev_slot: self.game.audio_mngr.efx.send(src, 1, rev_slot, filter=actual_target_filter)
+                                    if comp_slot: self.game.audio_mngr.efx.send(src, 2, comp_slot, filter=actual_target_filter)
+                                    if loc_rev_slot: self.game.audio_mngr.efx.send(src, 3, loc_rev_slot, filter=actual_target_filter)
                                 except Exception:
                                     pass
                             
@@ -1195,9 +1258,9 @@ class Gameplay(state.State):
                             smooth_factor = 0.1  # 10% toward target per update (very smooth)
                             
                             # Only update if difference is significant (prevents micro-clicks)
-                            gain_diff = abs(target_vol - current_gain)
+                            gain_diff = abs(actual_target_vol - current_gain)
                             if gain_diff > 0.01:  # Threshold: 1% change minimum
-                                new_gain = current_gain + (target_vol - current_gain) * smooth_factor
+                                new_gain = current_gain + (actual_target_vol - current_gain) * smooth_factor
                                 src.gain = new_gain
                             
                             # === AIR ABSORPTION ===
