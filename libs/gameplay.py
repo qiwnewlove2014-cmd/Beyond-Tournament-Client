@@ -425,6 +425,12 @@ class Gameplay(state.State):
         # Get global megaphone volume setting (default 100)
         global_vol = options.get("megaphone_volume", 100) / 100.0
         
+        # Get player position to calculate accurate initial volumes
+        try:
+            player_pos = (self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
+        except AttributeError:
+            player_pos = (0.0, 0.0, 0.0)
+        
         for i, pos in enumerate(initial_positions):
             base_vol = speaker_data_list[i].get('volume', 0.6)
             # Apply global volume multiplier to base volume
@@ -453,7 +459,22 @@ class Gameplay(state.State):
                 src.rolloff_factor = 1.0
                 src.reference_distance = 10.0
                 src.max_distance = 300.0
-            src.gain = final_vol
+            
+            # Calculate distance and initial occlusion/fade factor for the template source
+            dx = player_pos[0] - pos[0]
+            dy = player_pos[1] - pos[1]
+            dz = player_pos[2] - pos[2]
+            distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+            
+            init_occlusion = 1.0
+            if hearing_range > 0.0:
+                if distance >= hearing_range:
+                    init_occlusion = 0.0
+                elif distance >= hearing_range * 0.8:
+                    fade_start = hearing_range * 0.8
+                    init_occlusion = 1.0 - ((distance - fade_start) / (hearing_range - fade_start))
+                    
+            src.gain = final_vol * init_occlusion
             src.relative = False     # World Anchored
             
             # Use exact position
@@ -475,7 +496,6 @@ class Gameplay(state.State):
             outer_gain = speaker_data_list[i].get('outer_cone_gain', 0.2)
             
             # Calculate direction vector from yaw and pitch
-            import math
             if aim_yaw == 0:
                 # If yaw is 0, calculate automatically towards map center
                 dx = map_center_x - pos[0]
@@ -571,8 +591,8 @@ class Gameplay(state.State):
                 'current_gain': 0.85,
                 'target_gainhf': 0.4,
                 'current_gainhf': 0.4,
-                'target_vol': final_vol,
-                'current_vol': final_vol
+                'target_vol': final_vol * init_occlusion,
+                'current_vol': final_vol * init_occlusion
             })
             
             # === GROUND REFLECTION (Virtual Source) ===
@@ -590,7 +610,7 @@ class Gameplay(state.State):
                     reflection_src.rolloff_factor = 0.8  # Slower falloff (echo travels far)
                     reflection_src.reference_distance = 20.0  # Wider spread
                     reflection_src.max_distance = 250.0
-                    reflection_src.gain = final_vol * 0.4  # 40% volume for audible echo
+                    reflection_src.gain = final_vol * 0.4 * init_occlusion  # 40% volume * occlusion
                     reflection_src.relative = False
                     reflection_src.position = (pos[0], pos[1], reflection_z)
                     
@@ -632,8 +652,8 @@ class Gameplay(state.State):
                         'refl_current_gain': 0.6,
                         'refl_target_gainhf': 0.05,
                         'refl_current_gainhf': 0.05,
-                        'refl_target_vol': final_vol * 0.4,
-                        'refl_current_vol': final_vol * 0.4
+                        'refl_target_vol': final_vol * 0.4 * init_occlusion,
+                        'refl_current_vol': final_vol * 0.4 * init_occlusion
                     })
                 except Exception as e:
                     print(f"[MEGAPHONE] Error creating ground reflection: {e}")
@@ -821,6 +841,12 @@ class Gameplay(state.State):
             targets_gain = []
             targets_gainhf = []
             
+            # Get player position to calculate accurate initial volumes
+            try:
+                player_pos = (self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
+            except AttributeError:
+                player_pos = (0.0, 0.0, 0.0)
+                
             for idx, src_obj in enumerate(sources):
                 spk_idx = idx // 2
                 is_refl = (idx % 2 == 1)
@@ -829,14 +855,51 @@ class Gameplay(state.State):
                 spk_data = self.megaphone_speaker_data[spk_idx]
                 base_v = spk_data['base_volume'] * global_vol
                 
+                # Calculate distance and initial occlusion/fade factor
+                speaker_pos = spk_data['position']
+                dx = player_pos[0] - speaker_pos[0]
+                dy = player_pos[1] - speaker_pos[1]
+                dz = player_pos[2] - speaker_pos[2]
+                distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                
+                hearing_range = spk_data.get('hearing_range', 0.0)
+                init_occlusion = 1.0
+                
+                if hearing_range > 0.0:
+                    if distance >= hearing_range:
+                        init_occlusion = 0.0
+                    elif distance >= hearing_range * 0.8:
+                        fade_start = hearing_range * 0.8
+                        init_occlusion = 1.0 - ((distance - fade_start) / (hearing_range - fade_start))
+                
+                # Apply raycast and direction filters to initial occlusion if in range
+                if init_occlusion > 0.0:
+                    is_blocked = self._check_speaker_occlusion(speaker_pos, player_pos)
+                    dot_horizontal = (dx * spk_data['direction'][0] + dy * spk_data['direction'][1])
+                    is_behind = dot_horizontal < 0
+                    
+                    if getattr(self.camera.focus_object, 'in_water', False):
+                        depth = getattr(self.camera.focus_object, 'depth', 1.0)
+                        init_occlusion *= max(0.1, depth * 0.3)
+                    elif is_blocked or is_behind:
+                        if is_blocked:
+                            init_occlusion *= 0.3
+                        else:
+                            init_occlusion *= 0.5
+                
                 if not is_refl:
-                    targets_vol.append(base_v)
+                    targets_vol.append(base_v * init_occlusion)
                     targets_gain.append(0.85)
                     targets_gainhf.append(0.4)
                 else:
-                    targets_vol.append(base_v * 0.4)
+                    targets_vol.append(base_v * 0.4 * init_occlusion)
                     targets_gain.append(0.6)
                     targets_gainhf.append(0.05)
+                    
+            # Set source gain directly to match initial volume
+            for idx, src_obj in enumerate(sources):
+                if src_obj:
+                    src_obj.gain = targets_vol[idx]
                     
             self.megaphone_player_sources[sender_id] = {
                 'sources': sources,
@@ -1078,10 +1141,15 @@ class Gameplay(state.State):
         if distance == 0:
             return False  # Same position, no occlusion
         
-        # Step along the ray
-        step_count = max(distance, 1)
-        for i in range(1, step_count):  # Skip start point (speaker), check middle points
-            t = i / step_count
+        # Step along the ray with a step size of 2.0 to reduce lookup count (walls are thick)
+        # Cap max steps to 15 to prevent long-distance lookup lag spikes
+        step_size = 2.0
+        steps = max(1, int(distance / step_size))
+        if steps > 15:
+            steps = 15
+        
+        for i in range(1, steps):  # Skip start point (speaker), check middle points
+            t = i / steps
             check_x = int(x1 + dx * t)
             check_y = int(y1 + dy * t)
             check_z = int(z1 + dz * t)
@@ -1250,43 +1318,58 @@ class Gameplay(state.State):
                         dy = player_pos[1] - speaker_pos[1]
                         dz = player_pos[2] - speaker_pos[2]
                         
-                        # === LINE-OF-SIGHT CHECK ===
-                        # Check if any solid tile blocks the path from speaker to player
-                        is_blocked = self._check_speaker_occlusion(speaker_pos, player_pos)
+                        # === DISTANCE ATTENUATION ===
+                        distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        data['distance'] = distance
+                        
+                        # === LINE-OF-SIGHT CHECK (Throttled) ===
+                        spk_hearing_range = data.get('hearing_range', 80.0)
+                        if spk_hearing_range == 0.0:
+                            spk_hearing_range = 80.0
+                            
+                        # If outside hearing range, skip the expensive ray-march check
+                        if distance >= spk_hearing_range:
+                            is_blocked = True
+                        else:
+                            # Only raycast if player is within hearing range
+                            is_blocked = self._check_speaker_occlusion(speaker_pos, player_pos)
                         
                         # === DIRECTIONAL CHECK (Horizontal only) ===
                         dot_horizontal = (dx * data['direction'][0] + 
                                          dy * data['direction'][1])
                         is_behind = dot_horizontal < 0
                         
-                        # === DISTANCE ATTENUATION ===
-                        distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-                        data['distance'] = distance
+                        # Calculate transition zone factor (fade out from 80% to 100% of hearing range)
+                        spk_hearing_range_raw = data.get('hearing_range', 0.0)
+                        fade_factor = 1.0
+                        if spk_hearing_range_raw > 0.0:
+                            if distance >= spk_hearing_range_raw:
+                                fade_factor = 0.0
+                            elif distance >= spk_hearing_range_raw * 0.8:
+                                fade_start = spk_hearing_range_raw * 0.8
+                                fade_factor = 1.0 - ((distance - fade_start) / (spk_hearing_range_raw - fade_start))
                         
-                        occlusion_multiplier = 1.0
+                        occlusion_multiplier = fade_factor
                         target_gain = 0.85
                         target_gainhf = 0.4
                         
-                        # Mute completely if outside custom hearing range (prevents sound leak beyond limits)
-                        spk_hearing_range = data.get('hearing_range', 0.0)
-                        if spk_hearing_range > 0.0 and distance >= spk_hearing_range:
-                            occlusion_multiplier = 0.0
-                        else:
+                        # Apply occlusion and underwater filters only if not fully faded out
+                        if fade_factor > 0.0:
                             if is_underwater:
                                 # Player is underwater - filter megaphone heavily
                                 target_gain = 0.8
                                 target_gainhf = 0.02
                                 # Extra volume attenuation based on player depth
                                 depth = getattr(self.camera.focus_object, 'depth', 1.0)
-                                occlusion_multiplier = max(0.1, depth * 0.3)
+                                occlusion_multiplier = fade_factor * max(0.1, depth * 0.3)
                             elif is_blocked or is_behind:
                                 # Behind speaker OR blocked by wall - apply muffled filter
                                 target_gain = 0.6
                                 target_gainhf = 0.05
                                 if is_blocked:
-                                    occlusion_multiplier = 0.3  # 30% through wall
+                                    occlusion_multiplier = fade_factor * 0.3  # 30% through wall
                                 else:
-                                    occlusion_multiplier = 0.5  # 50% behind speaker
+                                    occlusion_multiplier = fade_factor * 0.5  # 50% behind speaker
                                 
                         target_vol = data['base_volume'] * global_vol * occlusion_multiplier
 
@@ -1331,43 +1414,67 @@ class Gameplay(state.State):
                         # LERP volume
                         t_vol = data.get('target_vol', data['base_volume'] * global_vol)
                         c_vol = data.get('current_vol', t_vol)
-                        new_vol = c_vol + (t_vol - c_vol) * smooth_factor
-                        data['current_vol'] = new_vol
-                        data['source'].gain = new_vol
+                        if abs(t_vol - c_vol) > 0.0001:
+                            new_vol = c_vol + (t_vol - c_vol) * smooth_factor
+                            data['current_vol'] = new_vol
+                            data['source'].gain = new_vol
+                        elif c_vol != t_vol:
+                            data['current_vol'] = t_vol
+                            data['source'].gain = t_vol
                         
                         # LERP filter gain
                         t_g = data.get('target_gain', 0.85)
                         c_g = data.get('current_gain', t_g)
-                        new_g = c_g + (t_g - c_g) * smooth_factor
-                        data['current_gain'] = new_g
-                        data['filter'].set("GAIN", new_g)
+                        if abs(t_g - c_g) > 0.001:
+                            new_g = c_g + (t_g - c_g) * smooth_factor
+                            data['current_gain'] = new_g
+                            data['filter'].set("GAIN", new_g)
+                        elif c_g != t_g:
+                            data['current_gain'] = t_g
+                            data['filter'].set("GAIN", t_g)
                         
                         # LERP filter gainhf
                         t_ghf = data.get('target_gainhf', 0.4)
                         c_ghf = data.get('current_gainhf', t_ghf)
-                        new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
-                        data['current_gainhf'] = new_ghf
-                        data['filter'].set("GAINHF", new_ghf)
+                        if abs(t_ghf - c_ghf) > 0.001:
+                            new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
+                            data['current_gainhf'] = new_ghf
+                            data['filter'].set("GAINHF", new_ghf)
+                        elif c_ghf != t_ghf:
+                            data['current_gainhf'] = t_ghf
+                            data['filter'].set("GAINHF", t_ghf)
                         
                     # Template reflection source
                     if data.get('reflection_source') and data.get('refl_filter'):
                         t_vol = data.get('refl_target_vol', data['base_volume'] * global_vol * 0.4)
                         c_vol = data.get('refl_current_vol', t_vol)
-                        new_vol = c_vol + (t_vol - c_vol) * smooth_factor
-                        data['refl_current_vol'] = new_vol
-                        data['reflection_source'].gain = new_vol
+                        if abs(t_vol - c_vol) > 0.0001:
+                            new_vol = c_vol + (t_vol - c_vol) * smooth_factor
+                            data['refl_current_vol'] = new_vol
+                            data['reflection_source'].gain = new_vol
+                        elif c_vol != t_vol:
+                            data['refl_current_vol'] = t_vol
+                            data['reflection_source'].gain = t_vol
                         
                         t_g = data.get('refl_target_gain', 0.6)
                         c_g = data.get('refl_current_gain', t_g)
-                        new_g = c_g + (t_g - c_g) * smooth_factor
-                        data['refl_current_gain'] = new_g
-                        data['refl_filter'].set("GAIN", new_g)
+                        if abs(t_g - c_g) > 0.001:
+                            new_g = c_g + (t_g - c_g) * smooth_factor
+                            data['refl_current_gain'] = new_g
+                            data['refl_filter'].set("GAIN", new_g)
+                        elif c_g != t_g:
+                            data['refl_current_gain'] = t_g
+                            data['refl_filter'].set("GAIN", t_g)
                         
                         t_ghf = data.get('refl_target_gainhf', 0.05)
                         c_ghf = data.get('refl_current_gainhf', t_ghf)
-                        new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
-                        data['refl_current_gainhf'] = new_ghf
-                        data['refl_filter'].set("GAINHF", new_ghf)
+                        if abs(t_ghf - c_ghf) > 0.001:
+                            new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
+                            data['refl_current_gainhf'] = new_ghf
+                            data['refl_filter'].set("GAINHF", new_ghf)
+                        elif c_ghf != t_ghf:
+                            data['refl_current_gainhf'] = t_ghf
+                            data['refl_filter'].set("GAINHF", t_ghf)
                         
                     # 2. Interpolate active per-player sources
                     if hasattr(self, 'megaphone_player_sources'):
@@ -1384,23 +1491,35 @@ class Gameplay(state.State):
                                     # Volume
                                     t_vol = player_entry['targets_vol'][prim_idx]
                                     c_vol = player_entry['currents_vol'][prim_idx]
-                                    new_vol = c_vol + (t_vol - c_vol) * smooth_factor
-                                    player_entry['currents_vol'][prim_idx] = new_vol
-                                    src.gain = new_vol
+                                    if abs(t_vol - c_vol) > 0.0001:
+                                        new_vol = c_vol + (t_vol - c_vol) * smooth_factor
+                                        player_entry['currents_vol'][prim_idx] = new_vol
+                                        src.gain = new_vol
+                                    elif c_vol != t_vol:
+                                        player_entry['currents_vol'][prim_idx] = t_vol
+                                        src.gain = t_vol
                                     
                                     # Filter GAIN
                                     t_g = player_entry['targets_gain'][prim_idx]
                                     c_g = player_entry['currents_gain'][prim_idx]
-                                    new_g = c_g + (t_g - c_g) * smooth_factor
-                                    player_entry['currents_gain'][prim_idx] = new_g
-                                    flt.set("GAIN", new_g)
+                                    if abs(t_g - c_g) > 0.001:
+                                        new_g = c_g + (t_g - c_g) * smooth_factor
+                                        player_entry['currents_gain'][prim_idx] = new_g
+                                        flt.set("GAIN", new_g)
+                                    elif c_g != t_g:
+                                        player_entry['currents_gain'][prim_idx] = t_g
+                                        flt.set("GAIN", t_g)
                                     
                                     # Filter GAINHF
                                     t_ghf = player_entry['targets_gainhf'][prim_idx]
                                     c_ghf = player_entry['currents_gainhf'][prim_idx]
-                                    new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
-                                    player_entry['currents_gainhf'][prim_idx] = new_ghf
-                                    flt.set("GAINHF", new_ghf)
+                                    if abs(t_ghf - c_ghf) > 0.001:
+                                        new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
+                                        player_entry['currents_gainhf'][prim_idx] = new_ghf
+                                        flt.set("GAINHF", new_ghf)
+                                    elif c_ghf != t_ghf:
+                                        player_entry['currents_gainhf'][prim_idx] = t_ghf
+                                        flt.set("GAINHF", t_ghf)
                                     
                                 # Interpolate player reflection source
                                 if refl_idx < len(player_entry['sources']) and player_entry['sources'][refl_idx] is not None and player_entry['filters'][refl_idx] is not None:
@@ -1410,59 +1529,76 @@ class Gameplay(state.State):
                                     # Volume
                                     t_vol = player_entry['targets_vol'][refl_idx]
                                     c_vol = player_entry['currents_vol'][refl_idx]
-                                    new_vol = c_vol + (t_vol - c_vol) * smooth_factor
-                                    player_entry['currents_vol'][refl_idx] = new_vol
-                                    src.gain = new_vol
+                                    if abs(t_vol - c_vol) > 0.0001:
+                                        new_vol = c_vol + (t_vol - c_vol) * smooth_factor
+                                        player_entry['currents_vol'][refl_idx] = new_vol
+                                        src.gain = new_vol
+                                    elif c_vol != t_vol:
+                                        player_entry['currents_vol'][refl_idx] = t_vol
+                                        src.gain = t_vol
                                     
                                     # Filter GAIN
                                     t_g = player_entry['targets_gain'][refl_idx]
                                     c_g = player_entry['currents_gain'][refl_idx]
-                                    new_g = c_g + (t_g - c_g) * smooth_factor
-                                    player_entry['currents_gain'][refl_idx] = new_g
-                                    flt.set("GAIN", new_g)
+                                    if abs(t_g - c_g) > 0.001:
+                                        new_g = c_g + (t_g - c_g) * smooth_factor
+                                        player_entry['currents_gain'][refl_idx] = new_g
+                                        flt.set("GAIN", new_g)
+                                    elif c_g != t_g:
+                                        player_entry['currents_gain'][refl_idx] = t_g
+                                        flt.set("GAIN", t_g)
                                     
                                     # Filter GAINHF
                                     t_ghf = player_entry['targets_gainhf'][refl_idx]
                                     c_ghf = player_entry['currents_gainhf'][refl_idx]
-                                    new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
-                                    player_entry['currents_gainhf'][refl_idx] = new_ghf
-                                    flt.set("GAINHF", new_ghf)
-                                    
+                                    if abs(t_ghf - c_ghf) > 0.001:
+                                        new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
+                                        player_entry['currents_gainhf'][refl_idx] = new_ghf
+                                        flt.set("GAINHF", new_ghf)
+                                    elif c_ghf != t_ghf:
+                                        player_entry['currents_gainhf'][refl_idx] = t_ghf
+                                        flt.set("GAINHF", t_ghf)
+                                        
                     # 3. Apply air absorption every frame using last calculated distance
                     dist = data.get('distance', 0.0)
                     if dist > 0.0:
                         air_absorption = max(0.3, 1.0 - (dist / 200.0))
+                        target_abs = 1.0 - air_absorption
                         
-                        # Apply to template primary
-                        if data.get('source'):
-                            try:
-                                if hasattr(data['source'], 'air_absorption_factor'):
-                                    data['source'].air_absorption_factor = 1.0 - air_absorption
-                            except: pass
+                        last_abs = data.get('last_air_absorption', -1.0)
+                        if abs(target_abs - last_abs) > 0.01:
+                            data['last_air_absorption'] = target_abs
                             
-                        # Apply to template reflection
-                        if data.get('reflection_source'):
-                            try:
-                                if hasattr(data['reflection_source'], 'air_absorption_factor'):
-                                    data['reflection_source'].air_absorption_factor = 1.0 - air_absorption
-                            except: pass
-                            
-                        # Apply to player sources
-                        if hasattr(self, 'megaphone_player_sources'):
-                            for player_entry in self.megaphone_player_sources.values():
-                                if 'sources' in player_entry:
-                                    prim_idx = 2 * i
-                                    refl_idx = 2 * i + 1
-                                    
-                                    if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None:
-                                        try:
-                                            player_entry['sources'][prim_idx].air_absorption_factor = 1.0 - air_absorption
-                                        except: pass
+                            # Apply to template primary
+                            if data.get('source'):
+                                try:
+                                    if hasattr(data['source'], 'air_absorption_factor'):
+                                        data['source'].air_absorption_factor = target_abs
+                                except: pass
+                                
+                            # Apply to template reflection
+                            if data.get('reflection_source'):
+                                try:
+                                    if hasattr(data['reflection_source'], 'air_absorption_factor'):
+                                        data['reflection_source'].air_absorption_factor = target_abs
+                                except: pass
+                                
+                            # Apply to player sources
+                            if hasattr(self, 'megaphone_player_sources'):
+                                for player_entry in self.megaphone_player_sources.values():
+                                    if 'sources' in player_entry:
+                                        prim_idx = 2 * i
+                                        refl_idx = 2 * i + 1
                                         
-                                    if refl_idx < len(player_entry['sources']) and player_entry['sources'][refl_idx] is not None:
-                                        try:
-                                            player_entry['sources'][refl_idx].air_absorption_factor = 1.0 - air_absorption
-                                        except: pass
+                                        if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None:
+                                            try:
+                                                player_entry['sources'][prim_idx].air_absorption_factor = target_abs
+                                            except: pass
+                                            
+                                        if refl_idx < len(player_entry['sources']) and player_entry['sources'][refl_idx] is not None:
+                                            try:
+                                                player_entry['sources'][refl_idx].air_absorption_factor = target_abs
+                                            except: pass
                 except Exception as e:
                     print(f"[MEGAPHONE] Error in per-frame interpolation loop: {e}")
         
