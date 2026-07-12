@@ -691,6 +691,10 @@ class EventHandeler:
         self.gameplay.spectator_mode = enabled
         self.gameplay.concert_spectator_mode = enabled
         
+        import time as _time
+        self.gameplay.concert_fade_in_start = _time.time()
+        self.gameplay.concert_fade_in_duration = 1.5
+        
         # Move existing megaphone sources to fading state for crossfade
         import time as _time
         if hasattr(self.gameplay, 'megaphone_player_sources'):

@@ -953,17 +953,17 @@ class Gameplay(state.State):
                     targets_gainhf.append(spk_data.get('refl_target_gainhf', 0.05))
                     targets_gainlf.append(spk_data.get('refl_target_gainlf', 0.6))
                     
-            # Set source gain directly to match initial volume
+            # Set source gain to 0.0 initially so they fade in smoothly via the update loop
             for idx, src_obj in enumerate(sources):
                 if src_obj:
-                    src_obj.gain = targets_vol[idx]
+                    src_obj.gain = 0.0
                     
             self.megaphone_player_sources[sender_id] = {
                 'sources': sources,
                 'filters': filters,
                 'last_active': _time.time(),
                 'targets_vol': targets_vol,
-                'currents_vol': list(targets_vol),
+                'currents_vol': [0.0] * len(targets_vol),
                 'targets_gain': targets_gain,
                 'currents_gain': list(targets_gain),
                 'targets_gainhf': targets_gainhf,
@@ -1627,13 +1627,22 @@ class Gameplay(state.State):
                                 is_own_voice = sid not in getattr(self, 'voice_channels', {})
                                 in_ear_mult = 0.001 if (is_own_voice and getattr(self, 'in_ear_monitor', False)) else 1.0
                                 
+                                # Fade-in logic for toggling concert/spectator mode
+                                concert_fade_in_mult = 1.0
+                                if hasattr(self, 'concert_fade_in_start'):
+                                    import time as _time
+                                    elapsed = _time.time() - getattr(self, 'concert_fade_in_start', 0)
+                                    dur = getattr(self, 'concert_fade_in_duration', 1.5)
+                                    if elapsed <= dur:
+                                        concert_fade_in_mult = elapsed / dur
+                                
                                 # Interpolate player primary source
                                 if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None and player_entry['filters'][prim_idx] is not None:
                                     src = player_entry['sources'][prim_idx]
                                     flt = player_entry['filters'][prim_idx]
                                     
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][prim_idx] * duck_mult * in_ear_mult
+                                    t_vol = player_entry['targets_vol'][prim_idx] * duck_mult * in_ear_mult * concert_fade_in_mult
                                     c_vol = player_entry['currents_vol'][prim_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
@@ -1687,7 +1696,7 @@ class Gameplay(state.State):
                                     flt = player_entry['filters'][refl_idx]
                                     
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][refl_idx] * duck_mult * in_ear_mult
+                                    t_vol = player_entry['targets_vol'][refl_idx] * duck_mult * in_ear_mult * concert_fade_in_mult
                                     c_vol = player_entry['currents_vol'][refl_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
