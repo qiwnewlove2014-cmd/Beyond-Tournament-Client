@@ -749,114 +749,146 @@ class Gameplay(state.State):
         filters = []
         global_vol = options.get("megaphone_volume", 100) / 100.0
 
-        for i, spk_data in enumerate(self.megaphone_speaker_data):
-            # Skip entries that are ground reflections (they are stored under reflection_source in the primary speaker dict)
-            if 'source' not in spk_data:
-                continue
-
+        if getattr(self, 'concert_spectator_mode', False):
+            # 2D Concert Spectator Mode
             src = None
             p_filter = None
             try:
                 src = self.game.audio_mngr.context.gen_source()
+                src.position = [0, 0, 0]
+                src.relative = True
+                src.gain = global_vol
+                src.rolloff_factor = 0.0
 
-                # Clone spatial properties from template speaker
-                template = spk_data['source']
-                src.position = spk_data['position']
-                src.gain = spk_data['base_volume'] * global_vol
-                src.relative = False
-                src.rolloff_factor = template.rolloff_factor
-                src.reference_distance = template.reference_distance
-                src.max_distance = template.max_distance
-                src.pitch = template.pitch
-
-                # Clone cone/direction
-                src.direction = spk_data['direction']
-                cone = spk_data.get('cone_settings', {})
-                src.cone_inner_angle = cone.get('inner', 360)
-                src.cone_outer_angle = cone.get('outer', 360)
-                src.cone_outer_gain = cone.get('outer_gain', 0.2)
-
-                # Create unique filter for player source
+                # Apply flat EQ for Concert Mode to ensure high fidelity
+                eq_bass = 1.0
+                eq_treble = 1.0
+                
                 p_filter = self.game.audio_mngr.gen_filter("LOWPASS")
                 if p_filter:
                     try:
-                        p_filter.set("GAIN", 0.85)
-                        p_filter.set("GAINHF", 0.4)
+                        p_filter.set("GAIN", eq_bass)
+                        p_filter.set("GAINHF", eq_treble)
                         src.direct_filter = p_filter
                     except Exception as e:
-                        print(f"[MEGAPHONE] Error initializing player filter: {e}")
-
-                # Apply shared EFX sends (eq, reverb, compressor)
-                if hasattr(self.game.audio_mngr, 'efx'):
-                    try:
-                        if hasattr(self, 'megaphone_eq_slot') and self.megaphone_eq_slot:
-                            self.game.audio_mngr.efx.send(src, 0, self.megaphone_eq_slot, filter=p_filter)
-                        if spk_data.get('reverb_slot'):
-                            self.game.audio_mngr.efx.send(src, 1, spk_data['reverb_slot'], filter=p_filter)
-                        if hasattr(self, 'megaphone_compressor_slot') and self.megaphone_compressor_slot:
-                            self.game.audio_mngr.efx.send(src, 2, self.megaphone_compressor_slot, filter=p_filter)
-                        if hasattr(self, 'current_player_reverb_slot') and self.current_player_reverb_slot not in (None, 'UNINIT'):
-                            self.game.audio_mngr.efx.send(src, 3, self.current_player_reverb_slot, filter=p_filter)
-                    except Exception:
                         pass
-
+                
+                sources.append(src)
+                if p_filter:
+                    filters.append(p_filter)
             except Exception as e:
-                print(f"[MEGAPHONE] Error creating per-player primary source for sender {sender_id}: {e}")
-
-            sources.append(src)
-            filters.append(p_filter)
-
-            # 2. Clone reflection source if it exists
-            refl_src = None
-            r_filter = None
-            if src is not None and 'reflection_source' in spk_data:
+                print(f"[MEGAPHONE] Error initializing 2D spectator source: {e}")
+                if src: src.destroy()
+                if p_filter: p_filter.destroy()
+        else:
+            for i, spk_data in enumerate(self.megaphone_speaker_data):
+                # Skip entries that are ground reflections (they are stored under reflection_source in the primary speaker dict)
+                if 'source' not in spk_data:
+                    continue
+    
+                src = None
+                p_filter = None
                 try:
-                    refl_src = self.game.audio_mngr.context.gen_source()
-                    refl_template = spk_data['reflection_source']
-                    
-                    # Reflection is at ground level, directly below the speaker
-                    ground_level = self.map.minz if hasattr(self, 'map') and hasattr(self.map, 'minz') else 0.0
-                    refl_src.position = (spk_data['position'][0], spk_data['position'][1], ground_level + 1.0)
-                    refl_src.gain = spk_data['base_volume'] * global_vol * 0.4  # 40% volume
-                    refl_src.relative = False
-                    refl_src.rolloff_factor = refl_template.rolloff_factor
-                    refl_src.reference_distance = refl_template.reference_distance
-                    refl_src.max_distance = refl_template.max_distance
-                    refl_src.pitch = refl_template.pitch
-                    
-                    # Point upward
-                    refl_src.direction = (0, 0, 1)
-                    refl_src.cone_inner_angle = refl_template.cone_inner_angle
-                    refl_src.cone_outer_angle = refl_template.cone_outer_angle
-                    refl_src.cone_outer_gain = refl_template.cone_outer_gain
-                    
-                    # Create unique filter for reflection source
-                    r_filter = self.game.audio_mngr.gen_filter("LOWPASS")
-                    if r_filter:
+                    src = self.game.audio_mngr.context.gen_source()
+    
+                    # Clone spatial properties from template speaker
+                    template = spk_data['source']
+                    src.position = spk_data['position']
+                    src.gain = spk_data['base_volume'] * global_vol
+                    src.relative = False
+                    src.rolloff_factor = template.rolloff_factor
+                    src.reference_distance = template.reference_distance
+                    src.max_distance = template.max_distance
+                    src.pitch = template.pitch
+
+                    # Clone cone/direction
+                    src.direction = spk_data['direction']
+                    cone = spk_data.get('cone_settings', {})
+                    src.cone_inner_angle = cone.get('inner', 360)
+                    src.cone_outer_angle = cone.get('outer', 360)
+                    src.cone_outer_gain = cone.get('outer_gain', 0.2)
+
+                    # Create unique filter for player source
+                    p_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+                    if p_filter:
                         try:
-                            r_filter.set("GAIN", 0.6)
-                            r_filter.set("GAINHF", 0.05)
-                            refl_src.direct_filter = r_filter
+                            p_filter.set("GAIN", 0.85)
+                            p_filter.set("GAINHF", 0.4)
+                            src.direct_filter = p_filter
                         except Exception as e:
-                            print(f"[MEGAPHONE] Error initializing player reflection filter: {e}")
-                    
-                    # Apply EFX sends
+                            print(f"[MEGAPHONE] Error initializing player filter: {e}")
+
+                    # Apply shared EFX sends (eq, reverb, compressor)
                     if hasattr(self.game.audio_mngr, 'efx'):
                         try:
                             if hasattr(self, 'megaphone_eq_slot') and self.megaphone_eq_slot:
-                                self.game.audio_mngr.efx.send(refl_src, 0, self.megaphone_eq_slot, filter=r_filter)
+                                self.game.audio_mngr.efx.send(src, 0, self.megaphone_eq_slot, filter=p_filter)
                             if spk_data.get('reverb_slot'):
-                                self.game.audio_mngr.efx.send(refl_src, 1, spk_data['reverb_slot'], filter=r_filter)
+                                self.game.audio_mngr.efx.send(src, 1, spk_data['reverb_slot'], filter=p_filter)
                             if hasattr(self, 'megaphone_compressor_slot') and self.megaphone_compressor_slot:
-                                self.game.audio_mngr.efx.send(refl_src, 2, self.megaphone_compressor_slot, filter=r_filter)
+                                self.game.audio_mngr.efx.send(src, 2, self.megaphone_compressor_slot, filter=p_filter)
+                            if hasattr(self, 'current_player_reverb_slot') and self.current_player_reverb_slot not in (None, 'UNINIT'):
+                                self.game.audio_mngr.efx.send(src, 3, self.current_player_reverb_slot, filter=p_filter)
                         except Exception:
                             pass
-                            
-                except Exception as e:
-                    print(f"[MEGAPHONE] Error creating per-player reflection source for sender {sender_id}: {e}")
 
-            sources.append(refl_src)
-            filters.append(r_filter)
+                except Exception as e:
+                    print(f"[MEGAPHONE] Error creating per-player primary source for sender {sender_id}: {e}")
+
+                sources.append(src)
+                filters.append(p_filter)
+
+                # 2. Clone reflection source if it exists
+                refl_src = None
+                r_filter = None
+                if src is not None and 'reflection_source' in spk_data:
+                    try:
+                        refl_src = self.game.audio_mngr.context.gen_source()
+                        refl_template = spk_data['reflection_source']
+                        
+                        # Reflection is at ground level, directly below the speaker
+                        ground_level = self.map.minz if hasattr(self, 'map') and hasattr(self.map, 'minz') else 0.0
+                        refl_src.position = (spk_data['position'][0], spk_data['position'][1], ground_level + 1.0)
+                        refl_src.gain = spk_data['base_volume'] * global_vol * 0.4  # 40% volume
+                        refl_src.relative = False
+                        refl_src.rolloff_factor = refl_template.rolloff_factor
+                        refl_src.reference_distance = refl_template.reference_distance
+                        refl_src.max_distance = refl_template.max_distance
+                        refl_src.pitch = refl_template.pitch
+                        
+                        # Point upward
+                        refl_src.direction = (0, 0, 1)
+                        refl_src.cone_inner_angle = refl_template.cone_inner_angle
+                        refl_src.cone_outer_angle = refl_template.cone_outer_angle
+                        refl_src.cone_outer_gain = refl_template.cone_outer_gain
+                        
+                        # Create unique filter for reflection source
+                        r_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+                        if r_filter:
+                            try:
+                                r_filter.set("GAIN", 0.6)
+                                r_filter.set("GAINHF", 0.05)
+                                refl_src.direct_filter = r_filter
+                            except Exception as e:
+                                print(f"[MEGAPHONE] Error initializing player reflection filter: {e}")
+                        
+                        # Apply EFX sends
+                        if hasattr(self.game.audio_mngr, 'efx'):
+                            try:
+                                if hasattr(self, 'megaphone_eq_slot') and self.megaphone_eq_slot:
+                                    self.game.audio_mngr.efx.send(refl_src, 0, self.megaphone_eq_slot, filter=r_filter)
+                                if spk_data.get('reverb_slot'):
+                                    self.game.audio_mngr.efx.send(refl_src, 1, spk_data['reverb_slot'], filter=r_filter)
+                                if hasattr(self, 'megaphone_compressor_slot') and self.megaphone_compressor_slot:
+                                    self.game.audio_mngr.efx.send(refl_src, 2, self.megaphone_compressor_slot, filter=r_filter)
+                            except Exception:
+                                pass
+                                
+                    except Exception as e:
+                        print(f"[MEGAPHONE] Error creating per-player reflection source for sender {sender_id}: {e}")
+
+                sources.append(refl_src)
+                filters.append(r_filter)
 
         if sources:
             targets_vol = []
@@ -1016,6 +1048,18 @@ class Gameplay(state.State):
                     if now - entry['last_active'] > 5.0]
         for sid in inactive:
             self._remove_megaphone_player(sid)
+            
+        # Cleanup expired fading sources
+        if hasattr(self, 'megaphone_fading_sources'):
+            to_remove = []
+            for fade_obj in self.megaphone_fading_sources:
+                if now - fade_obj['fade_start'] >= fade_obj['fade_duration']:
+                    for f_src in fade_obj['sources']:
+                        if f_src and getattr(f_src, "is_valid", lambda: False)():
+                            f_src.destroy()
+                    to_remove.append(fade_obj)
+            for item in to_remove:
+                self.megaphone_fading_sources.remove(item)
 
 
     def _check_speaker_occlusion(self, speaker_pos, player_pos):
@@ -1200,7 +1244,8 @@ class Gameplay(state.State):
                 if hasattr(channel, 'vc_compression'):
                     channel.vc_compression.put(lambda: voice_chat.tick_megaphone_delay(self))
 
-        if not self.spectator_mode:
+        is_concert = getattr(self, 'concert_spectator_mode', False)
+        if not self.spectator_mode or is_concert:
             self.player.loop()
         elif not self.substates:
             # Filter events for spectator mode when idle (Allow ESC, TAB, Chat, RETURN, Brackets, PageUp/Down, and Comma/Period)
@@ -1316,7 +1361,7 @@ class Gameplay(state.State):
                             pass
             
             # ALSO sync all active per-player megaphone sources
-            if hasattr(self, 'megaphone_player_sources'):
+            if hasattr(self, 'megaphone_player_sources') and not getattr(self, 'concert_spectator_mode', False):
                 for player_entry in self.megaphone_player_sources.values():
                     if 'sources' in player_entry:
                         for src in player_entry['sources']:
@@ -1422,6 +1467,15 @@ class Gameplay(state.State):
                         # Store targets on player cloned sources
                         if hasattr(self, 'megaphone_player_sources'):
                             for player_entry in self.megaphone_player_sources.values():
+                                if getattr(self, 'concert_spectator_mode', False):
+                                    if len(player_entry.get('targets_vol', [])) > 0 and i == 0:
+                                        player_entry['targets_vol'][0] = data['base_volume'] * global_vol
+                                        player_entry['targets_gain'][0] = 1.0
+                                        player_entry['targets_gainhf'][0] = 1.0
+                                        if 'targets_gainlf' in player_entry and len(player_entry['targets_gainlf']) > 0:
+                                            player_entry['targets_gainlf'][0] = 1.0
+                                    continue
+                                    
                                 if 'sources' in player_entry:
                                     prim_idx = 2 * i
                                     refl_idx = 2 * i + 1
@@ -1731,7 +1785,8 @@ class Gameplay(state.State):
         elif isinstance(should_block, list):
             events = should_block
         key = pygame.key.get_pressed()
-        if not self.spectator_mode:
+        is_concert = getattr(self, 'concert_spectator_mode', False)
+        if not self.spectator_mode or is_concert:
             for i in self.keys_held:
                 if key[i]:
                     self.keys_held[i](pygame.key.get_mods())
@@ -1739,7 +1794,7 @@ class Gameplay(state.State):
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
                 self.game.network.send(consts.CHANNEL_MAP, "pong_serve", {})
                 continue
-            if self.spectator_mode:
+            if self.spectator_mode and not getattr(self, 'concert_spectator_mode', False):
                 allowed_keys = [
                     pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
                     pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
@@ -2483,6 +2538,11 @@ class Gameplay(state.State):
         self.add_substate(m)
 
     def leave_spectator_match(self):
+        if getattr(self, 'concert_spectator_mode', False):
+            self.game.network.send(consts.CHANNEL_CHAT, "chat", {"message": "/spec"})
+            self.pop_last_substate()
+            return
+            
         self.spectator_mode = False
         self.camera.set_focus_object(self.player)
         self.pop_last_substate()

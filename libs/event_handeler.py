@@ -686,6 +686,33 @@ class EventHandeler:
 
         speak("You have left spectator mode.")
 
+    def concert_spectator_toggle(self, data):
+        enabled = data.get("enabled", False)
+        self.gameplay.spectator_mode = enabled
+        self.gameplay.concert_spectator_mode = enabled
+        
+        # Move existing megaphone sources to fading state for crossfade
+        import time as _time
+        if hasattr(self.gameplay, 'megaphone_player_sources'):
+            if not hasattr(self.gameplay, 'megaphone_fading_sources'):
+                self.gameplay.megaphone_fading_sources = []
+                
+            for sid, pdata in self.gameplay.megaphone_player_sources.items():
+                sources = pdata.get('sources', [])
+                filters = pdata.get('filters', [])
+                valid_sources = [s for s in sources if s and getattr(s, "is_valid", lambda: False)()]
+                if valid_sources:
+                    self.gameplay.megaphone_fading_sources.append({
+                        "sources": sources,
+                        "filters": filters,
+                        "sid": sid,
+                        "fade_start": _time.time(),
+                        "fade_duration": 1.5,
+                        "start_vols": [s.gain if s else 0.0 for s in sources],
+                        "is_concert": not enabled # the old state
+                    })
+            self.gameplay.megaphone_player_sources.clear()
+
     def spectator_update(self, data):
         if not self.gameplay.spectator_mode:
             return

@@ -526,7 +526,7 @@ class MusicCompression:
             logger.log_exception(e, "MusicCompression.recieve")
 
 
-def _queue_packet_to_source(gameplay, idx, src, play_packet):
+def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=None):
     buf = None
     try:
         while src.buffers_processed > 0:
@@ -545,7 +545,50 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet):
         buf = gameplay.game.audio_mngr.context.gen_buffer()
     
     try:
-        buf.set_data(play_packet, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+        is_concert = force_concert_mode if force_concert_mode is not None else getattr(gameplay, 'concert_spectator_mode', False)
+        if is_concert:
+            import array, audioop
+            global _haas_delay_buffers
+            if '_haas_delay_buffers' not in globals():
+                _haas_delay_buffers = {}
+                
+            if len(_haas_delay_buffers) > 50:
+                _haas_delay_buffers.clear()
+                
+            src_key = id(src)
+            samples = array.array('h', play_packet)
+            
+            # 15ms Haas delay (720 samples at 48kHz)
+            delay_samples = int(48000 * 0.015)
+            if src_key not in _haas_delay_buffers:
+                _haas_delay_buffers[src_key] = array.array('h', [0] * delay_samples)
+                
+            combined = _haas_delay_buffers[src_key] + samples
+            delayed_samples = combined[:len(samples)]
+            _haas_delay_buffers[src_key] = combined[len(samples):]
+            
+            # Lauridsen Pseudo-Stereo (Mid/Side processing)
+            # Center (Mid) = Original, Sides (Width) = Delayed phase-inverted
+            M_bytes = play_packet
+            S_bytes = delayed_samples.tobytes()
+            
+            # Scale down slightly to prevent clipping
+            M_scaled = audioop.mul(M_bytes, 2, 0.75)
+            S_pos = audioop.mul(S_bytes, 2, 0.35)
+            S_neg = audioop.mul(S_bytes, 2, -0.35)
+            
+            # L = Mid + Side, R = Mid - Side
+            L_bytes = audioop.add(M_scaled, S_pos, 2)
+            R_bytes = audioop.add(M_scaled, S_neg, 2)
+            
+            # Interleave into stereo buffer
+            stereo_samples = array.array('h', [0] * (len(samples) * 2))
+            stereo_samples[0::2] = array.array('h', L_bytes)
+            stereo_samples[1::2] = array.array('h', R_bytes)
+            
+            buf.set_data(stereo_samples.tobytes(), sample_rate=48000, format=cyal.BufferFormat.STEREO16)
+        else:
+            buf.set_data(play_packet, sample_rate=48000, format=cyal.BufferFormat.MONO16)
         src.queue_buffers(buf)
     except (cyal.exceptions.InvalidOperationError, cyal.exceptions.ALError): 
         return
@@ -565,6 +608,14 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet):
                         src_idx = entry['sources'].index(src)
                         if 'filters' in entry and src_idx < len(entry['filters']):
                             filter_to_apply = entry['filters'][src_idx]
+                        break
+            
+            if filter_to_apply is None and hasattr(gameplay, 'megaphone_fading_sources'):
+                for fade_obj in gameplay.megaphone_fading_sources:
+                    if 'sources' in fade_obj and src in fade_obj['sources']:
+                        src_idx = fade_obj['sources'].index(src)
+                        if 'filters' in fade_obj and src_idx < len(fade_obj['filters']):
+                            filter_to_apply = fade_obj['filters'][src_idx]
                         break
             
             # Fallback to physical templates
@@ -693,12 +744,33 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                 for _ in range(pad_frames):
                     _queue_packet_to_source(gameplay, idx, src, silence_packet)
                     
+                    # Also pad fading sources
+                    if hasattr(gameplay, 'megaphone_fading_sources'):
+                        for fade_obj in gameplay.megaphone_fading_sources:
+                            if fade_obj['sid'] == sender_id and idx < len(fade_obj['sources']):
+                                f_src = fade_obj['sources'][idx]
+                                if f_src and getattr(f_src, "is_valid", lambda: False)():
+                                    _queue_packet_to_source(gameplay, idx, f_src, silence_packet, force_concert_mode=fade_obj['is_concert'])
+                    
     _speaker_last_calc_time[sender_id] = now
     
     # 4. Queue the actual audio packet to all sources
     for idx, src in enumerate(sources):
         if src is not None:
             _queue_packet_to_source(gameplay, idx, src, packet)
+            
+    # Process Crossfade for fading sources
+    if hasattr(gameplay, 'megaphone_fading_sources'):
+        for fade_obj in gameplay.megaphone_fading_sources:
+            if fade_obj['sid'] == sender_id:
+                elapsed = now - fade_obj['fade_start']
+                if elapsed <= fade_obj['fade_duration']:
+                    t = elapsed / fade_obj['fade_duration']
+                    for idx, f_src in enumerate(fade_obj['sources']):
+                        if f_src and getattr(f_src, "is_valid", lambda: False)():
+                            start_vol = fade_obj['start_vols'][idx] if idx < len(fade_obj['start_vols']) else 1.0
+                            f_src.gain = max(0.0, start_vol * (1.0 - t))
+                            _queue_packet_to_source(gameplay, idx, f_src, packet, force_concert_mode=fade_obj['is_concert'])
 
 
 def tick_megaphone_delay(gameplay):
@@ -725,6 +797,20 @@ def tick_megaphone_delay(gameplay):
                         has_delayed_audio = True
                         play_packet = _speaker_delay_queues[queue_key].popleft()
                         _queue_packet_to_source(gameplay, idx, src, play_packet)
+                        
+                        # Process Crossfade for fading sources
+                        if hasattr(gameplay, 'megaphone_fading_sources'):
+                            for fade_obj in gameplay.megaphone_fading_sources:
+                                if fade_obj['sid'] == sender_id:
+                                    elapsed = current_time - fade_obj['fade_start']
+                                    if elapsed <= fade_obj['fade_duration']:
+                                        t = elapsed / fade_obj['fade_duration']
+                                        if idx < len(fade_obj['sources']):
+                                            f_src = fade_obj['sources'][idx]
+                                            if f_src and getattr(f_src, "is_valid", lambda: False)():
+                                                start_vol = fade_obj['start_vols'][idx] if idx < len(fade_obj['start_vols']) else 1.0
+                                                f_src.gain = max(0.0, start_vol * (1.0 - t))
+                                                _queue_packet_to_source(gameplay, idx, f_src, play_packet, force_concert_mode=fade_obj['is_concert'])
                         
                 if has_delayed_audio:
                     _last_play_times[sender_id] = current_time
