@@ -2477,10 +2477,22 @@ class Gameplay(state.State):
         if mod & pygame.KMOD_CTRL:
             self.open_language_menu(mod)
             return
+        if mod & pygame.KMOD_ALT:
+            self.toggle_in_ear_monitor()
+            return
+            
         if not self.player.locked:
             self.player.face(self.player.hfacing, 0, self.player.bfacing)
             speak("You now have a pitch of 0 degrees")
             self.player.play_sound("foley/turn/stop.ogg", cat="self")
+
+    def toggle_in_ear_monitor(self):
+        self.in_ear_monitor = not getattr(self, "in_ear_monitor", False)
+        if self.in_ear_monitor:
+            speak("In-Ear Monitor Enabled. Megaphone echo is muted.")
+        else:
+            speak("In-Ear Monitor Disabled. Standard Megaphone audio restored.")
+
 
     def open_language_menu(self, mod):
         self.game.network.send(consts.CHANNEL_MISC, "request_language_menu", {})
@@ -2641,11 +2653,12 @@ class Gameplay(state.State):
             return  # Ignore rapid presses
         self._pa_toggle_clock.restart()
         
-        # Staff OR Builder can use this feature
+        # Staff OR Builder OR Technician can use this feature
         is_staff = getattr(self, 'is_staff', False)
         is_builder = getattr(self, 'is_builder', False)
-        if not is_staff and not is_builder:
-            speak("System: PA Test Mode is only available for staff and builders.")
+        is_technician = getattr(self, 'is_technician', False)
+        if not is_staff and not is_builder and not is_technician:
+            speak("System: PA Test Mode is only available for staff, builders, and sound technicians.")
             return
         
         # Check if game has started - block PA Test Mode if so

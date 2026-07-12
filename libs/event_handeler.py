@@ -47,9 +47,11 @@ class EventHandeler:
         try:
             self.gameplay.is_staff = bool(data.get("is_staff", False))
             self.gameplay.is_builder = bool(data.get("is_builder", False))
+            self.gameplay.is_technician = bool(data.get("is_technician", False))
         except Exception:
             self.gameplay.is_staff = False
             self.gameplay.is_builder = False
+            self.gameplay.is_technician = False
             
         # Reset PA Test Mode state
         if hasattr(self.gameplay, 'pa_test_mode'):
@@ -576,12 +578,12 @@ class EventHandeler:
     def megaphone_settings_response(self, data):
         """Handle server response for megaphone settings permission"""
         if data.get("allowed", False):
-            # Player is builder - open menu
+            # Player is builder/technician - open menu
             from . import megaphone_settings
             self.gameplay.push_substate(megaphone_settings.megaphone_settings(self.game, self.gameplay))
         else:
-            # Player is not builder - deny access
-            speak("You must be a builder to access megaphone settings.")
+            # Player is not builder/technician - deny access
+            speak("You must be a builder or sound technician to access megaphone settings.")
     
     def open_megaphone_settings(self, data):
         """Open megaphone settings menu (triggered from builder menu)"""
