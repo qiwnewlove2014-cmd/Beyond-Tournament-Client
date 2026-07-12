@@ -94,7 +94,7 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    PRE_BUFFER_FRAMES = 3       # Wait for 3 frames (60ms) before playing
+    PRE_BUFFER_FRAMES = 1       # Wait for 1 frame (20ms) before playing (reduced for lower latency)
     MAX_BUFFER_FRAMES = 8       # Maximum frames in buffer (160ms)
     TARGET_BUFFER_FRAMES = 4    # Target buffer level (80ms latency)
     
