@@ -591,10 +591,7 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet):
 
 
 def queue_and_delay_frame(gameplay, sender_id, sources, packet):
-    # Check for In-Ear Monitor mode (Mute own megaphone echo)
-    if getattr(gameplay, "in_ear_monitor", False) and hasattr(gameplay, "player"):
-        if sender_id == gameplay.player.id:
-            return  # Drop own audio to prevent Speech Jammer effect
+
 
     global _speaker_delay_queues
     import math

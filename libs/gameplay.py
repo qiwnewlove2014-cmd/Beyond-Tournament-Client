@@ -558,12 +558,18 @@ class Gameplay(state.State):
                     print(f"[MEGAPHONE] Error creating per-speaker reverb: {e}")
                     speaker_reverb_slot = None
             
+            eq_bass = speaker_data_list[i].get('eq_bass', 50.0)
+            eq_mid = speaker_data_list[i].get('eq_mid', 50.0)
+            eq_treble = speaker_data_list[i].get('eq_treble', 50.0)
+
             # Create unique filter for primary speaker template
-            p_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+            p_filter = self.game.audio_mngr.gen_filter("BANDPASS")
             if p_filter:
                 try:
-                    p_filter.set("GAIN", 0.85)
-                    p_filter.set("GAINHF", 0.4)
+                    # Convert 0-100 to 0.0-1.0
+                    p_filter.set("GAINLF", eq_bass / 100.0)
+                    p_filter.set("GAIN", eq_mid / 100.0)
+                    p_filter.set("GAINHF", eq_treble / 100.0)
                     src.direct_filter = p_filter
                 except Exception as e:
                     print(f"[MEGAPHONE] Error initializing primary filter: {e}")
@@ -598,10 +604,15 @@ class Gameplay(state.State):
                     'outer_gain': outer_gain
                 },
                 'filter': p_filter,
-                'target_gain': 0.85,
-                'current_gain': 0.85,
-                'target_gainhf': 0.4,
-                'current_gainhf': 0.4,
+                'eq_bass': eq_bass / 100.0,
+                'eq_mid': eq_mid / 100.0,
+                'eq_treble': eq_treble / 100.0,
+                'target_gain': eq_mid / 100.0,
+                'current_gain': eq_mid / 100.0,
+                'target_gainhf': eq_treble / 100.0,
+                'current_gainhf': eq_treble / 100.0,
+                'target_gainlf': eq_bass / 100.0,
+                'current_gainlf': eq_bass / 100.0,
                 'target_vol': final_vol * init_occlusion,
                 'current_vol': final_vol * init_occlusion
             })
@@ -851,6 +862,7 @@ class Gameplay(state.State):
             targets_vol = []
             targets_gain = []
             targets_gainhf = []
+            targets_gainlf = []
             
             # Get player position to calculate accurate initial volumes
             try:
@@ -900,12 +912,14 @@ class Gameplay(state.State):
                 
                 if not is_refl:
                     targets_vol.append(base_v * init_occlusion)
-                    targets_gain.append(0.85)
-                    targets_gainhf.append(0.4)
+                    targets_gain.append(spk_data.get('target_gain', 0.85))
+                    targets_gainhf.append(spk_data.get('target_gainhf', 0.4))
+                    targets_gainlf.append(spk_data.get('target_gainlf', 0.5))
                 else:
                     targets_vol.append(base_v * 0.4 * init_occlusion)
-                    targets_gain.append(0.6)
-                    targets_gainhf.append(0.05)
+                    targets_gain.append(spk_data.get('refl_target_gain', 0.6))
+                    targets_gainhf.append(spk_data.get('refl_target_gainhf', 0.05))
+                    targets_gainlf.append(spk_data.get('refl_target_gainlf', 0.6))
                     
             # Set source gain directly to match initial volume
             for idx, src_obj in enumerate(sources):
@@ -921,7 +935,9 @@ class Gameplay(state.State):
                 'targets_gain': targets_gain,
                 'currents_gain': list(targets_gain),
                 'targets_gainhf': targets_gainhf,
-                'currents_gainhf': list(targets_gainhf)
+                'currents_gainhf': list(targets_gainhf),
+                'targets_gainlf': targets_gainlf,
+                'currents_gainlf': list(targets_gainlf)
             }
             return sources
         return None
@@ -1361,22 +1377,30 @@ class Gameplay(state.State):
                                 fade_factor = 1.0 - ((distance - fade_start) / (spk_hearing_range_raw - fade_start))
                         
                         occlusion_multiplier = fade_factor
-                        target_gain = 0.85
-                        target_gainhf = 0.4
+                        
+                        eq_mid = data.get('eq_mid', 0.5)
+                        eq_treble = data.get('eq_treble', 0.5)
+                        eq_bass = data.get('eq_bass', 0.5)
+                        
+                        target_gain = eq_mid
+                        target_gainhf = eq_treble
+                        target_gainlf = eq_bass
                         
                         # Apply occlusion and underwater filters only if not fully faded out
                         if fade_factor > 0.0:
                             if is_underwater:
                                 # Player is underwater - filter megaphone heavily
-                                target_gain = 0.8
-                                target_gainhf = 0.02
+                                target_gain = eq_mid * 0.94
+                                target_gainhf = eq_treble * 0.05
+                                target_gainlf = min(1.0, eq_bass * 1.5)
                                 # Extra volume attenuation based on player depth
                                 depth = getattr(self.camera.focus_object, 'depth', 1.0)
                                 occlusion_multiplier = fade_factor * max(0.1, depth * 0.3)
                             elif is_blocked or is_behind:
                                 # Behind speaker OR blocked by wall - apply muffled filter
-                                target_gain = 0.6
-                                target_gainhf = 0.05
+                                target_gain = eq_mid * 0.7
+                                target_gainhf = eq_treble * 0.12
+                                target_gainlf = min(1.0, eq_bass * 1.2)
                                 if is_blocked:
                                     occlusion_multiplier = fade_factor * 0.3  # 30% through wall
                                 else:
@@ -1388,10 +1412,12 @@ class Gameplay(state.State):
                         data['target_vol'] = target_vol
                         data['target_gain'] = target_gain
                         data['target_gainhf'] = target_gainhf
+                        data['target_gainlf'] = target_gainlf
                         
                         data['refl_target_vol'] = target_vol * 0.4
-                        data['refl_target_gain'] = 0.6
-                        data['refl_target_gainhf'] = 0.05
+                        data['refl_target_gain'] = eq_mid * 0.7
+                        data['refl_target_gainhf'] = eq_treble * 0.12
+                        data['refl_target_gainlf'] = min(1.0, eq_bass * 1.2)
 
                         # Store targets on player cloned sources
                         if hasattr(self, 'megaphone_player_sources'):
@@ -1404,11 +1430,13 @@ class Gameplay(state.State):
                                         player_entry['targets_vol'][prim_idx] = target_vol
                                         player_entry['targets_gain'][prim_idx] = target_gain
                                         player_entry['targets_gainhf'][prim_idx] = target_gainhf
+                                        player_entry['targets_gainlf'][prim_idx] = target_gainlf
                                         
                                     if refl_idx < len(player_entry['sources']):
                                         player_entry['targets_vol'][refl_idx] = target_vol * 0.4
-                                        player_entry['targets_gain'][refl_idx] = 0.6
-                                        player_entry['targets_gainhf'][refl_idx] = 0.05
+                                        player_entry['targets_gain'][refl_idx] = eq_mid * 0.7
+                                        player_entry['targets_gainhf'][refl_idx] = eq_treble * 0.12
+                                        player_entry['targets_gainlf'][refl_idx] = min(1.0, eq_bass * 1.2)
                     except Exception:
                         pass
 
@@ -1459,7 +1487,7 @@ class Gameplay(state.State):
                             data['filter'].set("GAIN", t_g)
                         
                         # LERP filter gainhf
-                        t_ghf = data.get('target_gainhf', 0.4)
+                        t_ghf = data.get('target_gainhf', 0.5)
                         c_ghf = data.get('current_gainhf', t_ghf)
                         if abs(t_ghf - c_ghf) > 0.001:
                             new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
@@ -1468,6 +1496,21 @@ class Gameplay(state.State):
                         elif c_ghf != t_ghf:
                             data['current_gainhf'] = t_ghf
                             data['filter'].set("GAINHF", t_ghf)
+                            
+                        # LERP filter gainlf
+                        t_glf = data.get('target_gainlf', 0.5)
+                        c_glf = data.get('current_gainlf', t_glf)
+                        if abs(t_glf - c_glf) > 0.001:
+                            new_glf = c_glf + (t_glf - c_glf) * smooth_factor
+                            data['current_gainlf'] = new_glf
+                            data['filter'].set("GAINLF", new_glf)
+                        elif c_glf != t_glf:
+                            data['current_gainlf'] = t_glf
+                            data['filter'].set("GAINLF", t_glf)
+                            
+                        # CRITICAL: Re-apply filter object to source so changes take effect
+                        if data.get('source'):
+                            data['source'].direct_filter = data['filter']
                         
                     # Template reflection source
                     if data.get('reflection_source') and data.get('refl_filter'):
@@ -1481,7 +1524,7 @@ class Gameplay(state.State):
                             data['refl_current_vol'] = t_vol
                             data['reflection_source'].gain = t_vol
                         
-                        t_g = data.get('refl_target_gain', 0.6)
+                        t_g = data.get('refl_target_gain', 0.35)
                         c_g = data.get('refl_current_gain', t_g)
                         if abs(t_g - c_g) > 0.001:
                             new_g = c_g + (t_g - c_g) * smooth_factor
@@ -1491,7 +1534,7 @@ class Gameplay(state.State):
                             data['refl_current_gain'] = t_g
                             data['refl_filter'].set("GAIN", t_g)
                         
-                        t_ghf = data.get('refl_target_gainhf', 0.05)
+                        t_ghf = data.get('refl_target_gainhf', 0.06)
                         c_ghf = data.get('refl_current_gainhf', t_ghf)
                         if abs(t_ghf - c_ghf) > 0.001:
                             new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
@@ -1500,6 +1543,20 @@ class Gameplay(state.State):
                         elif c_ghf != t_ghf:
                             data['refl_current_gainhf'] = t_ghf
                             data['refl_filter'].set("GAINHF", t_ghf)
+
+                        t_glf = data.get('refl_target_gainlf', 0.6)
+                        c_glf = data.get('refl_current_gainlf', t_glf)
+                        if abs(t_glf - c_glf) > 0.001:
+                            new_glf = c_glf + (t_glf - c_glf) * smooth_factor
+                            data['refl_current_gainlf'] = new_glf
+                            data['refl_filter'].set("GAINLF", new_glf)
+                        elif c_glf != t_glf:
+                            data['refl_current_gainlf'] = t_glf
+                            data['refl_filter'].set("GAINLF", t_glf)
+                            
+                        # CRITICAL: Re-apply filter object to source so changes take effect
+                        if data.get('reflection_source'):
+                            data['reflection_source'].direct_filter = data['refl_filter']
                         
                     # 2. Interpolate active per-player sources
                     if hasattr(self, 'megaphone_player_sources'):
@@ -1512,13 +1569,17 @@ class Gameplay(state.State):
                                 is_other_active = most_recent_active and (sid != most_recent_sender_id)
                                 duck_mult = 0.25 if is_other_active else 1.0
                                 
+                                # Mute own voice (Fade) if In-Ear Monitor is enabled
+                                is_own_voice = sid not in getattr(self, 'voice_channels', {})
+                                in_ear_mult = 0.001 if (is_own_voice and getattr(self, 'in_ear_monitor', False)) else 1.0
+                                
                                 # Interpolate player primary source
                                 if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None and player_entry['filters'][prim_idx] is not None:
                                     src = player_entry['sources'][prim_idx]
                                     flt = player_entry['filters'][prim_idx]
                                     
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][prim_idx] * duck_mult
+                                    t_vol = player_entry['targets_vol'][prim_idx] * duck_mult * in_ear_mult
                                     c_vol = player_entry['currents_vol'][prim_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
@@ -1549,6 +1610,22 @@ class Gameplay(state.State):
                                     elif c_ghf != t_ghf:
                                         player_entry['currents_gainhf'][prim_idx] = t_ghf
                                         flt.set("GAINHF", t_ghf)
+
+                                    # Filter GAINLF
+                                    t_glf = player_entry.get('targets_gainlf', player_entry['targets_gainhf'])[prim_idx]
+                                    c_glf = player_entry.get('currents_gainlf', player_entry['currents_gainhf'])[prim_idx]
+                                    if abs(t_glf - c_glf) > 0.001:
+                                        new_glf = c_glf + (t_glf - c_glf) * smooth_factor
+                                        if 'currents_gainlf' in player_entry:
+                                            player_entry['currents_gainlf'][prim_idx] = new_glf
+                                        flt.set("GAINLF", new_glf)
+                                    elif c_glf != t_glf:
+                                        if 'currents_gainlf' in player_entry:
+                                            player_entry['currents_gainlf'][prim_idx] = t_glf
+                                        flt.set("GAINLF", t_glf)
+                                        
+                                    # CRITICAL: Re-apply filter object to source so changes take effect
+                                    src.direct_filter = flt
                                     
                                 # Interpolate player reflection source
                                 if refl_idx < len(player_entry['sources']) and player_entry['sources'][refl_idx] is not None and player_entry['filters'][refl_idx] is not None:
@@ -1556,7 +1633,7 @@ class Gameplay(state.State):
                                     flt = player_entry['filters'][refl_idx]
                                     
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][refl_idx] * duck_mult
+                                    t_vol = player_entry['targets_vol'][refl_idx] * duck_mult * in_ear_mult
                                     c_vol = player_entry['currents_vol'][refl_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
@@ -1587,6 +1664,22 @@ class Gameplay(state.State):
                                     elif c_ghf != t_ghf:
                                         player_entry['currents_gainhf'][refl_idx] = t_ghf
                                         flt.set("GAINHF", t_ghf)
+
+                                    # Filter GAINLF
+                                    t_glf = player_entry.get('targets_gainlf', player_entry['targets_gainhf'])[refl_idx]
+                                    c_glf = player_entry.get('currents_gainlf', player_entry['currents_gainhf'])[refl_idx]
+                                    if abs(t_glf - c_glf) > 0.001:
+                                        new_glf = c_glf + (t_glf - c_glf) * smooth_factor
+                                        if 'currents_gainlf' in player_entry:
+                                            player_entry['currents_gainlf'][refl_idx] = new_glf
+                                        flt.set("GAINLF", new_glf)
+                                    elif c_glf != t_glf:
+                                        if 'currents_gainlf' in player_entry:
+                                            player_entry['currents_gainlf'][refl_idx] = t_glf
+                                        flt.set("GAINLF", t_glf)
+                                        
+                                    # CRITICAL: Re-apply filter object to source so changes take effect
+                                    src.direct_filter = flt
                                         
                     # 3. Apply air absorption every frame using last calculated distance
                     dist = data.get('distance', 0.0)

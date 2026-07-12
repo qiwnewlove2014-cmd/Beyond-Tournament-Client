@@ -315,7 +315,7 @@ class Map:
             else:
                 self.source_list.append(source)
 
-    def spawn_megaphoneSpeaker(self, minx=0, maxx=0, miny=0, maxy=0, minz=0, maxz=0, volume=60, id="", x=None, y=None, z=None, delay=0.0, reverb_decay=2.0, reverb_diffusion=0.8, aim_yaw=0, aim_pitch=-30, inner_cone_angle=45, outer_cone_angle=90, outer_cone_gain=0.2, hearing_range=0.0, **kwargs):
+    def spawn_megaphoneSpeaker(self, minx=0, maxx=0, miny=0, maxy=0, minz=0, maxz=0, volume=60, id="", x=None, y=None, z=None, delay=0.0, reverb_decay=2.0, reverb_diffusion=0.8, aim_yaw=0, aim_pitch=-30, inner_cone_angle=45, outer_cone_angle=90, outer_cone_gain=0.2, hearing_range=0.0, eq_bass=50, eq_mid=50, eq_treble=50, **kwargs):
         # Volume comes in as 0-100, convert to 0.0-1.0
         volume = float(volume) / 100.0
         
@@ -340,7 +340,11 @@ class Map:
             'inner_cone_angle': float(inner_cone_angle),
             'outer_cone_angle': float(outer_cone_angle),
             'outer_cone_gain': float(outer_cone_gain),
-            'hearing_range': float(hearing_range)
+            'hearing_range': float(hearing_range),
+            # EQ properties (0-100)
+            'eq_bass': float(eq_bass),
+            'eq_mid': float(eq_mid),
+            'eq_treble': float(eq_treble)
         })
 
 
