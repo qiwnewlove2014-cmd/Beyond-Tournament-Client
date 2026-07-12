@@ -347,6 +347,14 @@ class voice_chat_compression(threading.Thread):
                     
                     buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
                     try: 
+                        # Jitter Buffer Padding (100ms) to prevent micro-stutters
+                        if src.buffers_queued == 0:
+                            silence_data = bytes(len(data))
+                            for _ in range(5):
+                                s_buf = self.game.audio_mngr.context.gen_buffer()
+                                s_buf.set_data(silence_data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                                src.queue_buffers(s_buf)
+                                
                         src.queue_buffers(buf)
                     except cyal.exceptions.InvalidOperationError: 
                         continue
@@ -734,10 +742,13 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
             _speaker_current_delays[sender_id].append(frames_delay)
             
-            # Instantly push silence frames to restore perfect spatial stagger
-            target_active = frames_delay
+            # Add jitter buffer margin (120ms = 6 frames) to prevent micro-stutters during network drops
+            JITTER_MARGIN_FRAMES = 6
+            
+            # Instantly push silence frames to restore perfect spatial stagger and jitter margin
+            target_active = frames_delay + JITTER_MARGIN_FRAMES
             current_active = active_counts[idx]
-            pad_frames = target_active - current_active
+            pad_frames = max(0, target_active - current_active)
             
             if pad_frames > 0:
                 silence_packet = bytes(len(packet))
