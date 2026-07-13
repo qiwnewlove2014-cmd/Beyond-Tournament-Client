@@ -30,8 +30,9 @@ def _find_ffmpeg():
             return ffmpeg_path
     except ImportError:
         pass
-    # 2. Check next to executable (handle PyInstaller frozen state)
-    if getattr(sys, 'frozen', False):
+    # 2. Check next to executable (handle Nuitka/PyInstaller standalone state)
+    is_compiled = getattr(sys, 'frozen', False) or '__compiled__' in globals() or not os.path.basename(sys.executable).lower().startswith("python")
+    if is_compiled:
         exe_dir = os.path.dirname(sys.executable)
     else:
         exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
@@ -295,6 +296,7 @@ class AudioStreamer(threading.Thread):
     def run(self):
         if not FFMPEG_PATH:
             print("[MusicBot] ffmpeg not found!")
+            speak("ffmpeg not found.")
             return
 
         cmd = [FFMPEG_PATH]
@@ -321,6 +323,7 @@ class AudioStreamer(threading.Thread):
             )
         except Exception as ex:
             print(f"[MusicBot] ffmpeg launch error: {ex}")
+            speak("ffmpeg launch error.")
             return
 
         # Initialize buffer pool
