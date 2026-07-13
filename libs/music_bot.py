@@ -36,7 +36,7 @@ def _find_ffmpeg():
     else:
         exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
         
-    for name in ["ffmpeg.exe", "ffmpeg"]:
+    for name in ["ffmpeg.exe", "ffmpeg$.exe", "ffmpeg"]:
         p = os.path.join(exe_dir, name)
         if os.path.exists(p):
             return p
