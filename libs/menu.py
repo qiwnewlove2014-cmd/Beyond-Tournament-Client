@@ -110,6 +110,24 @@ class Menu(state.State):
         if gain is None:
             gain = options.get("menu_music_volume", 50)
         self.music = music_path
+
+        # Check if the game already has this music playing!
+        current_music = getattr(self.game, "_active_menu_music", None)
+        if current_music and current_music.get("path") == music_path:
+            self.mus = current_music["sound"]
+            if self.mus and self.mus.source is not None:
+                self.mus.source.gain = gain / 100
+            self.mus.volume = gain
+            self.music_volume = gain
+            current_music["kept"] = True
+            return
+
+        if current_music:
+            old_mus = current_music.get("sound")
+            if old_mus:
+                old_mus.destroy()
+            self.game._active_menu_music = None
+
         mus = self.game.audio_mngr.create_soundgroup(direct=True)
         self.mus = mus.play(self.music, looping=True, cat="music")
         if self.mus is None:
@@ -117,6 +135,13 @@ class Menu(state.State):
         if self.mus.source is not None: self.mus.source.gain = gain / 100
         self.mus.volume = gain
         self.music_volume = gain
+
+        self.game._active_menu_music = {
+            "path": music_path,
+            "sound": self.mus,
+            "soundgroup": mus,
+            "kept": False
+        }
 
     def speak_current_item(self):
         item = self.items[self.pos]
@@ -269,10 +294,27 @@ class Menu(state.State):
         super().exit()
         options.save()
         if self.mus != None:
-            self.game.automate(
-                self.mus.source, "gain", 0.0, 500, 
-                callback= self.mus.destroy, cancelable=False
-            )
+            active = getattr(self.game, "_active_menu_music", None)
+            if active and active.get("sound") == self.mus:
+                # Give the next menu state 100ms to claim this music
+                self.game.call_after(100, lambda: self._cleanup_menu_music(self.mus, active["soundgroup"]))
+            else:
+                self.game.automate(
+                    self.mus.source, "gain", 0.0, 500, 
+                    callback=self.mus.destroy, cancelable=False
+                )
         if self.close:
             self.direct_soundgroup.play(self.close, cat="ui")
+
+    def _cleanup_menu_music(self, sound, soundgroup):
+        active = getattr(self.game, "_active_menu_music", None)
+        if active and active.get("sound") == sound:
+            if active.get("kept"):
+                active["kept"] = False
+            else:
+                self.game.automate(
+                    sound.source, "gain", 0.0, 500, 
+                    callback=sound.destroy, cancelable=False
+                )
+                self.game._active_menu_music = None
 

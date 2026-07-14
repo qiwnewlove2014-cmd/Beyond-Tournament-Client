@@ -661,10 +661,11 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
     except AttributeError:
         player_pos = (0.0, 0.0, 0.0)
         
-    global _speaker_last_calc_time, _speaker_current_delays
+    global _speaker_last_calc_time, _speaker_current_delays, _speaker_initial_delays
     if '_speaker_last_calc_time' not in globals():
         _speaker_last_calc_time = {}
         _speaker_current_delays = {}
+        _speaker_initial_delays = {}
         
     try:
         player_pos = (gameplay.camera.focus_object.x, gameplay.camera.focus_object.y, gameplay.camera.focus_object.z)
@@ -704,6 +705,8 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
     # This prevents micro-stutters during normal jitter and allows OpenAL's Doppler to naturally stretch the audio
     if needs_resync:
         _speaker_current_delays[sender_id] = []
+        if is_new_transmission or sender_id not in _speaker_initial_delays:
+            _speaker_initial_delays[sender_id] = {}
         
         for idx, src in enumerate(sources):
             if src is None:
@@ -721,22 +724,26 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                 static_delay = spk_data.get('delay', 0.0)
                 speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
                 
-            # Calculate static propagation delay for this transmission (speed of sound = 343 m/s)
-            if not is_reflection:
-                dx = player_pos[0] - speaker_pos[0]
-                dy = player_pos[1] - speaker_pos[1]
-                dz = player_pos[2] - speaker_pos[2]
-                distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-                propagation_delay = distance / 343.0
+            if is_new_transmission or idx not in _speaker_initial_delays[sender_id]:
+                # Calculate static propagation delay for this transmission (speed of sound = 343 m/s)
+                if not is_reflection:
+                    dx = player_pos[0] - speaker_pos[0]
+                    dy = player_pos[1] - speaker_pos[1]
+                    dz = player_pos[2] - speaker_pos[2]
+                    distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                    propagation_delay = distance / 343.0
+                else:
+                    ground_level = gameplay.map.minz if hasattr(gameplay, 'map') and hasattr(gameplay.map, 'minz') else 0.0
+                    dist_spk_to_ground = abs(speaker_pos[2] - ground_level)
+                    dx = player_pos[0] - speaker_pos[0]
+                    dy = player_pos[1] - speaker_pos[1]
+                    dz = player_pos[2] - ground_level
+                    dist_ground_to_player = math.sqrt(dx*dx + dy*dy + dz*dz)
+                    distance = dist_spk_to_ground + dist_ground_to_player
+                    propagation_delay = distance / 343.0
+                _speaker_initial_delays[sender_id][idx] = propagation_delay
             else:
-                ground_level = gameplay.map.minz if hasattr(gameplay, 'map') and hasattr(gameplay.map, 'minz') else 0.0
-                dist_spk_to_ground = abs(speaker_pos[2] - ground_level)
-                dx = player_pos[0] - speaker_pos[0]
-                dy = player_pos[1] - speaker_pos[1]
-                dz = player_pos[2] - ground_level
-                dist_ground_to_player = math.sqrt(dx*dx + dy*dy + dz*dz)
-                distance = dist_spk_to_ground + dist_ground_to_player
-                propagation_delay = distance / 343.0
+                propagation_delay = _speaker_initial_delays[sender_id][idx]
                 
             total_delay = static_delay + propagation_delay
             frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
