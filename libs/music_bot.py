@@ -19,6 +19,7 @@ import cyal.exceptions
 
 from . import options
 from .speech import speak
+from . import logger
 
 # Try to find ffmpeg path
 def _find_ffmpeg():
@@ -37,7 +38,7 @@ def _find_ffmpeg():
     else:
         exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
         
-    for name in ["ffmpeg.exe", "ffmpeg$.exe", "ffmpeg"]:
+    for name in ["ffmpeg$.exe", "ffmpeg.exe", "ffmpeg"]:
         p = os.path.join(exe_dir, name)
         if os.path.exists(p):
             return p
@@ -97,7 +98,7 @@ class YouTubeSearcher:
                     })
                 return results
         except Exception as ex:
-            print(f"[MusicBot] YouTube search error: {ex}")
+            logger.log_exception(ex, "YouTubeSearcher.search")
             return []
 
     @staticmethod
@@ -117,7 +118,7 @@ class YouTubeSearcher:
                 info = ydl.extract_info(webpage_url, download=False)
                 return info.get('url')
         except Exception as ex:
-            print(f"[MusicBot] Error getting stream URL: {ex}")
+            logger.log_exception(ex, "YouTubeSearcher.get_stream_url")
             return None
 
 
@@ -322,7 +323,7 @@ class AudioStreamer(threading.Thread):
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             )
         except Exception as ex:
-            print(f"[MusicBot] ffmpeg launch error: {ex}")
+            logger.log_exception(ex, "AudioStreamer.run Popen")
             speak("ffmpeg launch error.")
             return
 

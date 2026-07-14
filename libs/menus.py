@@ -352,7 +352,7 @@ def set_input_device(game, device, func_call, parent, capture, in_game=False):
     if device == "system default": device = str(capture.default_device.decode('utf-8'))
     if in_game and parent.voice_chat.audio_input.name != device: 
         del parent.voice_chat.audio_input
-        parent.voice_chat.audio_input = parent.voice_chat.capture_ext.open_device(name=device.encode(), sample_rate=48000, format=cyal.BufferFormat.MONO16)
+        parent.voice_chat.audio_input = parent.voice_chat.capture_ext.open_device(name=device, sample_rate=48000, format=cyal.BufferFormat.MONO16)
     func_call()
 
 
