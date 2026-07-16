@@ -118,6 +118,7 @@ def main_menu(game):
             ("Set account", game.set_account),
             ("Create account", game.create_account),
             ("options", lambda: options_menu(game, lambda: main_menu(game))),
+            ("Check for Updates", lambda: updater.check_and_update(game)),
             ("Exit", game.exit),
         )
     )
@@ -352,7 +353,11 @@ def set_input_device(game, device, func_call, parent, capture, in_game=False):
     if device == "system default": device = str(capture.default_device.decode('utf-8'))
     if in_game and parent.voice_chat.audio_input.name != device: 
         del parent.voice_chat.audio_input
-        parent.voice_chat.audio_input = parent.voice_chat.capture_ext.open_device(name=device, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+        try:
+            parent.voice_chat.audio_input = parent.voice_chat.capture_ext.open_device(name=device.encode(), sample_rate=48000, format=cyal.BufferFormat.MONO16)
+        except (cyal.exceptions.DeviceNotFoundError, TypeError):
+            parent.voice_chat.audio_input = None
+            speak(f"Failed to load audio device: {device}")
     func_call()
 
 

@@ -398,8 +398,8 @@ class VoiceChatRecord(threading.Thread):
         self.capture_ext = cyal.CaptureExtension()
         device = options.get("audio_input_device", 'system default')
         if device == 'system default': device = self.capture_ext.default_device.decode('utf-8')
-        try: self.audio_input = self.capture_ext.open_device(name=device, sample_rate=48000)
-        except cyal.exceptions.DeviceNotFoundError: 
+        try: self.audio_input = self.capture_ext.open_device(name=device.encode(), sample_rate=48000)
+        except (cyal.exceptions.DeviceNotFoundError, TypeError): 
             self.audio_input = None
             speak(f"Failed to load audio device: {device}")
         self.vc_compression = voice_chat_compression(self.game)
