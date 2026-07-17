@@ -395,6 +395,11 @@ class Updater(state.State):
     def _start_download(self):
         """เริ่มดาวน์โหลดใน background thread เพื่อไม่บล็อกตัวเกม"""
         import threading
+        # เฟดเพลงลงก่อนเริ่มอัปเดต
+        try:
+            pygame.mixer.music.fadeout(1000)
+        except Exception:
+            pass
         speak(
             "Beyond Tournament Updating. "
             "Press Space for progress, 1 for speed, 2 for size, 3 for time remaining.",

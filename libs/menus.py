@@ -118,7 +118,7 @@ def main_menu(game):
             ("Set account", game.set_account),
             ("Create account", game.create_account),
             ("options", lambda: options_menu(game, lambda: main_menu(game))),
-            ("Check for Updates", lambda: updater.check_and_update(game)),
+            ("Check for Updates", lambda: game.replace(updater.Updater(game))),
             ("Exit", game.exit),
         )
     )
