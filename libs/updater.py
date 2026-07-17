@@ -4,7 +4,7 @@ import zipfile
 import subprocess
 import sys
 import tempfile
-from pygame import key
+import pygame
 import requests
 import pySmartDL as dl
 from . import state, menu, version
@@ -91,16 +91,17 @@ def _current_version_string():
 
 
 def install_and_restart(zip_path):
-    """แตก zip ไป temp dir → copy ทับไดเรกทอรีปัจจุบัน → restart ผ่าน
-    move_to/rm_dir handshake (scaffolding ที่มีอยู่แล้วใน game.parse_arguments)
+    """แตก zip ไป temp dir → สร้าง batch script → ปิดเกม → batch คัดลอกทับ → popup แจ้งเสร็จ
+
+    ใช้ Batch Script Handoff เพื่อหลีกเลี่ยง WinError 5 (Access Denied)
+    เนื่องจาก Windows ล็อกไฟล์ .pyd/.dll ที่กำลังถูกใช้งานอยู่
 
     ขั้นตอน:
     1. แตก zip ไป temp dir
-    2. หาโฟลเดอร์ย่อยที่มี Beyond Tournament.exe (release อาจห่อโฟลเดอร์)
-    3. คัดลอกทับไดเรกทอรีปัจจุบัน
-    4. relaunch exe ใหม่ + สั่งลบไดเรกทอรีเก่า
+    2. หาโฟลเดอร์ย่อยที่มี Beyond Tournament.exe
+    3. สร้าง batch script ที่รอให้เกมปิดก่อน แล้วคัดลอกทับ + popup แจ้งเสร็จ
+    4. สั่งรัน batch script แล้วปิดเกมทันที
     """
-    # หาไดเรกทอรีปัจจุบัน (ที่ exe รันอยู่)
     current_dir = os.getcwd()
 
     # แตก zip ไป temp
@@ -117,7 +118,6 @@ def install_and_restart(zip_path):
     source_dir = extract_dir
     exe_name = "Beyond Tournament.exe"
     if not os.path.exists(os.path.join(source_dir, exe_name)):
-        # ค้นหาในโฟลเดอร์ย่อยระดับเดียว
         for entry in os.listdir(source_dir):
             sub = os.path.join(source_dir, entry)
             if os.path.isdir(sub) and os.path.exists(os.path.join(sub, exe_name)):
@@ -129,35 +129,50 @@ def install_and_restart(zip_path):
         shutil.rmtree(extract_dir, ignore_errors=True)
         return
 
-    # คัดลอกทับ (ใช้ path_utils.copy_folder เหมือน move_to handshake)
-    speak("Installing update...", True)
-    try:
-        path_utils.copy_folder(source_dir, current_dir)
-    except Exception as e:
-        speak(f"Failed to install update: {e}", True)
-        shutil.rmtree(extract_dir, ignore_errors=True)
-        return
+    # สร้าง batch script สำหรับคัดลอกทับหลังเกมปิด
+    bat_path = os.path.join(tempfile.gettempdir(), "bt_update_install.bat")
+    pid = os.getpid()
+    src = source_dir.replace('/', '\\')
+    dst = current_dir.replace('/', '\\')
+    ext = extract_dir.replace('/', '\\')
+    zp = zip_path.replace('/', '\\')
 
-    # ทำความสะอาด temp
-    shutil.rmtree(extract_dir, ignore_errors=True)
-    try:
-        os.remove(zip_path)
-    except Exception:
-        pass
+    with open(bat_path, 'w', encoding='utf-8') as f:
+        f.write('@echo off\n')
+        f.write('chcp 65001 >nul\n')
+        # รอให้ process เกมปิดตัวก่อน (สูงสุด 30 วินาที)
+        f.write('set /a count=0\n')
+        f.write(':waitloop\n')
+        f.write('set /a count+=1\n')
+        f.write('if %count% gtr 30 goto install\n')
+        f.write(f'tasklist /FI "PID eq {pid}" 2>nul | find /I "{pid}" >nul\n')
+        f.write('if not errorlevel 1 (\n')
+        f.write('    timeout /t 1 /nobreak >nul\n')
+        f.write('    goto waitloop\n')
+        f.write(')\n')
+        f.write(':install\n')
+        # คัดลอกไฟล์ทับ (ตอนนี้ไม่มีไฟล์ถูกล็อกแล้ว)
+        f.write(f'xcopy /E /Y /Q "{src}\\*" "{dst}\\"\n')
+        # แสดง popup แจ้งอัปเดตเสร็จ
+        f.write('powershell -WindowStyle Hidden -Command "')
+        f.write("Add-Type -AssemblyName System.Windows.Forms; ")
+        f.write("[System.Windows.Forms.MessageBox]::Show(")
+        f.write("'Update installed successfully! Please restart the game.', ")
+        f.write("'Beyond Tournament Update', 'OK', 'Information')")
+        f.write('"\n')
+        # ทำความสะอาด temp
+        f.write(f'rmdir /s /q "{ext}"\n')
+        f.write(f'del "{zp}" 2>nul\n')
+        f.write('del "%~f0"\n')
 
-    # Restart: relaunch exe ใหม่ในไดเรกทอรีปัจจุบัน + สั่งให้มันลบตัวเองทิ้ง
-    # (ใช้ rm_dir handshake ของ parse_arguments)
-    speak("Update installed. Restarting...", True)
-    new_exe = os.path.join(current_dir, exe_name)
-    try:
-        subprocess.Popen(
-            [new_exe, "rm_dir", current_dir, str(os.getpid())],
-            cwd=current_dir,
-        )
-        # ออกจากโปรแกรมปัจจุบันให้ process ใหม่ทำงานต่อ
-        os._exit(0)
-    except Exception as e:
-        speak(f"Failed to restart: {e}. Please restart manually.", True)
+    speak("Installing update. The game will close now.", True)
+    import time
+    time.sleep(2)  # ให้เวลาเสียงพูดจบก่อนปิด
+    subprocess.Popen(
+        ['cmd', '/c', bat_path],
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+    )
+    os._exit(0)
 
 
 def check_and_update(game, interactive=True):
@@ -247,28 +262,41 @@ def check_and_update(game, interactive=True):
 
 
 # =============================================================================
-# Legacy Updater State (คงไว้เพื่อความเข้ากันได้ — game.py/menus.py ยังอ้างถึง)
+# Updater State — เช็คอัปเดตตอนเปิดแอป พร้อมถามยืนยันก่อนดาวน์โหลด
 # =============================================================================
 class Updater(state.State):
-    """State wrapper ที่อัปเดตจาก GitHub ตอนเปิดแอป (compiled mode).
+    """State wrapper ที่เช็คอัปเดตจาก GitHub ตอนเปิดแอป (compiled mode).
 
-    ใช้ check_and_update ใน enter() แทน stub เดิม ถ้าไม่มีอัปเดตหรือผิดพลาด
-    จะไป main_menu ตามปกติ ถ้ามีอัปเดตจะดาวน์โหลด+restart ให้อัตโนมัติ"""
+    ถ้าเจออัปเดตใหม่จะถามผู้เล่นก่อน (Enter = ดาวน์โหลด, Escape = ข้าม)
+    ระหว่างดาวน์โหลดกดปุ่มเพื่อดูสถานะได้:
+      Space = เปอร์เซ็นต์, 1 = ความเร็ว, 2 = ขนาด, 3 = เวลาเหลือ
+    ถ้าไม่มีอัปเดตหรือผิดพลาดจะไป main_menu ตามปกติ"""
 
     def __init__(self, game, check=True):
         super().__init__(game)
         self.check = check
+        self.update_info = None
+        self.downloading = False
+        self.smart_dl = None  # อ้างอิง SmartDL object สำหรับดูสถานะ
 
     def enter(self):
         from . import menus
         super().enter()
         if self.check:
-            # เช็คแบบเงียบตอนเปิดแอป ถ้าไม่มีอัปเดต → ไป main menu
-            # ถ้ามีอัปเดต → check_and_update จะพูดแจ้งและ restart เอง
             try:
-                updated = check_and_update(self.game, interactive=False)
-                if updated:
-                    return  # กำลัง restart อยู่ อย่าไป main menu
+                release = get_latest_release()
+                if release and not release.get("no_release"):
+                    current = _current_version_tuple()
+                    if is_newer(release["tag"], current) and release.get("zip_url"):
+                        self.update_info = release
+                        current_str = _current_version_string()
+                        speak(
+                            f"Update available: {release['tag']}. "
+                            f"You are on {current_str}. "
+                            f"Press Enter to download, or Escape to skip.",
+                            True,
+                        )
+                        return  # รอ input จากผู้เล่นใน update()
             except Exception:
                 pass
         menus.main_menu(self.game)
@@ -278,3 +306,139 @@ class Updater(state.State):
 
     def update(self, events):
         super().update(events)
+        if not self.update_info:
+            return
+
+        for event in events:
+            if event.type != pygame.KEYDOWN:
+                continue
+
+            # === ยังไม่ได้ดาวน์โหลด: รอยืนยัน ===
+            if not self.downloading:
+                if event.key == pygame.K_RETURN:
+                    self.downloading = True
+                    self._start_download()
+                elif event.key == pygame.K_ESCAPE:
+                    from . import menus
+                    self.update_info = None
+                    menus.main_menu(self.game)
+                return
+
+            # === กำลังดาวน์โหลด: กดดูสถานะ ===
+            if self.smart_dl and not self.smart_dl.isFinished():
+                if event.key == pygame.K_SPACE:
+                    self._speak_progress()
+                elif event.key == pygame.K_1:
+                    self._speak_speed()
+                elif event.key == pygame.K_2:
+                    self._speak_size()
+                elif event.key == pygame.K_3:
+                    self._speak_eta()
+
+    # === Status Reporting (Accessibility) ===
+
+    def _speak_progress(self):
+        """Space: พูดเปอร์เซ็นต์การดาวน์โหลด"""
+        try:
+            pct = int(self.smart_dl.get_progress() * 100)
+            speak(f"{pct} percent", True)
+        except Exception:
+            speak("Calculating...", True)
+
+    def _speak_speed(self):
+        """1: พูดความเร็วดาวน์โหลด"""
+        try:
+            speed = self.smart_dl.get_speed()
+            if speed > 1024 * 1024:
+                speak(f"{speed / (1024 * 1024):.1f} megabytes per second", True)
+            elif speed > 1024:
+                speak(f"{speed / 1024:.0f} kilobytes per second", True)
+            else:
+                speak(f"{int(speed)} bytes per second", True)
+        except Exception:
+            speak("Calculating...", True)
+
+    def _speak_size(self):
+        """2: พูดขนาดที่ดาวน์โหลดแล้ว / ขนาดทั้งหมด"""
+        try:
+            dl_size = self.smart_dl.get_dl_size()
+            total = self.smart_dl.filesize or 0
+            dl_mb = dl_size / (1024 * 1024)
+            if total > 0:
+                total_mb = total / (1024 * 1024)
+                speak(f"{dl_mb:.1f} of {total_mb:.1f} megabytes downloaded", True)
+            else:
+                speak(f"{dl_mb:.1f} megabytes downloaded", True)
+        except Exception:
+            speak("Calculating...", True)
+
+    def _speak_eta(self):
+        """3: พูดเวลาที่เหลือ"""
+        try:
+            eta = self.smart_dl.get_eta()
+            if eta <= 0:
+                speak("Calculating...", True)
+            elif eta < 60:
+                speak(f"About {int(eta)} seconds remaining", True)
+            else:
+                minutes = int(eta // 60)
+                seconds = int(eta % 60)
+                if seconds > 0:
+                    speak(f"About {minutes} minutes and {seconds} seconds remaining", True)
+                else:
+                    speak(f"About {minutes} minutes remaining", True)
+        except Exception:
+            speak("Calculating...", True)
+
+    # === Download & Install ===
+
+    def _start_download(self):
+        """เริ่มดาวน์โหลดใน background thread เพื่อไม่บล็อกตัวเกม"""
+        import threading
+        speak(
+            "Beyond Tournament Updating. "
+            "Press Space for progress, 1 for speed, 2 for size, 3 for time remaining.",
+            True,
+        )
+        t = threading.Thread(target=self._download_thread, daemon=True)
+        t.start()
+
+    def _download_thread(self):
+        """ดาวน์โหลด .zip จาก GitHub แล้วเรียก install บน main thread"""
+        release = self.update_info
+        tmp_zip = os.path.join(tempfile.gettempdir(), "bt_update.zip")
+        try:
+            smart = dl.SmartDL(
+                release["zip_url"],
+                tmp_zip,
+                threads=2,
+                progress_bar=False,
+                timeout=120,
+            )
+            self.smart_dl = smart  # เก็บอ้างอิงให้ main thread ดูสถานะได้
+            smart.start()
+            smart.wait()
+            if not smart.isSuccessful():
+                self.game.put(lambda: self._on_download_failed(
+                    "Download failed. Please try again later."
+                ))
+                return
+        except Exception as e:
+            msg = str(e)
+            self.game.put(lambda: self._on_download_failed(
+                f"Download failed: {msg}"
+            ))
+            return
+
+        # ดาวน์โหลดเสร็จ → สั่งติดตั้งบน main thread
+        self.game.put(lambda: install_and_restart(tmp_zip))
+
+    def _on_download_failed(self, msg):
+        """ดาวน์โหลดล้มเหลว → แจ้งแล้วไป main menu"""
+        from . import menus
+        speak(msg, True)
+        self.smart_dl = None
+        self.downloading = False
+        self.update_info = None
+        menus.main_menu(self.game)
+
