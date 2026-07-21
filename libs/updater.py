@@ -114,17 +114,18 @@ def install_and_restart(zip_path):
         shutil.rmtree(extract_dir, ignore_errors=True)
         return
 
-    # หาโฟลเดอร์ที่มี exe (release อาจห่อโฟลเดอร์ย่อย)
+    # หาโฟลเดอร์ที่มี exe (ค้นหาแบบ recursive รองรับ zip ที่ห่อโฟลเดอร์ซ้อนกันหลายชั้น)
     source_dir = extract_dir
     exe_name = "Beyond Tournament.exe"
-    if not os.path.exists(os.path.join(source_dir, exe_name)):
-        for entry in os.listdir(source_dir):
-            sub = os.path.join(source_dir, entry)
-            if os.path.isdir(sub) and os.path.exists(os.path.join(sub, exe_name)):
-                source_dir = sub
-                break
+    found_dir = None
+    for root, dirs, files in os.walk(extract_dir):
+        if exe_name in files:
+            found_dir = root
+            break
 
-    if not os.path.exists(os.path.join(source_dir, exe_name)):
+    if found_dir:
+        source_dir = found_dir
+    else:
         speak("Update package does not contain the game executable.", True)
         shutil.rmtree(extract_dir, ignore_errors=True)
         return
