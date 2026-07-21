@@ -268,7 +268,9 @@ class AudioStreamer(threading.Thread):
                 if hasattr(self.bot, 'mic_pcm_queue') and self.bot.mic_pcm_queue:
                     try:
                         mic_data = self.bot.mic_pcm_queue.popleft()
-                        # Mix the two mono 16-bit PCM streams together
+                        # Scale down slightly before mixing to prevent 16-bit PCM overflow clipping distortion
+                        mono_data = audioop.mul(mono_data, 2, 0.75)
+                        mic_data = audioop.mul(mic_data, 2, 0.85)
                         mono_data = audioop.add(mono_data, mic_data, 2)
                     except Exception:
                         pass

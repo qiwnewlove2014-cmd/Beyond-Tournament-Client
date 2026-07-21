@@ -1623,11 +1623,7 @@ class Gameplay(state.State):
                                 is_other_active = most_recent_active and (sid != most_recent_sender_id)
                                 duck_mult = 0.25 if is_other_active else 1.0
                                 
-                                # Mute own voice (Fade) if In-Ear Monitor is enabled
-                                is_own_voice = sid not in getattr(self, 'voice_channels', {})
-                                in_ear_mult = 0.001 if (is_own_voice and getattr(self, 'in_ear_monitor', False)) else 1.0
-                                
-                                # Fade-in logic for toggling concert/spectator mode
+                                 # Fade-in logic for toggling concert/spectator mode
                                 concert_fade_in_mult = 1.0
                                 if hasattr(self, 'concert_fade_in_start'):
                                     import time as _time
@@ -1642,7 +1638,7 @@ class Gameplay(state.State):
                                     flt = player_entry['filters'][prim_idx]
                                     
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][prim_idx] * duck_mult * in_ear_mult * concert_fade_in_mult
+                                    t_vol = player_entry['targets_vol'][prim_idx] * duck_mult * concert_fade_in_mult
                                     c_vol = player_entry['currents_vol'][prim_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
@@ -1696,7 +1692,7 @@ class Gameplay(state.State):
                                     flt = player_entry['filters'][refl_idx]
                                     
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][refl_idx] * duck_mult * in_ear_mult * concert_fade_in_mult
+                                    t_vol = player_entry['targets_vol'][refl_idx] * duck_mult * concert_fade_in_mult
                                     c_vol = player_entry['currents_vol'][refl_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
@@ -2639,21 +2635,11 @@ class Gameplay(state.State):
         if mod & pygame.KMOD_CTRL:
             self.open_language_menu(mod)
             return
-        if mod & pygame.KMOD_ALT:
-            self.toggle_in_ear_monitor()
-            return
             
         if not self.player.locked:
             self.player.face(self.player.hfacing, 0, self.player.bfacing)
             speak("You now have a pitch of 0 degrees")
             self.player.play_sound("foley/turn/stop.ogg", cat="self")
-
-    def toggle_in_ear_monitor(self):
-        self.in_ear_monitor = not getattr(self, "in_ear_monitor", False)
-        if self.in_ear_monitor:
-            speak("In-Ear Monitor Enabled. Megaphone echo is muted.")
-        else:
-            speak("In-Ear Monitor Disabled. Standard Megaphone audio restored.")
 
 
     def open_language_menu(self, mod):
