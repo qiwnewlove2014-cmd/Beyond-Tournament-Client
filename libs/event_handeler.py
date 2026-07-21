@@ -322,7 +322,16 @@ class EventHandeler:
             options.append(
                 (i["title"], functools.partial(on_select, i["value"], i["close"], idx), i.get("preview_sound"))
             )
-        options.append(("Close", on_close, None))
+        has_server_back = False
+        if data.get("options"):
+            last_opt = data["options"][-1]
+            opt_val = last_opt.get("value")
+            if (isinstance(opt_val, dict) and opt_val.get("action") == "builder_back") or opt_val == "builder_back":
+                has_server_back = True
+
+        if not has_server_back:
+            options.append(("Close", on_close, None))
+
         m.add_items(options)
         
         if is_memory_enabled:

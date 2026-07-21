@@ -189,9 +189,11 @@ class Menu(state.State):
                     elif not self.block_space and self.pos != -1:
                         self.select_current_item()
                 elif key == pg.K_ESCAPE:
-                    # activate the last option, we'll assume it exits the menu.
+                    # activate the last option, we'll assume it exits the menu or navigates back.
                     self.items[-1][1]()
-                    if self.autoclose:
+                    # Do not pop client menu if this is a builder menu, allowing server-driven back navigation
+                    is_builder_menu = self.menu_event and (self.menu_event.startswith("builder_") or self.menu_event in ("edit_element_select", "element_action_select"))
+                    if self.autoclose and not is_builder_menu:
                         if self.parrent:
                             self.parrent.pop_last_substate()
                         else:
