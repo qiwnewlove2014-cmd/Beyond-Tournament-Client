@@ -265,7 +265,7 @@ class Menu(state.State):
                 elif self.up_down and key == pg.K_UP:
                     self.move_up()
 
-                if self.up_down and key == pg.K_END:
+                elif self.up_down and key == pg.K_END:
                     self.move_end()
 
                 elif self.up_down and key == pg.K_HOME:
@@ -338,27 +338,25 @@ class Menu(state.State):
                             self.game.pop()
 
                 elif key == pg.K_PAGEDOWN and self.music_volume is not None:
-                    self.set_music_volume(self.music_volume - 5)
-
-                elif key == pg.K_PAGEUP and self.music_volume is not None:
-                    self.set_music_volume(self.music_volume + 5)
-                
-                elif key == pg.K_LEFT and not self.left_right and self.sound_browse_mode:
+                    # Builder paste: only meaningful in the builder menu
+                    if self.game.builder_clipboard:
+                        from libs.builder.utils import handle_builder_paste
+                        handle_builder_paste(self.game)
+                elif key == pg.K_LEFT:
                     if self.preview_volume > 0:
                         self.preview_volume = max(0, self.preview_volume - 5)
                         speech.speak(f"{self.preview_volume}")
                         snd = self.direct_soundgroup.labeled_sources.get("menu_preview")
                         if snd and snd.source:
                             snd.source.gain = (self.preview_volume / 100) * (self.direct_soundgroup.parent.volume_categories.get("ui", [100])[0] / 100)
-                
-                elif key == pg.K_RIGHT and not self.left_right and self.sound_browse_mode:
+                elif key == pg.K_RIGHT:
                     if self.preview_volume < 100:
                         self.preview_volume = min(100, self.preview_volume + 5)
                         speech.speak(f"{self.preview_volume}")
                         snd = self.direct_soundgroup.labeled_sources.get("menu_preview")
                         if snd and snd.source:
                             snd.source.gain = (self.preview_volume / 100) * (self.direct_soundgroup.parent.volume_categories.get("ui", [100])[0] / 100)
-                elif event.unicode:
+                elif event.unicode and event.unicode.isprintable():
                     new_pos = self.return_first_match(event.unicode, self.pos)
                     if new_pos != self.pos:
                         self.pos = new_pos

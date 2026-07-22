@@ -366,6 +366,11 @@ class EventHandeler:
                 m.pos = -1
         else:
             m.pos = -1
+
+        # Focus option 0 by default for active match/lobby turn menus so Enter works immediately
+        if m.menu_type in ("match_play", "match_control") and m.pos == -1 and len(m.items) > 0:
+            m.pos = 0
+
         m.sound_browse_mode = bool(data.get("sound_browse_mode", False))
         m.block_space = data.get("event", "").startswith("builder_")
         # Store menu context so Ctrl+C / Ctrl+V shortcuts know which event and
@@ -375,7 +380,13 @@ class EventHandeler:
         menus.set_default_sounds(m)
         if m.menu_type in ("match_play", "match_control"):
             self.gameplay.in_minigame_match = True
-        self.gameplay.add_substate(m)
+            # If current top substate is already a match menu, replace it to prevent substate stacking
+            if self.gameplay.substates and getattr(self.gameplay.substates[-1], "menu_type", "normal") in ("match_play", "match_control"):
+                self.gameplay.replace_last_substate(m)
+            else:
+                self.gameplay.add_substate(m)
+        else:
+            self.gameplay.add_substate(m)
 
     def close_input(self, data):
         if getattr(self, "gameplay", None):

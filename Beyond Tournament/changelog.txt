@@ -4,6 +4,17 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.4.6] Blackjack Multiplayer Logic & Input Chain Patch — 2026-07-22
+--------------------------------------------------------------------------------
+
+• Minigame & Arcade Systems
+- **Multiplayer Mode Retention:** Resolved round transition logic so multiplayer matches smoothly remain in multiplayer mode across all rounds without defaulting to Solo AI mode.
+- **Turn Security & Guarding:** Added active turn validation across player match actions, preventing out-of-turn inputs from advancing match turns or triggering premature dealer resolution.
+- **Keyboard Navigation Fix:** Restored continuous keyboard event processing for menu items, allowing seamless Up/Down arrow key navigation across all overlay menus.
+- **Instant Action Focus:** Automatically focused active turn choices on arrival, enabling players to select actions immediately via Enter or Space.
+- **Substate Memory Reclamation:** Optimized menu substate updates during match progression, preventing obsolete overlay menus from stacking up in memory.
+
+--------------------------------------------------------------------------------
 [v1.4.5] Blackjack Multiplayer & Minigame Patch — 2026-07-22
 --------------------------------------------------------------------------------
 
