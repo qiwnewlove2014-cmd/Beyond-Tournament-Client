@@ -1,6 +1,9 @@
 import contextlib
+import threading
+import queue as _queue
 
 import pygame as pg
+import cyal
 
 from . import state
 from . import globals as g
@@ -41,6 +44,18 @@ class Menu(state.State):
         self.preview_volume = 100
         self.sound_browse_mode = False
         self.block_space = False
+        # === ASYNC PREVIEW DECODER ===
+        # Decodes Vorbis preview sounds on a background thread so the main thread
+        # never blocks on OpenAL while the megaphone stream is also using the
+        # (unlocked) shared context. One OpenAL source is reused across previews
+        # instead of gen/destroy per item, minimizing context contention.
+        self._preview_decode_queue = _queue.Queue()        # paths awaiting decode
+        self._preview_result_queue = _queue.Queue()        # (path, buffer) decoded
+        self._preview_decode_thread = None
+        self._preview_lock = threading.Lock()
+        self._preview_latest_path = None                   # newest requested path (stale decodes are dropped)
+        self._preview_source = None                        # reused OpenAL source
+        self._preview_buffer = None                        # last buffer bound (kept for gain tweaks)
         # Menu context for builder copy/paste shortcuts (set by make_menu).
         self.menu_event = ""
         self.menu_values = []
@@ -60,24 +75,180 @@ class Menu(state.State):
         item_text = history_items[self.history_pos]
         speech.speak(f"{self.history_pos + 1} of {len(history_items)}: {item_text}", id="menu_history")
 
-    def stop_preview_sound(self):
-        if "menu_preview" in self.direct_soundgroup.labeled_sources:
-            snd = self.direct_soundgroup.labeled_sources.pop("menu_preview")
-            if snd and snd.source:
+    # ====================================================================
+    # ASYNC PREVIEW DECODER
+    # Preview sounds are decoded off the main thread and played on a single
+    # reused OpenAL source. This keeps the main loop from contending with the
+    # megaphone stream for the shared (unlocked) OpenAL context, which was the
+    # cause of megaphone stutter while browsing builder sound menus.
+    # ====================================================================
+
+    def _preview_decode_worker(self):
+        """Background thread: pulls paths from the decode queue and decodes them
+        into OpenAL buffers. Only the Vorbis decode + buffer.set_data happen here
+        (no source mutations). Stale results (a newer path was requested) are
+        dropped before being queued back to the main thread."""
+        while True:
+            path = self._preview_decode_queue.get()
+            if path is None:
+                # Sentinel: stop the worker.
+                self._preview_decode_queue.task_done()
+                return
+            try:
+                # Drop if a newer preview was already requested while we waited.
+                with self._preview_lock:
+                    if path != self._preview_latest_path:
+                        self._preview_decode_queue.task_done()
+                        continue
+                # Reuse the shared buffer cache; this only decodes on a cache miss.
+                buffer = self.game.audio_mngr.load_buffer(path)
+                if buffer is None:
+                    self._preview_decode_queue.task_done()
+                    continue
+                # Drop again right before handing back, in case the user kept moving.
+                with self._preview_lock:
+                    if path != self._preview_latest_path:
+                        self._preview_decode_queue.task_done()
+                        continue
+                # Hand the buffer object back directly (not the path) so the main
+                # thread doesn't have to re-resolve/re-lookup and can't lose it to
+                # the WeakValueDictionary GC between decode and playback.
+                self._preview_result_queue.put((path, buffer))
+            except Exception:
+                pass
+            finally:
                 try:
-                    self.game.automate(
-                        snd.source, "gain", 0.0, 300,
-                        callback=snd.destroy, cancelable=False
-                    )
+                    self._preview_decode_queue.task_done()
+                except ValueError:
+                    pass
+
+    def _ensure_preview_worker(self):
+        """Lazily start the background decode thread once per menu."""
+        if self._preview_decode_thread is not None and self._preview_decode_thread.is_alive():
+            return
+        self._preview_decode_thread = threading.Thread(
+            target=self._preview_decode_worker, daemon=True
+        )
+        self._preview_decode_thread.start()
+
+    def _ensure_preview_source(self):
+        """Lazily create the single reused OpenAL source for previews (direct,
+        non-spatialized). Returns the source or None if it cannot be created."""
+        if self._preview_source is not None:
+            return self._preview_source
+        try:
+            src = self.game.audio_mngr.context.gen_source()
+            src.spatialize = False
+            src.direct_channels = False
+            src.gain = 0.0
+            self._preview_source = src
+            # Register under the menu_preview label so existing gain/volume logic
+            # (arrow-key volume, mute_if_far) still finds a Sound object.
+            from .audio.sound import Sound
+            snd = Sound(src, self.preview_volume, dist=False, cat="ui")
+            self.direct_soundgroup.labeled_sources["menu_preview"] = snd
+        except Exception:
+            self._preview_source = None
+        return self._preview_source
+
+    def _apply_preview_gain(self):
+        """Re-apply the preview volume (callers, ui category, preview_volume)."""
+        src = self._preview_source
+        if src is None:
+            return
+        try:
+            ui_vol = self.direct_soundgroup.parent.volume_categories.get("ui", [100])[0] / 100
+            src.gain = (self.preview_volume / 100) * ui_vol
+        except Exception:
+            pass
+
+    def _poll_preview_result(self):
+        """Called every frame from update(): if a decoded buffer is ready and is
+        still the latest request, bind it to the reused source and play it."""
+        try:
+            path, buffer = self._preview_result_queue.get_nowait()
+        except _queue.Empty:
+            return
+        with self._preview_lock:
+            if path != self._preview_latest_path:
+                return  # stale, ignore
+        src = self._ensure_preview_source()
+        if src is None or buffer is None:
+            return
+        try:
+            with self._preview_lock:
+                src.stop()
+                src.buffer = buffer
+                self._preview_buffer = buffer
+                self._apply_preview_gain()
+                src.play()
+        except Exception:
+            pass
+
+    def stop_preview_sound(self):
+        """Fade the current preview out and stop it (no source destroy — the
+        reused source is kept for the next preview)."""
+        snd = self.direct_soundgroup.labeled_sources.get("menu_preview")
+        src = self._preview_source
+        if src is not None:
+            try:
+                self.game.automate(
+                    src, "gain", 0.0, 300,
+                    callback=lambda: (src.stop() if src else None), cancelable=False
+                )
+            except Exception:
+                try:
+                    src.stop()
                 except Exception:
-                    snd.source.stop()
-                    snd.destroy()
+                    pass
+        # Backwards-compat: keep the old labeled-source fade path too.
+        if snd and snd.source and snd.source is not src:
+            try:
+                self.game.automate(
+                    snd.source, "gain", 0.0, 300,
+                    callback=snd.destroy, cancelable=False
+                )
+            except Exception:
+                snd.source.stop()
+                snd.destroy()
+
+    def _destroy_preview(self):
+        """Tear down the reused preview source and worker (called on exit)."""
+        # Signal the worker to stop and wait briefly for it to drain.
+        try:
+            self._preview_decode_queue.put(None)
+        except Exception:
+            pass
+        if self._preview_decode_thread is not None:
+            self._preview_decode_thread.join(timeout=0.2)
+            self._preview_decode_thread = None
+        # Drain any pending work.
+        with contextlib.suppress(Exception):
+            while True:
+                self._preview_decode_queue.get_nowait()
+        with contextlib.suppress(Exception):
+            while True:
+                self._preview_result_queue.get_nowait()
+        # Destroy the reused source.
+        src = self._preview_source
+        self._preview_source = None
+        self._preview_buffer = None
+        if src is not None:
+            try:
+                src.stop()
+                src.buffer = None
+                src.delete()
+            except Exception:
+                pass
+        # Remove the label mapping we created.
+        with contextlib.suppress(KeyError):
+            self.direct_soundgroup.labeled_sources.pop("menu_preview", None)
 
 
     def toggle_preview(self):
         """If preview is playing, fade it out. If not playing, replay current item."""
-        snd = self.direct_soundgroup.labeled_sources.get("menu_preview")
-        if snd and snd.source and snd.source.state.name != "STOPPED":
+        src = self._preview_source
+        if src is not None and src.state.name != "STOPPED" and src.gain > 0.0:
             self.stop_preview_sound()
             speech.speak("Stopped", id="preview_toggle")
         else:
@@ -169,12 +340,20 @@ class Menu(state.State):
         if callable(text):
             text = text()
         speech.speak(text, id="menu_item")
-        
+
         if len(item) > 2 and item[2]:
-            self.direct_soundgroup.play(item[2], cat="ui", id="menu_preview", volume=self.preview_volume)
+            # Enqueue the preview for async decode instead of playing synchronously.
+            # This keeps the main thread (and OpenAL context) free while the
+            # megaphone stream is using the same context.
+            self._ensure_preview_worker()
+            with self._preview_lock:
+                self._preview_latest_path = item[2]
+            self._preview_decode_queue.put(item[2])
 
     def update(self, events):
         super().update(events)
+        # Drain any decoded preview so it can play this frame (non-blocking).
+        self._poll_preview_result()
         for event in events:
             if event.type == pg.KEYUP:
                 target_gp = getattr(self, "parrent", None) or getattr(self.game, "gameplay", None)
@@ -342,14 +521,14 @@ class Menu(state.State):
                     if self.game.builder_clipboard:
                         from libs.builder.utils import handle_builder_paste
                         handle_builder_paste(self.game)
-                elif key == pg.K_LEFT:
+                elif key == pg.K_LEFT and self.sound_browse_mode:
                     if self.preview_volume > 0:
                         self.preview_volume = max(0, self.preview_volume - 5)
                         speech.speak(f"{self.preview_volume}")
                         snd = self.direct_soundgroup.labeled_sources.get("menu_preview")
                         if snd and snd.source:
                             snd.source.gain = (self.preview_volume / 100) * (self.direct_soundgroup.parent.volume_categories.get("ui", [100])[0] / 100)
-                elif key == pg.K_RIGHT:
+                elif key == pg.K_RIGHT and self.sound_browse_mode:
                     if self.preview_volume < 100:
                         self.preview_volume = min(100, self.preview_volume + 5)
                         speech.speak(f"{self.preview_volume}")
@@ -434,7 +613,7 @@ class Menu(state.State):
         speech.speak(f"music volume set to {self.music_volume}%", id="music_volume")
 
     def exit(self):
-        self.stop_preview_sound()
+        self._destroy_preview()
         super().exit()
         options.save()
         if self.mus != None:
