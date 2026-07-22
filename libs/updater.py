@@ -90,29 +90,23 @@ def _current_version_string():
     return f"{v.major}.{v.minor}.{v.patch}"
 
 
-def install_and_restart(zip_path):
-    """แตก zip ไป temp dir → สร้าง batch script → ปิดเกม → batch คัดลอกทับ → popup แจ้งเสร็จ
-
+def install_and_restart(zip_path, extract_dir=None):
+    """กระบวนการคัดลอกทับและรีสตาร์ท ( Batch Script Handoff )
     ใช้ Batch Script Handoff เพื่อหลีกเลี่ยง WinError 5 (Access Denied)
     เนื่องจาก Windows ล็อกไฟล์ .pyd/.dll ที่กำลังถูกใช้งานอยู่
-
-    ขั้นตอน:
-    1. แตก zip ไป temp dir
-    2. หาโฟลเดอร์ย่อยที่มี Beyond Tournament.exe
-    3. สร้าง batch script ที่รอให้เกมปิดก่อน แล้วคัดลอกทับ + popup แจ้งเสร็จ
-    4. สั่งรัน batch script แล้วปิดเกมทันที
     """
     current_dir = os.getcwd()
 
-    # แตก zip ไป temp
-    extract_dir = tempfile.mkdtemp(prefix="bt_update_")
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(extract_dir)
-    except Exception as e:
-        speak(f"Failed to extract update: {e}", True)
-        shutil.rmtree(extract_dir, ignore_errors=True)
-        return
+    # ถ้ายังไม่ได้ขยายไฟล์ ให้แตก zip ไป temp (รองรับกรณีเรียกใช้งานตรง)
+    if not extract_dir:
+        extract_dir = tempfile.mkdtemp(prefix="bt_update_")
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(extract_dir)
+        except Exception as e:
+            speak(f"Failed to extract update: {e}", True)
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            return
 
     # หาโฟลเดอร์ที่มี exe (ค้นหาแบบ recursive รองรับ zip ที่ห่อโฟลเดอร์ซ้อนกันหลายชั้น)
     source_dir = extract_dir
@@ -279,6 +273,16 @@ class Updater(state.State):
         self.update_info = None
         self.downloading = False
         self.smart_dl = None  # อ้างอิง SmartDL object สำหรับดูสถานะ
+        self.last_pct = -1  # ติดตามเปอร์เซ็นต์ดาวน์โหลดล่าสุด
+
+    def _is_dl_finished(self):
+        """เช็กสถานะการดาวน์โหลดอย่างปลอดภัย ป้องกัน AttributeError จาก pySmartDL thread cleanup"""
+        if not self.smart_dl:
+            return True
+        try:
+            return self.smart_dl.isFinished()
+        except Exception:
+            return True
 
     def enter(self):
         from . import menus
@@ -325,8 +329,8 @@ class Updater(state.State):
                     menus.main_menu(self.game)
                 return
 
-            # === กำลังดาวน์โหลด: กดดูสถานะ ===
-            if self.smart_dl and not self.smart_dl.isFinished():
+            # === ขณะดาวน์โหลด: กดดูสถานะ ===
+            if self.smart_dl and not self._is_dl_finished():
                 if event.key == pygame.K_SPACE:
                     self._speak_progress()
                 elif event.key == pygame.K_1:
@@ -335,6 +339,24 @@ class Updater(state.State):
                     self._speak_size()
                 elif event.key == pygame.K_3:
                     self._speak_eta()
+
+        # === Automatic Progress & Window Title Tracking (NVDA Progress Beeps) ===
+        if self.downloading and self.smart_dl and not self._is_dl_finished():
+            try:
+                pct = int(self.smart_dl.get_progress() * 100)
+                if pct != self.last_pct:
+                    self.last_pct = pct
+                    # 1. Update Window Title Bar so NVDA/JAWS auto-detect percentage and play progress beeps
+                    try:
+                        pygame.display.set_caption(f"[{pct}%] Downloading Update... - Beyond Tournament")
+                    except Exception:
+                        pass
+
+                    # 2. Verbal Speech Announcement every 10%
+                    if pct % 10 == 0 and pct > 0:
+                        speak(f"{pct} percent", False)
+            except Exception:
+                pass
 
     # === Status Reporting (Accessibility) ===
 
@@ -436,12 +458,47 @@ class Updater(state.State):
             ))
             return
 
-        # ดาวน์โหลดเสร็จ → สั่งติดตั้งบน main thread
-        self.game.put(lambda: install_and_restart(tmp_zip))
+        # ดาวน์โหลดเสร็จ → ล้างอ้างอิง smart_dl และส่งคำสั่งแจ้งสถานะขยายไฟล์ผ่าน Main Thread อย่างปลอดภัย
+        self.smart_dl = None
+
+        def _notify_extraction():
+            try:
+                pygame.display.set_caption("[Extracting...] Installing Update... - Beyond Tournament")
+            except Exception:
+                pass
+            speak("Download complete. Extracting update, please wait...", True)
+
+        self.game.put(_notify_extraction)
+
+        extract_dir = tempfile.mkdtemp(prefix="bt_update_")
+        try:
+            with zipfile.ZipFile(tmp_zip, 'r') as zf:
+                zf.extractall(extract_dir)
+        except Exception as e:
+            msg = str(e)
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            self.game.put(lambda: self._on_download_failed(
+                f"Failed to extract update: {msg}"
+            ))
+            return
+
+        # ขยายไฟล์เสร็จเรียบร้อย → สั่งสลับไฟล์บน main thread (<1ms)
+        def _finish_update():
+            try:
+                pygame.display.set_caption("Beyond Tournament")
+            except Exception:
+                pass
+            install_and_restart(tmp_zip, extract_dir)
+
+        self.game.put(_finish_update)
 
     def _on_download_failed(self, msg):
         """ดาวน์โหลดล้มเหลว → แจ้งแล้วไป main menu"""
         from . import menus
+        try:
+            pygame.display.set_caption("Beyond Tournament")
+        except Exception:
+            pass
         speak(msg, True)
         self.smart_dl = None
         self.downloading = False

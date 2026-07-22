@@ -383,6 +383,9 @@ class AudioStreamer(threading.Thread):
                 if not self.running:
                     break
                 try:
+                    # [FIX]: Always reclaim processed buffers so buffers_queued drops to 0 at EOF
+                    self._reclaim_processed()
+
                     # Drain pause buffer into OpenAL
                     while self._pause_buffer:
                         chunk = self._pause_buffer[0]
@@ -391,8 +394,8 @@ class AudioStreamer(threading.Thread):
                         else:
                             break  # No available OpenAL buffers, wait
 
-                    # Restart if source stopped and we have buffers queued
-                    if self.source.state != cyal.SourceState.PLAYING and self.source.buffers_queued > 0:
+                    # Restart if source stopped and we have buffers queued (only if new buffers are queued and not EOF)
+                    if not eof and self.source.state != cyal.SourceState.PLAYING and self.source.buffers_queued > 0:
                         self.source.play()
                 except Exception:
                     pass
@@ -410,12 +413,14 @@ class AudioStreamer(threading.Thread):
         # Wait for remaining buffers to finish playing
         if self.running:
             try:
-                # Keep checking until all queued buffers are processed
+                # Keep checking and unqueuing until all queued buffers are processed
                 while self.source.buffers_queued > 0 and self.running:
+                    with self._lock:
+                        self._reclaim_processed()
                     # If we are paused at the very end, wait here until resumed
-                    if not self.paused and self.source.state != cyal.SourceState.PLAYING:
+                    if not self.paused and self.source.state != cyal.SourceState.PLAYING and self.source.buffers_queued > 0:
                         self.source.play()
-                    time.sleep(0.1)
+                    time.sleep(0.05)
             except Exception:
                 pass
 
@@ -504,6 +509,17 @@ class MapMusicBot:
         self.enabled = options.get("music_bot_enabled", True)
         self.broadcast_enabled = False  # Disabled by default (Private listening mode)
         self.broadcast_to_megaphone = False
+
+        # Personal Playlist & Favorites Manager (Stored locally on Client)
+        from .playlist_manager import PlaylistManager
+        self.playlist_mgr = PlaylistManager()
+        self.current_target = ""
+        self.current_source = "youtube"
+
+        # Unified Last Played Track State (for Ctrl+M Replay and Shift+M Pause/Resume)
+        self.last_track_title = ""
+        self.last_track_target = ""
+        self.last_track_source = "youtube"
 
         # Search state
         self.searching = False
@@ -599,6 +615,10 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._open_file_dialog()
 
+        def go_playlists():
+            gp.pop_last_substate()
+            self._open_playlists_menu()
+
         def go_help():
             gp.pop_last_substate()
             self._show_help_menu()
@@ -607,6 +627,7 @@ class MapMusicBot:
         items = [
             ("Search YouTube", go_search),
             ("Choose Local File", go_local),
+            ("My Playlists & Favorites", go_playlists),
         ]
         
         # Check if staff to show megaphone routing option
@@ -644,6 +665,245 @@ class MapMusicBot:
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
+
+    def _save_current_to_favorites(self):
+        """Save currently playing track to Favorites"""
+        from .speech import speak
+        if not self.current_title or not self.current_target:
+            speak("No track is currently playing.")
+            return
+
+        added = self.playlist_mgr.add_favorite(self.current_title, self.current_target, self.current_source)
+        if added:
+            speak(f"Saved {self.current_title} to favorites.")
+        else:
+            speak(f"{self.current_title} is already in favorites.")
+
+    def _open_playlists_menu(self):
+        """Show main My Playlists & Favorites menu"""
+        from . import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        m = menu_mod.Menu(self.game, "My Playlists & Favorites", parrent=gp)
+        items = []
+
+        if self.current_title and self.current_target:
+            def fav_current():
+                gp.pop_last_substate()
+                self._save_current_to_favorites()
+            items.append(("Save Current Song to Favorites", fav_current))
+
+        def go_favorites():
+            gp.pop_last_substate()
+            self._show_favorites_menu()
+
+        def go_create_playlist():
+            gp.pop_last_substate()
+            self._prompt_create_playlist()
+
+        items.append(("All Favorites", go_favorites))
+        items.append(("Create New Playlist", go_create_playlist))
+
+        # List custom playlists
+        playlist_names = self.playlist_mgr.get_playlist_names()
+        for p_name in playlist_names:
+            def make_p_cb(name):
+                return lambda: (gp.pop_last_substate(), self._show_custom_playlist_menu(name))
+            items.append((f"Playlist: {p_name}", make_p_cb(p_name)))
+
+        items.append(("Back", lambda: (gp.pop_last_substate(), self._show_mode_menu())))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _show_favorites_menu(self):
+        """Show menu of favorite tracks"""
+        from . import menu as menu_mod, menus
+        from .speech import speak
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        favs = self.playlist_mgr.get_favorites()
+        if not favs:
+            speak("No favorite tracks saved yet.")
+            return
+
+        m = menu_mod.Menu(self.game, "All Favorites", parrent=gp)
+        items = []
+        for track in favs:
+            title = track.get("title", "Unknown")
+            target = track.get("target", "")
+            source = track.get("source", "youtube")
+
+            def make_fav_item_cb(t_title, t_target, t_source):
+                return lambda: (gp.pop_last_substate(), self._show_track_action_menu(t_title, t_target, t_source, is_favorite=True))
+
+            items.append((title, make_fav_item_cb(title, target, source)))
+
+        items.append(("Back", lambda: (gp.pop_last_substate(), self._open_playlists_menu())))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _show_custom_playlist_menu(self, playlist_name):
+        """Show tracks inside a custom playlist"""
+        from . import menu as menu_mod, menus
+        from .speech import speak
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        tracks = self.playlist_mgr.get_playlist_tracks(playlist_name)
+        m = menu_mod.Menu(self.game, f"Playlist: {playlist_name}", parrent=gp)
+        items = []
+
+        if tracks:
+            def play_all():
+                gp.pop_last_substate()
+                self._play_playlist_all(playlist_name)
+
+            items.append(("Play All Tracks", play_all))
+
+        def delete_playlist():
+            gp.pop_last_substate()
+            self.playlist_mgr.delete_playlist(playlist_name)
+            speak(f"Deleted playlist {playlist_name}.")
+
+        items.append(("Delete Playlist", delete_playlist))
+
+        for track in tracks:
+            title = track.get("title", "Unknown")
+            target = track.get("target", "")
+            source = track.get("source", "youtube")
+
+            def make_tr_cb(t_title, t_target, t_source, p_name):
+                return lambda: (gp.pop_last_substate(), self._show_track_action_menu(t_title, t_target, t_source, playlist_name=p_name))
+
+            items.append((title, make_tr_cb(title, target, source, playlist_name)))
+
+        items.append(("Back", lambda: (gp.pop_last_substate(), self._open_playlists_menu())))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _show_track_action_menu(self, title, target, source, is_favorite=False, playlist_name=None):
+        """Show actions for a specific track (Play Now, Remove)"""
+        from . import menu as menu_mod, menus
+        from .speech import speak
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        m = menu_mod.Menu(self.game, f"Track: {title}", parrent=gp)
+        items = []
+
+        def play_now():
+            gp.pop_last_substate()
+            self.play_single_track(title, target, source)
+
+        items.append(("Play Now", play_now))
+
+        if is_favorite:
+            def remove_fav():
+                gp.pop_last_substate()
+                self.playlist_mgr.remove_favorite(target)
+                speak(f"Removed {title} from favorites.")
+            items.append(("Remove from Favorites", remove_fav))
+
+        if playlist_name:
+            def remove_from_p():
+                gp.pop_last_substate()
+                self.playlist_mgr.remove_from_playlist(playlist_name, target)
+                speak(f"Removed {title} from playlist.")
+            items.append((f"Remove from {playlist_name}", remove_from_p))
+
+        def back_action():
+            gp.pop_last_substate()
+            if playlist_name:
+                self._show_custom_playlist_menu(playlist_name)
+            else:
+                self._show_favorites_menu()
+
+        items.append(("Back", back_action))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def play_single_track(self, title, target, source):
+        """Play a single track from playlist/favorites"""
+        from .speech import speak
+        import threading
+        self.current_title = title
+        self.current_target = target
+        self.current_source = source
+
+        # Save for replay
+        self.last_track_title = title
+        self.last_track_target = target
+        self.last_track_source = source
+        self.last_youtube_url = target
+        self.last_youtube_title = title
+
+        if source == "local":
+            self._start_local_file_stream(target, title)
+        else:
+            if target.startswith("http://") or target.startswith("https://"):
+                speak(f"Loading: {title}")
+                self.stop()
+                self.is_loading_stream = True
+
+                def do_play():
+                    stream_url = YouTubeSearcher.get_stream_url(target)
+                    if not stream_url:
+                        speak("Failed to get audio stream.")
+                        self.is_loading_stream = False
+                        return
+                    self.game.put(lambda: self._start_youtube_stream(stream_url, title))
+
+                threading.Thread(target=do_play, daemon=True).start()
+            else:
+                self._on_search_submit(target)
+
+    def _play_playlist_all(self, playlist_name):
+        """Play all tracks in a custom playlist sequentially"""
+        from .speech import speak
+        tracks = self.playlist_mgr.get_playlist_tracks(playlist_name)
+        if not tracks:
+            speak("Playlist is empty.")
+            return
+
+        speak(f"Playing playlist: {playlist_name}")
+        first = tracks[0]
+        self.play_single_track(first.get("title", "Unknown"), first.get("target", ""), first.get("source", "youtube"))
+
+    def _prompt_create_playlist(self):
+        """Prompt user for a new playlist name"""
+        gp = self._find_gameplay()
+        if gp:
+            gp.add_substate(self.game.input.run(
+                "Enter new playlist name:",
+                handeler=self._on_create_playlist_submit
+            ))
+
+    def _on_create_playlist_submit(self, name):
+        from .speech import speak
+        gp = self._find_gameplay()
+        if gp:
+            gp.pop_last_substate()
+
+        if not name.strip():
+            speak("Cancelled.")
+            return
+
+        success = self.playlist_mgr.create_playlist(name)
+        if success:
+            speak(f"Created playlist {name}.")
+        else:
+            speak(f"Playlist {name} already exists.")
+        self._open_playlists_menu()
 
     def _show_help_menu(self):
         """Show scrollable menu containing the Music Bot key controls"""
@@ -720,6 +980,13 @@ class MapMusicBot:
 
         speak(f"Loading local file: {title}")
         self.current_title = title
+        self.current_target = filepath
+        self.current_source = "local"
+
+        # Save for replay
+        self.last_track_title = title
+        self.last_track_target = filepath
+        self.last_track_source = "local"
         self.is_loading_stream = True
 
         # Stop any current playback
@@ -798,29 +1065,98 @@ class MapMusicBot:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
+    def _prompt_add_track_to_playlist(self, title, target, source="youtube"):
+        """Prompt user to choose which custom playlist to add a track to"""
+        from . import menu as menu_mod, menus
+        from .speech import speak
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        names = self.playlist_mgr.get_playlist_names()
+        if not names:
+            speak("No custom playlists created yet. Please create one first.")
+            return
+
+        m = menu_mod.Menu(self.game, f"Add '{title}' to Playlist", parrent=gp)
+        items = []
+        for name in names:
+            def make_add_cb(p_name):
+                def do_add():
+                    gp.pop_last_substate()
+                    added = self.playlist_mgr.add_to_playlist(p_name, title, target, source)
+                    if added:
+                        speak(f"Added {title} to {p_name}.")
+                    else:
+                        speak(f"{title} is already in {p_name}.")
+                return do_add
+            items.append((name, make_add_cb(name)))
+
+        items.append(("Cancel", lambda: gp.pop_last_substate()))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
     def _on_result_selected(self, index, gp):
-        """User selected a search result"""
+        """User selected a search result -> Show options (Play Now / Save to Favorites / Save to Playlist)"""
         gp.pop_last_substate()
 
         if index >= len(self.search_results):
-            return
-
-        if self.is_loading_stream:
-            speak("Please wait, already loading a track.")
             return
 
         result = self.search_results[index]
         title = result.get('title', 'Unknown')
         webpage_url = result.get('webpage_url', '')
         direct_url = result.get('url', '')
+        target = webpage_url or direct_url
+
+        from . import menu as menu_mod, menus
+        m = menu_mod.Menu(self.game, title, parrent=gp)
+        items = []
+
+        def play_now():
+            gp.pop_last_substate()
+            self._start_youtube_stream_from_search(title, webpage_url, direct_url)
+
+        def save_fav():
+            gp.pop_last_substate()
+            added = self.playlist_mgr.add_favorite(title, target, "youtube")
+            if added:
+                speak(f"Saved {title} to favorites.")
+            else:
+                speak(f"{title} is already in favorites.")
+
+        def save_playlist():
+            gp.pop_last_substate()
+            self._prompt_add_track_to_playlist(title, target, "youtube")
+
+        items.append(("Play Now", play_now))
+        items.append(("Save to Favorites", save_fav))
+        items.append(("Add to Playlist...", save_playlist))
+        items.append(("Cancel", lambda: gp.pop_last_substate()))
+
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _start_youtube_stream_from_search(self, title, webpage_url, direct_url):
+        from .speech import speak
+        if self.is_loading_stream:
+            speak("Please wait, already loading a track.")
+            return
 
         speak(f"Loading: {title}")
         self.current_title = title
-        self.is_loading_stream = True
+        self.current_target = webpage_url or direct_url
+        self.current_source = "youtube"
 
         # Save for replay
+        self.last_track_title = title
+        self.last_track_target = webpage_url or direct_url
+        self.last_track_source = "youtube"
         self.last_youtube_url = webpage_url
         self.last_youtube_title = title
+        self.is_loading_stream = True
 
         # Stop any current playback
         self.stop()
@@ -828,6 +1164,7 @@ class MapMusicBot:
 
         # Get stream URL in background
         def do_play():
+            import threading
             url = direct_url
             if not url:
                 url = YouTubeSearcher.get_stream_url(webpage_url)
@@ -858,28 +1195,19 @@ class MapMusicBot:
         self.current_title = title
         speak(f"Now playing: {title}")
 
+    def has_last_track(self):
+        """Check if any track has been played and is available for replay"""
+        return bool(self.last_track_target or self.last_youtube_url)
+
     def _replay_last(self):
-        """Replay the last YouTube song by re-fetching stream URL"""
+        """Replay the last played track (YouTube, Local, or Playlist)"""
         if self.is_loading_stream:
             return
-            
-        self.is_loading_stream = True
-        url = self.last_youtube_url
-        title = self.last_youtube_title
-        
-        self.stop()
-        self.is_loading_stream = True
 
-        def do_replay():
-            stream_url = YouTubeSearcher.get_stream_url(url)
-            if not stream_url:
-                speak("Failed to get audio stream for replay.")
-                self.is_loading_stream = False
-                return
-            self.game.put(lambda: self._start_youtube_stream(stream_url, title))
-
-        t = threading.Thread(target=do_replay, daemon=True)
-        t.start()
+        if self.last_track_target:
+            self.play_single_track(self.last_track_title, self.last_track_target, self.last_track_source)
+        elif self.last_youtube_url:
+            self.play_single_track(self.last_youtube_title, self.last_youtube_url, "youtube")
 
     # === Local File Playback (fallback/map music) ===
 
@@ -967,10 +1295,11 @@ class MapMusicBot:
         self._current_reverb_slot = None
 
     def toggle_pause(self):
+        from .speech import speak
         if not self.playing:
             # If we have a last played song, replay it
-            if self.last_youtube_url:
-                speak(f"Replaying: {self.last_youtube_title}")
+            if self.has_last_track():
+                speak(f"Replaying: {self.last_track_title or self.last_youtube_title}")
                 self._replay_last()
             else:
                 speak("Nothing is playing. Press M to search.")

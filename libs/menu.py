@@ -44,6 +44,21 @@ class Menu(state.State):
         # Menu context for builder copy/paste shortcuts (set by make_menu).
         self.menu_event = ""
         self.menu_values = []
+        self.in_history_mode = False
+        self.history_pos = 0
+
+    def speak_history_item(self):
+        history_items = getattr(self.game, "match_history", [])
+        if not history_items:
+            speech.speak("No match history recorded yet.", id="menu_history")
+            return
+        if self.history_pos < 0:
+            self.history_pos = 0
+        elif self.history_pos >= len(history_items):
+            self.history_pos = len(history_items) - 1
+
+        item_text = history_items[self.history_pos]
+        speech.speak(f"{self.history_pos + 1} of {len(history_items)}: {item_text}", id="menu_history")
 
     def stop_preview_sound(self):
         if "menu_preview" in self.direct_soundgroup.labeled_sources:
@@ -89,6 +104,11 @@ class Menu(state.State):
         speech.speak(self.title, id="menu_title")
         if self.open:
             self.direct_soundgroup.play(self.open, cat="ui")
+
+    def add_item(self, title, action=None, preview_sound=None):
+        if action is None:
+            action = lambda: None
+        self.items.append((title, action, preview_sound))
 
     def add_items(self, items: list[tuple]):
         """
@@ -156,8 +176,88 @@ class Menu(state.State):
     def update(self, events):
         super().update(events)
         for event in events:
+            if event.type == pg.KEYUP:
+                target_gp = getattr(self, "parrent", None) or getattr(self.game, "gameplay", None)
+                if target_gp and hasattr(target_gp, "voice_chat_stop"):
+                    if event.key == self.game.keyconfig.get("voice_chat", pg.K_g):
+                        target_gp.voice_chat_stop(getattr(event, "mod", 0))
+                continue
+
             if event.type == pg.KEYDOWN:
                 key = event.key
+
+                is_minigame_match = getattr(self, "menu_type", "normal") in ("match_play", "match_control")
+
+                # Allow chat, voice chat, and buffer reading keys whenever attached to parent Gameplay
+                target_gp = getattr(self, "parrent", None) or getattr(self.game, "gameplay", None)
+                if target_gp and hasattr(target_gp, "chat"):
+                    if key == pg.K_QUOTE:
+                        target_gp.chat(event.mod)
+                        continue
+                    elif key == pg.K_SLASH:
+                        target_gp.map_chat(event.mod)
+                        continue
+                    elif key == pg.K_COMMA:
+                        target_gp.buffer_move_l(event.mod)
+                        continue
+                    elif key == pg.K_PERIOD:
+                        target_gp.buffer_move_r(event.mod)
+                        continue
+                    elif key == pg.K_LEFTBRACKET:
+                        target_gp.buffer_cycle_l(event.mod)
+                        continue
+                    elif key == pg.K_RIGHTBRACKET:
+                        target_gp.buffer_cycle_r(event.mod)
+                        continue
+                    elif key == self.game.keyconfig.get("voice_chat", pg.K_g):
+                        target_gp.voice_chat_start(event.mod)
+                        continue
+
+                # Tab / Shift+Tab Dual-Pane Toggle (Match History vs Card Actions) - ONLY in minigame matches!
+                if key == pg.K_TAB and is_minigame_match:
+                    history_items = getattr(self.game, "match_history", [])
+                    if not history_items:
+                        speech.speak("No match history recorded yet.", True)
+                    else:
+                        self.in_history_mode = not self.in_history_mode
+                        if self.in_history_mode:
+                            self.history_pos = len(history_items) - 1
+                            speech.speak("Match History. Press Up or Down to review. Press Tab for Card Actions.", True)
+                            self.speak_history_item()
+                        else:
+                            speech.speak("Card Actions.", True)
+                            self.speak_current_item()
+                    continue
+
+                if self.in_history_mode and is_minigame_match:
+                    history_items = getattr(self.game, "match_history", [])
+                    if key == pg.K_DOWN:
+                        if self.history_pos > 0:
+                            self.history_pos -= 1
+                            self.speak_history_item()
+                        else:
+                            if self.edge != "":
+                                self.direct_soundgroup.play(self.edge, cat="ui")
+                    elif key == pg.K_UP:
+                        if self.history_pos < len(history_items) - 1:
+                            self.history_pos += 1
+                            self.speak_history_item()
+                        else:
+                            if self.edge != "":
+                                self.direct_soundgroup.play(self.edge, cat="ui")
+                    elif key in (pg.K_RETURN, pg.K_SPACE):
+                        self.speak_history_item()
+                    elif key == pg.K_HOME:
+                        self.history_pos = len(history_items) - 1
+                        self.speak_history_item()
+                    elif key == pg.K_END:
+                        self.history_pos = 0
+                        self.speak_history_item()
+                    elif key == pg.K_ESCAPE:
+                        self.in_history_mode = False
+                        speech.speak("Card Actions.", True)
+                        self.speak_current_item()
+                    continue
 
                 if self.up_down and key == pg.K_DOWN:
                     self.move_down()
@@ -188,12 +288,50 @@ class Menu(state.State):
                         self.toggle_preview()
                     elif not self.block_space and self.pos != -1:
                         self.select_current_item()
-                elif key == pg.K_ESCAPE:
+
+                elif key in (pg.K_BACKSPACE, pg.K_ESCAPE):
+                    now = pg.time.get_ticks()
+                    if now - getattr(self, "last_backspace_time", 0) < 250:
+                        print(f"[DEBUG MENU] Mashing debounced: key={pg.key.name(key)}")
+                        continue  # 🛡️ Debounce rapid mashing
+                    self.last_backspace_time = now
+
+                    menu_type = getattr(self, "menu_type", "normal")
+                    print(f"[DEBUG MENU] Backspace/Esc pressed: title='{self.title}', menu_type='{menu_type}', key={pg.key.name(key)}")
+                    if menu_type == "match_play":
+                        if key == pg.K_BACKSPACE:
+                            control_callback = None
+                            for title, cb, _ in self.items:
+                                if any(w in title for w in ("Control", "Leave", "Exit", "Surrender")):
+                                    control_callback = cb
+                                    break
+                            if control_callback:
+                                print(f"[DEBUG MENU] match_play: Executing control callback: {control_callback}")
+                                control_callback()
+                            else:
+                                print(f"[DEBUG MENU] match_play: Sending prompt_exit_minigame packet")
+                                self.game.network.send(consts.CHANNEL_MENUS, "mainmenu", {"value": {"action": "prompt_exit_minigame"}})
+                        continue
+                    elif menu_type == "match_control":
+                        if self.items:
+                            print(f"[DEBUG MENU] match_control: Executing Resume Game (item 0)")
+                            self.items[0][1]()
+                        continue
+                    else:
+                        # 🛡️ Normal server menu (lobby / setup menus): Consume Backspace and trigger last option or back callback!
+                        if self.items:
+                            print(f"[DEBUG MENU] Normal menu: Executing back option '{self.items[-1][0]}'")
+                            self.items[-1][1]()
+                        continue
+
                     # activate the last option, we'll assume it exits the menu or navigates back.
                     self.items[-1][1]()
-                    # Do not pop client menu if this is a builder menu, allowing server-driven back navigation
-                    is_builder_menu = self.menu_event and (self.menu_event.startswith("builder_") or self.menu_event in ("edit_element_select", "element_action_select"))
-                    if self.autoclose and not is_builder_menu:
+                    # Do not pop client menu if this is a server-navigated menu (allowing server-driven back/confirm dialog)
+                    is_server_menu = self.menu_event and (
+                        self.menu_event.startswith("builder_") or 
+                        self.menu_event in ("edit_element_select", "element_action_select", "mainmenu", "pong_arcade_menu")
+                    )
+                    if self.autoclose and not is_server_menu:
                         if self.parrent:
                             self.parrent.pop_last_substate()
                         else:
@@ -231,6 +369,12 @@ class Menu(state.State):
         return True
 
     def select_current_item(self):
+        now = pg.time.get_ticks()
+        if now - getattr(self, "last_select_time", 0) < 250:
+            print(f"[DEBUG MENU] Item selection debounced (mashing protection)")
+            return  # 🛡️ Debounce rapid mashing on single or multi options!
+        self.last_select_time = now
+
         self.items[self.pos][1]()
         if self.enter_sound != "":
             self.direct_soundgroup.play(self.enter_sound, cat="ui")

@@ -111,9 +111,9 @@ class Camera:
         musics_to_pause = list(
             self.focus_object.map.get_musics_at(self.x, self.y, self.z)
         )
-        self.x = x
-        self.y = y
-        self.z = z
+        self.x = float(x) if x is not None else 0.0
+        self.y = float(y) if y is not None else 0.0
+        self.z = float(z) if z is not None else 0.0
         self.game.audio_mngr.position = (self.x, self.y, self.z)
         self.soundgroup.position = (self.x, self.y, self.z)
 

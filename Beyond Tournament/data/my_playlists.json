@@ -1,0 +1,23 @@
+{
+  "favorites": [
+    {
+      "title": "เจ็บปวดสุดติ่ง - พ็อก บิ๊กอายส์ (คณะเอวีรูม LIVE ) | Original : เด่น อาร์ สยาม",
+      "target": "https://www.youtube.com/watch?v=gWFLNc0PRnk",
+      "source": "youtube"
+    }
+  ],
+  "playlists": {
+    "test": [
+      {
+        "title": "สิทธิ์ของเจ้า - ไหมไทย หัวใจศิลป์【OFFICIAL MV】",
+        "target": "https://www.youtube.com/watch?v=98LzldwNu4I",
+        "source": "youtube"
+      },
+      {
+        "title": "เจ็บปวดสุดติ่ง - พ็อก บิ๊กอายส์ (คณะเอวีรูม LIVE ) | Original : เด่น อาร์ สยาม",
+        "target": "https://www.youtube.com/watch?v=gWFLNc0PRnk",
+        "source": "youtube"
+      }
+    ]
+  }
+}

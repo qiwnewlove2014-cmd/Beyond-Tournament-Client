@@ -59,9 +59,12 @@ class Entity(Object):
             except cyal.exceptions.InvalidOperationError as e:
                 print(e)
                 self.vc_source, self.radio_source, self.music_source = self.game.audio_mngr.context.gen_sources(3) 
-            self.vc_source.position = (self.x, self.y, self.z)
+            ex = float(self.x) if self.x is not None else 0.0
+            ey = float(self.y) if self.y is not None else 0.0
+            ez = float(self.z) if self.z is not None else 0.0
+            self.vc_source.position = (ex, ey, ez)
             self.vc_source.reference_distance = 1.7  # Boost volume to ~20% at 8 meters
-            self.music_source.position = (self.x, self.y, self.z)
+            self.music_source.position = (ex, ey, ez)
             self.music_source.rolloff_factor = 2.0
             self.music_source.reference_distance = 5.0
             self.music_source.max_distance = 150.0
@@ -100,6 +103,9 @@ class Entity(Object):
 
 
     def move(self, x, y, z, play_sound=True, mode="walk"):
+        x = float(x) if x is not None else (float(self.x) if self.x is not None else 0.0)
+        y = float(y) if y is not None else (float(self.y) if self.y is not None else 0.0)
+        z = float(z) if z is not None else (float(self.z) if self.z is not None else 0.0)
         self.x = x
         self.y = y
         self.z = z

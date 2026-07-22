@@ -4,7 +4,7 @@ from math import pi, sin, cos, atan2, radians, degrees, sqrt
 def to_int(value):
     try:
         return int(value)
-    except ValueError:
+    except (ValueError, TypeError):
         return 0
 
 

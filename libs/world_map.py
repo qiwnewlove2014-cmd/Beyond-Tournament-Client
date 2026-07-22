@@ -839,12 +839,17 @@ class PerkMachine(BaseMapObj):
 
 
 class MinigameTable(BaseMapObj):
-    """An arcade/minigame table (e.g. Pong)."""
+    """An arcade/minigame table (e.g. Pong, Blackjack, Multi-Game)."""
 
     def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, game_type="pong"):
         super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "minigameTable")
-        self.game_type = game_type
-        self.label = f"Arcade ({game_type})"
+        self.game_type = game_type or "pong"
+        if self.game_type == "blackjack":
+            self.label = "Blackjack Arcade Table"
+        elif self.game_type == "all":
+            self.label = "Multi-Game Arcade Cabinet"
+        else:
+            self.label = "Pong Arcade Table"
 
 
 class Pannable(BaseMapObj):

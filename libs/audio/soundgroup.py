@@ -305,7 +305,9 @@ class SoundGroup:
             elif not self.muted and source.source.gain == 0.0 and not source.dist or self.muted and source.source.gain == 0.0 and source.dist: 
                 source.source.gain = (source.volume / 100) * (self.parent.volume_categories[source.cat][0] / 100)
                 source.muted=False
-        distance = get_3d_distance(*self.parent.position, *self.position)
+        p1 = [float(c) if c is not None else 0.0 for c in self.parent.position]
+        p2 = [float(c) if c is not None else 0.0 for c in self.position]
+        distance = get_3d_distance(*p1, *p2)
         if distance > self.parent.max_distance: self.muted = True
         else: self.muted = False
 

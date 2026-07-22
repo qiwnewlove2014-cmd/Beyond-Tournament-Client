@@ -74,6 +74,14 @@ class EventHandeler:
         speak("Welcome. You are now online")
 
     def speak(self, data):
+        text = data.get("text", "")
+        if text:
+            if not hasattr(self.game, "match_history"):
+                self.game.match_history = []
+            self.game.match_history.append(text)
+            if len(self.game.match_history) > 50:
+                self.game.match_history.pop(0)
+
         if data["buffer"]:
             buffer.add_item(
                 self.game,
@@ -122,9 +130,15 @@ class EventHandeler:
             None, exclude=self.game.exclude_water, clear=True
         )
         self.gameplay.parser.load(data["data"])
-        self.gameplay.player.move(data["x"], data["y"], data["z"], play_sound=False)
+        raw_x = data.get("x")
+        raw_y = data.get("y")
+        raw_z = data.get("z")
+        x = float(raw_x) if raw_x is not None else 0.0
+        y = float(raw_y) if raw_y is not None else 0.0
+        z = float(raw_z) if raw_z is not None else 0.0
+        self.gameplay.player.move(x, y, z, play_sound=False)
         # Setup megaphone speakers after map data is loaded
-        self.gameplay.setup_megaphone_speakers()
+        self.gameplay.megaphone.setup_megaphone_speakers(force=True)
         # === Load Music Bot playlist for this map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
             self.gameplay.music_bot.load_map_music(data["data"])
@@ -147,7 +161,7 @@ class EventHandeler:
         self.gameplay.player.move(
             self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
         )
-        self.gameplay.setup_megaphone_speakers()
+        self.gameplay.megaphone.setup_megaphone_speakers(force=True)
         # === Reload Music Bot playlist for updated map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
             self.gameplay.music_bot.load_map_music(data["data"])
@@ -164,11 +178,17 @@ class EventHandeler:
             if hasattr(map, f"spawn_{type}"):
                 getattr(map, f"spawn_{type}")(**element["data"])
         if has_megaphone:
-            self.gameplay.setup_megaphone_speakers()
+            self.gameplay.megaphone.setup_megaphone_speakers(force=True)
 
     def spawn_entity(self, data):
+        raw_x = data.get("x")
+        raw_y = data.get("y")
+        raw_z = data.get("z")
+        x = float(raw_x) if raw_x is not None else 0.0
+        y = float(raw_y) if raw_y is not None else 0.0
+        z = float(raw_z) if raw_z is not None else 0.0
         entity = self.gameplay.map.spawn_entity(
-            data["name"], data["x"], data["y"], data["z"]
+            data["name"], x, y, z
         )
         if data.get("voice_channel", None) != None:
             self.gameplay.voice_channels[data["voice_channel"]] = entity
@@ -316,7 +336,10 @@ class EventHandeler:
                 del self.game.menu_memory[menu_id]
             self.gameplay.pop_last_substate()
 
-        m = menu.Menu(self.game, data["title"])
+        m = menu.Menu(self.game, data["title"], autoclose=False, parrent=self.gameplay)
+        m.menu_event = data.get("event", "")
+        m.menu_type = data.get("menu_type", "normal")
+        print(f"[CLIENT HANDLER DEBUG] Received make_menu: title='{data['title']}', event='{m.menu_event}', menu_type='{m.menu_type}', options_count={len(data.get('options', []))}")
         options = []
         for idx, i in enumerate(data["options"]):
             options.append(
@@ -324,10 +347,11 @@ class EventHandeler:
             )
         has_server_back = False
         if data.get("options"):
-            last_opt = data["options"][-1]
-            opt_val = last_opt.get("value")
-            if (isinstance(opt_val, dict) and opt_val.get("action") == "builder_back") or opt_val == "builder_back":
-                has_server_back = True
+            for opt in data["options"]:
+                opt_val = opt.get("value")
+                if (isinstance(opt_val, dict) and opt_val.get("action") in ("builder_back", "bj_prompt_exit", "exit_blackjack")) or opt_val in ("builder_back", "bj_prompt_exit", "exit_blackjack"):
+                    has_server_back = True
+                    break
 
         if not has_server_back:
             options.append(("Close", on_close, None))
@@ -349,7 +373,19 @@ class EventHandeler:
         m.menu_event = data.get("event", "")
         m.menu_values = [i["value"] for i in data["options"]]
         menus.set_default_sounds(m)
+        if m.menu_type in ("match_play", "match_control"):
+            self.gameplay.in_minigame_match = True
         self.gameplay.add_substate(m)
+
+    def close_input(self, data):
+        if getattr(self, "gameplay", None):
+            self.gameplay.pop_last_substate()
+            remaining_match = any(
+                getattr(sub, "menu_type", "normal") in ("match_play", "match_control")
+                for sub in self.gameplay.substates
+            )
+            if not remaining_match:
+                self.gameplay.in_minigame_match = False
 
     def add_weapon(self, data):
         self.gameplay.wmanager.add(weapon.weapon(self.game, self.gameplay, **data))
@@ -553,7 +589,7 @@ class EventHandeler:
             if channelID in self.gameplay.voice_channels:
                 channel = self.gameplay.voice_channels[channelID]
                 # Get or create per-player speaker sources (separate from shared physical speakers)
-                player_sources = self.gameplay.get_megaphone_player_sources(sender_id)
+                player_sources = self.gameplay.megaphone.get_megaphone_player_sources(sender_id)
                 if player_sources:
                     channel.vc_compression.recieve(opus_data, player_sources, None, channelID, self.gameplay, sender_id)
         elif channelID in self.gameplay.voice_channels.keys():
@@ -601,7 +637,7 @@ class EventHandeler:
 
     def megaphone_lock_state(self, data):
         """Handle megaphone lock state broadcasts from server"""
-        self.gameplay.megaphone_lock_owner = data.get("owner")
+        self.gameplay.megaphone.lock_owner = data.get("owner")
 
     def request_scandir(self, data):
         """Scan client's local asset directory and return file/folder items to server"""
@@ -704,27 +740,8 @@ class EventHandeler:
         self.gameplay.concert_fade_in_start = _time.time()
         self.gameplay.concert_fade_in_duration = 1.5
         
-        # Move existing megaphone sources to fading state for crossfade
-        import time as _time
-        if hasattr(self.gameplay, 'megaphone_player_sources'):
-            if not hasattr(self.gameplay, 'megaphone_fading_sources'):
-                self.gameplay.megaphone_fading_sources = []
-                
-            for sid, pdata in self.gameplay.megaphone_player_sources.items():
-                sources = pdata.get('sources', [])
-                filters = pdata.get('filters', [])
-                valid_sources = [s for s in sources if s and getattr(s, "is_valid", lambda: False)()]
-                if valid_sources:
-                    self.gameplay.megaphone_fading_sources.append({
-                        "sources": sources,
-                        "filters": filters,
-                        "sid": sid,
-                        "fade_start": _time.time(),
-                        "fade_duration": 1.5,
-                        "start_vols": [s.gain if s else 0.0 for s in sources],
-                        "is_concert": not enabled # the old state
-                    })
-            self.gameplay.megaphone_player_sources.clear()
+        if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
+            self.gameplay.megaphone.trigger_fade_transition(duration=1.5)
 
     def spectator_update(self, data):
         if not self.gameplay.spectator_mode:
