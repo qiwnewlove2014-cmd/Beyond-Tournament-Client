@@ -1,4 +1,17 @@
 ================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.4.7
+================================================================================
+
+• Audio Engine & Voice Chat
+- **Megaphone Talkover Clipping Fix:** Replaced the previous winner-takes-all ducking (one loud speaker at 100%, others forced to 25%) with equal-power sum-safe mixing. Every simultaneously active speaker now receives gain 1/√N, so the summed level stays constant and no longer clips or crackles when 2+ players talk over each other through the megaphone. Everyone is heard equally.
+- **Non-Blocking Builder Sound Preview:** Sound previews in the Builder music/ambience browse menus are now decoded on a background thread and played on a single reused OpenAL source, instead of decoding and allocating a new source on the main thread every cursor move. This removes the contention with the megaphone stream over the shared OpenAL context, eliminating megaphone stutter while browsing sounds.
+- **Master Gain Clipping Correction:** Fixed the master listener gain being amplified above 1.0 (was master/67 ≈ 1.49 at 100%), which pre-amplified the summed output and caused premature digital clipping. It now maps master volume 1:1 to [0,1].
+- **Tighter Preview Safety Limiter:** Tightened the soft limiter threshold and pre-scaling so individual voices leave headroom before the mixer sums multiple senders during megaphone talkover.
+
+• Builder & Menu Navigation
+- **Arrow-Key Volume Hijack Fix:** Left and right arrow keys were unconditionally hijacked to adjust the preview volume in every menu, preventing their use as navigation. The volume handlers are now gated on the sound-browse flag, matching the existing Space key guard, so arrows no longer interfere with normal menus while still adjusting preview volume inside sound-browse menus.
+
+================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.4.6
 ================================================================================
 

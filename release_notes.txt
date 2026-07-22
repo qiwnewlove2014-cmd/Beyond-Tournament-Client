@@ -1,35 +1,8 @@
-• Minigame & Arcade Systems
-- **Multiplayer Mode Retention:** Resolved round transition logic so multiplayer matches smoothly remain in multiplayer mode across all rounds without defaulting to Solo AI mode.
-- **Turn Security & Guarding:** Added active turn validation across player match actions, preventing out-of-turn inputs from advancing match turns or triggering premature dealer resolution.
-- **Keyboard Navigation Fix:** Restored continuous keyboard event processing for menu items, allowing seamless Up/Down arrow key navigation across all overlay menus.
-- **Instant Action Focus:** Automatically focused active turn choices on arrival, enabling players to select actions immediately via Enter or Space.
-- **Substate Memory Reclamation:** Optimized menu substate updates during match progression, preventing obsolete overlay menus from stacking up in memory.
-
-• Auto-Updater & Client Distribution
-- **Thread-Safe Background Extraction:** Refactored update package extraction to execute cleanly on background threads while safely dispatching UI status updates to the main event loop, completely resolving UI thread freezes and `(Not Responding)` warnings during installation.
-- **pySmartDL Exception Protection:** Added safe exception handling around download status checks, preventing client crashes during post-download thread cleanup.
-- **Seamless Game Auto-Updater:** Introduced an integrated automatic game updater. The client now silently checks for new releases upon startup and prompts the player with full TTS accessibility instructions.
-- **Accessible Progress Tracking:** During an active download, players can press Space (percentage), 1 (download speed), 2 (file size downloaded), or 3 (estimated time remaining) to receive real-time audio progress announcements.
-- **Safe Batch Script Handoff:** Overhauled the update installation pipeline to hand off file replacement to a background batch script upon closing the game, completely eliminating file lock conflicts and permissions errors.
-- **Post-Update Confirmation:** Displays a native Windows notification upon successful update installation, allowing players to restart the game manually at their convenience.
-
 • Audio Engine & Voice Chat
-- **Audio Clipping Protection:** Optimized the Opus stream audio mixing pipeline between microphone voice chat and the Music Bot, eliminating sound distortion and clipping during simultaneous broadcasts.
-- **Megaphone Security & Lock Enforcement:** Reinforced server-side megaphone broadcasting permissions to strictly enforce broadcast ownership locks, preventing unauthorized voice streams from interrupting ongoing announcements.
-- **Background Music Transitions:** Implemented automatic audio fadeouts when initiating an update or changing menus for a polished soundscape transition.
-- **Concert Spectator Audio Crossfading:** Enhanced Concert Spectator mode transitions with a 1.5-second smooth crossfade between physical 3D speaker arrays and 2D stereo concert mode, eliminating abrupt audio cuts and restoring warm bass fidelity.
-- **End-of-Track Stream Reclamation:** Resolved an audio buffer retention issue in the streaming engine. Songs now reach clean end-of-file completion, automatically releasing audio queues and transitioning to the next track without repeating the final audio frame.
-- **Unified Replay & Pause Controls:** Streamlined keyboard control context for audio playback. Replay (Ctrl+M) and Pause/Resume (Shift+M) now reliably function across all audio sources, including custom playlists and local audio files.
+- **Megaphone Talkover Clipping Fix:** Replaced the previous winner-takes-all ducking (one loud speaker at 100%, others forced to 25%) with equal-power sum-safe mixing. Every simultaneously active speaker now receives gain 1/√N, so the summed level stays constant and no longer clips or crackles when 2+ players talk over each other through the megaphone. Everyone is heard equally.
+- **Non-Blocking Builder Sound Preview:** Sound previews in the Builder music/ambience browse menus are now decoded on a background thread and played on a single reused OpenAL source, instead of decoding and allocating a new source on the main thread every cursor move. This removes the contention with the megaphone stream over the shared OpenAL context, eliminating megaphone stutter while browsing sounds.
+- **Master Gain Clipping Correction:** Fixed the master listener gain being amplified above 1.0 (was master/67 ≈ 1.49 at 100%), which pre-amplified the summed output and caused premature digital clipping. It now maps master volume 1:1 to [0,1].
+- **Tighter Preview Safety Limiter:** Tightened the soft limiter threshold and pre-scaling so individual voices leave headroom before the mixer sums multiple senders during megaphone talkover.
 
-• Personal Playlists & Music Bot
-- **AppData User Profile Storage:** Relocated personal playlists (`my_playlists.json`) to Windows `%APPDATA%/Beyond Tournament/`, ensuring custom playlists and favorite tracks remain 100% safe across game updates, reinstalls, and patches. Includes automatic migration of legacy playlist data on startup.
-- **Personal My Playlists & Favorites:** Introduced client-side personal playlist management. Players can now save YouTube tracks and local audio files into a dedicated Favorites list or custom named playlists, allowing instant 1-click playback without re-typing search queries.
-- **Direct Search Result Bookmarking:** Search results and audio selections now feature direct options to play immediately, bookmark to Favorites, or save into specific custom playlists.
-
-• Builder System & UX Improvements
-- **Multi-Level Back Navigation (Builder Stack):** Overhauled the in-game Builder menu navigation. Players can now seamlessly step backward through multi-level configuration menus using the Escape key or Back option without losing their context or restarting from the main menu.
-- **Staff Permissions Synchronization:** Resolved an issue where staff member roles granted in-game were not immediately recognized by client-side builder toggles upon connection.
-
-• System & General Fixes
-- **Spectator Safety Controls:** Restricted spectator command toggles during active competitive matches to prevent state overlap while keeping spectator access available during pre-game exploration lobbies.
-- **Distributed Build Stability:** Prioritized fallback executable resolution for background tools across distributed builds, resolving playback failures on standalone client packages.
+• Builder & Menu Navigation
+- **Arrow-Key Volume Hijack Fix:** Left and right arrow keys were unconditionally hijacked to adjust the preview volume in every menu, preventing their use as navigation. The volume handlers are now gated on the sound-browse flag, matching the existing Space key guard, so arrows no longer interfere with normal menus while still adjusting preview volume inside sound-browse menus.
