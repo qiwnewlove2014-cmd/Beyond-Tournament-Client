@@ -46,10 +46,12 @@ def soft_limit_audio(audio_bytes, threshold=0.35, ratio=12.0):
         limited = []
         peak = max(abs(s) for s in samples) if samples else 1
         
-        # If peak is very high, apply additional pre-scaling
+        # If peak is very high, apply additional pre-scaling.
+        # Threshold lowered to 0.75 to leave headroom before the mixer sums
+        # multiple senders together (prevents sum-clipping during talkover).
         pre_scale = 1.0
-        if peak > max_val * 0.9:
-            pre_scale = (max_val * 0.85) / peak
+        if peak > max_val * 0.75:
+            pre_scale = (max_val * 0.7) / peak
         
         for sample in samples:
             # Pre-scale to prevent extreme peaks
@@ -297,7 +299,10 @@ class voice_chat_compression(threading.Thread):
                 
                 # === MEGAPHONE: Use Jitter Buffer for smooth playback ===
                 if channelID == consts.CHANNEL_MEGAPHONE:
-                    limited_data = soft_limit_audio(bytes(data), threshold=0.8, ratio=6.0)
+                    # Safety-net limiter before the mixer sums this sender with others.
+                    # threshold=0.5 leaves headroom for the equal-power sum at the mixer;
+                    # ratio=4.0 is moderate so individual voices aren't over-compressed.
+                    limited_data = soft_limit_audio(bytes(data), threshold=0.5, ratio=4.0)
                     
                     # Single jitter buffer per sender — ensures all speakers play the same frame simultaneously
                     buffer_key = sender_id if sender_id is not None else "megaphone_shared"

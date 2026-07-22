@@ -1182,19 +1182,19 @@ class MegaphoneManager:
             smooth_factor = 0.15  # 15% transition per frame (~250-300ms total fade duration)
             global_vol = options.get("megaphone_volume", 100) / 100.0
             
-            # Find the most recently active speaker to implement talkover ducking
+            # === SUM-SAFE EQUAL-POWER MIXING (prevents clipping when N talkover) ===
+            # Instead of winner-takes-all ducking (one speaker loud, rest at 25%),
+            # every currently-active speaker gets gain = 1/√N. The summed energy
+            # stays ≈1.0 regardless of how many people talk over each other, so the
+            # master bus never clips. Everyone is heard equally.
             now = time.time()
-            most_recent_sender_id = None
-            max_active_time = 0.0
+            active_speaker_ids = set()
             if hasattr(self, 'player_sources'):
                 for sid, entry in self.player_sources.items():
-                    last_act = entry.get('last_active', 0.0)
-                    if last_act > max_active_time:
-                        max_active_time = last_act
-                        most_recent_sender_id = sid
-            
-            # A speaker is active if they spoke in the last 400ms
-            most_recent_active = (most_recent_sender_id is not None and (now - max_active_time < 0.4))
+                    if now - entry.get('last_active', 0.0) < 0.4:
+                        active_speaker_ids.add(sid)
+            n_active = len(active_speaker_ids)
+            mix_gain = 1.0 / math.sqrt(n_active) if n_active > 0 else 1.0
             
             for i, data in enumerate(self.speaker_data):
                 try:
@@ -1302,9 +1302,11 @@ class MegaphoneManager:
                                 prim_idx = 2 * i
                                 refl_idx = 2 * i + 1
                                 
-                                # Duck player volume if another player is currently speaking more recently
-                                is_other_active = most_recent_active and (sid != most_recent_sender_id)
-                                duck_mult = 0.25 if is_other_active else 1.0
+                                # Equal-power ducking: every active speaker is attenuated
+                                # by 1/√N so the summed level stays ≈ constant (sum-safe).
+                                # Inactive senders (not currently speaking) keep gain 1.0 —
+                                # they are silent anyway since no packets feed their sources.
+                                duck_mult = mix_gain if sid in active_speaker_ids else 1.0
                                 
                                  # Fade-in logic for toggling concert/spectator mode
                                 concert_fade_in_mult = 1.0

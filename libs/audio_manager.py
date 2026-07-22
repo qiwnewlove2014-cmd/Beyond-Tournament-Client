@@ -165,8 +165,11 @@ class AudioManager():
                 self.volume_categories[cat][0] = volume
                 options.set(f"volume_{cat}", volume)
                 if cat == "master":
-                    # Amplification factor: 1.5x louder (divide by 67 instead of 100)
-                    self.listener.gain = self.volume_categories["master"][0] / 67
+                    # Listener gain maps master volume 1:1 to [0,1].
+                    # Do NOT divide by <100 here — a listener gain above 1.0
+                    # pre-amplifies the summed output and causes digital clipping
+                    # whenever multiple sources (e.g. megaphone talkover) overlap.
+                    self.listener.gain = self.volume_categories["master"][0] / 100
                     return
                 
                 for source in self.volume_categories[cat][1]:
