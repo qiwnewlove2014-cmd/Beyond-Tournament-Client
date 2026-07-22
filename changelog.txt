@@ -22,6 +22,10 @@ BEYOND TOURNAMENT - CHANGELOG v1.4.6
 - **Instant Action Focus:** Automatically focused active turn choices on arrival, enabling players to select actions immediately via Enter or Space.
 - **Substate Memory Reclamation:** Optimized menu substate updates during match progression, preventing obsolete overlay menus from stacking up in memory.
 
+• Weapon Manager & Admin Tools
+- **Recoil Tuning in Weapon Manager:** Integrated custom recoil chance configuration into the weapon editor menu, allowing administrators to modify recoil percentages per shot directly in-game without editing server configuration files manually.
+- **Creation Wizard Refinement:** Streamlined weapon creation prompts by isolating recoil configuration specifically to firearm categories while automatically initializing melee weapons with zero recoil.
+
 • Auto-Updater & Client Distribution
 - **Thread-Safe Background Extraction:** Refactored update package extraction to execute cleanly on background threads while safely dispatching UI status updates to the main event loop, completely resolving UI thread freezes and `(Not Responding)` warnings during installation.
 - **pySmartDL Exception Protection:** Added safe exception handling around download status checks, preventing client crashes during post-download thread cleanup.

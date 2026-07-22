@@ -349,7 +349,13 @@ class EventHandeler:
         if data.get("options"):
             for opt in data["options"]:
                 opt_val = opt.get("value")
-                if (isinstance(opt_val, dict) and opt_val.get("action") in ("builder_back", "bj_prompt_exit", "exit_blackjack")) or opt_val in ("builder_back", "bj_prompt_exit", "exit_blackjack"):
+                if isinstance(opt_val, dict):
+                    act = str(opt_val.get("action", ""))
+                    prop = str(opt_val.get("property", ""))
+                    if act in ("builder_back", "bj_prompt_exit", "exit_blackjack", "back_main", "weapon_back") or prop == "back" or act.endswith("_back"):
+                        has_server_back = True
+                        break
+                elif str(opt_val) in ("builder_back", "bj_prompt_exit", "exit_blackjack", "back_main", "weapon_back") or str(opt_val).endswith("_back"):
                     has_server_back = True
                     break
 
@@ -494,11 +500,14 @@ class EventHandeler:
             self.gameplay.pop_last_substate()
             self.client.send(consts.CHANNEL_MENUS, data["event"], {"value": value, "data": data["data"]})
 
-        stage = data.get("data", {}).get("stage", "")
-        input_type = data.get("data", {}).get("type", "")
-        msg_length = data.get("data", {}).get("msg_length", 200)
-        min_val = data.get("data", {}).get("min_val", None)
-        max_val = data.get("data", {}).get("max_val", None)
+        data_obj = data.get("data")
+        if not isinstance(data_obj, dict):
+            data_obj = {}
+        stage = data_obj.get("stage", "")
+        input_type = data_obj.get("type", "")
+        msg_length = data_obj.get("msg_length", 200)
+        min_val = data_obj.get("min_val", None)
+        max_val = data_obj.get("max_val", None)
         
         if input_type in ["createMap", "expandMap"]:
             if stage.endswith('X') or stage.endswith('Y') or stage.endswith('Z'):
