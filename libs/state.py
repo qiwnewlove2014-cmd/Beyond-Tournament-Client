@@ -34,11 +34,6 @@ class State:
             substate = self.substates.pop()
             if isinstance(substate, State): 
                 substate.exit()
-            try:
-                import pygame
-                setattr(self, "last_substate_closed_time", pygame.time.get_ticks())
-            except Exception:
-                pass
             return substate
     def replace_last_substate(self, substate): 
         self.pop_last_substate()

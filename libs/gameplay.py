@@ -148,7 +148,7 @@ class Gameplay(state.State):
             ): lambda mod: buffer.toggle_mute(),
             kc.get("interact", pygame.K_f): self.interact,
             kc.get("open_main_menu", pygame.K_BACKSPACE): lambda mod: (
-                None if (getattr(self, "in_minigame_match", False) or self.is_in_minigame()) else self.chat2("/mainmenu")
+                self.chat2("/mainmenu")
             ),
             kc.get("check_stats", pygame.K_p): self._p_or_spectator_cam,
             pygame.K_TAB: self.spectator_switch_player,  # Switch spectator target
@@ -475,10 +475,6 @@ class Gameplay(state.State):
                     self.keys_pressed[event.key](event.mod)
             else:
                 if event.type == pygame.KEYDOWN and event.key in self.keys_pressed:
-                    if pygame.time.get_ticks() - getattr(self, "last_substate_closed_time", 0) < 250:
-                        continue  # 🛡️ Post-menu cooldown shield: swallow leftover mashing!
-                    if event.key == self.kc.get("open_main_menu", pygame.K_BACKSPACE) and (getattr(self, "in_minigame_match", False) or self.is_in_minigame()):
-                        continue  # 🛡️ Block /mainmenu completely during minigame match/lobby!
                     self.keys_pressed[event.key](event.mod)
                 elif event.type == pygame.KEYUP and event.key in self.keys_released:
                     self.keys_released[event.key](event.mod)
@@ -1153,12 +1149,6 @@ class Gameplay(state.State):
         self.game.network.send(consts.CHANNEL_MISC, "open_helper_menu", {})
 
     def ask_to_exit(self, mod):
-        if getattr(self.game, 'pong_mode', False):
-            return
-        if getattr(self, 'in_minigame_match', False):
-            self.game.network.send(consts.CHANNEL_MENUS, "mainmenu", {"value": {"action": "prompt_exit_minigame"}})
-            return
-        
         m = menu.Menu(
             self.game,
             "Are you sure you want to exit?",

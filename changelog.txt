@@ -1,4 +1,15 @@
 ================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.4.8
+================================================================================
+
+• Minigame & Navigation Fixes
+- **Match Control Key Unlocking:** Restored seamless Backspace key navigation during active minigames, allowing players to open match control menus smoothly.
+- **Minigame Substate Cleanup:** Integrated explicit exit dialog and resume request protocols for Pong matches, restoring full paddle movement and serve controls upon match resume.
+- **Match Owner & Participant Menu Access:** Updated in-game match management options so participants and match creators retain access to Leave and Destroy options across all game states.
+- **Menu Tuple Crash Fix:** Hardened menu item iteration logic against tuple format variations, preventing client crashes during local exit confirmation prompts.
+- **Login Screen Protection:** Guarded navigation hotkeys on top-level root menus to prevent unintended application exits.
+
+================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.4.7
 ================================================================================
 

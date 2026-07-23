@@ -1,15 +1,14 @@
-• Weapon Manager & Admin Tools
-- **Categorized Weapon Management:** Reorganized the weapon management interface into clean categories (Melee, Semi-Automatic, Full Automatic, All Weapons) for streamlined navigation and administration.
-- **Target DPS Equalizer:** Added automated bulk DPS balancing across firearm categories, calculating damage per bullet based on rate of fire while enforcing safety caps and protecting unique equipment.
-- **Proportional Recoil Auto-Distributor:** Integrated bulk recoil chance auto-distribution scaled proportionally with weapon fire rate.
-- **Screen Reader Accessibility Clamps:** Optimized input prompts for screen reader clarity by removing pre-filled default numbers and establishing safety boundaries against extreme stats.
+• Minigame & Navigation Fixes
+- **Match Control Key Unlocking:** Restored seamless Backspace key navigation during active minigames, allowing players to open match control menus smoothly.
+- **Minigame Substate Cleanup:** Integrated explicit exit dialog and resume request protocols for Pong matches, restoring full paddle movement and serve controls upon match resume.
+- **Match Owner & Participant Menu Access:** Updated in-game match management options so participants and match creators retain access to Leave and Destroy options.
+- **Menu Tuple Crash Fix:** Hardened menu item iteration logic against tuple format variations, preventing crashes during local exit confirmation prompts.
+- **Login Screen Protection:** Guarded navigation hotkeys on top-level root menus to prevent unintended application exits.
 
-• Builder & Menu Navigation
-- **Category-Aware Back Navigation:** Configured weapon inspection options to preserve category origin, returning administrators directly to their active weapon category upon exiting weapon property sub-menus.
-- **Step-by-Step ESC Navigation:** Enforced layer-by-layer menu back navigation when pressing the Escape key, eliminating full-stack menu closures and matching builder navigation standards.
-- **Arrow-Key Volume Hijack Fix:** Left and right arrow keys were unconditionally hijacked to adjust the preview volume in every menu. The volume handlers are now gated on the sound-browse flag so arrows no longer interfere with normal menus.
+• Weapon Manager & Admin Tools
+- **Categorized Weapon Management:** Reorganized the weapon management interface into clean categories (Melee, Semi-Automatic, Full Automatic, All Weapons) for streamlined navigation.
+- **Target DPS Equalizer:** Added automated bulk DPS balancing across firearm categories, calculating damage per bullet based on rate of fire while enforcing safety caps.
+- **Proportional Recoil Auto-Distributor:** Integrated bulk recoil chance auto-distribution scaled proportionally with weapon fire rate.
 
 • Audio Engine & Voice Chat
 - **Megaphone Talkover Clipping Fix:** Replaced ducking with equal-power sum-safe mixing across active speakers, preventing clipping and distortion during simultaneous megaphone usage.
-- **Non-Blocking Builder Sound Preview:** Sound previews in the Builder music/ambience browse menus are now decoded on a background thread, eliminating audio stuttering during sound browsing.
-- **Zombie Death Audio Refinement:** Removed human collapse impact sounds during zombie elimination, ensuring zombies exclusively play thematic vocal death sounds.

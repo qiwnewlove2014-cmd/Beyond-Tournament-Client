@@ -468,39 +468,54 @@ class Menu(state.State):
                     elif not self.block_space and self.pos != -1:
                         self.select_current_item()
 
-                elif key in (pg.K_BACKSPACE, pg.K_ESCAPE):
-                    now = pg.time.get_ticks()
-                    if now - getattr(self, "last_backspace_time", 0) < 250:
-                        print(f"[DEBUG MENU] Mashing debounced: key={pg.key.name(key)}")
-                        continue  # 🛡️ Debounce rapid mashing
-                    self.last_backspace_time = now
-
+                elif key == pg.K_BACKSPACE:
+                    is_main_menu = (getattr(self, "menu_event", "") == "mainmenu" or self.title.lower() in ("main menu", "map menu", "mainmenu"))
+                    if is_main_menu:
+                        # 🔄 Backspace toggles the Main/Map menu closed (folds it away)
+                        if self.parrent:
+                            self.parrent.pop_last_substate()
+                    continue
+                elif key == pg.K_ESCAPE:
                     menu_type = getattr(self, "menu_type", "normal")
-                    print(f"[DEBUG MENU] Backspace/Esc pressed: title='{self.title}', menu_type='{menu_type}', key={pg.key.name(key)}")
                     if menu_type == "match_play":
-                        if key == pg.K_BACKSPACE:
-                            control_callback = None
-                            for title, cb, _ in self.items:
-                                if any(w in title for w in ("Control", "Leave", "Exit", "Surrender")):
-                                    control_callback = cb
-                                    break
-                            if control_callback:
-                                print(f"[DEBUG MENU] match_play: Executing control callback: {control_callback}")
-                                control_callback()
-                            else:
-                                print(f"[DEBUG MENU] match_play: Sending prompt_exit_minigame packet")
-                                self.game.network.send(consts.CHANNEL_MENUS, "mainmenu", {"value": {"action": "prompt_exit_minigame"}})
+                        control_callback = None
+                        for item in self.items:
+                            title = item[0]
+                            cb = item[1]
+                            if any(w in str(title).lower() for w in ("control", "leave", "surrender", "back")):
+                                control_callback = cb
+                                break
+                        if control_callback:
+                            control_callback()
+                        else:
+                            self.game.network.send(consts.CHANNEL_MENUS, "mainmenu", {"value": {"action": "prompt_exit_minigame"}})
                         continue
                     elif menu_type == "match_control":
                         if self.items:
-                            print(f"[DEBUG MENU] match_control: Executing Resume Game (item 0)")
                             self.items[0][1]()
                         continue
                     else:
-                        # 🛡️ Normal server menu (lobby / setup menus): Consume Backspace and trigger last option or back callback!
+                        # 🛡️ ESC on Normal server menu (lobby / setup menus): Check for Back/Close/Cancel option before executing
                         if self.items:
-                            print(f"[DEBUG MENU] Normal menu: Executing back option '{self.items[-1][0]}'")
-                            self.items[-1][1]()
+                            is_root_menu = self.parrent is None
+                            nav_keywords = ("back", "close", "exit", "quit", "cancel", "return", "leave")
+                            
+                            last_title = str(self.items[-1][0]).lower()
+                            if any(w in last_title for w in nav_keywords):
+                                self.items[-1][1]()
+                            else:
+                                back_idx = -1
+                                for idx, item in enumerate(self.items):
+                                    t = item[0]
+                                    if any(w in str(t).lower() for w in nav_keywords):
+                                        back_idx = idx
+                                        break
+                                if back_idx != -1:
+                                    self.items[back_idx][1]()
+                                elif self.parrent:
+                                    self.parrent.pop_last_substate()
+                                elif is_root_menu:
+                                    self.items[-1][1]()
                         continue
 
                     # activate the last option, we'll assume it exits the menu or navigates back.
@@ -546,12 +561,6 @@ class Menu(state.State):
         return True
 
     def select_current_item(self):
-        now = pg.time.get_ticks()
-        if now - getattr(self, "last_select_time", 0) < 250:
-            print(f"[DEBUG MENU] Item selection debounced (mashing protection)")
-            return  # 🛡️ Debounce rapid mashing on single or multi options!
-        self.last_select_time = now
-
         self.items[self.pos][1]()
         if self.enter_sound != "":
             self.direct_soundgroup.play(self.enter_sound, cat="ui")
