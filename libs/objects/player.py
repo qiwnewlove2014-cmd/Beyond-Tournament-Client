@@ -85,15 +85,13 @@ class Player(Entity):
         super().fall_stop()
         old_hp = self.hp
         self.hp = self.hp - (self.fall_distance / 2 + random(-3, 3))
+        if self.hp <= 0 or self.hp > 100:
+            self.hp = 100
         log(f"[DEBUG.PLAYER.FALL] Calculated HP damage. HP before: {old_hp:.1f}, HP after: {self.hp:.1f}. Sending set_hp to server.")
         self.game.network.send(consts.CHANNEL_MISC, "set_hp", {"amount": self.hp})
         self.fall_distance = 0
         self.stunned = True
         self.stunned_clock.restart()
-        log(f"[DEBUG.PLAYER.FALL] Playing death/start.ogg for self player impact.")
-        self.play_sound("death/start.ogg", cat="self")
-        if self.hp <= 0 or self.hp > 100:
-            self.hp = 100
 
     @property
     def hp(self):
