@@ -1,13 +1,11 @@
-• Audio Engine & Sound Systems
-- **UI Sound Preloading:** All critical notification and interface sounds are now pre-loaded into memory at startup, eliminating the issue where alert sounds would fail to play on first trigger.
-- **Audio Buffer Retention:** Strengthened the audio buffer cache to prevent premature sound disposal between plays, ensuring consistent playback reliability.
-- **Weapon Reload Sound Overlap Fix:** Fixed the reload sound effect playing twice simultaneously. Reload audio now plays once cleanly, matching firing sound behavior.
+• Audio Engine & Voice Chat
+- **Megaphone Bass Boost:** Boosted the megaphone PA equalizer low-frequency band (low_gain 2.2→2.8, low_cutoff 160→200 Hz) for warmer, punchier bass across every speaker and player clone.
 
-• Notifications & Alert Sounds
-- **Dedicated Broadcast Sound:** Global server announcements now use a distinct notification tone separate from personal messages.
-- **Staff Warning Sound Integration:** Administrative warnings, security alerts, and moderation actions now trigger a dedicated warning tone for staff.
-- **Kick Alert Broadcast:** Kick and ban events now broadcast a distinct alert sound globally for all connected players.
-- **Anti-Cheat Stealth Alerts:** Security detection alerts are now delivered exclusively to staff with a warning sound, while other players see the flagged user go offline normally.
+• Player & Death Systems
+- **Death Sound on Fall Fix:** Removed the death stinger (death/start.ogg) that played on every ordinary fall/landing; it now only plays on actual death. Landing impact uses the normal foley fall sound instead.
+- **Dead HP Check Fix:** Pressing the HP-check key while dead now correctly announces "You are dead." instead of reporting a stale HP value like "100 of 100 HP".
 
-• Megaphone & Broadcasting
-- **Broadcast Ownership Lock:** Added server-enforced broadcast ownership to prevent overlapping megaphone transmissions.
+• Minigames & Arcade
+- **Blackjack Multiplayer Visibility:** Player draws, stands, and double-downs are now broadcast to everyone in the match (previously only the acting player saw them). The "Waiting for X..." menu no longer pops up repeatedly during the same player's turn, and dealer turn announcements no longer overlap/fire out of order.
+- **Arcade Cabinet Pong Fix:** Selecting Pong from the Multi-Game Arcade Cabinet now opens the mode-select menu and keeps the player on the current map (no longer teleports to the Pong arena and no longer skips mode selection).
+- **Blackjack Hidden from Minigame Menu:** Removed Blackjack from the main "Select Minigame" list (now Pong-only); Blackjack remains fully playable from the in-world Multi-Game Arcade Cabinet.

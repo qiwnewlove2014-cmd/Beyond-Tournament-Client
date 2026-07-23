@@ -1,4 +1,15 @@
 ================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.5.0
+================================================================================
+
+• Audio Engine & Voice Chat
+- **Megaphone Bass Boost:** Boosted the megaphone PA equalizer low-frequency band (low_gain 2.2→2.8, low_cutoff 160→200 Hz) for warmer, punchier bass across every speaker and player clone.
+
+• Player & Death Systems
+- **Death Sound on Fall Fix:** Removed the death stinger (death/start.ogg) that played on every ordinary fall/landing; it now only plays on actual death. Landing impact uses the normal foley fall sound instead.
+- **Dead HP Check Fix:** Pressing the HP-check key while dead now correctly announces "You are dead." instead of reporting a stale HP value like "100 of 100 HP".
+
+================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.4.9
 ================================================================================
 

@@ -41,8 +41,8 @@ class MegaphoneManager:
         # --- EQ: Crisp Megaphone PA Cabinet Effect with Rich Bass ---
         self.eq_slot = self.game.audio_mngr.gen_effect(
             "EQUALIZER",
-            ("low_gain", 2.2),          # Warm & punchy bass body
-            ("low_cutoff", 160.0),      # Allows low vocal fundamentals
+            ("low_gain", 2.8),          # Warm & punchy bass body (boosted from 2.2)
+            ("low_cutoff", 200.0),      # Wider bass band (was 160) for deeper warmth
             ("mid1_gain", 1.4),         # Presence boost for voice clarity
             ("mid1_center", 1400.0),    # Human vocal presence center
             ("mid1_width", 1.0),
