@@ -1,4 +1,22 @@
 ================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.4.9
+================================================================================
+
+• Audio Engine & Sound Systems
+- **UI Sound Preloading:** All critical notification and interface sounds are now pre-loaded into memory at startup, eliminating the issue where alert sounds would fail to play on first trigger after joining the server.
+- **Audio Buffer Retention:** Strengthened the audio buffer cache to prevent the system from prematurely discarding loaded sounds between plays, ensuring consistent playback reliability throughout a session.
+- **Weapon Reload Sound Overlap Fix:** Fixed an issue where the reload sound effect would sometimes play twice simultaneously, caused by both the local client and the server broadcasting the sound back to the same player. Reload audio now plays once cleanly, matching the established behavior of firing sounds.
+
+• Notifications & Alert Sounds
+- **Dedicated Broadcast Sound:** Global server announcements now use a distinct notification tone, providing a clear audible cue separate from personal messages and staff alerts.
+- **Staff Warning Sound Integration:** Administrative warnings, security alerts, and moderation actions now trigger a dedicated warning tone for staff members, making urgent events immediately recognizable.
+- **Kick Alert Broadcast:** When a player is kicked or banned, a distinct alert sound now plays globally for all connected players, providing clear feedback that a moderation action has occurred.
+- **Anti-Cheat Stealth Alerts:** Security detection alerts are now delivered exclusively to staff with a dedicated warning sound, while other players simply see the flagged user go offline normally, maintaining operational discretion.
+
+• Megaphone & Broadcasting
+- **Broadcast Ownership Lock:** Added server-enforced broadcast ownership to prevent overlapping megaphone transmissions. When a broadcast is active, other users receive a notification instead of interrupting the current speaker.
+
+================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.4.8
 ================================================================================
 

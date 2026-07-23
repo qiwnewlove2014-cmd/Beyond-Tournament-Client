@@ -63,6 +63,7 @@ class AudioManager():
         }
         self.unbound_sources = []
         self.buffers = weakref.WeakValueDictionary()
+        self._preloaded_buffers = {}  # Strong references for preloaded sounds to prevent GC
         
         # Initialize volumes
         for cat, val in self.volume_categories.items():
@@ -114,6 +115,19 @@ class AudioManager():
     def position(self, value: tuple):
         self.listener.position=value
     
+    def preload_ui_sounds(self):
+        """Pre-load critical UI sounds at startup to prevent first-play silence."""
+        ui_sounds = [
+            "ui/warn.ogg", "ui/kick.ogg", "ui/broadcast.ogg",
+            "ui/online.ogg", "ui/offline.ogg", "ui/chat.ogg",
+            "ui/pm.ogg", "ui/kill.ogg", "ui/notify1.ogg", "ui/notify2.ogg",
+        ]
+        for snd in ui_sounds:
+            self._preloaded_buffers[os.path.relpath(f"data/{snd}")] = None  # Mark for strong ref
+            buf = self.load_buffer(snd)
+            if buf is not None:
+                self._preloaded_buffers[os.path.relpath(f"data/{snd}")] = buf
+
     def load_buffer(self, path: str) -> cyal.Buffer | None:
         if path.split(":")[0] == "server_sounds":
             path = path.split(":")[1]
@@ -153,6 +167,9 @@ class AudioManager():
                 format = format
             )
             self.buffers[path] = buffer
+            # Keep strong reference if this path was preloaded
+            if path in self._preloaded_buffers:
+                self._preloaded_buffers[path] = buffer
             return buffer
         except Exception as e:
             print(f"unable to load file: {path} — {e}")

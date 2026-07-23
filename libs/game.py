@@ -85,6 +85,7 @@ class Game:
         self.device_clock = self.new_clock()
         self.title_clock = self.new_clock()
         self.direct_soundgroup = self.audio_mngr.create_soundgroup(True)
+        self.audio_mngr.preload_ui_sounds()
         self.instance_mngr = instance_manager.InstanceManager()
         self.instance_mngr.update_title()
         self.reconnecting = False

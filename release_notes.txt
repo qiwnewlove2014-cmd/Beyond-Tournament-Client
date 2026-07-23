@@ -1,14 +1,13 @@
-• Minigame & Navigation Fixes
-- **Match Control Key Unlocking:** Restored seamless Backspace key navigation during active minigames, allowing players to open match control menus smoothly.
-- **Minigame Substate Cleanup:** Integrated explicit exit dialog and resume request protocols for Pong matches, restoring full paddle movement and serve controls upon match resume.
-- **Match Owner & Participant Menu Access:** Updated in-game match management options so participants and match creators retain access to Leave and Destroy options.
-- **Menu Tuple Crash Fix:** Hardened menu item iteration logic against tuple format variations, preventing crashes during local exit confirmation prompts.
-- **Login Screen Protection:** Guarded navigation hotkeys on top-level root menus to prevent unintended application exits.
+• Audio Engine & Sound Systems
+- **UI Sound Preloading:** All critical notification and interface sounds are now pre-loaded into memory at startup, eliminating the issue where alert sounds would fail to play on first trigger.
+- **Audio Buffer Retention:** Strengthened the audio buffer cache to prevent premature sound disposal between plays, ensuring consistent playback reliability.
+- **Weapon Reload Sound Overlap Fix:** Fixed the reload sound effect playing twice simultaneously. Reload audio now plays once cleanly, matching firing sound behavior.
 
-• Weapon Manager & Admin Tools
-- **Categorized Weapon Management:** Reorganized the weapon management interface into clean categories (Melee, Semi-Automatic, Full Automatic, All Weapons) for streamlined navigation.
-- **Target DPS Equalizer:** Added automated bulk DPS balancing across firearm categories, calculating damage per bullet based on rate of fire while enforcing safety caps.
-- **Proportional Recoil Auto-Distributor:** Integrated bulk recoil chance auto-distribution scaled proportionally with weapon fire rate.
+• Notifications & Alert Sounds
+- **Dedicated Broadcast Sound:** Global server announcements now use a distinct notification tone separate from personal messages.
+- **Staff Warning Sound Integration:** Administrative warnings, security alerts, and moderation actions now trigger a dedicated warning tone for staff.
+- **Kick Alert Broadcast:** Kick and ban events now broadcast a distinct alert sound globally for all connected players.
+- **Anti-Cheat Stealth Alerts:** Security detection alerts are now delivered exclusively to staff with a warning sound, while other players see the flagged user go offline normally.
 
-• Audio Engine & Voice Chat
-- **Megaphone Talkover Clipping Fix:** Replaced ducking with equal-power sum-safe mixing across active speakers, preventing clipping and distortion during simultaneous megaphone usage.
+• Megaphone & Broadcasting
+- **Broadcast Ownership Lock:** Added server-enforced broadcast ownership to prevent overlapping megaphone transmissions.
