@@ -1,11 +1,2 @@
-• Audio Engine & Voice Chat
-- **Megaphone Bass Boost:** Boosted the megaphone PA equalizer low-frequency band (low_gain 2.2→2.8, low_cutoff 160→200 Hz) for warmer, punchier bass across every speaker and player clone.
-
-• Player & Death Systems
-- **Death Sound on Fall Fix:** Removed the death stinger (death/start.ogg) that played on every ordinary fall/landing; it now only plays on actual death. Landing impact uses the normal foley fall sound instead.
-- **Dead HP Check Fix:** Pressing the HP-check key while dead now correctly announces "You are dead." instead of reporting a stale HP value like "100 of 100 HP".
-
-• Minigames & Arcade
-- **Blackjack Multiplayer Visibility:** Player draws, stands, and double-downs are now broadcast to everyone in the match (previously only the acting player saw them). The "Waiting for X..." menu no longer pops up repeatedly during the same player's turn, and dealer turn announcements no longer overlap/fire out of order.
-- **Arcade Cabinet Pong Fix:** Selecting Pong from the Multi-Game Arcade Cabinet now opens the mode-select menu and keeps the player on the current map (no longer teleports to the Pong arena and no longer skips mode selection).
-- **Blackjack Hidden from Minigame Menu:** Removed Blackjack from the main "Select Minigame" list (now Pong-only); Blackjack remains fully playable from the in-world Multi-Game Arcade Cabinet.
+• Version Sync & Patch Release
+- **Client & Server Version Sync:** Updated game core versions to v1.5.1 to maintain strict protocol compatibility across client and server network handlers.

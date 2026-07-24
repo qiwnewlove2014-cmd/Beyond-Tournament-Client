@@ -1,4 +1,11 @@
 ================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.5.1
+================================================================================
+
+• Version Sync & Patch Release
+- **Client & Server Version Sync:** Updated game core versions to v1.5.1 to maintain strict protocol compatibility across client and server network handlers.
+
+================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.5.0
 ================================================================================
 

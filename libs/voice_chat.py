@@ -665,19 +665,32 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
     except AttributeError:
         player_pos = (0.0, 0.0, 0.0)
         
-    global _speaker_last_calc_time, _speaker_current_delays, _speaker_initial_delays
+    global _speaker_last_calc_time, _speaker_current_delays, _speaker_initial_delays, _speaker_last_calc_pos
     if '_speaker_last_calc_time' not in globals():
         _speaker_last_calc_time = {}
         _speaker_current_delays = {}
         _speaker_initial_delays = {}
-        
+        _speaker_last_calc_pos = {}
+
     try:
         player_pos = (gameplay.camera.focus_object.x, gameplay.camera.focus_object.y, gameplay.camera.focus_object.z)
     except AttributeError:
         player_pos = (0.0, 0.0, 0.0)
-        
+
     now = time.time()
     last_calc = _speaker_last_calc_time.get(sender_id, 0)
+
+    # Movement-based resync: track how far the listener moved since the last
+    # delay calculation. If they walked >= 3 units, force a recalculation so the
+    # propagation delay tracks the live distance to each speaker instead of being
+    # frozen at the position when speech started.
+    last_calc_pos = _speaker_last_calc_pos.get(sender_id, player_pos)
+    moved_dist = math.sqrt(
+        (player_pos[0] - last_calc_pos[0]) ** 2 +
+        (player_pos[1] - last_calc_pos[1]) ** 2 +
+        (player_pos[2] - last_calc_pos[2]) ** 2
+    )
+    moved_enough = moved_dist >= 3.0
     
     # 1. Unqueue all processed buffers and count active buffers to get the true playhead position
     active_counts = []
@@ -703,7 +716,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             any_starved = True
             break
             
-    needs_resync = is_new_transmission or any_starved
+    needs_resync = is_new_transmission or any_starved or moved_enough
     
     # 3. Only recalculate delays and pad if the stream was broken (starved or new)
     # This prevents micro-stutters during normal jitter and allows OpenAL's Doppler to naturally stretch the audio
@@ -728,8 +741,9 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                 static_delay = spk_data.get('delay', 0.0)
                 speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
                 
-            if is_new_transmission or idx not in _speaker_initial_delays[sender_id]:
-                # Calculate static propagation delay for this transmission (speed of sound = 343 m/s)
+            if is_new_transmission or moved_enough or idx not in _speaker_initial_delays[sender_id]:
+                # Recalculate propagation delay from the live position (speed of sound = 343 m/s).
+                # Triggered on new transmission, or when the listener moved >= 3 units.
                 if not is_reflection:
                     dx = player_pos[0] - speaker_pos[0]
                     dy = player_pos[1] - speaker_pos[1]
@@ -775,6 +789,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                                     _queue_packet_to_source(gameplay, idx, f_src, silence_packet, force_concert_mode=fade_obj['is_concert'])
                     
     _speaker_last_calc_time[sender_id] = now
+    _speaker_last_calc_pos[sender_id] = player_pos
     
     # 4. Queue the actual audio packet to all sources
     for idx, src in enumerate(sources):
