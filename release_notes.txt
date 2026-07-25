@@ -1,6 +1,12 @@
-• Megaphone & Acoustic Filter System
-- **Line-of-Sight Wall Occlusion:** Restored accurate acoustic wall occlusion across all PA speakers. Sound now properly muffles and dims when obstructed by solid wall structures.
-- **Deep Bass Enhancement:** Boosted low-frequency bass output for occluded speakers, allowing heavy bass frequencies to naturally punch through walls while high frequencies are absorbed.
+• UX & Menus
+- **Keybinding Cursor Memory:** The keybinding config menu now remembers your cursor position after binding a key. Previously the cursor reset to the top of the list after every bind, forcing you to scroll back down each time.
+
+• Map & Zone System
+- **Zone Overlap Priority:** When multiple zones overlap at the same position, the smallest zone now takes priority. This prevents large background zones from overwriting smaller specific zones regardless of creation order.
+- **Zone Text Character Limit:** Increased the zone description input limit from 200 to 5,000 characters, allowing map creators to paste long descriptions without truncation.
+
+• Matchmaking & Lobby
+- **Block Mid-Game Leaving:** Non-host players can no longer leave a match once it has started. The leave option is only available during the pre-game lobby and exploration phase.
 
 • System & Core Engine
-- **Client & Server Protocol Sync:** Synchronized network protocol and client/server version markers to v1.5.2.
+- **Client & Server Protocol Sync:** Synchronized network protocol and client/server version markers to v1.5.3.

@@ -166,12 +166,20 @@ class Map:
         return found_responses
 
     def get_zone_at(self, x, y, z):
-        """Same as get_tile_at, except deals with zones"""
-        found_responses = ""
+        """Same as get_tile_at, except deals with zones.
+        When multiple zones overlap, the smallest zone (by volume) wins.
+        On equal volume, the first match in zone_list is kept."""
+        best_zone = ""
+        best_volume = float('inf')
         for i in self.zone_list:
             if i.in_bound(x, y, z):
-                found_responses = i.zonename
-        return found_responses
+                volume = ((i.maxx - i.minx + 1)
+                        * (i.maxy - i.miny + 1)
+                        * (i.maxz - i.minz + 1))
+                if volume < best_volume:
+                    best_volume = volume
+                    best_zone = i.zonename
+        return best_zone
 
     def spawn_reverb(
         self,
