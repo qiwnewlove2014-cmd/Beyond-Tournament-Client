@@ -5,28 +5,33 @@ from . import logger
 
 def get_default_playlist_path():
     """Get persistent storage path for playlists in %APPDATA%/Beyond Tournament.
-    Auto-migrates existing data/my_playlists.json if present.
+    Auto-migrates and deletes existing data/my_playlists.json if present.
     """
     appdata = os.getenv('APPDATA')
-    if appdata:
-        appdata_dir = os.path.join(appdata, 'Beyond Tournament')
-        try:
-            os.makedirs(appdata_dir, exist_ok=True)
-        except Exception:
-            pass
-        appdata_path = os.path.join(appdata_dir, 'my_playlists.json')
+    if not appdata:
+        appdata = os.path.expanduser('~')
 
-        # Auto-migrate legacy file if it exists
-        legacy_path = os.path.join('data', 'my_playlists.json')
-        if os.path.exists(legacy_path) and not os.path.exists(appdata_path):
-            try:
+    appdata_dir = os.path.join(appdata, 'Beyond Tournament')
+    try:
+        os.makedirs(appdata_dir, exist_ok=True)
+    except Exception:
+        pass
+    appdata_path = os.path.join(appdata_dir, 'my_playlists.json')
+
+    # Auto-migrate or clean up legacy file in data/ so it's never bundled in builds
+    legacy_path = os.path.join('data', 'my_playlists.json')
+    if os.path.exists(legacy_path):
+        try:
+            if not os.path.exists(appdata_path):
                 shutil.move(legacy_path, appdata_path)
                 logger.log(f"[PlaylistManager] Migrated legacy playlists from {legacy_path} to {appdata_path}")
-            except Exception as e:
-                logger.log(f"[PlaylistManager] Migration failed: {e}")
-        return appdata_path
+            else:
+                os.remove(legacy_path)
+                logger.log(f"[PlaylistManager] Removed obsolete legacy file {legacy_path} from data folder.")
+        except Exception as e:
+            logger.log(f"[PlaylistManager] Migration/cleanup error: {e}")
 
-    return os.path.join('data', 'my_playlists.json')
+    return appdata_path
 
 
 class PlaylistManager:
