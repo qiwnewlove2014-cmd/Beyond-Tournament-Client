@@ -230,8 +230,12 @@ def set_hrtf_model(model, game, func_call):
     speech.speak(f"using HRTF model {model}")
 
 
-def keyconfig_menu(game, func_call, replace_call=None, parent=None, in_game=False):
-    """append a menu for binding keyboard keys to functions."""
+def keyconfig_menu(game, func_call, replace_call=None, parent=None, in_game=False, restore_pos=None):
+    """append a menu for binding keyboard keys to functions.
+
+    restore_pos: if set, the menu cursor starts at this index instead of the top.
+    This prevents the user from having to scroll back down after each key bind.
+    """
     default_keys = keyconfig.Keyconfig("default_keyconfig.json")
     m = menu.Menu(
         game,
@@ -242,7 +246,13 @@ def keyconfig_menu(game, func_call, replace_call=None, parent=None, in_game=Fals
     if replace_call is None: replace_call=game.replace
     items = []
     for i in default_keys.keys.keys():
-        func = functools.partial(replace_call, Key_config_screen(game, i, options_menu=func_call if in_game else lambda: keyconfig_menu(game, func_call, in_game=in_game)))
+        # Capture the current index so we can restore the cursor to THIS item
+        # after the key is bound. We use a default argument (_idx=current_index)
+        # to bind the value IMMEDIATELY — without it, Python's late-binding
+        # closure would make every lambda use the final loop value, causing
+        # the cursor to always jump to the last item.
+        current_index = len(items)
+        func = functools.partial(replace_call, Key_config_screen(game, i, options_menu=func_call if in_game else lambda _idx=current_index: keyconfig_menu(game, func_call, in_game=in_game, restore_pos=_idx)))
         # we use functools.partial because lambdas dont work as they should with loops like that.
         items.append(
             (
@@ -254,6 +264,9 @@ def keyconfig_menu(game, func_call, replace_call=None, parent=None, in_game=Fals
     # the list comprehention above basicly adds all the keys of default_keys.keys(which are function strings) as the item text and a lambda function that will append a key config screen for that function.
     items.append(("Back", func_call))
     m.add_items(items)
+    # Restore cursor to the item the user was on before binding (if any).
+    if restore_pos is not None and 0 <= restore_pos < len(m.items):
+        m.pos = restore_pos
     replace_call(m)
 
 

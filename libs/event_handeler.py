@@ -505,7 +505,7 @@ class EventHandeler:
             data_obj = {}
         stage = data_obj.get("stage", "")
         input_type = data_obj.get("type", "")
-        msg_length = data_obj.get("msg_length", 200)
+        msg_length = data_obj.get("msg_length", 5000 if input_type == 'zone' or stage == 'text' else 200)
         min_val = data_obj.get("min_val", None)
         max_val = data_obj.get("max_val", None)
         
