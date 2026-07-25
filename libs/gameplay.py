@@ -369,6 +369,14 @@ class Gameplay(state.State):
         
         return False  # Clear line-of-sight
 
+    def update_megaphone_settings(self, volume, bass, mid, high):
+        """Forwarder for the megaphone settings menu (megaphone_settings.py calls
+        self.parrent.update_megaphone_settings). Megaphone logic now lives in the
+        MegaphoneManager, so delegate to it. Without this, the Speaker Vol slider
+        in the settings menu silently does nothing."""
+        if hasattr(self, 'megaphone') and hasattr(self.megaphone, 'update_megaphone_settings'):
+            self.megaphone.update_megaphone_settings(volume, bass, mid, high)
+
     def update(self, events):
         self.megaphone.update_megaphone_audio(0, None)
         is_concert = getattr(self, 'concert_spectator_mode', False)

@@ -124,32 +124,27 @@ class MegaphoneManager:
             self.player_sources.clear()
 
     def _check_speaker_occlusion(self, speaker_pos, player_pos):
-        """Check if any solid tile blocks the path from speaker to player.
-        Uses simple line-of-sight raycast to detect walls blocking sound."""
+        """Return how much a wall blocks line-of-sight between speaker and player.
+
+        Returns a float occlusion ratio in [0.0, 1.0]:
+          0.0 = fully clear (no wall tiles on the ray)
+          1.0 = fully blocked (a wall tile is on the path)
+          0.5 = underwater (partial occlusion)
+
+        Uses the proven map.valid_straight_path() which walks tile-by-tile
+        through the grid and reliably detects wall tiles, unlike the old
+        parametric ray that could skip tiles due to step aliasing.
+        """
         try:
-            sx, sy, sz = speaker_pos
-            px, py, pz = player_pos
-
-            # Get direction vector
-            dx = px - sx
-            dy = py - sy
-            dz = pz - sz
-
-            # Check 5 points along the line
-            for i in range(1, 5):
-                t = i / 5.0
-                check_x = sx + dx * t
-                check_y = sy + dy * t
-                check_z = sz + dz * t
-
-                # Check if there's a solid tile at this position
-                tile = self.map.get_tile_at(int(check_x), int(check_y), int(check_z))
-                if tile and hasattr(tile, 'solid') and tile.solid:
-                    return True  # Blocked by wall
-
-            return False  # Clear line of sight
+            result = self.map.valid_straight_path(speaker_pos, player_pos)
+            if result is False:
+                return 1.0  # Wall detected — fully blocked
+            elif result is None:
+                return 0.5  # Underwater — partial occlusion
+            else:
+                return 0.0  # Clear line-of-sight
         except Exception:
-            return False  # On error, assume not blocked
+            return 0.0  # On error, assume not blocked
 
     def setup_megaphone_speakers(self, force=False):
         """Initializes or re-initializes megaphone speakers based on map data"""
@@ -389,7 +384,7 @@ class MegaphoneManager:
             if p_filter:
                 try:
                     # Convert 0-100 to 0.0-1.0
-                    p_filter.set("GAINLF", eq_bass / 100.0)
+                    p_filter.set("GAINLF", 1.0)  # Full bass pass-through (EQ effect handles bass shaping)
                     p_filter.set("GAIN", eq_mid / 100.0)
                     p_filter.set("GAINHF", eq_treble / 100.0)
                     src.direct_filter = p_filter
@@ -426,15 +421,15 @@ class MegaphoneManager:
                     'outer_gain': outer_gain
                 },
                 'filter': p_filter,
-                'eq_bass': eq_bass / 100.0,
+                'eq_bass': 1.0,  # Full bass (EQ effect handles shaping, not direct filter)
                 'eq_mid': eq_mid / 100.0,
                 'eq_treble': eq_treble / 100.0,
                 'target_gain': eq_mid / 100.0,
                 'current_gain': eq_mid / 100.0,
                 'target_gainhf': eq_treble / 100.0,
                 'current_gainhf': eq_treble / 100.0,
-                'target_gainlf': eq_bass / 100.0,
-                'current_gainlf': eq_bass / 100.0,
+                'target_gainlf': 1.0,
+                'current_gainlf': 1.0,
                 'target_vol': final_vol * init_occlusion,
                 'current_vol': final_vol * init_occlusion
             })
@@ -576,11 +571,12 @@ class MegaphoneManager:
                 eq_bass = 1.0
                 eq_treble = 1.0
                 
-                p_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+                p_filter = self.game.audio_mngr.gen_filter("BANDPASS")
                 if p_filter:
                     try:
                         p_filter.set("GAIN", eq_bass)
                         p_filter.set("GAINHF", eq_treble)
+                        p_filter.set("GAINLF", eq_bass)
                         src.direct_filter = p_filter
                     except Exception as e:
                         pass
@@ -619,13 +615,15 @@ class MegaphoneManager:
                     src.cone_inner_angle = cone.get('inner', 360)
                     src.cone_outer_angle = cone.get('outer', 360)
                     src.cone_outer_gain = cone.get('outer_gain', 0.2)
+                    src.pitch = 1.0  # Lock pitch to 1.0 to eliminate OpenAL Doppler pitch distortion
 
                     # Create unique filter for player source
-                    p_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+                    p_filter = self.game.audio_mngr.gen_filter("BANDPASS")
                     if p_filter:
                         try:
                             p_filter.set("GAIN", 0.85)
                             p_filter.set("GAINHF", 0.4)
+                            p_filter.set("GAINLF", 1.0)  # Full bass pass-through
                             src.direct_filter = p_filter
                         except Exception as e:
                             print(f"[MEGAPHONE] Error initializing player filter: {e}")
@@ -675,11 +673,12 @@ class MegaphoneManager:
                         refl_src.cone_outer_gain = refl_template.cone_outer_gain
                         
                         # Create unique filter for reflection source
-                        r_filter = self.game.audio_mngr.gen_filter("LOWPASS")
+                        r_filter = self.game.audio_mngr.gen_filter("BANDPASS")
                         if r_filter:
                             try:
                                 r_filter.set("GAIN", 0.6)
                                 r_filter.set("GAINHF", 0.05)
+                                r_filter.set("GAINLF", 1.0)  # Full bass pass-through
                                 refl_src.direct_filter = r_filter
                             except Exception as e:
                                 print(f"[MEGAPHONE] Error initializing player reflection filter: {e}")
@@ -876,16 +875,18 @@ class MegaphoneManager:
     def _cleanup_megaphone_efx(self):
         """Return megaphone EFX slots to the pool and clean up sources.
         Slots are returned to the AudioManager pool for reuse — never deleted."""
-        # Return global EFX effect slots to pool (reverb, EQ, compressor)
-        for slot_name in ['megaphone_reverb_slot', 'megaphone_eq_slot', 'megaphone_compressor_slot']:
+        # Return global EFX effect slots to pool (reverb, EQ, compressor).
+        # NOTE: attribute names must match __init__ (self.reverb_slot etc.),
+        # not the old 'megaphone_*' names from before extraction — otherwise
+        # getattr returns None and the slots/filters leak every exit.
+        for slot_name in ['reverb_slot', 'eq_slot', 'compressor_slot']:
             slot = getattr(self, slot_name, None)
             if slot:
                 self.game.audio_mngr.release_effect_slot(slot)
                 setattr(self, slot_name, None)
 
         # Cleanup global EFX filters (lowpass, muffled, underwater)
-        # Filters are much less limited than slots, try to delete them
-        for filter_name in ['megaphone_lowpass_filter', 'megaphone_muffled_filter', 'megaphone_underwater_filter']:
+        for filter_name in ['lowpass_filter', 'muffled_filter', 'underwater_filter']:
             f = getattr(self, filter_name, None)
             if f:
                 try:
@@ -997,7 +998,7 @@ class MegaphoneManager:
             if consts.CHANNEL_MEGAPHONE in self.voice_channels:
                 channel = self.voice_channels[consts.CHANNEL_MEGAPHONE]
                 if hasattr(channel, 'vc_compression'):
-                    channel.vc_compression.put(lambda: voice_chat.tick_megaphone_delay(self))
+                    channel.vc_compression.put(lambda: voice_chat.tick_megaphone_delay(self.gameplay))
 
         # === MEGAPHONE DYNAMIC REVERB SYNC ===
         # Synchronize megaphone speakers with the player's local reverb zone
@@ -1020,8 +1021,15 @@ class MegaphoneManager:
                     break
                     
         new_local_reverb_slot = current_reverb_zone.reverb if current_reverb_zone else None
-        
+
+        # Track the current local reverb slot ON THE MANAGER (self), not split
+        # across manager (read) and gameplay (write). The old split made the read
+        # always return the 'UNINIT' sentinel, so this whole block re-ran every
+        # frame and re-sent slot 3 on every speaker.
         if getattr(self, 'current_player_reverb_slot', 'UNINIT') != new_local_reverb_slot:
+            self.current_player_reverb_slot = new_local_reverb_slot
+            # Mirror onto gameplay so non-megaphone code (e.g. beacon pitch reverb
+            # at gameplay.py) that reads gameplay.current_player_reverb_slot keeps working.
             self.gameplay.current_player_reverb_slot = new_local_reverb_slot
             
             # Send slot 3 is reserved for the player's local dynamic reverb
@@ -1055,10 +1063,12 @@ class MegaphoneManager:
                                 pass
         
         # === DIRECTIONAL MUFFLED SOUND + LINE-OF-SIGHT OCCLUSION ===
-        # Every 10 frames, check if player is behind speaker OR blocked by wall
+        # Throttled: checking every 5 frames (was every 2). Combined with the
+        # ratio-based occlusion blend below, this avoids the filter flip-flopping
+        # ('วุบว้าบ') at wall edges when the listener walks along them.
         if hasattr(self, 'speaker_data') and hasattr(self, 'muffled_check_counter'):
             self.muffled_check_counter += 1
-            if self.muffled_check_counter >= 10:
+            if self.muffled_check_counter >= 5:
                 self.muffled_check_counter = 0
                 player_pos = (self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
                 global_vol = options.get("megaphone_volume", 100) / 100.0
@@ -1067,6 +1077,9 @@ class MegaphoneManager:
                 for i, data in enumerate(self.speaker_data):
                     try:
                         speaker_pos = data['position']
+                        eq_bass = data.get('eq_bass', 0.5)
+                        eq_mid = data.get('eq_mid', 0.85)
+                        eq_treble = data.get('eq_treble', 0.4)
                         
                         # Vector from speaker to player
                         dx = player_pos[0] - speaker_pos[0]
@@ -1081,19 +1094,28 @@ class MegaphoneManager:
                         spk_hearing_range = data.get('hearing_range', 80.0)
                         if spk_hearing_range == 0.0:
                             spk_hearing_range = 80.0
-                            
-                        # If outside hearing range, skip the expensive ray-march check
+
+                        # occlusion_ratio: 0.0 = clear, 1.0 = fully behind a wall.
+                        # The ray-march returns a SMOOTH ratio (fraction of sampled
+                        # tiles that are walls), so walking along a wall edge gives
+                        # a partial ratio instead of a hard boolean flip — which is
+                        # what caused the 'วุบว้าบ' filter chatter.
                         if distance >= spk_hearing_range:
-                            is_blocked = True
+                            occlusion_ratio = 1.0  # Outside hearing range = fully blocked
                         else:
-                            # Only raycast if player is within hearing range
-                            is_blocked = self._check_speaker_occlusion(speaker_pos, player_pos)
-                        
+                            occlusion_ratio = self._check_speaker_occlusion(speaker_pos, player_pos)
+
                         # === DIRECTIONAL CHECK (Horizontal only) ===
-                        dot_horizontal = (dx * data['direction'][0] + 
+                        dot_horizontal = (dx * data['direction'][0] +
                                          dy * data['direction'][1])
-                        is_behind = dot_horizontal < 0
-                        
+                        # 'is_behind' is still boolean, but it only contributes a
+                        # partial occlusion (0.5 below), so it blends in smoothly.
+                        behind_strength = 1.0 if dot_horizontal < 0 else 0.0
+
+                        # Combine wall occlusion and behind-speaker into one smooth
+                        # occlusion strength in [0,1]. Take the stronger of the two.
+                        occlusion_strength = max(occlusion_ratio, behind_strength * 0.5)
+
                         # Calculate transition zone factor (fade out from 80% to 100% of hearing range)
                         spk_hearing_range_raw = data.get('hearing_range', 0.0)
                         fade_factor = 1.0
@@ -1103,36 +1125,45 @@ class MegaphoneManager:
                             elif distance >= spk_hearing_range_raw * 0.8:
                                 fade_start = spk_hearing_range_raw * 0.8
                                 fade_factor = 1.0 - ((distance - fade_start) / (spk_hearing_range_raw - fade_start))
-                        
-                        occlusion_multiplier = fade_factor
-                        
-                        eq_mid = data.get('eq_mid', 0.5)
-                        eq_treble = data.get('eq_treble', 0.5)
-                        eq_bass = data.get('eq_bass', 0.5)
-                        
-                        target_gain = eq_mid
-                        target_gainhf = eq_treble
-                        target_gainlf = eq_bass
-                        
-                        # Apply occlusion and underwater filters only if not fully faded out
-                        if fade_factor > 0.0:
-                            if is_underwater:
-                                # Player is underwater - filter megaphone heavily
-                                target_gain = eq_mid * 0.94
-                                target_gainhf = eq_treble * 0.05
-                                target_gainlf = min(1.0, eq_bass * 1.5)
-                                # Extra volume attenuation based on player depth
-                                depth = getattr(self.camera.focus_object, 'depth', 1.0)
-                                occlusion_multiplier = fade_factor * max(0.1, depth * 0.3)
-                            elif is_blocked or is_behind:
-                                # Behind speaker OR blocked by wall - apply muffled filter
-                                target_gain = eq_mid * 0.7
-                                target_gainhf = eq_treble * 0.12
-                                target_gainlf = min(1.0, eq_bass * 1.2)
-                                if is_blocked:
-                                    occlusion_multiplier = fade_factor * 0.3  # 30% through wall
-                                else:
-                                    occlusion_multiplier = fade_factor * 0.5  # 50% behind speaker
+
+                        # === APPLY FILTERS ===
+                        # Wall occlusion muffle is applied REGARDLESS of fade_factor.
+                        # Previously it was gated behind `if fade_factor > 0.0`, which
+                        # meant speakers just outside hearing range (fade_factor=0)
+                        # never got their filter updated even though occlusion_strength
+                        # was 1.0 — so the filter stayed wide open and the wall had no
+                        # audible effect.
+                        if is_underwater:
+                            # Player is underwater - filter megaphone heavily
+                            target_gain = eq_mid * 0.94
+                            target_gainhf = eq_treble * 0.05
+                            target_gainlf = min(1.0, eq_bass * 1.5)
+                            # Extra volume attenuation based on player depth
+                            depth = getattr(self.camera.focus_object, 'depth', 1.0)
+                            occlusion_multiplier = fade_factor * max(0.1, depth * 0.3)
+                        elif occlusion_strength > 0.0:
+                            # Realistic muffle curve. Two coupled effects:
+                            #  - Muffle (high-cut): strength_curve ramps with ^0.6 so a
+                            #    light graze (strength 0.2) only mildly cuts highs,
+                            #    while a thick wall (strength 1.0) cuts hard to 0.10.
+                            #  - Volume drop: proportional to occlusion_strength so a
+                            #    thick wall both muffles AND attenuates, like real sound
+                            #    being absorbed. Behind-speaker contributes less drop
+                            #    than a full wall (0.5 weight already in strength).
+                            muffled_gain = eq_mid * 0.6
+                            muffled_gainhf = 0.10
+                            muffled_gainlf = min(1.0, eq_bass * 2.0)
+                            strength_curve = occlusion_strength ** 0.6
+                            target_gain = eq_mid + (muffled_gain - eq_mid) * strength_curve
+                            target_gainhf = eq_treble + (muffled_gainhf - eq_treble) * strength_curve
+                            target_gainlf = eq_bass + (muffled_gainlf - eq_bass) * strength_curve
+                            # Volume attenuation: 0% at strength 0, up to ~70% at full wall.
+                            occlusion_multiplier = fade_factor * (1.0 - occlusion_strength * 0.7)
+                        else:
+                            target_gain = eq_mid
+                            target_gainhf = eq_treble
+                            target_gainlf = eq_bass
+                            occlusion_multiplier = fade_factor
                                 
                         target_vol = data['base_volume'] * global_vol * occlusion_multiplier
 
@@ -1321,7 +1352,7 @@ class MegaphoneManager:
                                 if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None and player_entry['filters'][prim_idx] is not None:
                                     src = player_entry['sources'][prim_idx]
                                     flt = player_entry['filters'][prim_idx]
-                                    
+
                                     # Volume
                                     t_vol = player_entry['targets_vol'][prim_idx] * duck_mult * concert_fade_in_mult
                                     c_vol = player_entry['currents_vol'][prim_idx]
@@ -1332,7 +1363,7 @@ class MegaphoneManager:
                                     elif c_vol != t_vol:
                                         player_entry['currents_vol'][prim_idx] = t_vol
                                         src.gain = t_vol
-                                    
+
                                     # Filter GAIN
                                     t_g = player_entry['targets_gain'][prim_idx]
                                     c_g = player_entry['currents_gain'][prim_idx]
@@ -1368,9 +1399,25 @@ class MegaphoneManager:
                                             player_entry['currents_gainlf'][prim_idx] = t_glf
                                         flt.set("GAINLF", t_glf)
                                         
-                                    # CRITICAL: Re-apply filter object to source so changes take effect
+                                    # CRITICAL: Re-apply filter object to source so changes take effect.
+                                    # The filter is shared between direct_filter AND EFX sends (slot 0=EQ,
+                                    # 1=reverb, 2=compressor, 3=local reverb). After mutating GAIN/GAINHF/
+                                    # GAINLF we must re-send each slot so OpenAL picks up the new filter
+                                    # state — otherwise the muffle values are computed but never heard.
                                     src.direct_filter = flt
-                                    
+                                    if hasattr(self.game.audio_mngr, 'efx'):
+                                        try:
+                                            if hasattr(self, 'eq_slot') and self.eq_slot:
+                                                self.game.audio_mngr.efx.send(src, 0, self.eq_slot, filter=flt)
+                                            if i < len(self.speaker_data) and self.speaker_data[i].get('reverb_slot'):
+                                                self.game.audio_mngr.efx.send(src, 1, self.speaker_data[i]['reverb_slot'], filter=flt)
+                                            if hasattr(self, 'compressor_slot') and self.compressor_slot:
+                                                self.game.audio_mngr.efx.send(src, 2, self.compressor_slot, filter=flt)
+                                            if hasattr(self, 'current_player_reverb_slot') and self.current_player_reverb_slot not in (None, 'UNINIT'):
+                                                self.game.audio_mngr.efx.send(src, 3, self.current_player_reverb_slot, filter=flt)
+                                        except Exception:
+                                            pass
+
                                 # Interpolate player reflection source
                                 if refl_idx < len(player_entry['sources']) and player_entry['sources'][refl_idx] is not None and player_entry['filters'][refl_idx] is not None:
                                     src = player_entry['sources'][refl_idx]

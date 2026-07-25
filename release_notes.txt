@@ -1,2 +1,6 @@
-• Version Sync & Patch Release
-- **Client & Server Version Sync:** Updated game core versions to v1.5.1 to maintain strict protocol compatibility across client and server network handlers.
+• Megaphone & Acoustic Filter System
+- **Line-of-Sight Wall Occlusion:** Restored accurate acoustic wall occlusion across all PA speakers. Sound now properly muffles and dims when obstructed by solid wall structures.
+- **Deep Bass Enhancement:** Boosted low-frequency bass output for occluded speakers, allowing heavy bass frequencies to naturally punch through walls while high frequencies are absorbed.
+
+• System & Core Engine
+- **Client & Server Protocol Sync:** Synchronized network protocol and client/server version markers to v1.5.2.

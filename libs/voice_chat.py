@@ -96,8 +96,8 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    PRE_BUFFER_FRAMES = 1       # Wait for 1 frame (20ms) before playing (reduced for lower latency)
-    MAX_BUFFER_FRAMES = 8       # Maximum frames in buffer (160ms)
+    PRE_BUFFER_FRAMES = 3       # Wait for 3 frames (60ms) before playing to ensure smooth audio without stutters
+    MAX_BUFFER_FRAMES = 12      # Maximum frames in buffer (240ms) for network stability
     TARGET_BUFFER_FRAMES = 4    # Target buffer level (80ms latency)
     
     def __init__(self, game):
@@ -318,11 +318,11 @@ class voice_chat_compression(threading.Thread):
                     global _last_play_times, _speaker_delay_queues, _last_packet_times
                     _last_play_times[sender_id] = time.time()
                     
-                    # If this is a new sentence after a pause (>300ms), clear delay queues to prevent echoes from the past
+                    # If this is a new sentence after a short pause (>180ms), clear delay queues to prevent stale audio stack-up
                     current_time = time.time()
                     last_pkt_time = _last_packet_times.get(sender_id, 0.0)
                     _last_packet_times[sender_id] = current_time
-                    if current_time - last_pkt_time > 0.3:
+                    if current_time - last_pkt_time > 0.18:
                         for idx in range(len(sources)):
                             queue_key = (sender_id, idx)
                             if queue_key in _speaker_delay_queues:
@@ -690,7 +690,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
         (player_pos[1] - last_calc_pos[1]) ** 2 +
         (player_pos[2] - last_calc_pos[2]) ** 2
     )
-    moved_enough = moved_dist >= 3.0
+    moved_enough = moved_dist >= 1.5
     
     # 1. Unqueue all processed buffers and count active buffers to get the true playhead position
     active_counts = []
@@ -722,7 +722,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
     # This prevents micro-stutters during normal jitter and allows OpenAL's Doppler to naturally stretch the audio
     if needs_resync:
         _speaker_current_delays[sender_id] = []
-        if is_new_transmission or sender_id not in _speaker_initial_delays:
+        if is_new_transmission or moved_enough or sender_id not in _speaker_initial_delays:
             _speaker_initial_delays[sender_id] = {}
         
         for idx, src in enumerate(sources):
