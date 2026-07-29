@@ -3,8 +3,17 @@ BEYOND TOURNAMENT - CHANGELOG v1.5.5
 ================================================================================
 
 • Jupiter Boss & Polymorphic Entity System
-- **Jupiter Mini-Boss Infiltration:** Introduced Jupiter boss entities seamlessly into standard Zombie Game Mode rounds starting from Round 5+. Features 10,000 Base HP scaling, thunder strike attacks, 3D arrival announcement roar, and isolated 3D spatial footsteps.
+- **Jupiter Mini-Boss Infiltration:** Introduced Jupiter boss entities seamlessly into standard Zombie Game Mode rounds starting from Round 5+. Features 10,000 Base HP scaling, 3D arrival announcement roar, isolated spatial audio, and administrative spawn commands.
 - **Polymorphic Audio Engine:** Expanded the entity sound engine to support custom entity sound folders dynamically, suppressing default surface tile footsteps for special boss entities while enabling 3D spatial charge windups and hit sound effects.
+
+• Jupiter Boss AI & Tactical Maneuvers
+- **Dynamic 25-Tactic Combat Matrix:** Upgraded Jupiter with an advanced AI tactical decision engine featuring 25 dynamic combat maneuvers. Includes S-curve sweeps, Z-zigzag rushes, spiral envelopes, shield-counter pivots, cover hugging, and 3-second Double Time Sprint bursts with distinct spatial footstep audio.
+- **Proactive Melee & Ranged Evasion:** Jupiter now senses incoming melee weapons and firearms in real-time, executing smooth sidesteps and backsteps out of strike zones. During InstaKill mode, Jupiter gains heavy damage resistance (25% max HP cap per hit) and ultra-responsive evasion.
+- **Mobile Ultimate Thunderstorm:** Transformed Jupiter's 4-strike thunderbolt ultimate into a mobile casting skill. Jupiter now continues running, sprinting, and chasing targets at full speed while raining down 360-degree lightning strikes.
+- **Smooth Arc Trajectory & Audio Panning:** Enhanced AI movement physics with smooth angular LERP curve interpolation, eliminating sharp turn snaps and producing fluid 3D spatial audio panning.
+- **Heavy Melee Stagger & Reactive Backstep:** Heavy melee weapon impacts now cause bosses to flinch with a 3D audio groan and sprint back 6–8 tiles, breaking heavy combos while dynamic evasion scales smoothly with weapon reach.
+- **Dynamic Multi-Target Engagement:** Upgraded target selection to dynamically transfer aggro to active damage dealers in real-time, providing complete combat freedom during multi-player engagements.
+- **Spawn Observation Stance & Sound Boost:** Bosses now observe players for 3 seconds upon arrival before initiating aggressive attacks, while footstep audio is boosted for clear 3D tactical tracking.
 
 ================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.5.4
@@ -32,48 +41,39 @@ BEYOND TOURNAMENT - CHANGELOG v1.5.3
 ================================================================================
 
 • UX & Menus
-- **Keybinding Cursor Memory:** The keybinding config menu now remembers your cursor position after binding a key. Previously the cursor reset to the top of the list after every bind, forcing you to scroll back down each time.
-- **Categorized Wallbuy Selection:** Map Wallbuy menus are now organized into clean category sections (Melee & Throwables, Automatic Firearms, Semi-Auto & Pistols, and Shields & Protection) for streamlined browsing.
-- **Dynamic Category Titles & Screen Reader Audio:** Sub-menus now announce their specific category name (e.g., "Select Melee Weapons & Throwables") for enhanced audio accessibility.
+- **Keybinding Cursor Memory:** The keybinding config menu now remembers your cursor position after binding a key.
+- **Categorized Wallbuy Selection:** Map Wallbuy menus are now organized into clean category sections for streamlined browsing.
+- **Dynamic Category Titles & Screen Reader Audio:** Sub-menus now announce their specific category name for enhanced audio accessibility.
 - **Streamlined Menu Navigation:** Enhanced menu back and Escape key navigation across creation tools to ensure a smooth, seamless workflow.
 
 • Shield System & Equipment
-- **Full Shield Protection System:** Introduced 5 distinct shield tiers ranging from Oak Wood to Iron. Shields can be bought from Wallbuy stations or assigned directly without consuming inventory slots.
-- **Frontal Combat Mitigation:** Holding the defense stance mitigates incoming damage based on shield block percentage and durability, featuring 3D impact audio cues.
-- **Shield Durability & Health Inspection:** Pressing the health check key (`H`) now announces remaining shield durability alongside player HP, or confirms when no shield is currently equipped.
+- **Full Shield Protection System:** Introduced 5 distinct shield tiers ranging from Oak Wood to Iron.
+- **Frontal Combat Mitigation:** Holding the defense stance mitigates incoming damage based on shield block percentage and durability.
+- **Shield Durability & Health Inspection:** Pressing the health check key now announces remaining shield durability alongside player HP.
 
 • Zombie Combat & Tactical AI
-- **Dynamic Proximity Aggro Transfer:** Players can now shake off pursuing zombies by leading them past other players in multi-player matches. Passing within 3.5 tiles triggers immediate retargeting, allowing a portion of the horde to switch focus smoothly to nearby allies.
-- **Solo vs Multi-Player Horde Balancing:** Single-player matches automatically focus 100% of all spawned zombies onto the solo player for maximum challenge, while multi-player matches apply soft density caps (6+ zombies per player) to evenly distribute horde pursuit across all active team members.
-- **Continuous Stationary Target Tracking:** Fixed an issue where zombies would stand still after attacking a stationary target. Zombies now continuously refresh target coordinates and execute flanking/surrounding maneuvers smoothly without pausing, even when targets remain completely still.
-- **Sprinting & Tactical Approach Patterns:** Normal Zombies now accelerate into a fast sprint upon spotting targets and execute 15 randomized tactical approach maneuvers including curve flanks, zig-zags, leap lunges, and side dashes.
+- **Dynamic Proximity Aggro Transfer:** Players can now shake off pursuing zombies by leading them past other players in multi-player matches.
+- **Solo vs Multi-Player Horde Balancing:** Single-player matches automatically focus 100% of all spawned zombies onto the solo player, while multi-player matches apply soft density caps.
+- **Continuous Stationary Target Tracking:** Fixed an issue where zombies would stand still after attacking a stationary target.
+- **Sprinting & Tactical Approach Patterns:** Normal Zombies now accelerate into a fast sprint upon spotting targets and execute 15 randomized tactical approach maneuvers.
 
 • Map & Zone System
-- **Auto-Generated Player Spawns:** Entering `0` when configuring player spawns during map creation now automatically generates 4 corner spawn points inset safely from outer boundary walls.
-- **Streamlined Shield Wallbuy Placement:** Shield Wallbuy setup now automatically concludes upon setting purchase cost, skipping irrelevant ammo prompt inputs.
-- **Zone Overlap Priority:** When multiple zones overlap at the same position, the smallest zone now takes priority. This prevents large background zones from overwriting smaller specific zones regardless of creation order.
-- **Zone Text Character Limit:** Increased the zone description input limit from 200 to 5,000 characters, allowing map creators to paste long descriptions without truncation.
+- **Auto-Generated Player Spawns:** Entering 0 when configuring player spawns during map creation now automatically generates 4 corner spawn points.
+- **Streamlined Shield Wallbuy Placement:** Shield Wallbuy setup now automatically concludes upon setting purchase cost.
+- **Zone Overlap Priority:** When multiple zones overlap at the same position, the smallest zone now takes priority.
+- **Zone Text Character Limit:** Increased the zone description input limit from 200 to 5,000 characters.
 
 • Staff Permission & Audio Broadcast
-- **Unified Staff Authority Alignment:** Synchronized permission verification across all official staff roles to ensure seamless access to administrative announcement features and public address broadcast channels.
-- **Megaphone Audio Priority & Stream Management:** Streamlined PA broadcast locks and multi-source audio routing, allowing authorized staff to manage environmental music broadcasts and perform live announcements cleanly without signal disruption.
-
-• Matchmaking & Lobby
-- **Block Mid-Game Leaving:** Non-host players can no longer leave a match once it has started. The leave option is only available during the pre-game lobby and exploration phase.
-
-• System & Core Engine
-- **Client & Server Protocol Sync:** Synchronized network protocol and client/server version markers to v1.5.3.
+- **Unified Staff Authority Alignment:** Synchronized permission verification across all official staff roles.
+- **Megaphone Audio Priority & Stream Management:** Streamlined PA broadcast locks and multi-source audio routing.
 
 ================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.5.2
 ================================================================================
 
 • Megaphone & Acoustic Filter System
-- **Line-of-Sight Wall Occlusion:** Restored accurate acoustic wall occlusion across all PA speakers. Sound now properly muffles and dims when obstructed by solid wall structures.
-- **Deep Bass Enhancement:** Boosted low-frequency bass output for occluded speakers, allowing heavy bass frequencies to naturally punch through walls while high frequencies are absorbed.
-
-• System & Core Engine
-- **Client & Server Protocol Sync:** Synchronized network protocol and client/server version markers to v1.5.2.
+- **Line-of-Sight Wall Occlusion:** Restored accurate acoustic wall occlusion across all PA speakers.
+- **Deep Bass Enhancement:** Boosted low-frequency bass output for occluded speakers.
 
 ================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.5.1
@@ -87,94 +87,181 @@ BEYOND TOURNAMENT - CHANGELOG v1.5.0
 ================================================================================
 
 • Audio Engine & Voice Chat
-- **Megaphone Bass Boost:** Boosted the megaphone PA equalizer low-frequency band (low_gain 2.2→2.8, low_cutoff 160→200 Hz) for warmer, punchier bass across every speaker and player clone.
+- **Megaphone Bass Boost:** Boosted the megaphone PA equalizer low-frequency band for warmer, punchier bass across every speaker.
 
 • Player & Death Systems
-- **Death Sound on Fall Fix:** Removed the death stinger (death/start.ogg) that played on every ordinary fall/landing; it now only plays on actual death. Landing impact uses the normal foley fall sound instead.
-- **Dead HP Check Fix:** Pressing the HP-check key while dead now correctly announces "You are dead." instead of reporting a stale HP value like "100 of 100 HP".
+- **Death Sound on Fall Fix:** Removed the death stinger that played on every ordinary fall/landing.
+- **Dead HP Check Fix:** Pressing the HP-check key while dead now correctly announces "You are dead."
 
 ================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.4.9
 ================================================================================
 
 • Audio Engine & Sound Systems
-- **UI Sound Preloading:** All critical notification and interface sounds are now pre-loaded into memory at startup, eliminating the issue where alert sounds would fail to play on first trigger after joining the server.
-- **Audio Buffer Retention:** Strengthened the audio buffer cache to prevent the system from prematurely discarding loaded sounds between plays, ensuring consistent playback reliability throughout a session.
-- **Weapon Reload Sound Overlap Fix:** Fixed an issue where the reload sound effect would sometimes play twice simultaneously, caused by both the local client and the server broadcasting the sound back to the same player. Reload audio now plays once cleanly, matching the established behavior of firing sounds.
-
-• Notifications & Alert Sounds
-- **Dedicated Broadcast Sound:** Global server announcements now use a distinct notification tone, providing a clear audible cue separate from personal messages and staff alerts.
-- **Staff Warning Sound Integration:** Administrative warnings, security alerts, and moderation actions now trigger a dedicated warning tone for staff members, making urgent events immediately recognizable.
-- **Kick Alert Broadcast:** When a player is kicked or banned, a distinct alert sound now plays globally for all connected players, providing clear feedback that a moderation action has occurred.
-- **Anti-Cheat Stealth Alerts:** Security detection alerts are now delivered exclusively to staff with a dedicated warning sound, while other players simply see the flagged user go offline normally, maintaining operational discretion.
-
-• Megaphone & Broadcasting
-- **Broadcast Ownership Lock:** Added server-enforced broadcast ownership to prevent overlapping megaphone transmissions. When a broadcast is active, other users receive a notification instead of interrupting the current speaker.
+- **UI Sound Preloading:** All critical notification and interface sounds are now pre-loaded into memory at startup.
+- **Audio Buffer Retention:** Strengthened the audio buffer cache to prevent premature sound unloading.
+- **Weapon Reload Sound Overlap Fix:** Fixed an issue where the reload sound effect would play twice simultaneously.
 
 ================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.4.8
 ================================================================================
 
 • Minigame & Navigation Fixes
-- **Match Control Key Unlocking:** Restored seamless Backspace key navigation during active minigames, allowing players to open match control menus smoothly.
-- **Minigame Substate Cleanup:** Integrated explicit exit dialog and resume request protocols for Pong matches, restoring full paddle movement and serve controls upon match resume.
-- **Match Owner & Participant Menu Access:** Updated in-game match management options so participants and match creators retain access to Leave and Destroy options across all game states.
-- **Menu Tuple Crash Fix:** Hardened menu item iteration logic against tuple format variations, preventing client crashes during local exit confirmation prompts.
-- **Login Screen Protection:** Guarded navigation hotkeys on top-level root menus to prevent unintended application exits.
+- **Match Control Key Unlocking:** Restored seamless Backspace key navigation during active minigames.
+- **Minigame Substate Cleanup:** Integrated explicit exit dialog and resume request protocols for Pong matches.
+- **Match Owner & Participant Menu Access:** Updated in-game match management options for participants and creators.
+- **Menu Tuple Crash Fix:** Hardened menu item iteration logic against tuple format variations.
+- **Login Screen Protection:** Guarded navigation hotkeys on top-level root menus.
 
 ================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.4.7
 ================================================================================
 
 • Audio Engine & Voice Chat
-- **Megaphone Talkover Clipping Fix:** Replaced the previous winner-takes-all ducking (one loud speaker at 100%, others forced to 25%) with equal-power sum-safe mixing. Every simultaneously active speaker now receives gain 1/√N, so the summed level stays constant and no longer clips or crackles when 2+ players talk over each other through the megaphone. Everyone is heard equally.
-- **Non-Blocking Builder Sound Preview:** Sound previews in the Builder music/ambience browse menus are now decoded on a background thread and played on a single reused OpenAL source, instead of decoding and allocating a new source on the main thread every cursor move. This removes the contention with the megaphone stream over the shared OpenAL context, eliminating megaphone stutter while browsing sounds.
-- **Master Gain Clipping Correction:** Fixed the master listener gain being amplified above 1.0 (was master/67 ≈ 1.49 at 100%), which pre-amplified the summed output and caused premature digital clipping. It now maps master volume 1:1 to [0,1].
-- **Tighter Preview Safety Limiter:** Tightened the soft limiter threshold and pre-scaling so individual voices leave headroom before the mixer sums multiple senders during megaphone talkover.
-
-• Builder & Menu Navigation
-- **Arrow-Key Volume Hijack Fix:** Left and right arrow keys were unconditionally hijacked to adjust the preview volume in every menu, preventing their use as navigation. The volume handlers are now gated on the sound-browse flag, matching the existing Space key guard, so arrows no longer interfere with normal menus while still adjusting preview volume inside sound-browse menus.
+- **Megaphone Talkover Clipping Fix:** Replaced ducking with equal-power sum-safe mixing.
+- **Non-Blocking Builder Sound Preview:** Sound previews in Builder browse menus are now decoded on a background thread.
+- **Master Gain Clipping Correction:** Fixed master listener gain amplification to map volume 1:1.
+- **Tighter Preview Safety Limiter:** Tightened soft limiter threshold and pre-scaling.
 
 ================================================================================
 BEYOND TOURNAMENT - CHANGELOG v1.4.6
 ================================================================================
 
+• Notifications & Moderation Alerts
+- **Dedicated Broadcast Sound:** Global server announcements now use a distinct notification tone.
+- **Staff Warning Sound Integration:** Administrative warnings and moderation actions now trigger a dedicated warning tone.
+- **Kick Alert Broadcast:** When a player is kicked or banned, a distinct alert sound plays globally.
+- **Anti-Cheat Stealth Alerts:** Security detection alerts are delivered exclusively to staff with a dedicated warning tone.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.4.5
+================================================================================
+
 • Minigame & Arcade Systems
-- **Multiplayer Mode Retention:** Resolved round transition logic so multiplayer matches smoothly remain in multiplayer mode across all rounds without defaulting to Solo AI mode.
-- **Turn Security & Guarding:** Added active turn validation across player match actions, preventing out-of-turn inputs from advancing match turns or triggering premature dealer resolution.
-- **Keyboard Navigation Fix:** Restored continuous keyboard event processing for menu items, allowing seamless Up/Down arrow key navigation across all overlay menus.
-- **Instant Action Focus:** Automatically focused active turn choices on arrival, enabling players to select actions immediately via Enter or Space.
-- **Substate Memory Reclamation:** Optimized menu substate updates during match progression, preventing obsolete overlay menus from stacking up in memory.
+- **Multiplayer Mode Retention:** Resolved round transition logic so multiplayer matches smoothly remain in multiplayer mode.
+- **Turn Security & Guarding:** Added active turn validation across player match actions.
+- **Keyboard Navigation Fix:** Restored continuous keyboard event processing for menu items.
+- **Instant Action Focus:** Automatically focused active turn choices on arrival.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.4.4
+================================================================================
 
 • Weapon Manager & Admin Tools
-- **Recoil Tuning in Weapon Manager:** Integrated custom recoil chance configuration into the weapon editor menu, allowing administrators to modify recoil percentages per shot directly in-game without editing server configuration files manually.
-- **Creation Wizard Refinement:** Streamlined weapon creation prompts by isolating recoil configuration specifically to firearm categories while automatically initializing melee weapons with zero recoil.
+- **Recoil Tuning in Weapon Manager:** Integrated custom recoil chance configuration into the weapon editor menu.
+- **Creation Wizard Refinement:** Streamlined weapon creation prompts by isolating recoil configuration to firearms.
 
-• Auto-Updater & Client Distribution
-- **Thread-Safe Background Extraction:** Refactored update package extraction to execute cleanly on background threads while safely dispatching UI status updates to the main event loop, completely resolving UI thread freezes and `(Not Responding)` warnings during installation.
-- **pySmartDL Exception Protection:** Added safe exception handling around download status checks, preventing client crashes during post-download thread cleanup.
-- **Seamless Game Auto-Updater:** Introduced an integrated automatic game updater. The client now silently checks for new releases upon startup and prompts the player with full TTS accessibility instructions.
-- **Accessible Progress Tracking:** During an active download, players can press Space (percentage), 1 (download speed), 2 (file size downloaded), or 3 (estimated time remaining) to receive real-time audio progress announcements.
-- **Safe Batch Script Handoff:** Overhauled the update installation pipeline to hand off file replacement to a background batch script upon closing the game, completely eliminating file lock conflicts and permissions errors.
-- **Post-Update Confirmation:** Displays a native Windows notification upon successful update installation, allowing players to restart the game manually at their convenience.
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.4.3
+================================================================================
 
 • Audio Engine & Voice Chat
-- **Audio Clipping Protection:** Optimized the Opus stream audio mixing pipeline between microphone voice chat and the Music Bot, eliminating sound distortion and clipping during simultaneous broadcasts.
-- **Megaphone Security & Lock Enforcement:** Reinforced server-side megaphone broadcasting permissions to strictly enforce broadcast ownership locks, preventing unauthorized voice streams from interrupting ongoing announcements.
-- **Background Music Transitions:** Implemented automatic audio fadeouts when initiating an update or changing menus for a polished soundscape transition.
-- **Concert Spectator Audio Crossfading:** Enhanced Concert Spectator mode transitions with a 1.5-second smooth crossfade between physical 3D speaker arrays and 2D stereo concert mode, eliminating abrupt audio cuts and restoring warm bass fidelity.
-- **End-of-Track Stream Reclamation:** Resolved an audio buffer retention issue in the streaming engine. Songs now reach clean end-of-file completion, automatically releasing audio queues and transitioning to the next track without repeating the final audio frame.
-- **Unified Replay & Pause Controls:** Streamlined keyboard control context for audio playback. Replay (Ctrl+M) and Pause/Resume (Shift+M) now reliably function across all audio sources, including custom playlists and local audio files.
+- **Audio Clipping Protection:** Optimized Opus stream audio mixing pipeline between microphone voice chat and Music Bot.
+- **Background Music Transitions:** Implemented automatic audio fadeouts when initiating an update or changing menus.
+- **Unified Replay & Pause Controls:** Streamlined keyboard control context for audio playback.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.4.2
+================================================================================
 
 • Personal Playlists & Music Bot
-- **AppData User Profile Storage:** Relocated personal playlists (`my_playlists.json`) to Windows `%APPDATA%/Beyond Tournament/`, ensuring custom playlists and favorite tracks remain 100% safe across game updates, reinstalls, and patches. Includes automatic migration of legacy playlist data on startup.
-- **Personal My Playlists & Favorites:** Introduced client-side personal playlist management. Players can now save YouTube tracks and local audio files into a dedicated Favorites list or custom named playlists, allowing instant 1-click playback without re-typing search queries.
-- **Direct Search Result Bookmarking:** Search results and audio selections now feature direct options to play immediately, bookmark to Favorites, or save into specific custom playlists.
+- **AppData User Profile Storage:** Relocated personal playlists (`my_playlists.json`) to Windows `%APPDATA%/Beyond Tournament/`.
+- **Personal My Playlists & Favorites:** Introduced client-side personal playlist management.
+- **Direct Search Result Bookmarking:** Search results feature direct options to bookmark to Favorites or custom playlists.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.4.1
+================================================================================
 
 • Builder System & UX Improvements
-- **Multi-Level Back Navigation (Builder Stack):** Overhauled the in-game Builder menu navigation. Players can now seamlessly step backward through multi-level configuration menus using the Escape key or Back option without losing their context or restarting from the main menu.
-- **Staff Permissions Synchronization:** Resolved an issue where staff member roles granted in-game were not immediately recognized by client-side builder toggles upon connection.
+- **Multi-Level Back Navigation:** Overhauled in-game Builder menu navigation to step backward through multi-level menus.
+- **Staff Permissions Synchronization:** Resolved an issue where staff member roles granted in-game were not immediately recognized by builder toggles.
 
-• System & General Fixes
-- **Spectator Safety Controls:** Restricted spectator command toggles during active competitive matches to prevent state overlap while keeping spectator access available during pre-game exploration lobbies.
-- **Distributed Build Stability:** Prioritized fallback executable resolution for background tools across distributed builds, resolving playback failures on standalone client packages.
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.4.0
+================================================================================
+
+• Auto-Updater & Client Distribution
+- **Seamless Game Auto-Updater:** Introduced an integrated automatic game updater.
+- **Thread-Safe Background Extraction:** Refactored update package extraction to execute cleanly on background threads.
+- **Accessible Progress Tracking:** During an active download, players can press Space, 1, 2, or 3 for audio progress announcements.
+- **Safe Batch Script Handoff:** Overhauled the update installation pipeline to hand off file replacement to a background script.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.9
+================================================================================
+
+• Auto-Updater Batch Pipeline
+- **Safe Batch Script Handoff:** Overhauled update installation to hand off file replacement to a background batch script upon closing the game, avoiding file lock conflicts.
+- **Post-Update Notification Sync:** Displays native Windows notifications upon successful update completion.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.8
+================================================================================
+
+• Anti-Cheat Audit & Staff Monitoring
+- **Stealth Anti-Cheat Audit:** Enhanced server-side security monitoring to log anomalous player movement and action packets.
+- **Staff Discretion Alerts:** Security detection alerts are dispatched exclusively to active staff members.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.7
+================================================================================
+
+• Audio Engine Gain & Limiter Corrections
+- **Master Listener Gain Mapping:** Corrected master listener gain amplification to map 1:1 without digital distortion.
+- **Preview Safety Limiter:** Tightened soft limiter thresholds for background music previews.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.6
+================================================================================
+
+• User Profile Storage Migration
+- **AppData User Profile Storage:** Relocated user profiles and playlists (`my_playlists.json`) to Windows `%APPDATA%/Beyond Tournament/`.
+- **Automatic Legacy Data Migration:** Automatically migrates legacy playlist data on startup.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.5
+================================================================================
+
+• Concert & Spectator Audio Engine
+- **Concert Spectator Audio Crossfading:** Enhanced Concert Spectator mode transitions with a 1.5-second smooth crossfade.
+- **End-of-Track Stream Reclamation:** Resolved an audio buffer retention issue in the streaming engine.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.4
+================================================================================
+
+• Anti-Cheat & Security Systems
+- **Stealth Anti-Cheat Audit:** Enhanced server-side security monitoring.
+- **Staff Discretion Alerts:** Security detection alerts dispatched exclusively to staff.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.3
+================================================================================
+
+• Voice Chat & Megaphone Safety
+- **Broadcast Ownership Lock:** Added server-enforced broadcast ownership.
+- **Multi-Speaker Level Normalization:** Balanced multi-speaker voice chat streams.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.2
+================================================================================
+
+• Audio Engine & Buffer Optimizations
+- **Dynamic Audio Stream Caching:** Optimized memory retention for streaming audio buffers.
+- **Background Sound Fadeouts:** Smooth sound fadeouts upon menu transitions.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.1
+================================================================================
+
+• Standalone Client Build Stability
+- **Fallback Tool Resolution:** Prioritized fallback executable resolution for background tools across distributed builds.
+- **pySmartDL Exception Protection:** Added safe exception handling around download status checks.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v1.3.0
+================================================================================
+
+• Initial v1.3 Foundation Release
+- **Core Engine & Networking Foundation:** Initial release of the v1.3 core network engine and client sound system.
