@@ -1,19 +1,13 @@
-• UX, Menus & Input Safety
-- **Menu Input Isolation & Voice Chat Safety:** Restored clean letter-search navigation across all overlay and weapon selection menus. Pressing navigation hotkeys while inside menus now functions strictly as menu navigation without accidentally activating Push-to-Talk voice channels.
-- **Redundant Arcade Cabinet Exit Cleaned:** Streamlined the Arcade Cabinet interface to feature a single, clean Close button without duplicate exit options.
+• Jupiter Boss & Polymorphic Entity System
+- **Jupiter Mini-Boss Infiltration:** Introduced Jupiter boss entities seamlessly into standard Zombie Game Mode rounds starting from Round 5+. Features 10,000 Base HP scaling, thunder strike attacks, 3D arrival announcement roar, and isolated 3D spatial footsteps.
+- **Polymorphic Audio Engine:** Expanded the entity sound engine to support custom entity sound folders dynamically, suppressing default surface tile footsteps for special boss entities while enabling 3D spatial charge windups and hit sound effects.
 
 • Shield System & Combat Failsafes
 - **Flexible Curved Arc & Physical Width Barrier:** Upgraded the shield defense engine with dynamic 3-stage combat barrier physics. Shields now feature configurable physical barrier widths and curved defense arcs that adapt dynamically to player rotation, supporting up to 360-degree dome protection.
-- **Downed State Shield Lock:** Prevented players who are dead or awaiting revive from raising or lowering defensive shields until they are successfully revived by a teammate.
+- **Shield Double Audio Fix:** Eliminated double audio playback when raising or lowering shields by excluding the local player from server 3D spatial sound broadcasts.
 
-• Zombie Game & Sound Rotation
-- **Weighted Sound Theme Rotation:** Re-engineered round sound theme selection to automatically rotate among available sound themes every round, utilizing probabilistic weight balancing to prevent consecutive folder repetition and ensure equal distribution across extended matches.
-
-• Weapon Management & Auto-Balancing
-- **Melee Weapon Auto-Balancing:** Expanded administrative balance tools to support Melee weapons, allowing staff to configure custom recoil parameters and auto-equalize target Damage Per Second (DPS) across both firearms and melee weapons.
-
-• Audio Engine & PA Speakers
-- **Automatic PA Speaker Initialization:** Map Public Address (PA) speakers now initialize automatically upon joining any server or map without requiring manual map reloading.
+• UX, Menus & Input Safety
+- **Auto-Balance Menu Reordered:** Streamlined the weapon auto-balance menu interface by grouping firearm and melee weapon options into clean, distinct categories.
 
 • System & Core Engine
-- **Client & Server Protocol Sync:** Synchronized network protocol and version markers across Client and Server to v1.5.4.
+- **Client & Server Protocol Sync:** Synchronized network protocol and version markers across Client and Server to v1.5.5.
