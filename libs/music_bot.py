@@ -632,7 +632,9 @@ class MapMusicBot:
         
         # Check if staff to show megaphone routing option
         is_staff = getattr(gp, 'is_staff', False) if gp else False
-        if is_staff:
+        is_builder = getattr(gp, 'is_builder', False) if gp else False
+        is_technician = getattr(gp, 'is_technician', False) if gp else False
+        if is_staff or is_builder or is_technician:
             def get_megaphone_label():
                 status = "ON" if self.broadcast_to_megaphone else "OFF"
                 return f"Broadcast to Megaphone: {status}"

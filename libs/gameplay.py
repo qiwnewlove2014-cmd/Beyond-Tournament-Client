@@ -7,6 +7,7 @@ import cyal.exceptions
 from .systems.megaphone_system import MegaphoneManager
 import pygame
 import pyogg
+from .shields import ShieldManager
 from . import (
     audio_manager,
     buffer,
@@ -51,6 +52,7 @@ class Gameplay(state.State):
         self.turning = False
         self.can_run = True
         self.wmanager = weaponmanager.weaponManager(self.game, self.player)
+        self.shield_mngr = ShieldManager(self)
         self.parser = map.Map_parser(self.game, self.map)
         self.last_ping_time = time.time()
         self.pingging = False
@@ -163,9 +165,11 @@ class Gameplay(state.State):
             kc.get("music_bot_toggle", pygame.K_m): self.music_bot_control,
             kc.get("music_bot_vol_down", pygame.K_F9): lambda mod: self.music_bot_volume(-10),
             kc.get("music_bot_vol_up", pygame.K_F10): lambda mod: self.music_bot_volume(10),
+            kc.get("raise_shield", pygame.K_s): self.start_raise_shield,
         }
         self.keys_released = {
             kc.get("voice_chat", pygame.K_g): self.voice_chat_stop,  # Push-to-Talk mode
+            kc.get("raise_shield", pygame.K_s): self.stop_raise_shield,
             kc.get("strafe_left", pygame.K_q): lambda mod: (
                 setattr(self, "can_run", True)
             ),
@@ -535,6 +539,19 @@ class Gameplay(state.State):
         if mod & pygame.KMOD_SHIFT:
             return buffer.cycle_item(3)
         buffer.cycle_item(1)
+
+    def start_raise_shield(self, mod=0):
+        if not self.spectator_mode:
+            if not self.shield_mngr.equipped_shield:
+                speak("No shield equipped.")
+                return
+            self.shield_mngr.raise_shield()
+            self.game.network.send(consts.CHANNEL_MISC, "raise_shield", {"angle": self.player.hfacing})
+
+    def stop_raise_shield(self, mod=0):
+        if not self.spectator_mode and self.shield_mngr.is_raising:
+            self.shield_mngr.lower_shield()
+            self.game.network.send(consts.CHANNEL_MISC, "lower_shield", {"angle": self.player.hfacing})
 
     # key event handelers:
     def buffer_move_r(self, mod=0):

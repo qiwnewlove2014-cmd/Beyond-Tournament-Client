@@ -41,5 +41,6 @@
     "`": "export_buffers",
     "f6": "toggle_beacons",
     "g": "voice_chat",
-    "n": "helper_menu"
+    "n": "helper_menu",
+    "s": "raise_shield"
 }

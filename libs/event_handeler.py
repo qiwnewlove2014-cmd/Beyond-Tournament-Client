@@ -137,8 +137,9 @@ class EventHandeler:
         y = float(raw_y) if raw_y is not None else 0.0
         z = float(raw_z) if raw_z is not None else 0.0
         self.gameplay.player.move(x, y, z, play_sound=False)
-        # Setup megaphone speakers after map data is loaded
-        self.gameplay.megaphone.setup_megaphone_speakers(force=True)
+        # Setup megaphone speakers after map data is loaded (with safety check)
+        if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
+            self.gameplay.megaphone.setup_megaphone_speakers(force=True)
         # === Load Music Bot playlist for this map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
             self.gameplay.music_bot.load_map_music(data["data"])
@@ -161,7 +162,8 @@ class EventHandeler:
         self.gameplay.player.move(
             self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
         )
-        self.gameplay.megaphone.setup_megaphone_speakers(force=True)
+        if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
+            self.gameplay.megaphone.setup_megaphone_speakers(force=True)
         # === Reload Music Bot playlist for updated map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
             self.gameplay.music_bot.load_map_music(data["data"])
@@ -226,8 +228,13 @@ class EventHandeler:
                 pass
 
     def remove_entity(self, data):
-        self.gameplay.voice_channels = { k: v for k, v in self.gameplay.voice_channels.items() if v.name != data["name"] }
-        self.gameplay.map.remove_entity(data["name"])
+        if hasattr(self.gameplay, 'voice_channels') and isinstance(self.gameplay.voice_channels, dict):
+            target_name = data.get("name")
+            keys_to_remove = [k for k, v in self.gameplay.voice_channels.items() if getattr(v, 'name', None) == target_name]
+            for k in keys_to_remove:
+                del self.gameplay.voice_channels[k]
+        if hasattr(self.gameplay, 'map') and self.gameplay.map:
+            self.gameplay.map.remove_entity(data["name"])
 
     def play_sound(self, data):
         if entity := (
@@ -336,6 +343,15 @@ class EventHandeler:
                 del self.game.menu_memory[menu_id]
             self.gameplay.pop_last_substate()
 
+        # Pop previous builder menu substate if open so builder menus swap cleanly instead of stacking
+        event_name = data.get("event", "")
+        is_builder_menu = event_name.startswith("builder_") or event_name.startswith("edit_") or event_name == "element_action_select"
+        if is_builder_menu and self.gameplay and getattr(self.gameplay, "states", None):
+            top_state = self.gameplay.states[-1]
+            top_event = getattr(top_state, "menu_event", "")
+            if top_event.startswith("builder_") or top_event.startswith("edit_") or top_event == "element_action_select":
+                self.gameplay.pop_last_substate()
+
         m = menu.Menu(self.game, data["title"], autoclose=False, parrent=self.gameplay)
         m.menu_event = data.get("event", "")
         m.menu_type = data.get("menu_type", "normal")
@@ -348,14 +364,18 @@ class EventHandeler:
         has_server_back = False
         if data.get("options"):
             for opt in data["options"]:
+                opt_title = str(opt.get("title", "")).lower()
                 opt_val = opt.get("value")
+                if opt_title == "back" or opt_title.startswith("back "):
+                    has_server_back = True
+                    break
                 if isinstance(opt_val, dict):
                     act = str(opt_val.get("action", ""))
                     prop = str(opt_val.get("property", ""))
-                    if act in ("builder_back", "bj_prompt_exit", "exit_blackjack", "back_main", "weapon_back") or prop == "back" or act.endswith("_back"):
+                    if act in ("back", "builder_back", "bj_prompt_exit", "exit_blackjack", "back_main", "weapon_back") or prop == "back" or act.endswith("_back"):
                         has_server_back = True
                         break
-                elif str(opt_val) in ("builder_back", "bj_prompt_exit", "exit_blackjack", "back_main", "weapon_back") or str(opt_val).endswith("_back"):
+                elif str(opt_val) in ("back", "builder_back", "bj_prompt_exit", "exit_blackjack", "back_main", "weapon_back") or str(opt_val).endswith("_back"):
                     has_server_back = True
                     break
 
@@ -634,6 +654,8 @@ class EventHandeler:
                 entity.music_compression.recieve(opus_data, entity.music_source, None, entity_channel_id, self.gameplay)
 
     def has_radio(self, data):
+        if not hasattr(self.gameplay, 'voice_channels') or not isinstance(self.gameplay.voice_channels, dict):
+            return
         if data["channel"] not in self.gameplay.voice_channels.keys(): return
         self.gameplay.voice_channels[data["channel"]].has_radio = data["enable"]
     
@@ -841,3 +863,25 @@ class EventHandeler:
         language_counts = data.get("language_counts", {})
         current = data.get("current_language", "th")
         self.gameplay.show_language_menu(available_langs, language_counts, current)
+
+    def shield_hit(self, data):
+        x = data.get("x")
+        y = data.get("y")
+        z = data.get("z")
+        if hasattr(self.gameplay, 'shield_mngr'):
+            self.gameplay.shield_mngr.play_impact_sound(x, y, z, is_local=(x is None))
+
+    def shield_break(self, data):
+        x = data.get("x")
+        y = data.get("y")
+        z = data.get("z")
+        if hasattr(self.gameplay, 'shield_mngr'):
+            self.gameplay.shield_mngr.play_break_sound(x, y, z, is_local=(x is None))
+
+    def equip_shield(self, data):
+        if hasattr(self.gameplay, 'shield_mngr'):
+            self.gameplay.shield_mngr.equip_shield(data)
+
+    def unequip_shield(self, data):
+        if hasattr(self.gameplay, 'shield_mngr'):
+            self.gameplay.shield_mngr.unequip_shield()

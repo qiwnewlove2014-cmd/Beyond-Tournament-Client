@@ -4,10 +4,28 @@ BEYOND TOURNAMENT - CHANGELOG v1.5.3
 
 • UX & Menus
 - **Keybinding Cursor Memory:** The keybinding config menu now remembers your cursor position after binding a key. Previously the cursor reset to the top of the list after every bind, forcing you to scroll back down each time.
+- **Categorized Wallbuy Selection:** Map Wallbuy menus are now organized into clean category sections (Melee & Throwables, Automatic Firearms, Semi-Auto & Pistols, and Shields & Protection) for streamlined browsing.
+- **Dynamic Category Titles & Screen Reader Audio:** Sub-menus now announce their specific category name (e.g., "Select Melee Weapons & Throwables") for enhanced audio accessibility.
+- **Streamlined Menu Navigation:** Enhanced menu back and Escape key navigation across creation tools to ensure a smooth, seamless workflow.
+
+• Shield System & Equipment
+- **Full Shield Protection System:** Introduced 5 distinct shield tiers ranging from Oak Wood to Iron. Shields can be bought from Wallbuy stations or assigned directly without consuming inventory slots.
+- **Frontal Combat Mitigation:** Holding the defense stance mitigates incoming damage based on shield block percentage and durability, featuring 3D impact audio cues.
+- **Shield Durability & Health Inspection:** Pressing the health check key (`H`) now announces remaining shield durability alongside player HP, or confirms when no shield is currently equipped.
+
+• Zombie Combat & Tactical AI
+- **Continuous Stationary Target Tracking:** Fixed an issue where zombies would stand still after attacking a stationary target. Zombies now continuously refresh target coordinates and execute flanking/surrounding maneuvers smoothly without pausing, even when targets remain completely still.
+- **Sprinting & Tactical Approach Patterns:** Normal Zombies now accelerate into a fast sprint upon spotting targets and execute 15 randomized tactical approach maneuvers including curve flanks, zig-zags, leap lunges, and side dashes.
 
 • Map & Zone System
+- **Auto-Generated Player Spawns:** Entering `0` when configuring player spawns during map creation now automatically generates 4 corner spawn points inset safely from outer boundary walls.
+- **Streamlined Shield Wallbuy Placement:** Shield Wallbuy setup now automatically concludes upon setting purchase cost, skipping irrelevant ammo prompt inputs.
 - **Zone Overlap Priority:** When multiple zones overlap at the same position, the smallest zone now takes priority. This prevents large background zones from overwriting smaller specific zones regardless of creation order.
 - **Zone Text Character Limit:** Increased the zone description input limit from 200 to 5,000 characters, allowing map creators to paste long descriptions without truncation.
+
+• Staff Permission & Audio Broadcast
+- **Unified Staff Authority Alignment:** Synchronized permission verification across all official staff roles to ensure seamless access to administrative announcement features and public address broadcast channels.
+- **Megaphone Audio Priority & Stream Management:** Streamlined PA broadcast locks and multi-source audio routing, allowing authorized staff to manage environmental music broadcasts and perform live announcements cleanly without signal disruption.
 
 • Matchmaking & Lobby
 - **Block Mid-Game Leaving:** Non-host players can no longer leave a match once it has started. The leave option is only available during the pre-game lobby and exploration phase.
