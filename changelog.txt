@@ -14,6 +14,8 @@ BEYOND TOURNAMENT - CHANGELOG v1.5.5
 - **Heavy Melee Stagger & Reactive Backstep:** Heavy melee weapon impacts now cause bosses to flinch with a 3D audio groan and sprint back 6–8 tiles, breaking heavy combos while dynamic evasion scales smoothly with weapon reach.
 - **Dynamic Multi-Target Engagement:** Upgraded target selection to dynamically transfer aggro to active damage dealers in real-time, providing complete combat freedom during multi-player engagements.
 - **Spawn Observation Stance & Sound Boost:** Bosses now observe players for 3 seconds upon arrival before initiating aggressive attacks, while footstep audio is boosted for clear 3D tactical tracking.
+
+• Jupiter Boss Special Rounds & Tactical Variety
 - **Dedicated Boss Special Rounds:** Introduced dedicated boss special rounds appearing via probabilistic evaluation (35% chance every 4+ rounds). Features custom announcement broadcasts, clean text formatting, 3D directional vector-boosted spatial arrival roars, and victory rewards (1,000 Bonus Points + Max Ammo + Double Points).
 - **Tactical Stalking & Behavioral Variety:** Reduced close-range direct rush frequency, introduced tactical stalking pacing, feint-and-strike counter maneuvers, and a 2.8s–4.5s stance duration window to create organic mind games without constant chasing.
 - **Enforced Spawn Stance Pacing:** Enforced a slow 360ms walking pace and suppressed sprint bursts during the initial 3-second spawn observation window for realistic boss arrival.
