@@ -311,7 +311,7 @@ class Gameplay(state.State):
 
     def exit(self):
         super().exit()
-        if self.player.locked:
+        if self.player.locked and self.game.network and getattr(self.game.network, 'event_handeler', None):
             self.game.network.event_handeler.death({"dead": False})
         if self.game.network:
             self.game.network.put(None)
@@ -541,7 +541,7 @@ class Gameplay(state.State):
         buffer.cycle_item(1)
 
     def start_raise_shield(self, mod=0):
-        if not self.spectator_mode:
+        if not self.spectator_mode and not getattr(self.player, 'dead', False):
             if not self.shield_mngr.equipped_shield:
                 speak("No shield equipped.")
                 return
@@ -549,7 +549,7 @@ class Gameplay(state.State):
             self.game.network.send(consts.CHANNEL_MISC, "raise_shield", {"angle": self.player.hfacing})
 
     def stop_raise_shield(self, mod=0):
-        if not self.spectator_mode and self.shield_mngr.is_raising:
+        if not self.spectator_mode and not getattr(self.player, 'dead', False) and self.shield_mngr.is_raising:
             self.shield_mngr.lower_shield()
             self.game.network.send(consts.CHANNEL_MISC, "lower_shield", {"angle": self.player.hfacing})
 
@@ -1474,12 +1474,12 @@ class Gameplay(state.State):
             speak("System: PA Test Mode is only available before game starts.")
             return
         
-        # Check if map has PA speakers
-        if not hasattr(self.megaphone, 'sources') or not self.megaphone.sources:
-            speak("System: No PA speakers available on this map.")
-            return
-        
-        if consts.CHANNEL_MEGAPHONE not in self.voice_channels:
+        # Check if map has PA speakers (with auto-retry setup if map loaded speakers)
+        if (not hasattr(self.megaphone, 'sources') or not self.megaphone.sources or consts.CHANNEL_MEGAPHONE not in self.voice_channels):
+            if hasattr(self.map, 'megaphone_speakers') and self.map.megaphone_speakers:
+                self.megaphone.setup_megaphone_speakers(force=True)
+
+        if not hasattr(self.megaphone, 'sources') or not self.megaphone.sources or consts.CHANNEL_MEGAPHONE not in self.voice_channels:
             speak("System: No PA speakers available on this map.")
             return
         
@@ -1554,10 +1554,11 @@ class Gameplay(state.State):
                 
         # Megaphone availability check
         if use_megaphone:
-            if consts.CHANNEL_MEGAPHONE not in self.voice_channels and not hasattr(self.megaphone, 'sources'):
-                 speak("System: No public address system available directly in this area.")
-                 return
-            if consts.CHANNEL_MEGAPHONE not in self.voice_channels and hasattr(self.megaphone, 'sources') and not self.megaphone.sources:
+            if (consts.CHANNEL_MEGAPHONE not in self.voice_channels or not hasattr(self.megaphone, 'sources') or not self.megaphone.sources):
+                 if hasattr(self.map, 'megaphone_speakers') and self.map.megaphone_speakers:
+                     self.megaphone.setup_megaphone_speakers(force=True)
+
+            if consts.CHANNEL_MEGAPHONE not in self.voice_channels or not hasattr(self.megaphone, 'sources') or not self.megaphone.sources:
                  speak("System: No public address system available directly in this area.")
                  return
             

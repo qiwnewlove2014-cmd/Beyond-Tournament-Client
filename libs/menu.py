@@ -354,12 +354,14 @@ class Menu(state.State):
         super().update(events)
         # Drain any decoded preview so it can play this frame (non-blocking).
         self._poll_preview_result()
+
+        # Stop active voice chat if player entered menu while holding Push-to-Talk
+        target_gp = getattr(self, "parrent", None) or getattr(self.game, "gameplay", None)
+        if target_gp and hasattr(target_gp, "voice_chat_stop") and hasattr(target_gp, "voice_chat") and target_gp.voice_chat and getattr(target_gp.voice_chat, "recording", False):
+            target_gp.voice_chat_stop(0)
+
         for event in events:
             if event.type == pg.KEYUP:
-                target_gp = getattr(self, "parrent", None) or getattr(self.game, "gameplay", None)
-                if target_gp and hasattr(target_gp, "voice_chat_stop"):
-                    if event.key == self.game.keyconfig.get("voice_chat", pg.K_g):
-                        target_gp.voice_chat_stop(getattr(event, "mod", 0))
                 continue
 
             if event.type == pg.KEYDOWN:
@@ -367,7 +369,7 @@ class Menu(state.State):
 
                 is_minigame_match = getattr(self, "menu_type", "normal") in ("match_play", "match_control")
 
-                # Allow chat, voice chat, and buffer reading keys whenever attached to parent Gameplay
+                # Allow chat and buffer reading keys whenever attached to parent Gameplay
                 target_gp = getattr(self, "parrent", None) or getattr(self.game, "gameplay", None)
                 if target_gp and hasattr(target_gp, "chat"):
                     if key == pg.K_QUOTE:
@@ -387,9 +389,6 @@ class Menu(state.State):
                         continue
                     elif key == pg.K_RIGHTBRACKET:
                         target_gp.buffer_cycle_r(event.mod)
-                        continue
-                    elif key == self.game.keyconfig.get("voice_chat", pg.K_g):
-                        target_gp.voice_chat_start(event.mod)
                         continue
 
                 # Tab / Shift+Tab Dual-Pane Toggle (Match History vs Card Actions) - ONLY in minigame matches!

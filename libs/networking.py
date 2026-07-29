@@ -72,6 +72,7 @@ class Client(threading.Thread):
             try:
                 data = None
                 if event.channelID < consts.CHANNEL_VOICECHAT: 
+                    if not event.packet.data: return
                     data = json.loads(event.packet.data)
                     if not isinstance(data, dict) or not hasattr(self.event_handeler, data.get("event", "")): return
                 elif event.channelID >= consts.CHANNEL_VOICECHAT: data = event.packet.data

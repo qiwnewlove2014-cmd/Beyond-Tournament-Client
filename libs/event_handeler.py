@@ -70,6 +70,8 @@ class EventHandeler:
         # Cleanup stale voice channels (especially Megaphone which holds compression threads)
         if hasattr(self.gameplay, 'voice_channels') and isinstance(self.gameplay.voice_channels, dict):
              self.gameplay.voice_channels.clear()
+        if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
+             self.gameplay.megaphone.setup_megaphone_speakers(force=True)
             
         speak("Welcome. You are now online")
 
