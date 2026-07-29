@@ -3,7 +3,11 @@
 - **Redundant Arcade Cabinet Exit Cleaned:** Streamlined the Arcade Cabinet interface to feature a single, clean Close button without duplicate exit options.
 
 • Shield System & Combat Failsafes
+- **Flexible Curved Arc & Physical Width Barrier:** Upgraded the shield defense engine with dynamic 3-stage combat barrier physics. Shields now feature configurable physical barrier widths and curved defense arcs that adapt dynamically to player rotation, supporting up to 360-degree dome protection.
 - **Downed State Shield Lock:** Prevented players who are dead or awaiting revive from raising or lowering defensive shields until they are successfully revived by a teammate.
+
+• Zombie Game & Sound Rotation
+- **Weighted Sound Theme Rotation:** Re-engineered round sound theme selection to automatically rotate among available sound themes every round, utilizing probabilistic weight balancing to prevent consecutive folder repetition and ensure equal distribution across extended matches.
 
 • Weapon Management & Auto-Balancing
 - **Melee Weapon Auto-Balancing:** Expanded administrative balance tools to support Melee weapons, allowing staff to configure custom recoil parameters and auto-equalize target Damage Per Second (DPS) across both firearms and melee weapons.
