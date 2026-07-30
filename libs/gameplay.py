@@ -150,7 +150,7 @@ class Gameplay(state.State):
             ): lambda mod: buffer.toggle_mute(),
             kc.get("interact", pygame.K_f): self.interact,
             kc.get("open_main_menu", pygame.K_BACKSPACE): lambda mod: (
-                self.chat2("/mainmenu")
+                self.chat2("/mainmenu") if not self.substates else None
             ),
             kc.get("check_stats", pygame.K_p): self._p_or_spectator_cam,
             pygame.K_TAB: self.spectator_switch_player,  # Switch spectator target
@@ -1174,6 +1174,9 @@ class Gameplay(state.State):
         self.game.network.send(consts.CHANNEL_MISC, "open_helper_menu", {})
 
     def ask_to_exit(self, mod):
+        if self.spectator_mode:
+            self.spectator_menu(mod)
+            return
         m = menu.Menu(
             self.game,
             "Are you sure you want to exit?",

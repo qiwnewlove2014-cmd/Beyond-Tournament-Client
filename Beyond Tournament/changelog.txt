@@ -1,0 +1,324 @@
+• Beyond Tournament — Official Changelog
+• This document tracks the development history and patch notes
+• for the Beyond Tournament project (Server & Client core).
+• ============================================================
+
+--------------------------------------------------------------------------------
+[v1.5.6] System Interaction & Administration Patch — 2026-07-30
+--------------------------------------------------------------------------------
+
+• User Interface & Navigation
+- **Spectator Menu Correction:** Fixed an issue where attempting to leave Spectator mode would incorrectly prompt the player to exit the game entirely instead of displaying the Spectator Options menu.
+- **Menu Hierarchy Navigation:** Resolved an interface bug where pressing the back button repeatedly inside deeply nested menus would cause the entire menu hierarchy to collapse unexpectedly.
+
+• Administration & Game Control
+- **Dynamic Round Management:** Introduced a new administrative command allowing Moderators to instantly change the active Zombie round.
+
+--------------------------------------------------------------------------------
+[v1.5.5] Jupiter Boss Infiltration & Tactical AI Engine Patch — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Jupiter Boss & Polymorphic Entity System
+- **Jupiter Mini-Boss Infiltration:** Introduced Jupiter boss entities seamlessly into standard Zombie Game Mode rounds starting from Round 5+. Features 10,000 Base HP scaling, 3D arrival announcement roar, isolated 3D spatial footsteps, and administrative spawn commands (max 5 active).
+- **Mixed Surprise Encounters:** Starting from Round 16+, Jupiter can now dynamically infiltrate and spawn mixed within standard zombie swarms. It will roar upon arrival but omit the global text announcement, creating a highly dangerous and unexpected jump scare.
+- **Continuous Minion Summoning:** When Jupiter's HP drops below 50%, it will roar and instantly summon 2 minion zombies. It will now continuously summon 2 more minions every 25 seconds as long as its HP remains critical, requiring players to focus it down quickly.
+- **Squad Reinforcements:** Upgraded the AI helper limit! Players can now deploy up to 4 armed zombie helpers simultaneously, and the starting inventory has been increased to 4 helpers.
+- **Polymorphic Audio Engine:** Expanded the entity sound engine to support custom entity sound folders dynamically, suppressing default surface tile footsteps for special boss entities while enabling 3D spatial charge windups and hit sound effects.
+- **Seamless Audio Lifecycle:** Extended the entity lifecycle delay upon death to ensure all multi-second death cries and lingering skill sound effects (such as the Thunderstorm) complete playing smoothly without being abruptly cut off by garbage collection.
+
+• Jupiter Boss AI & Tactical Maneuvers
+- **Phase 2 Survival Protocol & Absolute Nullification:** Upon reaching critical health, Jupiter now enters a desperate survival phase, instantly generating a massive defensive aura and triggering chaotic, high-speed evasive maneuvers while continuing to cast devastating lightning strikes. Furthermore, the boss is now fully immune to Instakill powerups, immediately shifting into an impenetrable state of absolute immortality to prevent cheap executions!
+- **Dynamic 25-Tactic Combat Matrix:** Upgraded Jupiter with an advanced AI tactical decision engine featuring 25 dynamic combat maneuvers. Includes S-curve sweeps, Z-zigzag rushes, spiral envelopes, shield-counter pivots, cover hugging, and 3-second Double Time Sprint bursts with distinct spatial footstep audio.
+- **Proactive Melee & Ranged Evasion:** Jupiter now senses incoming melee weapons and firearms in real-time, executing smooth sidesteps and backsteps out of strike zones. During InstaKill mode, Jupiter gains heavy damage resistance (25% max HP cap per hit) and ultra-responsive evasion.
+- **Mobile Ultimate Thunderstorm:** Transformed Jupiter's 4-strike thunderbolt ultimate into a mobile casting skill. Jupiter now continues running, sprinting, and chasing targets at full speed while raining down 360-degree lightning strikes.
+- **Smooth Arc Trajectory & Audio Panning:** Enhanced AI movement physics with smooth angular LERP curve interpolation, eliminating sharp turn snaps and producing fluid 3D spatial audio panning.
+- **360-Degree AoE Melee Sweep:** Transformed the boss's basic melee attack into a full 360-degree area-of-effect sweep, simultaneously damaging all swarming players within range.
+- **Phantom Dash Multi-Hit Combo:** Added a devastating new 3-hit combo skill that causes the boss to aggressively leap toward the target, dealing massive AoE cleave damage across 3 consecutive strikes.
+- **Dynamic Skill Spacing:** Integrated an intelligent cooldown spacing system that prevents the boss from spamming abilities consecutively, ensuring a tactical 6-second window between ultimate casts for fair counter-play.
+- **InstaKill Evasion Refinements:** The AI now completely ignores standard flinch stagger when InstaKill is active, allowing it to seamlessly dodge or aggressively counter-attack (Suan-Kwan) incoming InstaKill strikes.
+- **Line-Of-Sight Pathfinding Fallback:** Improved terrain navigation by enforcing line-of-sight validation for tactical maneuvers. Bosses will now automatically fall back to A* pathfinding when obstructed by walls instead of walking aimlessly.
+- **Heavy Melee Stagger & Reactive Backstep:** Heavy melee weapon impacts now cause bosses to flinch with a 3D audio groan and sprint back 6–8 tiles, breaking heavy combos while dynamic evasion scales smoothly with weapon reach.
+- **Dynamic Multi-Target Engagement:** Upgraded target selection to dynamically transfer aggro to active damage dealers in real-time, providing complete combat freedom during multi-player engagements.
+- **Spawn Observation Stance & Sound Boost:** Bosses now observe players for 3 seconds upon arrival before initiating aggressive attacks, while footstep audio is boosted for clear 3D tactical tracking.
+- **Audio-Reactive Combat Tactics:** The boss now actively listens to player actions to trigger counter-maneuvers. It will aggressively sprint in a straight line to punish players caught reloading with an empty magazine, and will execute sharp zigzag evasions to dodge incoming fire when detecting sustained gunfire.
+- **Enraged Chaos Movement:** When critically wounded (HP < 30%), the boss shifts into a highly erratic "Chaos Relocation" movement pattern, sweeping rapidly from side-to-side to disorient players relying purely on spatial audio.
+
+• Weapons, Equipment & Wallbuys
+- **Melee Weapon Wallbuy Refinement:** Improved wallbuy interaction logic for melee weapons. Players will now hear an informative "You already have this weapon" message if they attempt to interact with a melee wallbuy they already own, and the system no longer incorrectly plays the weapon grab sound.
+- **Ammo Restock Audio Feedback:** Added a distinct weapon grab sound effect when successfully restocking ammo from a wallbuy to provide clear audio confirmation of the transaction.
+
+• Jupiter Boss Special Rounds & Tactical Variety
+- **Dedicated Boss Special Rounds:** Introduced dedicated boss special rounds appearing via probabilistic evaluation (35% chance every 4+ rounds). Features custom announcement broadcasts, clean text formatting, 3D directional vector-boosted spatial arrival roars, and victory rewards (1,000 Bonus Points + Max Ammo + Double Points).
+- **Tactical Stalking & Behavioral Variety:** Reduced close-range direct rush frequency, introduced tactical stalking pacing, feint-and-strike counter maneuvers, and a 2.8s–4.5s stance duration window to create organic mind games without constant chasing.
+- **Enforced Spawn Stance Pacing:** Enforced a slow 360ms walking pace and suppressed sprint bursts during the initial 3-second spawn observation window for realistic boss arrival.
+- **Administrative Boss Round Test Tools:** Added staff testing commands to trigger dedicated boss special rounds instantly on demand for balance testing and verification.
+
+--------------------------------------------------------------------------------
+[v1.5.4] PA Speaker Auto-Load, Downed Shield Lock & Melee Balance Patch — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Shield System & Combat Failsafes
+- **Flexible Curved Arc & Physical Width Barrier:** Upgraded the shield defense engine with dynamic 3-stage combat barrier physics. Shields now feature configurable physical barrier widths and curved defense arcs that adapt dynamically to player rotation, supporting up to 360-degree dome protection.
+- **Downed State Shield Lock:** Prevented players who are dead or awaiting revive from raising or lowering defensive shields until they are successfully revived by a teammate.
+
+• Zombie Game & Sound Rotation
+- **Weighted Sound Theme Rotation:** Re-engineered round sound theme selection to automatically rotate among available sound themes every round, utilizing probabilistic weight balancing to prevent consecutive folder repetition and ensure equal distribution across extended matches.
+
+--------------------------------------------------------------------------------
+[v1.5.3] Comprehensive Shield Infrastructure & Zombie AI Update — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Shield System & Equipment
+- **Full Shield Protection System:** Introduced 5 distinct shield tiers ranging from Oak Wood to Iron.
+- **Frontal Combat Mitigation:** Holding the defense stance mitigates incoming damage based on shield block percentage and durability.
+
+• Zombie Combat & Tactical AI
+- **Dynamic Proximity Aggro Transfer:** Players can now shake off pursuing zombies by leading them past other players in multi-player matches.
+- **Solo vs Multi-Player Horde Balancing:** Single-player matches automatically focus 100% of all spawned zombies onto the solo player, while multi-player matches apply soft density caps.
+- **Continuous Stationary Target Tracking:** Fixed an issue where zombies would stand still after attacking a stationary target.
+
+--------------------------------------------------------------------------------
+[v1.5.2] PA Speaker Acoustic Filter & Wall Occlusion Patch — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Megaphone & Acoustic Filter System
+- **Line-of-Sight Wall Occlusion:** Restored accurate acoustic wall occlusion across all PA speakers.
+- **Deep Bass Enhancement:** Boosted low-frequency bass output for occluded speakers.
+
+--------------------------------------------------------------------------------
+[v1.5.1] Core Version Alignment & Server Sync — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Version Sync & Patch Release
+- **Client & Server Version Sync:** Updated game core versions to v1.5.1 to maintain strict protocol compatibility.
+
+--------------------------------------------------------------------------------
+[v1.5.0] Sound Engine & Fall Damage Audio Fix — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Player & Death Systems
+- **Death Sound on Fall Fix:** Removed the death stinger that played on every ordinary fall/landing.
+
+--------------------------------------------------------------------------------
+[v1.4.9] Preloaded Sound Cache & Reload Audio Sync — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Audio Engine & Sound Systems
+- **UI Sound Preloading:** All critical notification and interface sounds are now pre-loaded into memory at startup.
+
+--------------------------------------------------------------------------------
+[v1.4.8] Arcade Minigame Substate & Menu Key Unlocking — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Minigame & Navigation Fixes
+- **Match Control Key Unlocking:** Restored seamless Backspace key navigation during active minigames.
+
+--------------------------------------------------------------------------------
+[v1.4.7] Megaphone Talkover Level Balancing Patch — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Audio Engine & Voice Chat
+- **Megaphone Talkover Clipping Fix:** Replaced ducking with equal-power sum-safe mixing.
+
+--------------------------------------------------------------------------------
+[v1.4.6] Moderation Tones & Broadcast Security — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Notifications & Moderation Alerts
+- **Dedicated Broadcast Sound:** Global server announcements now use a distinct notification tone.
+
+--------------------------------------------------------------------------------
+[v1.4.5] Arcade Multiplayer Retention & Turn Validation — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Minigame & Arcade Systems
+- **Multiplayer Mode Retention:** Resolved round transition logic so multiplayer matches smoothly remain in multiplayer mode.
+
+--------------------------------------------------------------------------------
+[v1.4.4] Weapon Editor Recoil Tuning & Wizard Patch — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Weapon Manager & Admin Tools
+- **Recoil Tuning in Weapon Manager:** Integrated custom recoil chance configuration into the weapon editor menu.
+
+--------------------------------------------------------------------------------
+[v1.4.3] Opus Audio Stream Optimization & Controls Sync — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Audio Engine & Voice Chat
+- **Audio Clipping Protection:** Optimized Opus stream audio mixing pipeline between microphone voice chat and Music Bot.
+
+--------------------------------------------------------------------------------
+[v1.4.2] AppData Playlist Profile Migration — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Personal Playlists & Music Bot
+- **AppData User Profile Storage:** Relocated personal playlists (`my_playlists.json`) to Windows `%APPDATA%/Beyond Tournament/`.
+
+--------------------------------------------------------------------------------
+[v1.4.1] Builder Multi-Level Navigation Stack — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Builder System & UX Improvements
+- **Multi-Level Back Navigation:** Overhauled in-game Builder menu navigation to step backward through multi-level menus.
+
+--------------------------------------------------------------------------------
+[v1.4.0] Seamless Auto-Updater & Audio Progress Sync — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Auto-Updater & Client Distribution
+- **Seamless Game Auto-Updater:** Introduced an integrated automatic game updater.
+
+--------------------------------------------------------------------------------
+[v1.3.9] Auto-Updater Background Batch Pipeline — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Auto-Updater Batch Pipeline
+- **Safe Batch Script Handoff:** Overhauled update installation to hand off file replacement to a background batch script upon closing the game.
+
+--------------------------------------------------------------------------------
+[v1.3.8] Stealth Anti-Cheat Security Audit & Staff Alerts — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Anti-Cheat & Security Systems
+- **Stealth Anti-Cheat Audit:** Enhanced server-side security monitoring to log anomalous player movement and action packets.
+
+--------------------------------------------------------------------------------
+[v1.3.7] Audio Engine Gain Mapping & Limiter Fixes — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Audio Engine Gain Mapping
+- **Master Listener Gain Mapping:** Corrected master listener gain amplification to map 1:1 without digital distortion.
+
+--------------------------------------------------------------------------------
+[v1.3.6] User Profile AppData Migration Pipeline — 2026-07-29
+--------------------------------------------------------------------------------
+
+• User Profile Storage Migration
+- **AppData User Profile Storage:** Relocated user profiles and playlists (`my_playlists.json`) to Windows `%APPDATA%/Beyond Tournament/`.
+
+--------------------------------------------------------------------------------
+[v1.3.5] Concert Audio Crossfading & Stream Reclamation — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Concert & Spectator Audio Engine
+- **Concert Spectator Audio Crossfading:** Enhanced Concert Spectator mode transitions with a 1.5-second smooth crossfade.
+
+--------------------------------------------------------------------------------
+[v1.3.4] Stealth Anti-Cheat Monitoring & Staff Audit — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Anti-Cheat & Security Systems
+- **Stealth Anti-Cheat Audit:** Enhanced server-side security monitoring.
+
+--------------------------------------------------------------------------------
+[v1.3.3] Megaphone Broadcast Ownership Locks — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Voice Chat & Megaphone Safety
+- **Broadcast Ownership Lock:** Added server-enforced broadcast ownership.
+
+--------------------------------------------------------------------------------
+[v1.3.2] Audio Stream Buffer Memory Optimizations — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Audio Engine & Buffer Optimizations
+- **Dynamic Audio Stream Caching:** Optimized memory retention for streaming audio buffers.
+
+--------------------------------------------------------------------------------
+[v1.3.1] Standalone Client Build Tool Fallbacks — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Standalone Client Build Stability
+- **Fallback Tool Resolution:** Prioritized fallback executable resolution for background tools across distributed builds.
+
+--------------------------------------------------------------------------------
+[v1.3.0] Beyond Tournament v1.3 Foundation Core Release — 2026-07-29
+--------------------------------------------------------------------------------
+
+• Core Engine & Network Protocol
+- **v1.3 Core Protocol Foundation:** Initial release of the v1.3 core network protocol and server event handlers.
+
+--------------------------------------------------------------------------------
+[v0.9.0] The Spectator & 2v2 Update — 2026-07-02
+--------------------------------------------------------------------------------
+
+• 2v2 Team Doubles Mode
+- Introduced full 2v2 support for both Multiplayer and Solo (Co-op) modes.
+- Lobby capacities dynamically enforce player limits (4 players for 2v2).
+- Serves automatically alternate between teammates every 4 total points.
+- Expanded the Announcer System to include dynamic, escalating hype commentary specifically tailored for 2v2 tournaments.
+
+• Spectator System
+- Added a full Spectator Mode allowing players to spectate active public Pong matches.
+- Introduced the "Sideline Camera" feature, which positions the spectator at the East or West edge of the arena with perfect 3D stereo separation.
+- Automatic camera orientation: The server dynamically informs the spectator which team is on their left/right based on their camera facing angle.
+- Spectators hear goal sounds at a boosted 250% volume for maximum hype.
+
+• UI & Main Menu Reorganization
+- Replaced the cluttered flat main menu with a categorized 4-item structure:
+  1. Zombie Game (Contains public/private/random match flows)
+  2. Minigame (Contains all Pong AI and Multiplayer creation flows)
+  3. Spectate a Match
+  4. View the Leaderboard
+
+--------------------------------------------------------------------------------
+[v0.8.0] The Advanced AI Update — 2026-06-25
+--------------------------------------------------------------------------------
+
+• Artificial Intelligence Overhaul
+- Introduced 6 distinct AI Difficulty Levels (Beginner to Nightmare).
+- Added complex trajectory prediction logic. (Nightmare difficulty now predicts 99% of ball trajectories perfectly).
+- Implemented an "Aggressiveness and Surprise Wide-Shot" system, causing higher-level AI to execute unpredictable, sharp-angled swings to break player rhythm.
+- The AI now prioritizes targeting human opponents over other AI in 2v2 mode.
+
+• Rage-Quit Protection & Failsafes
+- Implemented Seamless AI Drop-In: If a human player rage-quits or disconnects mid-match, an AI instantly takes over their paddle without interrupting the game. The match only terminates if zero human players remain on the server.
+
+• New Modes & Win Conditions
+- **Competition Mode:** First to reach 7, 11, or 21 points wins.
+- **Training Mode:** Play endlessly without a score limit. Includes a "Constant Speed" toggle to disable ball acceleration for timing practice.
+
+--------------------------------------------------------------------------------
+[v0.7.0] The Physics & Sound Update — 2026-06-15
+--------------------------------------------------------------------------------
+
+• Improved Ball Physics
+- Completely rewrote the ball's directional (Vx) calculations. Steering the ball left or right using paddle offset is now highly responsive and no longer relies on stale accumulated data.
+- Added a speed-proportional Vx cap. Shot angles are now artificially limited based on ball speed to prevent uncontrollable sharp bounces when the ball reaches hyper-speed.
+
+• Audio & Immersiveness
+- **Dynamic Paddle Pitch:** Paddle movement sounds now dynamically scale in pitch (1.0 to 1.6) based on how far the paddle is from the center of the arena.
+- **Cinematic Power Switch:** Added a 3-stage cinematic audio sequence (Unlock > Processing > Activation) when flipping the main power switch.
+- **3D Spatial Audio:** Implemented a persistent rolling sound loop for the ball entity that correctly tracks its 3D coordinates.
+
+--------------------------------------------------------------------------------
+[v0.5.0] The Arcade Table Foundations — 2026-06-05
+--------------------------------------------------------------------------------
+
+• Arcade Systems
+- Rebranded standard "Minigame Tables" to "Arcade Tables".
+- Fixed severe logical bugs where players leaving an Arcade Table would spawn inside walls or fall through the floor. Z-axis positioning is now strictly locked to floor logic.
+- Prevented Arcade matches from spawning invisible collision platforms on the host map, preventing map pollution.
+- Players are now guaranteed to rejoin their previous "Survey/Exploration" session upon exiting an Arcade game, restoring their main menu state correctly.
+
+--------------------------------------------------------------------------------
+[v0.3.0] The Builder Tools Update — 2026-05-20
+--------------------------------------------------------------------------------
+
+• Map Building & Editing
+- Overhauled the Builder Snap Logic: Walls and floors now reliably snap corner-to-corner without overlapping hitboxes.
+- Fixed an issue where copying and pasting large structures would cause the game server to hard-lock (Paste Game-Lock).
+- Fixed duplicate property fields when editing Door configurations.
+- Implemented a reboot duration cap for building servers.
+
+--------------------------------------------------------------------------------
+[v0.1.0] The Alpha Launch — 2026-05-01
+--------------------------------------------------------------------------------
+
+• Project Genesis
+- Initial prototype launch of the server network.
+- Established basic TCP/UDP networking, player movement, and chat synchronization.
+- Introduced the core "Pong" mechanic as a proof-of-concept minigame.
+- Implemented early spatial voice chat testing.
+- The journey begins here!

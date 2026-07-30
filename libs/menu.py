@@ -468,11 +468,8 @@ class Menu(state.State):
                         self.select_current_item()
 
                 elif key == pg.K_BACKSPACE:
-                    is_main_menu = (getattr(self, "menu_event", "") == "mainmenu" or self.title.lower() in ("main menu", "map menu", "mainmenu"))
-                    if is_main_menu:
-                        # 🔄 Backspace toggles the Main/Map menu closed (folds it away)
-                        if self.parrent:
-                            self.parrent.pop_last_substate()
+                    # Backspace only opens the menu from gameplay.
+                    # Once a menu is open, Backspace does nothing. Use ESC to navigate back.
                     continue
                 elif key == pg.K_ESCAPE:
                     menu_type = getattr(self, "menu_type", "normal")
