@@ -498,11 +498,16 @@ class Game:
         speak(message)
 
     def automate(self, object, attribute, target_value, time, callback=None, time_step=20, step_callback=None, start_value=None, cancelable=True):
-        self.automations.append(
-            automation.Automation_Task(
-                self, object, attribute, target_value, time, time_step=time_step, callback=callback, step_callback=step_callback, start_value=start_value, cancelable=cancelable
-            )
+        if cancelable and object is not None and attribute is not None:
+            for task in list(self.automations):
+                if task.object is object and task.attribute == attribute and task.cancelable:
+                    self.automations.remove(task)
+        
+        task = automation.Automation_Task(
+            self, object, attribute, target_value, time, time_step=time_step, callback=callback, step_callback=step_callback, start_value=start_value, cancelable=cancelable
         )
+        self.automations.append(task)
+        return task
     
     #a function that suspends input and blocking network and game threads without causing the app to stop presponding, when suspension is over, all incoming packets and events are processed.
     def suspend(self, secs):

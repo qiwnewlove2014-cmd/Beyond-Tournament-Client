@@ -749,14 +749,17 @@ class Ambience(BaseMapObj):
         if not self.playing:
             self.playing = True
             if self.sound and self.sound.source is not None:
-                self.map.game.automate(
-                    self.sound.source,
-                    "gain",
-                    (self.volume / 100)
-                    * (self.map.game.audio_mngr.volume_categories[self.type][0] / 100),
-                    2000,
-                    callback=lambda: setattr(self.sound, "muted", False),
-                )
+                try:
+                    self.map.game.automate(
+                        self.sound.source,
+                        "gain",
+                        (self.volume / 100)
+                        * (self.map.game.audio_mngr.volume_categories[self.type][0] / 100),
+                        500,
+                        callback=lambda: setattr(self.sound, "muted", False),
+                    )
+                except cyal.exceptions.InvalidOperationError:
+                    pass
 
     def leave(self, destroy=False):
         def _on_fade_complete():
@@ -773,7 +776,7 @@ class Ambience(BaseMapObj):
                         self.sound.source,
                         "gain",
                         0.0,
-                        800,
+                        500,
                         callback=_on_fade_complete,
                     )
                 except cyal.exceptions.InvalidOperationError:
