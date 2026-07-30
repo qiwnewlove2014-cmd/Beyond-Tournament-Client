@@ -271,3 +271,87 @@ BEYOND TOURNAMENT - CHANGELOG v1.3.0
 
 • Initial v1.3 Foundation Release
 - **Core Engine & Networking Foundation:** Initial release of the v1.3 core network engine and client sound system.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v0.9.0
+================================================================================
+
+• 2v2 Team Doubles Mode
+- Introduced full 2v2 support for both Multiplayer and Solo (Co-op) modes.
+- Lobby capacities dynamically enforce player limits (4 players for 2v2).
+- Serves automatically alternate between teammates every 4 total points.
+- Expanded the Announcer System to include dynamic, escalating hype commentary specifically tailored for 2v2 tournaments.
+
+• Spectator System
+- Added a full Spectator Mode allowing players to spectate active public Pong matches.
+- Introduced the "Sideline Camera" feature, which positions the spectator at the East or West edge of the arena with perfect 3D stereo separation.
+- Automatic camera orientation: The server dynamically informs the spectator which team is on their left/right based on their camera facing angle.
+- Spectators hear goal sounds at a boosted 250% volume for maximum hype.
+
+• UI & Main Menu Reorganization
+- Replaced the cluttered flat main menu with a categorized 4-item structure:
+  1. Zombie Game (Contains public/private/random match flows)
+  2. Minigame (Contains all Pong AI and Multiplayer creation flows)
+  3. Spectate a Match
+  4. View the Leaderboard
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v0.8.0
+================================================================================
+
+• Artificial Intelligence Overhaul
+- Introduced 6 distinct AI Difficulty Levels (Beginner to Nightmare).
+- Added complex trajectory prediction logic. (Nightmare difficulty now predicts 99% of ball trajectories perfectly).
+- Implemented an "Aggressiveness and Surprise Wide-Shot" system, causing higher-level AI to execute unpredictable, sharp-angled swings to break player rhythm.
+- The AI now prioritizes targeting human opponents over other AI in 2v2 mode.
+
+• Rage-Quit Protection & Failsafes
+- Implemented Seamless AI Drop-In: If a human player rage-quits or disconnects mid-match, an AI instantly takes over their paddle without interrupting the game. The match only terminates if zero human players remain on the server.
+
+• New Modes & Win Conditions
+- **Competition Mode:** First to reach 7, 11, or 21 points wins.
+- **Training Mode:** Play endlessly without a score limit. Includes a "Constant Speed" toggle to disable ball acceleration for timing practice.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v0.7.0
+================================================================================
+
+• Improved Ball Physics
+- Completely rewrote the ball's directional (Vx) calculations. Steering the ball left or right using paddle offset is now highly responsive and no longer relies on stale accumulated data.
+- Added a speed-proportional Vx cap. Shot angles are now artificially limited based on ball speed to prevent uncontrollable sharp bounces when the ball reaches hyper-speed.
+
+• Audio & Immersiveness
+- **Dynamic Paddle Pitch:** Paddle movement sounds now dynamically scale in pitch (1.0 to 1.6) based on how far the paddle is from the center of the arena.
+- **Cinematic Power Switch:** Added a 3-stage cinematic audio sequence (Unlock > Processing > Activation) when flipping the main power switch.
+- **3D Spatial Audio:** Implemented a persistent rolling sound loop for the ball entity that correctly tracks its 3D coordinates.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v0.5.0
+================================================================================
+
+• Arcade Systems
+- Rebranded standard "Minigame Tables" to "Arcade Tables".
+- Fixed severe logical bugs where players leaving an Arcade Table would spawn inside walls or fall through the floor. Z-axis positioning is now strictly locked to floor logic.
+- Prevented Arcade matches from spawning invisible collision platforms on the host map, preventing map pollution.
+- Players are now guaranteed to rejoin their previous "Survey/Exploration" session upon exiting an Arcade game, restoring their main menu state correctly.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v0.3.0
+================================================================================
+
+• Map Building & Editing
+- Overhauled the Builder Snap Logic: Walls and floors now reliably snap corner-to-corner without overlapping hitboxes.
+- Fixed an issue where copying and pasting large structures would cause the game server to hard-lock (Paste Game-Lock).
+- Fixed duplicate property fields when editing Door configurations.
+- Implemented a reboot duration cap for building servers.
+
+================================================================================
+BEYOND TOURNAMENT - CHANGELOG v0.1.0
+================================================================================
+
+• Project Genesis
+- Initial prototype launch of the server network.
+- Established basic TCP/UDP networking, player movement, and chat synchronization.
+- Introduced the core "Pong" mechanic as a proof-of-concept minigame.
+- Implemented early spatial voice chat testing.
+- The journey begins here!
