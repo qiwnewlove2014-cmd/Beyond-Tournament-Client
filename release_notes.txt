@@ -6,3 +6,6 @@
 
 • Administration & Game Control
 - **Dynamic Round Management:** Introduced a new administrative command allowing Moderators to instantly change the active Zombie round.
+
+• Core Engine & Synchronization
+- **Spatial Desynchronization Fix:** Resolved a critical core engine bug where player entities would occasionally leave behind permanent visual ghosts/clones upon disconnecting or transitioning between maps.

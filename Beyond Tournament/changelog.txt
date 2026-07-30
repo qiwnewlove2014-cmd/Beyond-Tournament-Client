@@ -7,12 +7,11 @@
 [v1.5.6] System Interaction & Administration Patch — 2026-07-30
 --------------------------------------------------------------------------------
 
-• User Interface & Navigation
-- **Spectator Menu Correction:** Fixed an issue where attempting to leave Spectator mode would incorrectly prompt the player to exit the game entirely instead of displaying the Spectator Options menu.
-- **Menu Hierarchy Navigation:** Resolved an interface bug where pressing the back button repeatedly inside deeply nested menus would cause the entire menu hierarchy to collapse unexpectedly.
-
 • Administration & Game Control
 - **Dynamic Round Management:** Introduced a new administrative command allowing Moderators to instantly change the active Zombie round.
+
+• Core Engine & Synchronization
+- **Spatial Desynchronization Fix:** Resolved a critical core engine bug where player entities would occasionally leave behind permanent visual ghosts/clones upon disconnecting or transitioning between maps.
 
 --------------------------------------------------------------------------------
 [v1.5.5] Jupiter Boss Infiltration & Tactical AI Engine Patch — 2026-07-29
