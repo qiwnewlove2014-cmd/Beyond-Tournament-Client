@@ -195,6 +195,8 @@ class EventHandeler:
             data["name"], x, y, z
         )
         if data.get("voice_channel", None) != None:
+            if not hasattr(self.gameplay, 'voice_channels'):
+                self.gameplay.voice_channels = {}
             self.gameplay.voice_channels[data["voice_channel"]] = entity
         if data.get("player", False):
             entity.player = True

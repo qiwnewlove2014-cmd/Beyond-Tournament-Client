@@ -4,6 +4,19 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.5.7] Boss Jupiter Sounds, Keybinding UX & Spawn Crash Fix — 2026-08-01
+--------------------------------------------------------------------------------
+
+• Boss & Entity Audio
+- **Jupiter Boss Sounds:** Added the full Jupiter sound pack (summon, thunder hit, death, ambient noise, prepare thunderstorm) mapped to the entities/jupiter sound folder so the boss plays its own distinct audio instead of default hellhound sounds.
+
+• UX & Menus
+- **Keybinding Cursor Memory:** The keybinding config menu now remembers your cursor position after binding a key, so you no longer have to scroll back down to find the next function.
+
+• Bug Fixes
+- **Spawn Entity Crash Fix:** Fixed a crash where spawning an entity with a voice_channel before Gameplay finished initializing would raise AttributeError ('Gameplay' object has no attribute 'voice_channels').
+
+--------------------------------------------------------------------------------
 [v1.5.5] Jupiter Boss Infiltration & Tactical AI Engine Patch — 2026-07-29
 --------------------------------------------------------------------------------
 

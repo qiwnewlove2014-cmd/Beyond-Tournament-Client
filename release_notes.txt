@@ -1,11 +1,10 @@
-[v1.5.6] System Interaction & Administration Patch — 2026-07-30
+[v1.5.7] Boss Jupiter Sounds, Keybinding UX & Spawn Crash Fix — 2026-08-01
 
-• User Interface & Navigation
-- **Spectator Menu Correction:** Fixed an issue where attempting to leave Spectator mode would incorrectly prompt the player to exit the game entirely instead of displaying the Spectator Options menu.
-- **Menu Hierarchy Navigation:** Resolved an interface bug where pressing the back button repeatedly inside deeply nested menus would cause the entire menu hierarchy to collapse unexpectedly.
+• Boss & Entity Audio
+- **Jupiter Boss Sounds:** Added the full Jupiter sound pack (summon, thunder hit, death, ambient noise, prepare thunderstorm) mapped to the entities/jupiter sound folder so the boss plays its own distinct audio instead of default hellhound sounds.
 
-• Administration & Game Control
-- **Dynamic Round Management:** Introduced a new administrative command allowing Moderators to instantly change the active Zombie round.
+• UX & Menus
+- **Keybinding Cursor Memory:** The keybinding config menu now remembers your cursor position after binding a key, so you no longer have to scroll back down to find the next function.
 
-• Core Engine & Synchronization
-- **Spatial Desynchronization Fix:** Resolved a critical core engine bug where player entities would occasionally leave behind permanent visual ghosts/clones upon disconnecting or transitioning between maps.
+• Bug Fixes
+- **Spawn Entity Crash Fix:** Fixed a crash where spawning an entity with a voice_channel before Gameplay finished initializing would raise AttributeError ('Gameplay' object has no attribute 'voice_channels').
