@@ -73,8 +73,20 @@ class EventHandeler:
              self.gameplay.voice_channels.clear()
         if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
              self.gameplay.megaphone.setup_megaphone_speakers(force=True)
+
+        # Crash reports are sent only after this connection has authenticated.
+        # They stay on disk until the server acknowledges each report.
+        try:
+            from . import crash_reporting
+            crash_reporting.send_pending(self.game)
+        except Exception:
+            pass
             
         speak("Welcome. You are now online")
+
+    def client_crash_report_ack(self, data):
+        from . import crash_reporting
+        crash_reporting.acknowledge(data.get("id"))
 
     def speak(self, data):
         text = data.get("text", "")

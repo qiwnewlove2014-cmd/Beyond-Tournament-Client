@@ -357,6 +357,14 @@ class Game:
             return
         self._recovery_in_progress = True
         log_exception(error, context)
+        # Persist before touching the network.  If its worker is already broken,
+        # this report will be uploaded on the player's next authenticated login.
+        try:
+            from . import crash_reporting
+            crash_reporting.queue_exception(error, context, "recovered")
+            crash_reporting.send_pending(self)
+        except Exception as report_error:
+            log(f"[CRASH REPORT] Could not queue report: {report_error}")
         try:
             network = self.network
             self.network = None

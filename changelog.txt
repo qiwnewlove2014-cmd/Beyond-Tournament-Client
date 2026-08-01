@@ -17,6 +17,10 @@
 - **Personal Music Feed:** Added a shuffled Favorites feed with previous/next shortcuts and optional Broadcast or authorized Megaphone routing.
 - **Playback Cancellation:** Prevented stale background music loads from starting after a newer song is selected or playback is stopped.
 
+🔒 Security & Client Diagnostics
+- **Verified Crash Reports:** The client now preserves caught error details and securely reports the error type and traceback to the server after authentication, helping staff investigate real client failures sooner.
+- **False-Alert Prevention:** Normal exits and unexplained process closures no longer trigger staff warnings; staff alerts are reserved for genuine errors with diagnostic details.
+
 --------------------------------------------------------------------------------
 [v1.5.8] Dragon Boss & Client Stability Patch — 2026-08-01
 --------------------------------------------------------------------------------

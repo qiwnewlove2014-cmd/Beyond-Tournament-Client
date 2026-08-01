@@ -3,6 +3,13 @@ import time
 import os
 import pygame
 import struct
+from . import crash_reporting
+
+
+def _exit_for_cheat(reason):
+    """Avoid reporting deliberate anti-cheat shutdowns as client crashes."""
+    crash_reporting.mark_expected_shutdown(reason)
+    os._exit(1)
 
 class SecureInt:
     """
@@ -22,14 +29,14 @@ class SecureInt:
         if self._value != (self._shadow ^ self._key):
             # Tampering detected!
             print("CRITICAL: Memory tampering detected on SecureInt! Exiting...")
-            os._exit(1)
+            _exit_for_cheat("memory_tampering")
         return self._value
 
     def set(self, new_value):
         # Verification before setting
         if self._value != (self._shadow ^ self._key):
             print("CRITICAL: Memory tampering detected on SecureInt! Exiting...")
-            os._exit(1)
+            _exit_for_cheat("memory_tampering")
         
         self._value = int(new_value)
         self._shadow = self._value ^ self._key
@@ -51,14 +58,14 @@ class SecureFloat:
         current_int = self._float_to_int(self._value)
         if current_int != (self._shadow ^ self._key):
             print("CRITICAL: Memory tampering detected on SecureFloat! Exiting...")
-            os._exit(1)
+            _exit_for_cheat("memory_tampering")
         return self._value
 
     def set(self, new_value):
         current_int = self._float_to_int(self._value)
         if current_int != (self._shadow ^ self._key):
             print("CRITICAL: Memory tampering detected on SecureFloat! Exiting...")
-            os._exit(1)
+            _exit_for_cheat("memory_tampering")
             
         self._value = float(new_value)
         self._shadow = self._float_to_int(self._value) ^ self._key
@@ -141,7 +148,7 @@ def _speedhack_watchdog():
                     _game.network.send(consts.CHANNEL_MISC, "cheat_detected", {"reason": "Cheat Engine Process Detected"})
                     time.sleep(0.5)
                 except: pass
-            os._exit(1)
+            _exit_for_cheat("cheat_engine_detected")
         
         # 2. Speedhack Check
         current_real_time = time.time()
@@ -163,7 +170,7 @@ def _speedhack_watchdog():
                     _game.network.send(consts.CHANNEL_MISC, "cheat_detected", {"reason": f"Speedhack Detected (Game Time > Real Time)"})
                     time.sleep(0.5)
                 except: pass
-            os._exit(1)
+            _exit_for_cheat("speedhack_detected")
             
         last_real_time = current_real_time
         last_game_time = current_game_time

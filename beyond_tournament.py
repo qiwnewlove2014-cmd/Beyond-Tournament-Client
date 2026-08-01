@@ -3,6 +3,8 @@ import os
 import cyal.listener
 from libs import yt_dlp_deps
 
+active_game = None
+
 # Ensure the working directory is the script's own directory,
 # so relative paths (data/, libs/, etc.) work regardless of how
 # the game is launched (double-click, shortcut, terminal, etc.).
@@ -11,6 +13,8 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 def main():
     from libs import logger
+    from libs import crash_reporting
+    crash_reporting.begin_session()
     logger.clear_log()
     logger.log("Starting Beyond Tournament Client...")
     
@@ -31,7 +35,9 @@ def main():
     screen = pygame.display.set_mode((900, 500))
     from libs import game
 
+    global active_game
     g = game.Game(screen)
+    active_game = g
     previous_thread_hook = threading.excepthook
 
     def log_thread_crash(args):
@@ -113,9 +119,21 @@ if __name__ == "__main__":
         try:
             from libs import logger
             logger.log(f"[FATAL] Unhandled client exception:\n{error_msg}")
+            from libs import crash_reporting
+            crash_reporting.queue_exception(
+                sys.exc_info()[1], "Client process entry point", "fatal", error_msg
+            )
+            if active_game:
+                crash_reporting.send_pending(active_game)
         except Exception:
             pass
         print("Game Crashed! Showing dialog...")
         print(error_msg)
         show_crash_dialog(error_msg)
+    finally:
+        try:
+            from libs import crash_reporting
+            crash_reporting.finish_session()
+        except Exception:
+            pass
 

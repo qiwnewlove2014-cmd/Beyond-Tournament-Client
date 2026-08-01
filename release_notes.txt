@@ -11,3 +11,7 @@
 
 • Staff AI
 - Removed automated Mason AI broadcasts and the related broadcast toggle commands. Mason remains available for direct staff assistance.
+
+🔒 Security & Client Diagnostics
+- Caught client errors now create a verified diagnostic report with the error type and traceback, allowing staff to investigate real failures sooner.
+- Normal exits and unexplained process closures no longer create staff warnings, preventing false security alerts during ordinary play or development testing.
