@@ -111,41 +111,50 @@ class Entity(Object):
         self.z = z
         if callable(self.on_move):
             self.on_move(x, y, z)
-        reverb = self.map.get_reverb_at(self.x, self.y, self.z)
-        if reverb is None: 
-            self.soundgroup.apply_effect(None, 0)
-            if self.player: 
-                self.game.audio_mngr.efx.send(self.vc_source, 0, None, filter=None)
-                self.game.audio_mngr.efx.send(self.music_source, 0, None, filter=None)
-        if reverb and reverb.reverb:
-            try:
+        try:
+            reverb = self.map.get_reverb_at(self.x, self.y, self.z)
+            if reverb is None:
+                self.soundgroup.apply_effect(None, 0)
+                if self.player:
+                    self.game.audio_mngr.efx.send(self.vc_source, 0, None, filter=None)
+                    self.game.audio_mngr.efx.send(self.music_source, 0, None, filter=None)
+            if reverb and reverb.reverb:
                 self.soundgroup.apply_effect(reverb.reverb, 0) 
                 if self.player: 
                     self.game.audio_mngr.efx.send(self.vc_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
                     self.game.audio_mngr.efx.send(self.music_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
-            except cyal.exceptions.InvalidAlValueError as e:
-                pass
-            except cyal.exceptions.InvalidOperationError as e:
-                pass
+        except (cyal.exceptions.InvalidAlValueError, cyal.exceptions.InvalidOperationError) as e:
+            log(f"[ENTITY.AUDIO] Reverb update skipped for {self.name!r}: {e}")
         if self.player:
-            self.vc_source.position = (self.x, self.y, self.z)
-            self.music_source.position = (self.x, self.y, self.z)
-            if not self.is_user:
-                dist = movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position)
-                max_dist = self.game.audio_mngr.max_distance
-                min_dist = 5.0
-                if dist <= min_dist:
-                    gain = 1.0
-                elif dist >= max_dist:
-                    gain = 0.0
-                else:
-                    gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
-                self.vc_source.gain = gain
-                self.music_source.gain = gain
-        self.soundgroup.position = (self.x, self.y, self.z)
+            try:
+                self.vc_source.position = (self.x, self.y, self.z)
+                self.music_source.position = (self.x, self.y, self.z)
+                if not self.is_user:
+                    dist = movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position)
+                    max_dist = self.game.audio_mngr.max_distance
+                    min_dist = 5.0
+                    if dist <= min_dist:
+                        gain = 1.0
+                    elif dist >= max_dist:
+                        gain = 0.0
+                    else:
+                        gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
+                    self.vc_source.gain = gain
+                    self.music_source.gain = gain
+            except (cyal.exceptions.InvalidAlValueError, cyal.exceptions.InvalidOperationError) as e:
+                log(f"[ENTITY.AUDIO] Voice position update skipped for {self.name!r}: {e}")
+        try:
+            self.soundgroup.position = (self.x, self.y, self.z)
+        except (cyal.exceptions.InvalidAlValueError, cyal.exceptions.InvalidOperationError) as e:
+            log(f"[ENTITY.AUDIO] SoundGroup position update skipped for {self.name!r}: {e}")
         tile = self.map.get_tile_at(self.x, self.y, self.z)
+        # Flight positions are server-authoritative.  Do not let the normal
+        # client fall simulation pull a flying entity back to the ground or
+        # play fall/end.ogg when the flight arc lands.
+        if mode == "fly":
+            self.falling = False
         # start/stop falling if the current tile is air.
-        if getattr(self.game, 'pong_mode', False):
+        elif getattr(self.game, 'pong_mode', False):
             self.falling = False
         else:
             if not self.falling and tile in ["air", ""]:
@@ -168,6 +177,21 @@ class Entity(Object):
                     rel_z=-1,
                     cat=cat
                 )
+
+    def sync_network_position(self, x, y, z):
+        """Update a high-rate network snapshot without touching OpenAL/EFX.
+
+        Voice and reverb resources remain owned by the normal entity lifecycle;
+        their regular loop will observe these coordinates safely.  This method is
+        intentionally not a substitute for a real movement packet.
+        """
+        self.x = float(x) if x is not None else float(self.x or 0.0)
+        self.y = float(y) if y is not None else float(self.y or 0.0)
+        self.z = float(z) if z is not None else float(self.z or 0.0)
+        gameplay = getattr(self.game, "gameplay", None)
+        camera = getattr(gameplay, "camera", None)
+        if getattr(camera, "focus_object", None) is self:
+            camera.sync_network_position(self.x, self.y, self.z)
 
     def face(self, hdeg, vdeg, bdeg=0, play_sound=False, force=False):
         if play_sound:

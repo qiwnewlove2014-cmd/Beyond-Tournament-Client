@@ -1,10 +1,8 @@
-[v1.5.7] Boss Jupiter Sounds, Keybinding UX & Spawn Crash Fix — 2026-08-01
+[v1.5.8] Dragon Boss & Client Stability Patch — 2026-08-01
 
-• Boss & Entity Audio
-- **Jupiter Boss Sounds:** Added the full Jupiter sound pack (summon, thunder hit, death, ambient noise, prepare thunderstorm) mapped to the entities/jupiter sound folder so the boss plays its own distinct audio instead of default hellhound sounds.
+• Dragon Boss
+- **Dragon Encounter:** Face the Dragon from Round 12 onward, with distinctive roars, footsteps, Ring of Fire, and long-range aerial attacks.
+- **Clear Flight Audio:** Takeoff, flight, and mid-air roar cues make the Dragon's movement easier to follow.
 
-• UX & Menus
-- **Keybinding Cursor Memory:** The keybinding config menu now remembers your cursor position after binding a key, so you no longer have to scroll back down to find the next function.
-
-• Bug Fixes
-- **Spawn Entity Crash Fix:** Fixed a crash where spawning an entity with a voice_channel before Gameplay finished initializing would raise AttributeError ('Gameplay' object has no attribute 'voice_channels').
+• Client Stability
+- **Safer Entity Synchronization:** Improved recovery from invalid entity updates to reduce silent game closures.

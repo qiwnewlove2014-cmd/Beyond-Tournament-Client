@@ -19,6 +19,7 @@ class EventHandeler:
         self.client = client
         self.game = game
         self.gameplay = gameplay.Gameplay(self.game)
+        self.game.gameplay = self.gameplay
         self.tickets = tickets.Tickets(self.game)
 
     def create_fail(self, data):
@@ -185,15 +186,30 @@ class EventHandeler:
             self.gameplay.megaphone.setup_megaphone_speakers(force=True)
 
     def spawn_entity(self, data):
+        from .logger import log, log_exception
+        if not isinstance(data, dict) or not data.get("name"):
+            log("[ENTITY] Ignored spawn_entity packet without a valid name")
+            return
         raw_x = data.get("x")
         raw_y = data.get("y")
         raw_z = data.get("z")
         x = float(raw_x) if raw_x is not None else 0.0
         y = float(raw_y) if raw_y is not None else 0.0
         z = float(raw_z) if raw_z is not None else 0.0
-        entity = self.gameplay.map.spawn_entity(
-            data["name"], x, y, z
+        existing = self.gameplay.map.entities.get(data["name"])
+        was_camera_focus = (
+            getattr(self.gameplay.camera, "focus_object", None) is existing
         )
+        try:
+            entity = self.gameplay.map.spawn_entity(data["name"], x, y, z)
+        except Exception as e:
+            log_exception(e, f"spawn_entity name={data['name']!r}")
+            return
+        if was_camera_focus:
+            # A resync can replace an entity with the same name.  Never leave the
+            # spectator camera bound to the just-destroyed entity/audio sources.
+            self.gameplay.camera.set_focus_object(entity)
+        log(f"[ENTITY] Spawned {data['name']!r} at ({x}, {y}, {z})")
         if data.get("voice_channel", None) != None:
             if not hasattr(self.gameplay, 'voice_channels'):
                 self.gameplay.voice_channels = {}
@@ -303,18 +319,28 @@ class EventHandeler:
                         speak("Music broadcast was disabled because you entered a competition match.")
 
     def move(self, data):
-        entity = self.gameplay.map.entities.get(data["name"])
-        if not entity and data["name"] == self.gameplay.player.name:
+        from .logger import log, log_exception
+        if not isinstance(data, dict):
+            log("[ENTITY] Ignored malformed move packet")
+            return
+        name = data.get("name")
+        if not name:
+            log("[ENTITY] Ignored move packet without a name")
+            return
+        entity = self.gameplay.map.entities.get(name)
+        if not entity and name == self.gameplay.player.name:
             entity = self.gameplay.player
         if entity:
-            if "angle" not in data:
-                data["angle"] = 0
-            if "mode" not in data:
-                data["mode"] = "walk"
-            entity.move(
-                data["x"], data["y"], data["z"], data["play_sound"], data["mode"]
-            )
-            entity.face(data["angle"], entity.vfacing, entity.bfacing, force=True)
+            try:
+                entity.move(
+                    data.get("x"), data.get("y"), data.get("z"),
+                    bool(data.get("play_sound", False)), data.get("mode", "walk")
+                )
+                entity.face(data.get("angle", 0), entity.vfacing, entity.bfacing, force=True)
+            except Exception as e:
+                log_exception(e, f"move name={name!r} data={data!r}")
+        else:
+            log(f"[ENTITY] Ignored move for unknown entity {name!r}")
 
     def quit(self, data):
         self.game.put(lambda: self.gameplay.quit("quit"))
@@ -790,7 +816,11 @@ class EventHandeler:
             self.gameplay.megaphone.trigger_fade_transition(duration=1.5)
 
     def spectator_update(self, data):
+        from .logger import log, log_exception
         if not self.gameplay.spectator_mode:
+            return
+        if not isinstance(data, dict) or not isinstance(data.get("players"), list):
+            log("[ENTITY] Ignored malformed spectator_update packet")
             return
 
         # Pong matches include team names + game mode so the spectator client can
@@ -800,6 +830,9 @@ class EventHandeler:
         self.gameplay.pong_team2 = data.get("team2_name", "Team 2")
 
         for p_data in data["players"]:
+            if not isinstance(p_data, dict) or not p_data.get("name"):
+                log("[ENTITY] Ignored malformed player entry in spectator_update")
+                continue
             name = p_data["name"]
             if name == self.gameplay.player.name:
                 continue
@@ -813,32 +846,21 @@ class EventHandeler:
             # Re-enabling updates effectively but with safeguards.
             
             if not entity:
+                log(f"[ENTITY] Spectator snapshot arrived before spawn for {name!r}")
                 continue
-            if not entity:
-                # If entity doesn't exist, we might need to wait for spawn_entity or spawn it?
-                # For now, let's assume spawn_entity is handled separately or we skip.
-                # Actually, forcing spawn might be good if we entered late.
-                # But we lack model info here.
-                continue
-                
-            # Update position directly or via move?
-            # Since this is a snapshot, we can use move to interpolate if the client entity supports it.
-            # But move expects mode and play_sound.
-            
-            # Simple position update for now
-            # entity.x = p_data["x"]
-            # entity.y = p_data["y"]
-            # entity.z = p_data["z"]
-            
-            # Better: use move() without sound
-            entity.move(p_data["x"], p_data["y"], p_data["z"], False, "walk")
-            
-            # Orientation
-            if "hfacing" in p_data:
-                entity.face(p_data["hfacing"], p_data.get("vfacing", 0), 0)
-
-            # HP update
-            entity.hp = p_data["hp"]
+            try:
+                # Snapshots are high-frequency state syncs, not gameplay movement.
+                # Do not enter Entity.move(): it reallocates/touches EFX, SoundGroup
+                # and voice sources, which previously caused native audio crashes.
+                entity.sync_network_position(
+                    p_data.get("x"), p_data.get("y"), p_data.get("z")
+                )
+                if "hfacing" in p_data:
+                    entity.face(p_data["hfacing"], p_data.get("vfacing", 0), 0)
+                if "hp" in p_data:
+                    entity.hp = p_data["hp"]
+            except Exception as e:
+                log_exception(e, f"spectator_update name={name!r} data={p_data!r}")
 
     def switch_spectator_target(self, data):
         target_name = data["target"]

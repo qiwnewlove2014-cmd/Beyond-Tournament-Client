@@ -1,5 +1,6 @@
 from . import consts, movement, options
 from .speech import speak
+from .logger import log
 
 
 class Camera:
@@ -103,6 +104,20 @@ class Camera:
         # ambience/zone/music state (which belongs to the focus object).
         self.game.audio_mngr.position = (self.x, self.y, self.z)
         self.soundgroup.position = (self.x, self.y, self.z)
+
+    def sync_network_position(self, x, y, z):
+        """Move a followed spectator listener without zone/reverb side effects."""
+        if self.spectator_cam_mode != "follow":
+            return
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+        try:
+            self.game.audio_mngr.position = (self.x, self.y, self.z)
+            self.soundgroup.position = (self.x, self.y, self.z)
+        except Exception as e:
+            # Cyal/OpenAL failures must not make a network snapshot kill the game.
+            log(f"[ENTITY.AUDIO] Spectator listener update skipped: {e}")
 
     def move(self, x, y, z):
         ambiences_to_pause = list(

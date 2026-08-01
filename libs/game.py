@@ -34,6 +34,7 @@ from . import (
     keyboard_layout,
 )
 from .speech import speak
+from .logger import log, log_exception
 from .os_tools import get_os
 from .keyconfig import Keyconfig
 import psutil
@@ -89,6 +90,7 @@ class Game:
         self.instance_mngr = instance_manager.InstanceManager()
         self.instance_mngr.update_title()
         self.reconnecting = False
+        self._recovery_in_progress = False
         
         try:
             anti_cheat.set_game_reference(self)
@@ -343,8 +345,41 @@ class Game:
             # Continuously verify the anti-cheat shadow value
             # If Cheat Engine modifies this in memory, get() will crash the game!
             self.test_money.get()
-            
-            self.loop_function()
+            try:
+                self.loop_function()
+            except Exception as e:
+                # Keep anti-cheat verification outside this handler on purpose.
+                self.recover_from_exception(e, "Game main loop")
+
+    def recover_from_exception(self, error, context):
+        """Return to a safe menu after a recoverable Python exception."""
+        if self._recovery_in_progress:
+            return
+        self._recovery_in_progress = True
+        log_exception(error, context)
+        try:
+            network = self.network
+            self.network = None
+            if network:
+                # Never join here: its worker may be waiting on the game lock.
+                network.put(None)
+        except Exception as cleanup_error:
+            log(f"[RECOVERY] Could not stop network worker: {cleanup_error}")
+        try:
+            gameplay = getattr(self, "gameplay", None)
+            voice = getattr(gameplay, "voice_chat", None)
+            if voice:
+                voice.close()
+        except Exception as cleanup_error:
+            log(f"[RECOVERY] Could not close voice chat: {cleanup_error}")
+        try:
+            self.stack = []
+            menus.main_menu(self)
+            speak("A client error was recovered. You returned to the main menu. Please send client debug log to the developer.", False)
+        except Exception as recovery_error:
+            log_exception(recovery_error, "Game recovery")
+        finally:
+            self._recovery_in_progress = False
 
     def loop_function(self):
             if not self.queue.empty():

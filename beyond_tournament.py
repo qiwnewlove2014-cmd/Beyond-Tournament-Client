@@ -32,12 +32,23 @@ def main():
     from libs import game
 
     g = game.Game(screen)
+    previous_thread_hook = threading.excepthook
+
+    def log_thread_crash(args):
+        error_text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        logger.log(f"[FATAL THREAD] {args.thread.name}:\n{error_text}")
+        # Pygame/OpenAL state belongs to the main thread, so only schedule recovery.
+        g.put(lambda: g.recover_from_exception(args.exc_value, f"Thread {args.thread.name}"))
+        previous_thread_hook(args)
+
+    threading.excepthook = log_thread_crash
     g.start()
     g.loop()
 
 
 import sys
 import traceback
+import threading
 
 def show_crash_dialog(error_text):
     """
@@ -97,6 +108,13 @@ if __name__ == "__main__":
     except Exception:
         # Catch ALL unhandled exceptions
         error_msg = traceback.format_exc()
+        # Keep the traceback beside the compiled client executable so a player can
+        # send it to us even after closing the crash dialog.
+        try:
+            from libs import logger
+            logger.log(f"[FATAL] Unhandled client exception:\n{error_msg}")
+        except Exception:
+            pass
         print("Game Crashed! Showing dialog...")
         print(error_msg)
         show_crash_dialog(error_msg)

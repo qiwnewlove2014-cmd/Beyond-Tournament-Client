@@ -4,6 +4,17 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.5.8] Dragon Boss & Client Stability Patch — 2026-08-01
+--------------------------------------------------------------------------------
+
+• Dragon Boss
+- **Dragon Encounter Audio:** Added the Dragon sound set for footsteps, attacks, roars, flight, impacts, and death so its movement and attacks can be tracked clearly by sound.
+- **Aerial Assaults:** Dragon flight now uses clear takeoff and mid-flight roar cues with long, deliberate aerial strides.
+
+• Client Stability
+- **Safer Entity Synchronization:** Hardened network entity movement and audio recovery so an invalid entity update is logged instead of silently closing the game.
+
+--------------------------------------------------------------------------------
 [v1.5.7] Boss Jupiter Sounds, Keybinding UX & Spawn Crash Fix — 2026-08-01
 --------------------------------------------------------------------------------
 
