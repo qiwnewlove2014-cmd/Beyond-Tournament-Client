@@ -323,7 +323,7 @@ class Map:
             else:
                 self.source_list.append(source)
 
-    def spawn_megaphoneSpeaker(self, minx=0, maxx=0, miny=0, maxy=0, minz=0, maxz=0, volume=60, id="", x=None, y=None, z=None, delay=0.0, reverb_decay=2.0, reverb_diffusion=0.8, aim_yaw=0, aim_pitch=-30, inner_cone_angle=45, outer_cone_angle=90, outer_cone_gain=0.2, hearing_range=0.0, eq_bass=50, eq_mid=50, eq_treble=50, **kwargs):
+    def spawn_megaphoneSpeaker(self, minx=0, maxx=0, miny=0, maxy=0, minz=0, maxz=0, volume=60, id="", x=None, y=None, z=None, delay=0.0, reverb_decay=2.0, reverb_diffusion=0.8, aim_yaw=None, aim_pitch=-30, inner_cone_angle=45, outer_cone_angle=90, outer_cone_gain=0.2, hearing_range=0.0, eq_bass=50, eq_mid=50, eq_treble=50, **kwargs):
         # Volume comes in as 0-100, convert to 0.0-1.0
         volume = float(volume) / 100.0
         
@@ -343,7 +343,10 @@ class Map:
             'reverb_decay': float(reverb_decay),
             'reverb_diffusion': float(reverb_diffusion),
             # Cone properties for realistic audio
-            'aim_yaw': float(aim_yaw),
+            # An explicitly saved 0 means North.  Only legacy speakers with
+            # no aim_yaw field retain the former auto-aim-to-map-centre mode.
+            'aim_yaw': float(aim_yaw) if aim_yaw is not None else 0.0,
+            'auto_aim': aim_yaw is None or str(kwargs.get('auto_aim', False)).lower() == 'true',
             'aim_pitch': float(aim_pitch),
             'inner_cone_angle': float(inner_cone_angle),
             'outer_cone_angle': float(outer_cone_angle),

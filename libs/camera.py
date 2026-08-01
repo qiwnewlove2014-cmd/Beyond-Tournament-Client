@@ -115,6 +115,9 @@ class Camera:
         try:
             self.game.audio_mngr.position = (self.x, self.y, self.z)
             self.soundgroup.position = (self.x, self.y, self.z)
+            megaphone = getattr(getattr(self.game, 'gameplay', None), 'megaphone', None)
+            if megaphone and hasattr(megaphone, 'request_spatial_refresh'):
+                megaphone.request_spatial_refresh()
         except Exception as e:
             # Cyal/OpenAL failures must not make a network snapshot kill the game.
             log(f"[ENTITY.AUDIO] Spectator listener update skipped: {e}")
@@ -131,6 +134,9 @@ class Camera:
         self.z = float(z) if z is not None else 0.0
         self.game.audio_mngr.position = (self.x, self.y, self.z)
         self.soundgroup.position = (self.x, self.y, self.z)
+        megaphone = getattr(getattr(self.game, 'gameplay', None), 'megaphone', None)
+        if megaphone and hasattr(megaphone, 'request_spatial_refresh'):
+            megaphone.request_spatial_refresh()
 
         filter = self.game.audio_mngr.gen_filter(
             type="LOWPASS"

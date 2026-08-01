@@ -145,8 +145,17 @@ class MegaphoneJitterBuffer:
             
             # If we have been silent/empty for a long time (>300ms), reset pre-buffering state
             if self.is_playing and current_time - self.last_pop_time > 0.3:
+                # A new Megaphone transmission (or Music Bot resume) must not
+                # inherit PCM from the previous segment.  Keeping those frames
+                # lets old music play alongside the resumed stream and makes
+                # the PA image sound as if cabinets have shifted.
+                latest_packet = self.packet_queue[-1] if self.packet_queue else None
+                self.packet_queue.clear()
+                if latest_packet is not None:
+                    self.packet_queue.append(latest_packet)
                 self.is_playing = False
-                self.frames_received = 0
+                self.frames_received = 1 if latest_packet is not None else 0
+                self.last_output_time = 0.0
             
             # Pre-buffering: Wait until we have enough packets
             if not self.is_playing:
@@ -313,11 +322,10 @@ class voice_chat_compression(threading.Thread):
                     packet = jb.get_packet()
                     if packet is None:
                         return  # Still pre-buffering, no speaker plays yet
-                    
+
                     # Update last play time
                     global _last_play_times, _speaker_delay_queues, _last_packet_times
                     _last_play_times[sender_id] = time.time()
-                    
                     # If this is a new sentence after a short pause (>180ms), clear delay queues to prevent stale audio stack-up
                     current_time = time.time()
                     last_pkt_time = _last_packet_times.get(sender_id, 0.0)
@@ -665,12 +673,13 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
     except AttributeError:
         player_pos = (0.0, 0.0, 0.0)
         
-    global _speaker_last_calc_time, _speaker_current_delays, _speaker_initial_delays, _speaker_last_calc_pos
+    global _speaker_last_calc_time, _speaker_current_delays, _speaker_initial_delays, _speaker_last_calc_pos, _speaker_delay_cache_expires
     if '_speaker_last_calc_time' not in globals():
         _speaker_last_calc_time = {}
         _speaker_current_delays = {}
         _speaker_initial_delays = {}
         _speaker_last_calc_pos = {}
+        _speaker_delay_cache_expires = {}
 
     try:
         player_pos = (gameplay.camera.focus_object.x, gameplay.camera.focus_object.y, gameplay.camera.focus_object.z)
@@ -678,10 +687,26 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
         player_pos = (0.0, 0.0, 0.0)
 
     now = time.time()
-    last_calc = _speaker_last_calc_time.get(sender_id, 0)
+
+    # Sources are removed after a short idle period, such as a music Stop.
+    # Keep their delay baseline briefly so a replay does not unexpectedly take
+    # its origin from the listener's new position.  Expired entries are pruned
+    # only when megaphone audio next arrives.
+    for cached_sender, expires_at in list(_speaker_delay_cache_expires.items()):
+        if expires_at > now:
+            continue
+        for cache in (
+            _speaker_last_calc_time,
+            _speaker_current_delays,
+            _speaker_initial_delays,
+            _speaker_last_calc_pos,
+        ):
+            cache.pop(cached_sender, None)
+        _speaker_delay_cache_expires.pop(cached_sender, None)
+    _speaker_delay_cache_expires.pop(sender_id, None)
 
     # Movement-based resync: track how far the listener moved since the last
-    # delay calculation. If they walked >= 3 units, force a recalculation so the
+    # delay calculation. If they walked >= 1.5 units, force a recalculation so the
     # propagation delay tracks the live distance to each speaker instead of being
     # frozen at the position when speech started.
     last_calc_pos = _speaker_last_calc_pos.get(sender_id, player_pos)
@@ -707,8 +732,8 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             pass
         active_counts.append(src.buffers_queued)
 
-    # 2. Check if this is a new transmission or if any active source completely starved (hit 0)
-    is_new_transmission = (now - last_calc > 0.5)
+    # 2. Detect sources that ran dry.  A pause/resume can make every source run
+    # dry, but that must not change where its propagation delay originated.
     any_starved = False
     
     for i, count in enumerate(active_counts):
@@ -716,13 +741,16 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             any_starved = True
             break
             
-    needs_resync = is_new_transmission or any_starved or moved_enough
+    has_initial_delays = sender_id in _speaker_initial_delays
+    needs_initial_delay = not has_initial_delays
+    needs_resync = needs_initial_delay or any_starved or moved_enough
     
-    # 3. Only recalculate delays and pad if the stream was broken (starved or new)
-    # This prevents micro-stutters during normal jitter and allows OpenAL's Doppler to naturally stretch the audio
+    # 3. A source that ran dry needs silence padding again, but it keeps the
+    # existing propagation delay.  Recalculate that delay only for a fresh
+    # source or after the listener actually moved.
     if needs_resync:
         _speaker_current_delays[sender_id] = []
-        if is_new_transmission or moved_enough or sender_id not in _speaker_initial_delays:
+        if needs_initial_delay or moved_enough:
             _speaker_initial_delays[sender_id] = {}
         
         for idx, src in enumerate(sources):
@@ -741,9 +769,10 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                 static_delay = spk_data.get('delay', 0.0)
                 speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
                 
-            if is_new_transmission or moved_enough or idx not in _speaker_initial_delays[sender_id]:
+            if needs_initial_delay or moved_enough or idx not in _speaker_initial_delays[sender_id]:
                 # Recalculate propagation delay from the live position (speed of sound = 343 m/s).
-                # Triggered on new transmission, or when the listener moved >= 3 units.
+                # Triggered only for a fresh source or when the listener moved
+                # >= 1.5 units; pause/resume intentionally retains the old delay.
                 if not is_reflection:
                     dx = player_pos[0] - speaker_pos[0]
                     dy = player_pos[1] - speaker_pos[1]
@@ -821,7 +850,7 @@ def tick_megaphone_delay(gameplay):
         sources = entry['sources']
         last_time = _last_play_times.get(sender_id, 0)
         last_pkt_time = _last_packet_times.get(sender_id, 0)
-        
+
         # Only tick if we haven't received a network packet for at least 40ms (flushing phase)
         # This prevents the tick loop from interfering with active network speech playback
         if current_time - last_pkt_time >= 0.04:

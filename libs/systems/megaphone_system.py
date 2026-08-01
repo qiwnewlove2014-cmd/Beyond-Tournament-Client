@@ -2,9 +2,13 @@ import math
 import time
 import pygame
 from libs import options, consts, voice_chat
+from libs.logger import log
 
 class MegaphoneManager:
     MAX_MEGAPHONE_PLAYERS = 8
+    INACTIVE_SOURCE_TIMEOUT = 5.0
+    SPATIAL_REFRESH_INTERVAL = 0.10
+    SPATIAL_DEBUG_LOG_INTERVAL = 1.0
     
     def __init__(self, gameplay):
         self.gameplay = gameplay
@@ -87,9 +91,20 @@ class MegaphoneManager:
         # Speaker data storage for directional checking
         self.speaker_data = []
         self.muffled_check_counter = 0  # Frame counter for optimization
+        self._spatial_refresh_requested = False
+        self._last_spatial_refresh_time = 0.0
+        self._last_spatial_debug_time = 0.0
         self.last_megaphone_setup = 0  # Timestamp for debounce
         
         self.setup_megaphone_speakers()
+
+    def request_spatial_refresh(self):
+        """Refresh PA range/cone/occlusion on the next gameplay audio tick.
+
+        Camera movement owns the listener position, so it signals this cheap
+        refresh instead of recreating sources or touching queued audio buffers.
+        """
+        self._spatial_refresh_requested = True
 
     def trigger_fade_transition(self, duration=0.8):
         """Triggers a smooth volume crossfade transition when switching spectator/concert targets."""
@@ -324,7 +339,7 @@ class MegaphoneManager:
             outer_gain = speaker_data_list[i].get('outer_cone_gain', 0.2)
             
             # Calculate direction vector from yaw and pitch
-            if aim_yaw == 0:
+            if speaker_data_list[i].get('auto_aim', False):
                 # If yaw is 0, calculate automatically towards map center
                 dx = map_center_x - pos[0]
                 dy = map_center_y - pos[1]
@@ -782,10 +797,14 @@ class MegaphoneManager:
                 'targets_gainlf': targets_gainlf,
                 'currents_gainlf': list(targets_gainlf)
             }
+            log(
+                f"[MEGAPHONE.DEBUG] create sender={sender_id} listener={player_pos} "
+                f"speakers={[data['position'] for data in self.speaker_data]}"
+            )
             return sources
         return None
 
-    def _remove_megaphone_player(self, sender_id):
+    def _remove_megaphone_player(self, sender_id, preserve_delay_cache=False):
         """Clean up a specific player's megaphone sources. Detaches EFX, drains buffers, deletes sources."""
         if not hasattr(self, 'player_sources'):
             return
@@ -793,6 +812,7 @@ class MegaphoneManager:
             return
 
         entry = self.player_sources[sender_id]
+        log(f"[MEGAPHONE.DEBUG] remove sender={sender_id}")
         
         # Delete unique filters to prevent memory leaks
         if 'filters' in entry:
@@ -849,16 +869,37 @@ class MegaphoneManager:
         if sender_id in voice_chat._last_packet_times:
             del voice_chat._last_packet_times[sender_id]
 
+        # Stop/replay should keep its acoustic baseline for a short period.  A
+        # map reload or capacity eviction must clear it, because its speakers
+        # can be different.  The packet path prunes preserved entries after 30s.
+        if preserve_delay_cache:
+            delay_cache_expires = getattr(voice_chat, '_speaker_delay_cache_expires', None)
+            if not isinstance(delay_cache_expires, dict):
+                voice_chat._speaker_delay_cache_expires = {}
+                delay_cache_expires = voice_chat._speaker_delay_cache_expires
+            delay_cache_expires[sender_id] = voice_chat.time.time() + 30.0
+        else:
+            for cache_name in (
+                '_speaker_last_calc_time',
+                '_speaker_current_delays',
+                '_speaker_initial_delays',
+                '_speaker_last_calc_pos',
+                '_speaker_delay_cache_expires',
+            ):
+                cache = getattr(voice_chat, cache_name, None)
+                if isinstance(cache, dict):
+                    cache.pop(sender_id, None)
+
     def cleanup_inactive_megaphone_players(self):
-        """Remove per-player sources that haven't received audio for 5+ seconds."""
+        """Remove per-player sources that have been idle for too long."""
         import time as _time
         if not hasattr(self, 'player_sources'):
             return
         now = _time.time()
         inactive = [sid for sid, entry in self.player_sources.items()
-                    if now - entry['last_active'] > 5.0]
+                    if now - entry['last_active'] > self.INACTIVE_SOURCE_TIMEOUT]
         for sid in inactive:
-            self._remove_megaphone_player(sid)
+            self._remove_megaphone_player(sid, preserve_delay_cache=True)
             
         # Cleanup expired fading sources
         if hasattr(self, 'fading_sources'):
@@ -1065,14 +1106,27 @@ class MegaphoneManager:
         # === DIRECTIONAL MUFFLED SOUND + LINE-OF-SIGHT OCCLUSION ===
         # Throttled: checking every 5 frames (was every 2). Combined with the
         # ratio-based occlusion blend below, this avoids the filter flip-flopping
-        # ('วุบว้าบ') at wall edges when the listener walks along them.
+        # Spatial parameters are movement-driven.  Sources remain anchored to
+        # their cabinets; pausing or resuming a stream must not alter their
+        # range/cone state.  Camera movement explicitly requests this refresh.
         if hasattr(self, 'speaker_data') and hasattr(self, 'muffled_check_counter'):
-            self.muffled_check_counter += 1
-            if self.muffled_check_counter >= 5:
+            refresh_now = time.monotonic()
+            if (
+                self._spatial_refresh_requested
+                and refresh_now - self._last_spatial_refresh_time >= self.SPATIAL_REFRESH_INTERVAL
+            ):
                 self.muffled_check_counter = 0
+                self._spatial_refresh_requested = False
+                self._last_spatial_refresh_time = refresh_now
                 player_pos = (self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
                 global_vol = options.get("megaphone_volume", 100) / 100.0
                 is_underwater = getattr(self.camera.focus_object, 'in_water', False)
+                if refresh_now - self._last_spatial_debug_time >= self.SPATIAL_DEBUG_LOG_INTERVAL:
+                    self._last_spatial_debug_time = refresh_now
+                    log(
+                        f"[MEGAPHONE.DEBUG] refresh listener={player_pos} "
+                        f"speakers={[data['position'] for data in self.speaker_data]}"
+                    )
                 
                 for i, data in enumerate(self.speaker_data):
                     try:
@@ -1091,9 +1145,9 @@ class MegaphoneManager:
                         data['distance'] = distance
                         
                         # === LINE-OF-SIGHT CHECK (Throttled) ===
-                        spk_hearing_range = data.get('hearing_range', 80.0)
+                        spk_hearing_range = data.get('hearing_range', 0.0)
                         if spk_hearing_range == 0.0:
-                            spk_hearing_range = 80.0
+                            spk_hearing_range = 300.0
 
                         # occlusion_ratio: 0.0 = clear, 1.0 = fully behind a wall.
                         # The ray-march returns a SMOOTH ratio (fraction of sampled
@@ -1108,9 +1162,10 @@ class MegaphoneManager:
                         # === DIRECTIONAL CHECK (Horizontal only) ===
                         dot_horizontal = (dx * data['direction'][0] +
                                          dy * data['direction'][1])
-                        # 'is_behind' is still boolean, but it only contributes a
-                        # partial occlusion (0.5 below), so it blends in smoothly.
-                        behind_strength = 1.0 if dot_horizontal < 0 else 0.0
+                        # OpenAL already applies the configured cone.  Keep this
+                        # extra muffle only for a genuinely directional cone.
+                        cone_outer = data.get('cone_settings', {}).get('outer', 360)
+                        behind_strength = 1.0 if cone_outer < 360 and dot_horizontal < 0 else 0.0
 
                         # Combine wall occlusion and behind-speaker into one smooth
                         # occlusion strength in [0,1]. Take the stronger of the two.

@@ -4,6 +4,33 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.5.8] Dragon Boss Encounter & Version Sync — 2026-08-01
+--------------------------------------------------------------------------------
+
+• Dragon Boss
+- **Dragon Encounter:** Added the Dragon boss with a 20,000 HP health pool, custom footsteps, roars, melee attacks, Ring of Fire, and long-range aerial strikes.
+- **Boss Round Integration:** The Dragon is guaranteed to appear in Round 12, then follows the same cooldown and special-round selection rules as other boss encounters.
+- **Staff Testing:** Added `/spawndragon` for moderators and builders to summon the boss safely during Zombie Game testing.
+
+• Version Sync
+- **Client/Server Version Bump:** Updated the protocol version to BT-1.5.8.
+
+• Client Input Compatibility
+- **Mouse Wheel Weapon Guard:** Documented the client fix that prevents weapon-slot switching and selection sounds while outside an active match.
+
+--------------------------------------------------------------------------------
+[v1.5.7] Boss Round System & Version Sync — 2026-08-01
+--------------------------------------------------------------------------------
+
+• Boss System
+- **Boss Round Framework:** Added the boss_round flag to the round system, mirroring the existing dog_round plumbing. Boss rounds spawn a single enhanced hellhound with custom sound path, boosted HP, faster movement, and stronger explosion.
+- **Hellhound Constructor Options:** Hellhound now accepts an optional options object (sound_path, movement_time, explode_damage, explode_range, points_reward) so bosses can be configured per-instance without subclassing.
+- **Jupiter Boss:** When a special round triggers (every 3 rounds, 25% chance), there is a 50% chance it becomes a Boss Jupiter round instead of a dog round. Jupiter uses 2x HP, faster speed, wider/stronger explosion, and the entities/jupiter sound pack. Defeating the boss drops a powerup and heals all players.
+
+• Version Sync
+- **Client/Server Version Bump:** SERVER_VERSION bumped to BT-1.5.7 to match the client release.
+
+--------------------------------------------------------------------------------
 [v1.5.6] System Interaction & Administration Patch — 2026-07-30
 --------------------------------------------------------------------------------
 

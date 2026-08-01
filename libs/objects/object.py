@@ -20,23 +20,11 @@ class Object:
         self, sound, looping=False, cat="miscelaneous", id="", rel_x=0, rel_y=0, rel_z=0, volume=100, pitch=1.0
     ):
         try:
-            is_focus = False
-            try:
-                if hasattr(self.game, 'gameplay') and getattr(self.game.gameplay.camera, 'focus_object', None) == self:
-                    is_focus = True
-            except Exception:
-                pass
-            
-            if is_focus and hasattr(self.game, 'direct_soundgroup'):
-                return self.game.direct_soundgroup.play(
-                    sound,
-                    looping=looping,
-                    cat=cat,
-                    id=id,
-                    volume=volume,
-                    pitch=pitch
-                )
-
+            # Object sounds (including the local player's steps and wall
+            # impacts) must stay in this object's spatial SoundGroup.  Routing
+            # a focused object to direct_soundgroup strips both rel_x/rel_y
+            # direction and the SoundGroup EFX send, which makes the sound
+            # always play in the centre with no map reverb.
             return self.soundgroup.play(
                 sound,
                 looping=looping,

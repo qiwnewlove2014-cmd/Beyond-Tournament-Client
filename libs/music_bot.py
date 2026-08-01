@@ -158,7 +158,10 @@ class AudioStreamer(threading.Thread):
         self.encoder.set_channels(1)  # Opus network stream is ALWAYS MONO
         self.encoder.set_sampling_frequency(48000)
         self.last_send_time = None
-        self.network_queue = queue.Queue()
+        # Keep broadcast latency bounded.  A network hiccup must discard stale
+        # music frames instead of building an ever-growing backlog that later
+        # reaches each PA cabinet at a different time.
+        self.network_queue = queue.Queue(maxsize=50)
         self.sender_thread = None
 
     def _init_buffer_pool(self):
@@ -203,7 +206,14 @@ class AudioStreamer(threading.Thread):
 
     def _send_to_network(self, data):
         """Queue raw PCM chunk to be sent to the network by the sender thread."""
-        self.network_queue.put(data)
+        try:
+            self.network_queue.put_nowait(data)
+        except queue.Full:
+            try:
+                self.network_queue.get_nowait()
+                self.network_queue.put_nowait(data)
+            except queue.Empty:
+                pass
 
     def _network_sender_loop(self):
         """Paced network sending loop running in a separate thread.
@@ -214,6 +224,10 @@ class AudioStreamer(threading.Thread):
                 # Wait for a packet, with timeout so we check self.running regularly
                 data = self.network_queue.get(timeout=0.1)
             except queue.Empty:
+                continue
+
+            # Do not leak pre-pause PCM into the next broadcast segment.
+            if self.paused:
                 continue
 
             # High-resolution time pacing
@@ -458,6 +472,15 @@ class AudioStreamer(threading.Thread):
 
     def set_pause(self, paused):
         self.paused = paused
+        if paused:
+            # The local source can pause in-place, but queued network PCM has
+            # no timestamp.  It must be discarded or listeners will hear it
+            # after resume as a second, delayed copy of the song.
+            while True:
+                try:
+                    self.network_queue.get_nowait()
+                except queue.Empty:
+                    break
         with self._lock:
             try:
                 if paused:
@@ -503,6 +526,12 @@ class MapMusicBot:
         # Local playlist (fallback)
         self.playlist = []
         self.playlist_index = 0
+
+        # Personal Favorites / custom-playlist queue.  This is separate from
+        # map music, which has its own local playlist state above.
+        self.play_queue = []
+        self.play_queue_index = -1
+        self.play_queue_label = ""
 
         # Settings
         self.volume = options.get("music_bot_volume", 50)
@@ -735,6 +764,12 @@ class MapMusicBot:
 
         m = menu_mod.Menu(self.game, "All Favorites", parrent=gp)
         items = []
+
+        def play_all():
+            gp.pop_last_substate()
+            self._start_track_queue(favs, "Favorites")
+
+        items.append(("Play All Favorites", play_all))
         for track in favs:
             title = track.get("title", "Unknown")
             target = track.get("target", "")
@@ -834,10 +869,12 @@ class MapMusicBot:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def play_single_track(self, title, target, source):
+    def play_single_track(self, title, target, source, preserve_queue=False):
         """Play a single track from playlist/favorites"""
         from .speech import speak
         import threading
+        if not preserve_queue:
+            self._clear_track_queue()
         self.current_title = title
         self.current_target = target
         self.current_source = source
@@ -850,11 +887,11 @@ class MapMusicBot:
         self.last_youtube_title = title
 
         if source == "local":
-            self._start_local_file_stream(target, title)
+            self._start_local_file_stream(target, title, preserve_queue=preserve_queue)
         else:
             if target.startswith("http://") or target.startswith("https://"):
                 speak(f"Loading: {title}")
-                self.stop()
+                self.stop(clear_queue=False)
                 self.is_loading_stream = True
 
                 def do_play():
@@ -869,17 +906,51 @@ class MapMusicBot:
             else:
                 self._on_search_submit(target)
 
+    def _clear_track_queue(self):
+        self.play_queue = []
+        self.play_queue_index = -1
+        self.play_queue_label = ""
+
+    def _start_track_queue(self, tracks, label):
+        """Start a personal playlist/favorites queue without mixing map music."""
+        from .speech import speak
+        self.play_queue = [dict(track) for track in tracks if track.get("target")]
+        self.play_queue_index = 0
+        self.play_queue_label = label
+        if not self.play_queue:
+            speak(f"{label} is empty.")
+            self._clear_track_queue()
+            return
+        speak(f"Playing {label}. {len(self.play_queue)} tracks.")
+        self._play_queued_track()
+
+    def _play_queued_track(self):
+        if not (0 <= self.play_queue_index < len(self.play_queue)):
+            return
+        track = self.play_queue[self.play_queue_index]
+        self.play_single_track(
+            track.get("title", "Unknown"),
+            track.get("target", ""),
+            track.get("source", "youtube"),
+            preserve_queue=True,
+        )
+
+    def _advance_track_queue(self):
+        from .speech import speak
+        if not self.play_queue:
+            return False
+        self.play_queue_index += 1
+        if self.play_queue_index >= len(self.play_queue):
+            speak(f"{self.play_queue_label} finished.")
+            self._clear_track_queue()
+            return False
+        self._play_queued_track()
+        return True
+
     def _play_playlist_all(self, playlist_name):
         """Play all tracks in a custom playlist sequentially"""
-        from .speech import speak
         tracks = self.playlist_mgr.get_playlist_tracks(playlist_name)
-        if not tracks:
-            speak("Playlist is empty.")
-            return
-
-        speak(f"Playing playlist: {playlist_name}")
-        first = tracks[0]
-        self.play_single_track(first.get("title", "Unknown"), first.get("target", ""), first.get("source", "youtube"))
+        self._start_track_queue(tracks, f"playlist {playlist_name}")
 
     def _prompt_create_playlist(self):
         """Prompt user for a new playlist name"""
@@ -973,7 +1044,7 @@ class MapMusicBot:
         t.start()
         speak("Opening file explorer...")
 
-    def _start_local_file_stream(self, filepath, title):
+    def _start_local_file_stream(self, filepath, title, preserve_queue=False):
         """Start streaming local file"""
         import os
         if not os.path.exists(filepath):
@@ -992,7 +1063,7 @@ class MapMusicBot:
         self.is_loading_stream = True
 
         # Stop any current playback
-        self.stop()
+        self.stop(clear_queue=not preserve_queue)
 
         # Start streaming local file via ffmpeg -> AudioStreamer
         self._start_youtube_stream(filepath, title)
@@ -1279,7 +1350,7 @@ class MapMusicBot:
 
     # === Common Controls ===
 
-    def stop(self):
+    def stop(self, clear_queue=True):
         """Stop all playback and cancel any pending search"""
         # Cancel any ongoing search
         self.searching = False
@@ -1295,6 +1366,8 @@ class MapMusicBot:
         self.paused = False
         self.mode = "idle"
         self._current_reverb_slot = None
+        if clear_queue:
+            self._clear_track_queue()
 
     def toggle_pause(self):
         from .speech import speak
@@ -1410,7 +1483,8 @@ class MapMusicBot:
             # Stream finished
             self.playing = False
             self.mode = "idle"
-            speak("Track finished.")
+            if not self._advance_track_queue():
+                speak("Track finished.")
 
     def _sync_map_reverb(self):
         """Apply the map's reverb at the player's position to the music source.

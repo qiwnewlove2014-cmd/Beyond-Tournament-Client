@@ -506,7 +506,7 @@ class Gameplay(state.State):
                     self.game.mouse_buttons["middle"] = False
                 if event.button == 3:
                     self.game.mouse_buttons["right"] = False
-            if event.type == pygame.MOUSEWHEEL and not self.spectator_mode:
+            if event.type == pygame.MOUSEWHEEL and self.game_started and not self.spectator_mode:
                 if not self.wmanager.activeWeapon:
                     self.wmanager.switchWeapon(0)
                 pos = self.wmanager.weapons.index(self.wmanager.activeWeapon)

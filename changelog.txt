@@ -14,6 +14,9 @@
 • Client Stability
 - **Safer Entity Synchronization:** Hardened network entity movement and audio recovery so an invalid entity update is logged instead of silently closing the game.
 
+• Input & Controls
+- **Mouse Wheel Weapon Guard:** Scrolling the mouse wheel outside an active match no longer switches weapon slots or plays weapon-selection sounds.
+
 --------------------------------------------------------------------------------
 [v1.5.7] Boss Jupiter Sounds, Keybinding UX & Spawn Crash Fix — 2026-08-01
 --------------------------------------------------------------------------------
