@@ -1,8 +1,13 @@
-[v1.5.8] Dragon Boss & Client Stability Patch — 2026-08-01
+[v1.5.9] Navigation Audio & Music Control Patch — 2026-08-02
 
-• Dragon Boss
-- **Dragon Encounter:** Face the Dragon from Round 12 onward, with distinctive roars, footsteps, Ring of Fire, and long-range aerial attacks.
-- **Clear Flight Audio:** Takeoff, flight, and mid-air roar cues make the Dragon's movement easier to follow.
+• Navigation Audio & Input
+- Optional Wall Proximity Tone provides a directional 3D cue for walls within five tiles.
+- Tab direction check provides a spatial compass cue; turning cues and post-turn degree announcements are configurable and disabled by default.
+- Direction check, spectator switching, and Pong spectator camera keys are configurable, including intentional overlapping bindings.
 
-• Client Stability
-- **Safer Entity Synchronization:** Improved recovery from invalid entity updates to reduce silent game closures.
+• Music Bot
+- Personal Music Feed shuffles Favorites, supports previous/next controls, and can use normal Broadcast or authorized Megaphone routing.
+- Fixed stale background music loads that could start after selecting another song or pressing Stop.
+
+• Staff AI
+- Removed automated Mason AI broadcasts and the related broadcast toggle commands. Mason remains available for direct staff assistance.

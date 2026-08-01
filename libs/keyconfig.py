@@ -14,23 +14,34 @@ class Keyconfig:
     def load(self):
         with contextlib.suppress(FileNotFoundError):
             path = self.file if os.path.exists(self.file) else "default_keyconfig.json"
-            # we try to load the default keyconfig if not found, and we ignore if that one is not found as well.
             with open(path, "rb") as f:
-                keys = json.loads(f.read())
-                for k, v in keys.items():
+                data = json.loads(f.read())
+                # Format 2 stores function -> key, so more than one function
+                # can deliberately share the same physical key. Older files
+                # stored key -> function and are still accepted below.
+                if isinstance(data, dict) and data.get("format") == 2:
+                    bindings = data.get("bindings", {})
+                    for func, key_name in bindings.items():
+                        try:
+                            self.keys[func.strip()] = key.key_code(key_name.strip())
+                        except (AttributeError, ValueError):
+                            speak(f"Invalid key string for {func}: {key_name}. Using default.")
+                    return
+
+                # Legacy key -> function files remain compatible.
+                for k, v in data.items():
                     try:
                         self.keys[v.strip()] = key.key_code(k.strip())
-                        # we reverse it because in the game we care about keys from functions, not functions from keys. we also strip the strings just in case of leading or traling spaces
                     except ValueError:
-                        # an invalid key is given.
                         speak(f"Invalid key string for {v}: {k}. Using default.")
 
     def save(self):
-        # we reverse self.keys inside a local variable to be compatible with the file format.
-        keys = {key.name(v): k for k, v in self.keys.items()}
+        data = {
+            "format": 2,
+            "bindings": {func: key.name(code) for func, code in self.keys.items()},
+        }
         with open(self.file, "wb") as f:
-            data = json.dumps(keys, indent=4).encode("utf-8", "ignore")
-            f.write(data)
+            f.write(json.dumps(data, indent=4).encode("utf-8", "ignore"))
 
     def get(self, func, default):
         """returns the key constant asociated with {func}. if that key is not set, return {default}."""

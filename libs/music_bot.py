@@ -519,6 +519,11 @@ class MapMusicBot:
         # YouTube streamer thread
         self.streamer = None
 
+        # Main-thread playback generation. Background URL resolution captures a
+        # generation but may never create audio after a newer play or Stop.
+        self._playback_generation = 0
+        self._playback_generation_lock = threading.Lock()
+
         # Last played YouTube info (for replay)
         self.last_youtube_url = ""
         self.last_youtube_title = ""
@@ -532,6 +537,11 @@ class MapMusicBot:
         self.play_queue = []
         self.play_queue_index = -1
         self.play_queue_label = ""
+
+        # A shuffled Favorites feed. It preserves the user's current broadcast
+        # routing and never changes saved playlists.
+        self.feed_tracks = []
+        self.feed_index = -1
 
         # Settings
         self.volume = options.get("music_bot_volume", 50)
@@ -614,6 +624,16 @@ class MapMusicBot:
                 pass
             self.stream_source = None
 
+    def _begin_playback_generation(self):
+        """Invalidate pending starts and reserve a generation for new playback."""
+        with self._playback_generation_lock:
+            self._playback_generation += 1
+            return self._playback_generation
+
+    def _is_current_playback_generation(self, generation):
+        with self._playback_generation_lock:
+            return generation == self._playback_generation
+
     # === YouTube Playback ===
 
     def open_search(self):
@@ -648,6 +668,10 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._open_playlists_menu()
 
+        def go_personal_feed():
+            gp.pop_last_substate()
+            self._show_personal_feed_menu()
+
         def go_help():
             gp.pop_last_substate()
             self._show_help_menu()
@@ -657,6 +681,7 @@ class MapMusicBot:
             ("Search YouTube", go_search),
             ("Choose Local File", go_local),
             ("My Playlists & Favorites", go_playlists),
+            ("Personal Music Feed", go_personal_feed),
         ]
         
         # Check if staff to show megaphone routing option
@@ -709,6 +734,79 @@ class MapMusicBot:
             speak(f"Saved {self.current_title} to favorites.")
         else:
             speak(f"{self.current_title} is already in favorites.")
+
+    def _show_personal_feed_menu(self):
+        """Open the shuffled Favorites feed controls."""
+        from . import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def start_feed():
+            gp.pop_last_substate()
+            self._start_personal_feed()
+
+        def next_feed():
+            gp.pop_last_substate()
+            self._next_personal_feed()
+
+        m = menu_mod.Menu(self.game, "Personal Music Feed", parrent=gp)
+        m.add_items([
+            ("Start shuffled Favorites feed", start_feed),
+            ("Next feed song", next_feed),
+            ("Back", lambda: (gp.pop_last_substate(), self._show_mode_menu())),
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _clear_personal_feed(self):
+        self.feed_tracks = []
+        self.feed_index = -1
+
+    def _start_personal_feed(self):
+        favorites = [dict(track) for track in self.playlist_mgr.get_favorites() if track.get("target")]
+        if not favorites:
+            speak("Your Favorites are empty. Save songs first, then start the feed.")
+            return
+
+        random.shuffle(favorites)
+        self.feed_tracks = favorites
+        self.feed_index = 0
+        speak(f"Personal Music Feed started. {len(favorites)} songs from Favorites.")
+        self._play_personal_feed_track()
+
+    def _next_personal_feed(self):
+        if not self.feed_tracks:
+            self._start_personal_feed()
+            return
+        self.feed_index = (self.feed_index + 1) % len(self.feed_tracks)
+        self._play_personal_feed_track()
+
+    def previous_feed_track(self):
+        """Return to the prior song in an active Personal Music Feed."""
+        if not self.feed_tracks:
+            speak("Personal Music Feed is not active.")
+            return
+        self.feed_index = (self.feed_index - 1) % len(self.feed_tracks)
+        self._play_personal_feed_track()
+
+    def next_feed_track(self):
+        """Advance an active Personal Music Feed without changing normal playlists."""
+        if not self.feed_tracks:
+            speak("Personal Music Feed is not active.")
+            return
+        self._next_personal_feed()
+
+    def _play_personal_feed_track(self):
+        if not (0 <= self.feed_index < len(self.feed_tracks)):
+            return
+        track = self.feed_tracks[self.feed_index]
+        self.play_single_track(
+            track.get("title", "Unknown"),
+            track.get("target", ""),
+            track.get("source", "youtube"),
+            preserve_feed=True,
+        )
 
     def _open_playlists_menu(self):
         """Show main My Playlists & Favorites menu"""
@@ -869,12 +967,15 @@ class MapMusicBot:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def play_single_track(self, title, target, source, preserve_queue=False):
+    def play_single_track(self, title, target, source, preserve_queue=False, preserve_feed=False):
         """Play a single track from playlist/favorites"""
         from .speech import speak
         import threading
         if not preserve_queue:
             self._clear_track_queue()
+        if not preserve_feed:
+            self._clear_personal_feed()
+        playback_generation = self._begin_playback_generation()
         self.current_title = title
         self.current_target = target
         self.current_source = source
@@ -887,20 +988,33 @@ class MapMusicBot:
         self.last_youtube_title = title
 
         if source == "local":
-            self._start_local_file_stream(target, title, preserve_queue=preserve_queue)
+            self._start_local_file_stream(
+                target,
+                title,
+                preserve_queue=preserve_queue,
+                preserve_feed=preserve_feed,
+                playback_generation=playback_generation,
+            )
         else:
             if target.startswith("http://") or target.startswith("https://"):
                 speak(f"Loading: {title}")
-                self.stop(clear_queue=False)
+                self.stop(
+                    clear_queue=False,
+                    clear_feed=not preserve_feed,
+                    invalidate_pending=False,
+                )
                 self.is_loading_stream = True
 
                 def do_play():
                     stream_url = YouTubeSearcher.get_stream_url(target)
                     if not stream_url:
-                        speak("Failed to get audio stream.")
-                        self.is_loading_stream = False
+                        if self._is_current_playback_generation(playback_generation):
+                            speak("Failed to get audio stream.")
+                            self.is_loading_stream = False
                         return
-                    self.game.put(lambda: self._start_youtube_stream(stream_url, title))
+                    self.game.put(lambda: self._start_youtube_stream(
+                        stream_url, title, playback_generation
+                    ))
 
                 threading.Thread(target=do_play, daemon=True).start()
             else:
@@ -997,6 +1111,7 @@ class MapMusicBot:
             ("Ctrl + M: Stop / Replay last song", lambda: None),
             ("Ctrl + Shift + M: Speak status", lambda: None),
             ("Alt + M: Toggle broadcast (Private/Public)", lambda: None),
+            ("Personal Music Feed: Ctrl left bracket for previous; Ctrl right bracket for next", lambda: None),
             ("F9: Decrease volume", lambda: None),
             ("F10: Increase volume", lambda: None),
             ("Back", go_back)
@@ -1044,11 +1159,17 @@ class MapMusicBot:
         t.start()
         speak("Opening file explorer...")
 
-    def _start_local_file_stream(self, filepath, title, preserve_queue=False):
+    def _start_local_file_stream(self, filepath, title, preserve_queue=False, preserve_feed=False,
+                                 playback_generation=None):
         """Start streaming local file"""
         import os
         if not os.path.exists(filepath):
             speak("File not found.")
+            return
+
+        if playback_generation is None:
+            playback_generation = self._begin_playback_generation()
+        if not self._is_current_playback_generation(playback_generation):
             return
 
         speak(f"Loading local file: {title}")
@@ -1063,10 +1184,14 @@ class MapMusicBot:
         self.is_loading_stream = True
 
         # Stop any current playback
-        self.stop(clear_queue=not preserve_queue)
+        self.stop(
+            clear_queue=not preserve_queue,
+            clear_feed=not preserve_feed,
+            invalidate_pending=False,
+        )
 
         # Start streaming local file via ffmpeg -> AudioStreamer
-        self._start_youtube_stream(filepath, title)
+        self._start_youtube_stream(filepath, title, playback_generation)
 
     def _open_search_input(self):
         """Open the text input for search query"""
@@ -1218,6 +1343,10 @@ class MapMusicBot:
             speak("Please wait, already loading a track.")
             return
 
+        # A manually selected search result leaves the private feed.
+        self._clear_personal_feed()
+        playback_generation = self._begin_playback_generation()
+
         speak(f"Loading: {title}")
         self.current_title = title
         self.current_target = webpage_url or direct_url
@@ -1232,7 +1361,7 @@ class MapMusicBot:
         self.is_loading_stream = True
 
         # Stop any current playback
-        self.stop()
+        self.stop(invalidate_pending=False)
         self.is_loading_stream = True
 
         # Get stream URL in background
@@ -1242,17 +1371,23 @@ class MapMusicBot:
             if not url:
                 url = YouTubeSearcher.get_stream_url(webpage_url)
             if not url:
-                speak("Failed to get audio stream.")
-                self.is_loading_stream = False
+                if self._is_current_playback_generation(playback_generation):
+                    speak("Failed to get audio stream.")
+                    self.is_loading_stream = False
                 return
             # Start streaming on main thread
-            self.game.put(lambda: self._start_youtube_stream(url, title))
+            self.game.put(lambda: self._start_youtube_stream(
+                url, title, playback_generation
+            ))
 
         t = threading.Thread(target=do_play, daemon=True)
         t.start()
 
-    def _start_youtube_stream(self, audio_url, title):
+    def _start_youtube_stream(self, audio_url, title, playback_generation=None):
         """Start streaming from YouTube audio URL"""
+        if (playback_generation is not None
+                and not self._is_current_playback_generation(playback_generation)):
+            return
         self.is_loading_stream = False
         self._create_stream_source()
         if not self.stream_source:
@@ -1350,8 +1485,10 @@ class MapMusicBot:
 
     # === Common Controls ===
 
-    def stop(self, clear_queue=True):
+    def stop(self, clear_queue=True, clear_feed=True, invalidate_pending=True):
         """Stop all playback and cancel any pending search"""
+        if invalidate_pending:
+            self._begin_playback_generation()
         # Cancel any ongoing search
         self.searching = False
         self.is_loading_stream = False
@@ -1368,6 +1505,8 @@ class MapMusicBot:
         self._current_reverb_slot = None
         if clear_queue:
             self._clear_track_queue()
+        if clear_feed:
+            self._clear_personal_feed()
 
     def toggle_pause(self):
         from .speech import speak
@@ -1397,6 +1536,9 @@ class MapMusicBot:
             speak("Nothing is playing.")
 
     def next_track(self):
+        if self.feed_tracks:
+            self._next_personal_feed()
+            return
         if self.mode == "local" and self.playlist:
             self.playlist_index = (self.playlist_index + 1) % len(self.playlist)
             self._play_local_current()

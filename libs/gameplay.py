@@ -5,6 +5,8 @@ import webbrowser
 from functools import partial
 import cyal.exceptions
 from .systems.megaphone_system import MegaphoneManager
+from .systems.wall_tone_system import WallToneSystem
+from .systems.compass_turn_cue import CompassTurnCue
 import pygame
 import pyogg
 from .shields import ShieldManager
@@ -41,6 +43,8 @@ class Gameplay(state.State):
         self.map = world_map.Map(self.game, 0, 0, 0, 10, 10, 10)
         self.player = player.Player(self.game, self.map, 0, 0, 0)
         self.map.player = self.player
+        self.wall_tone = WallToneSystem(self)
+        self.compass_turn_cue = CompassTurnCue(self)
         self.camera = camera.Camera(self.game)
         self.camera.set_focus_object(self.player)
         self.music_volume = options.get("volume_music", 25)
@@ -78,7 +82,6 @@ class Gameplay(state.State):
             kc.get("run", pygame.K_LSHIFT): self.run_check,
         }
         self.keys_pressed = {
-            pygame.K_TAB: self.spectator_switch_player,
             kc.get("tracking_menu", pygame.K_t): self.open_tracking_menu,
             kc.get("voice_chat", pygame.K_g): self.voice_chat_start,  # Push-to-Talk mode
             pygame.K_RETURN: self.buffer_options,
@@ -152,8 +155,7 @@ class Gameplay(state.State):
             kc.get("open_main_menu", pygame.K_BACKSPACE): lambda mod: (
                 self.chat2("/mainmenu") if not self.substates else None
             ),
-            kc.get("check_stats", pygame.K_p): self._p_or_spectator_cam,
-            pygame.K_TAB: self.spectator_switch_player,  # Switch spectator target
+            kc.get("check_stats", pygame.K_p): self.check_stats,
             kc.get(
                 "export_buffers", pygame.K_BACKQUOTE
             ): lambda mod: buffer.export_buffers(),
@@ -185,7 +187,18 @@ class Gameplay(state.State):
                 setattr(self, "turn_mod", False)
             ),
         }
+        self.configurable_key_actions = [
+            (kc.get("check_direction", pygame.K_TAB), self.check_direction_in_play),
+            (kc.get("spectator_switch_player", pygame.K_TAB), self.spectator_switch_player),
+            (kc.get("spectator_cycle_camera", pygame.K_p), self.cycle_spectator_camera_if_active),
+        ]
         self.turn_mod = False
+
+    def _dispatch_configurable_key_actions(self, event):
+        """Run every configurable action sharing this key, in menu order."""
+        for bound_key, action in self.configurable_key_actions:
+            if event.key == bound_key:
+                action(event.mod)
 
     def spectator_switch_player(self, mod):
         if not self.spectator_mode:
@@ -200,13 +213,55 @@ class Gameplay(state.State):
 
         self.game.network.send(consts.CHANNEL_MISC, "spectator_switch_player", {})
 
-    def _p_or_spectator_cam(self, mod):
-        """P key does double duty: in spectator mode of a Pong match it cycles
-        the sideline camera angle; otherwise it shows the player stats."""
+    def check_direction_in_play(self, mod=0):
+        """Direction checks are available while playing, not while spectating."""
+        if self.spectator_mode and not getattr(self, "concert_spectator_mode", False):
+            return
+        self.check_direction()
+
+    def cycle_spectator_camera_if_active(self, mod=0):
+        """Run the spectator-camera binding only during a Pong spectator view."""
         if self.spectator_mode and self.pong_arena:
             self.spectator_cycle_cam_mode()
-        else:
-            self.game.network.send(consts.CHANNEL_MISC, "stats", {})
+
+    def check_direction(self):
+        """Speak the current compass direction and spatialize cardinal alignment."""
+        facing = self.player.hfacing % 360
+        cardinal_directions = (0, 90, 180, 270)
+
+        def angular_distance(first, second):
+            return abs((first - second + 180) % 360 - 180)
+
+        nearest = min(cardinal_directions, key=lambda direction: angular_distance(facing, direction))
+
+        # Always speak the actual 16-way direction. The cue remains anchored
+        # to the nearest cardinal so it can guide rotation through diagonals.
+        speak(string_utils.direction(facing))
+
+        # The source is anchored in the selected world direction, rather than
+        # to the listener. Rotating away moves it naturally left or right.
+        source_pos = movement.move(
+            (self.player.x, self.player.y, self.player.z + 1), nearest, factor=4
+        ).get_tuple
+        snd = self.game.audio_mngr.play_unbound(
+            "ui/facing.ogg",
+            *source_pos,
+            looping=False,
+            volume=45,
+            cat="ui",
+        )
+        if snd and snd.source:
+            try:
+                snd.source.reference_distance = 4.0
+                snd.source.rolloff_factor = 0.5
+            except Exception:
+                pass
+
+    def check_stats(self, mod=0):
+        """Request player stats outside spectator camera mode."""
+        if self.spectator_mode and self.pong_arena:
+            return
+        self.game.network.send(consts.CHANNEL_MISC, "stats", {})
 
     def spectator_cycle_cam_mode(self):
         """Cycle the Pong spectator ear: follow -> east edge -> west edge -> follow.
@@ -325,6 +380,10 @@ class Gameplay(state.State):
             self.music_bot = None
         if hasattr(self, 'megaphone') and self.megaphone:
             self.megaphone._cleanup_megaphone_efx()
+        if hasattr(self, 'wall_tone') and self.wall_tone:
+            self.wall_tone.destroy()
+        if hasattr(self, 'compass_turn_cue') and self.compass_turn_cue:
+            self.compass_turn_cue.destroy()
         self.map.destroy()
 
                     
@@ -383,6 +442,8 @@ class Gameplay(state.State):
 
     def update(self, events):
         self.megaphone.update_megaphone_audio(0, None)
+        self.wall_tone.update()
+        self.compass_turn_cue.update()
         is_concert = getattr(self, 'concert_spectator_mode', False)
         if not self.spectator_mode or is_concert:
             self.player.loop()
@@ -394,6 +455,7 @@ class Gameplay(state.State):
                 pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p,
                 pygame.K_m, pygame.K_F9, pygame.K_F10
             ]
+            allowed_keys.extend(key for key, _ in self.configurable_key_actions)
             events = [e for e in events if e.type == pygame.KEYDOWN and e.key in allowed_keys]
         if not self.spectator_mode:
             if not self.player.drownable and self.player.drown_clock.elapsed >= 30000 and not self.player.dead: self.player.drownable=True
@@ -483,11 +545,16 @@ class Gameplay(state.State):
                     pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p,
                     pygame.K_m, pygame.K_F9, pygame.K_F10
                 ]
-                if event.type == pygame.KEYDOWN and event.key in self.keys_pressed and event.key in allowed_keys:
-                    self.keys_pressed[event.key](event.mod)
+                allowed_keys.extend(key for key, _ in self.configurable_key_actions)
+                if event.type == pygame.KEYDOWN and event.key in allowed_keys:
+                    self._dispatch_configurable_key_actions(event)
+                    if event.key in self.keys_pressed:
+                        self.keys_pressed[event.key](event.mod)
             else:
-                if event.type == pygame.KEYDOWN and event.key in self.keys_pressed:
-                    self.keys_pressed[event.key](event.mod)
+                if event.type == pygame.KEYDOWN:
+                    self._dispatch_configurable_key_actions(event)
+                    if event.key in self.keys_pressed:
+                        self.keys_pressed[event.key](event.mod)
                 elif event.type == pygame.KEYUP and event.key in self.keys_released:
                     self.keys_released[event.key](event.mod)
             if not pygame.event.get_grab():
@@ -560,11 +627,19 @@ class Gameplay(state.State):
         buffer.cycle_item(2)
 
     def buffer_cycle_l(self, mod=0):
+        if mod & pygame.KMOD_CTRL:
+            if hasattr(self, 'music_bot') and self.music_bot:
+                self.music_bot.previous_feed_track()
+            return
         if mod & pygame.KMOD_SHIFT:
             return buffer.cycle(3)
         buffer.cycle(1)
 
     def buffer_cycle_r(self, mod=0):
+        if mod & pygame.KMOD_CTRL:
+            if hasattr(self, 'music_bot') and self.music_bot:
+                self.music_bot.next_feed_track()
+            return
         if mod & pygame.KMOD_SHIFT:
             return buffer.cycle(4)
         buffer.cycle(2)
@@ -628,6 +703,7 @@ class Gameplay(state.State):
             keys = pygame.key.get_pressed()
             if keys[pygame.K_q] or keys[pygame.K_e]:
                 return
+        self.wall_tone.preview_movement(self.player.hfacing - 90)
         tile_factor = 3.0 if self.map.get_tile_at(self.player.x, self.player.y, self.player.z) in ["deep_water", "underwater"] else 1.0
         effective_movetime = getattr(self.game, 'pong_speed', 60) if getattr(self.game, 'pong_mode', False) else (self.player.runtime if getattr(self, 'running', False) else self.player.movetime)
         if self.player.movement_clock.elapsed >= effective_movetime * tile_factor:
@@ -640,6 +716,7 @@ class Gameplay(state.State):
             keys = pygame.key.get_pressed()
             if keys[pygame.K_q] or keys[pygame.K_e]:
                 return
+        self.wall_tone.preview_movement(self.player.hfacing + 90)
         tile_factor = 3.0 if self.map.get_tile_at(self.player.x, self.player.y, self.player.z) in ["deep_water", "underwater"] else 1.0
         effective_movetime = getattr(self.game, 'pong_speed', 60) if getattr(self.game, 'pong_mode', False) else (self.player.runtime if getattr(self, 'running', False) else self.player.movetime)
         if self.player.movement_clock.elapsed >= effective_movetime * tile_factor:
@@ -661,6 +738,7 @@ class Gameplay(state.State):
             self.player.face(0, 0)
             self.turning = True
             return self.turn_stop(mod)
+        self.wall_tone.preview_movement(self.player.hfacing)
         tile_factor = 3.0 if self.map.get_tile_at(self.player.x, self.player.y, self.player.z) in ["deep_water", "underwater"] else 1.0
         if (
             not self.turn_mod
@@ -689,8 +767,7 @@ class Gameplay(state.State):
             self.turning = True
             amount=2 if self.running else 1
             self.player.face(self.player.hfacing - amount, self.player.vfacing)
-            if self.player.hfacing % 45 == 0:
-                speak(string_utils.direction(self.player.hfacing))
+            self.compass_turn_cue.on_turn(self.player.hfacing)
 
     def move_back(self, mod, turn=False):
         if self.is_in_minigame():
@@ -700,6 +777,7 @@ class Gameplay(state.State):
             self.player.face(self.player.hfacing + 180, 0)
             self.turning = True
             return self.turn_stop(mod)
+        self.wall_tone.preview_movement(self.player.hfacing + 180)
         tile_factor = 3.0 if self.map.get_tile_at(self.player.x, self.player.y, self.player.z) in ["deep_water", "underwater"] else 1.0
         if (
             not self.turn_mod
@@ -728,8 +806,7 @@ class Gameplay(state.State):
             self.turning = True
             amount=2 if self.running else 1
             self.player.face(self.player.hfacing + amount, self.player.vfacing)
-            if self.player.hfacing % 45 == 0:
-                speak(string_utils.direction(self.player.hfacing))
+            self.compass_turn_cue.on_turn(self.player.hfacing)
 
     def move_up(self, mod):
         tile_factor = 3.0 if self.map.get_tile_at(self.player.x, self.player.y, self.player.z) in ["deep_-water", "underwater"] else 1.0
@@ -795,9 +872,11 @@ class Gameplay(state.State):
         if not self.turning:
             return
         self.turning = False
+        self.compass_turn_cue.stop_turning()
         if not self.player.locked:
             self.player.play_sound("foley/turn/stop.ogg", cat="self")
-            if options.get("speak_on_turn", True): speak(f"turned to {self.player.hfacing} degrees")
+            if options.get("speak_on_turn", False):
+                speak(f"turned to {self.player.hfacing} degrees")
 
     def pitch_stop(self, mod):
         if not self.turning:

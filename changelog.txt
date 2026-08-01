@@ -4,6 +4,20 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.5.9] Navigation Audio & Music Control Patch — 2026-08-02
+--------------------------------------------------------------------------------
+
+• Navigation Audio & Input
+- **Wall Proximity Tone:** Added an optional 3D wall cue that checks only the direction the player is moving, raising pitch as a wall comes within five tiles.
+- **Compass Direction Check:** Added a configurable direction check with a spatial compass cue toward the nearest cardinal direction.
+- **Compass Turn Cue:** Added an optional left/right spatial compass cue while turning. It is disabled by default, as is the optional post-turn degree announcement.
+- **Flexible Key Bindings:** Direction check, spectator switching, and Pong spectator camera controls can now be rebound. Multiple actions may intentionally share one key.
+
+• Music Bot
+- **Personal Music Feed:** Added a shuffled Favorites feed with previous/next shortcuts and optional Broadcast or authorized Megaphone routing.
+- **Playback Cancellation:** Prevented stale background music loads from starting after a newer song is selected or playback is stopped.
+
+--------------------------------------------------------------------------------
 [v1.5.8] Dragon Boss & Client Stability Patch — 2026-08-01
 --------------------------------------------------------------------------------
 

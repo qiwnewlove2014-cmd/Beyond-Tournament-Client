@@ -153,6 +153,8 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         (game.toggle_item("Voice Chat", "voice_chat", True)),
         (game.toggle_item("microphone", "microphone", True)),
         (game.toggle_item("Player beacons", "beacons")),
+        (game.toggle_item("Wall proximity tone", "wall_tone", False)),
+        (game.toggle_item("Compass turn cue", "compass_turn_cue", False)),
         (game.toggle_item("play intro at start up", "play_intro_at_start")),
         (
             game.toggle_item(
@@ -164,7 +166,8 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         (game.toggle_item("Mute speech when out of the game window", "mute_speech_on_focus_loss")),
         (game.toggle_item(
             "speak your direction when finished turning", 
-            "speak_on_turn"
+            "speak_on_turn",
+            False,
         )),
         (game.toggle_item("receive typing indicators", "typing")),
         (
