@@ -27,6 +27,7 @@
 - **Safe Background Delivery:** Custom sounds download and cache outside the main game loop, fall back to the built-in sound when unavailable, and avoid blocking gameplay while players connect or disconnect.
 - **Strict Upload Validation:** The server independently validates every upload before linking it to the player's profile, so modified clients cannot bypass the file type, size, audio format, or duration limits.
 - **Portable Sound Cache:** Fixed custom sound loading when the game and the Windows user cache are located on different drives.
+- **Automatic Radmin VPN Uploads:** Players connected through Radmin VPN can upload or remove custom sounds over the encrypted VPN without configuring HTTPS. The Client permits this exception only when the server uses Radmin's 26.0.0.0/8 range and the player's computer has an active address in that range.
 
 🔒 Security & Client Diagnostics
 - **Centralized Client Error Reports:** Client exceptions are queued safely and delivered after authenticated login, then retained until the server acknowledges receipt. Full reports are stored per player on the server so staff do not need to request local crash logs.

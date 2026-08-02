@@ -1,7 +1,9 @@
 import concurrent.futures
 import hashlib
+import ipaddress
 import os
 import re
+import socket
 import threading
 from urllib.parse import urlparse
 
@@ -15,6 +17,52 @@ MAX_SOUND_BYTES = 512 * 1024
 MAX_CACHE_BYTES = 50 * 1024 * 1024
 DOWNLOAD_GRACE_SECONDS = 1.0
 SOUND_ID_RE = re.compile(r"^[a-f0-9]{64}$")
+RADMIN_VPN_NETWORK = ipaddress.ip_network("26.0.0.0/8")
+TRANSPORT_ERROR = (
+    "Custom sound changes require HTTPS, localhost, or an active Radmin VPN connection."
+)
+
+
+def _has_local_radmin_vpn_address():
+    """Confirm this client is actually attached to Radmin's 26.0.0.0/8 network."""
+    try:
+        import psutil
+    except ImportError:
+        return False
+
+    try:
+        for addresses in psutil.net_if_addrs().values():
+            for address in addresses:
+                if address.family != socket.AF_INET:
+                    continue
+                try:
+                    if ipaddress.ip_address(address.address) in RADMIN_VPN_NETWORK:
+                        return True
+                except ValueError:
+                    continue
+    except (OSError, psutil.Error):
+        return False
+    return False
+
+
+def _upload_transport_allowed(base_url):
+    """Allow TLS, loopback development, or HTTP carried inside Radmin VPN."""
+    parsed = urlparse(str(base_url or ""))
+    if parsed.scheme.lower() == "https":
+        return True
+    if parsed.scheme.lower() != "http" or not parsed.hostname:
+        return False
+
+    hostname = parsed.hostname.lower()
+    if hostname == "localhost":
+        return True
+    try:
+        target_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if target_ip.is_loopback:
+        return True
+    return target_ip in RADMIN_VPN_NETWORK and _has_local_radmin_vpn_address()
 
 
 class PresenceSoundManager:
@@ -220,9 +268,8 @@ class PresenceSoundManager:
         if not self.upload_token or not self.base_url:
             speak("You must be connected to a compatible server.")
             return
-        parsed = urlparse(self.base_url)
-        if parsed.scheme != "https" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
-            speak("Custom sound upload requires a secure HTTPS server connection.")
+        if not _upload_transport_allowed(self.base_url):
+            speak(TRANSPORT_ERROR)
             return
 
         def choose_file():
@@ -257,6 +304,8 @@ class PresenceSoundManager:
 
     def _upload_file(self, kind, file_path):
         try:
+            if not _upload_transport_allowed(self.base_url):
+                raise ValueError(TRANSPORT_ERROR)
             if not file_path.lower().endswith(".ogg"):
                 raise ValueError("Only OGG Vorbis files are accepted.")
             size = os.path.getsize(file_path)
@@ -292,11 +341,16 @@ class PresenceSoundManager:
         if kind not in ("online", "offline") or not self.upload_token or not self.base_url:
             speak("You must be connected to a compatible server.")
             return
+        if not _upload_transport_allowed(self.base_url):
+            speak(TRANSPORT_ERROR)
+            return
         speak(f"Removing custom {kind} sound.")
         self._executor.submit(self._clear_remote, kind)
 
     def _clear_remote(self, kind):
         try:
+            if not _upload_transport_allowed(self.base_url):
+                raise ValueError(TRANSPORT_ERROR)
             response = requests.delete(
                 f"{self.base_url}/api/presence-sounds/{kind}",
                 headers={"Authorization": f"Bearer {self.upload_token}"},
