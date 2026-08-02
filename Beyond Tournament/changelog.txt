@@ -4,6 +4,37 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.5.9] Navigation Audio, Music Controls & Staff AI Cleanup — 2026-08-02
+--------------------------------------------------------------------------------
+
+• Music Bot Companion Controls
+- **Personal Music Feed:** Added a shuffled Favorites feed. It keeps the listener's current normal Broadcast or authorized Megaphone routing, so staff can test PA broadcasts while moving between feed songs.
+- **Feed Shortcuts:** Added `Ctrl + [` for the previous feed song and `Ctrl + ]` for the next feed song. The ordinary `[` and `]` buffer controls are unchanged.
+
+• Client Navigation Audio
+- **Wall Proximity Tone:** Added an optional, directional 3D wall cue. While moving forward, backward, or strafing, it checks only the active movement path up to five tiles and smoothly raises pitch as the first wall becomes closer.
+- **Compass Direction Check:** Tab now reports the current 16-way compass direction during normal play and provides a spatial `facing.ogg` cue toward the nearest cardinal direction, including while between cardinal headings.
+- **Compass Turn Cue:** Added an optional smooth cue that moves left/right with the player's real turning angle. It is disabled by default; the existing post-turn degree announcement is also disabled by default and remains independently configurable.
+
+• Staff AI Cleanup
+- **Mason AI Broadcast Removal:** Removed the automated Mason AI broadcast timer and the `/aibroadcast` / `/aib` controls. Mason remains available for direct staff assistance and questions.
+
+• Custom Online & Offline Sounds
+- **Player Profile Sounds:** Added separate custom online and offline sounds tied to each player's profile, with accessible in-game controls to upload, replace, remove, or restore either sound to the game default.
+- **How to Upload:** After logging in, open the in-game Options menu, choose `Configure custom online and offline sounds`, then select `Upload online sound` or `Upload offline sound`. Choose an OGG Vorbis file in the file picker and wait for the spoken upload confirmation.
+- **Replace or Remove:** File names do not need to match the original game sounds. Uploading another file for the same online or offline slot replaces the current custom sound; choosing `Restore default online sound` or `Restore default offline sound` removes that custom slot and returns it to the built-in game sound.
+- **Sound Requirements:** Each file must be OGG Vorbis mono or stereo at 44,100 or 48,000 Hz, between 0.25 and 10 seconds long, and no larger than 512 KB. Online and offline may use different files, or the same file may be uploaded to both slots.
+- **Safe Background Delivery:** Custom sounds download and cache outside the main game loop, fall back to the built-in sound when unavailable, and avoid blocking gameplay while players connect or disconnect.
+- **Strict Upload Validation:** The server independently validates every upload before linking it to the player's profile, so modified clients cannot bypass the file type, size, audio format, or duration limits.
+- **Portable Sound Cache:** Fixed custom sound loading when the game and the Windows user cache are located on different drives.
+
+🔒 Security & Client Diagnostics
+- **Centralized Client Error Reports:** Client exceptions are queued safely and delivered after authenticated login, then retained until the server acknowledges receipt. Full reports are stored per player on the server so staff do not need to request local crash logs.
+- **Actionable Staff Alerts:** Error notifications now include a report ID plus the source file, line number, and function. Server logs include bounded diagnostic frames and safe primitive local values while filtering credentials, tokens, chat text, and other sensitive data.
+- **Unexpected Exit Recovery:** Per-process session markers detect terminated or unclean client exits on the next launch and attach the available tail of the client debug log without confusing another live game window for a crash.
+- **Concurrent Queue Safety:** Crash-report writes are protected across client threads and simultaneous game processes to prevent lost or corrupted reports without blocking normal gameplay.
+
+--------------------------------------------------------------------------------
 [v1.5.8] Dragon Boss Encounter & Version Sync — 2026-08-01
 --------------------------------------------------------------------------------
 

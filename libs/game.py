@@ -27,6 +27,7 @@ from . import (
     audio_manager,
     speech,
     updater,
+    presence_sounds,
     path_utils,
     automation,
     instance_manager,
@@ -87,6 +88,7 @@ class Game:
         self.title_clock = self.new_clock()
         self.direct_soundgroup = self.audio_mngr.create_soundgroup(True)
         self.audio_mngr.preload_ui_sounds()
+        self.presence_sounds = presence_sounds.PresenceSoundManager(self)
         self.instance_mngr = instance_manager.InstanceManager()
         self.instance_mngr.update_title()
         self.reconnecting = False
@@ -442,6 +444,7 @@ class Game:
                         self.audio_mngr.context.device.pause()
                         self.audio_mngr.muted = True
                 if len(self.stack) == 0:
+                    self.presence_sounds.shutdown()
                     options.save()
                     self.keyconfig.save()
                     pygame.quit()

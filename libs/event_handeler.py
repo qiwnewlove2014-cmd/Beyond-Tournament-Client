@@ -43,6 +43,7 @@ class EventHandeler:
         
         self.game.available_languages = data.get("available_languages", {})
         self.game.current_language = data.get("current_language", "th")
+        self.game.presence_sounds.configure(data)
 
         # Store staff status for PA Test Mode (with safe fallback)
         try:
@@ -116,16 +117,16 @@ class EventHandeler:
             self.game,
             "players",
             f'{data["username"]} came online.',
-            sound="ui/online.ogg",
         )
+        self.game.presence_sounds.notify("online", data.get("presence_sound_id", ""))
 
     def offline(self, data):
         buffer.add_item(
             self.game,
             "players",
             f'{data["username"]} went offline.',
-            sound="ui/offline.ogg",
         )
+        self.game.presence_sounds.notify("offline", data.get("presence_sound_id", ""))
 
     def kick(self, data):
         buffer.add_item(

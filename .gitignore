@@ -134,6 +134,8 @@ settings.json
 keyconfig.json
 client_crash_state.json
 pending_crash_reports.json
+pending_crash_reports.lock
+.client_crash_sessions/
 testing.bat
 main.bat
 Pipfile.lock

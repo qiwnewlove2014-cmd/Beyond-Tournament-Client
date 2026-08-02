@@ -182,11 +182,36 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         ("reset your location template to default", lambda: options.set("location_template",             "{x}, \r\n{y}, \r\n{z}, \r\nOn {tile} \r\nFacing {direction} at {angle} degrees with a pitch of {pitch} degrees. \r\nYou are leaning by {lean} degrees and you are {balanced}. ")),
         ("Configure key bindings.", lambda: keyconfig_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
     ]
+    if in_game:
+        items.append((
+            "Configure custom online and offline sounds",
+            lambda: presence_sounds_menu(game, func_call, replace_call=replace_call, parent=parent),
+        ))
     items.append(("Back", lambda: func_call()))
     m.add_items(items)
     m.set_music("music/10.ogg")  # Continue main menu music
     if replace_call is None: game.replace(m)
     else: replace_call(m)
+
+
+def presence_sounds_menu(game, func_call, replace_call=None, parent=None):
+    m = menu.Menu(game, "Custom online and offline sounds", parrent=parent)
+    set_default_sounds(m)
+    manager = game.presence_sounds
+    online_status = "custom" if manager.own_sound_ids["online"] else "default"
+    offline_status = "custom" if manager.own_sound_ids["offline"] else "default"
+    m.add_items([
+        (f"Upload online sound. Current: {online_status}", lambda: manager.choose_and_upload("online")),
+        (f"Upload offline sound. Current: {offline_status}", lambda: manager.choose_and_upload("offline")),
+        ("Restore default online sound", lambda: manager.clear("online")),
+        ("Restore default offline sound", lambda: manager.clear("offline")),
+        ("Requirements: OGG Vorbis, 512 kilobytes maximum, 0.25 to 10 seconds", lambda: None),
+        ("Back", func_call),
+    ])
+    if replace_call is None:
+        game.replace(m)
+    else:
+        replace_call(m)
 
 
 def buffer_timing_menu(game, func_call, replace_call=None, parent=None):

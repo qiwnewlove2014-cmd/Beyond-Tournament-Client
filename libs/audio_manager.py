@@ -141,9 +141,12 @@ class AudioManager():
                             f.write(data.content)
                     except e:
                         print(e)
-        if path.split("/")[0] != "data": path= f"data/{path}"
+        if not os.path.isabs(path) and path.split("/")[0] != "data": path= f"data/{path}"
         if not path.endswith(".ogg"): path = path_utils.get_next_cycle_item(path)
-        path = os.path.relpath(path)
+        # Presence sounds are cached under the user's profile, which may be on
+        # a different Windows drive than the game. relpath() raises ValueError
+        # across drives, so absolute cache paths must remain absolute.
+        path = os.path.normpath(path) if os.path.isabs(path) else os.path.relpath(path)
         if path in self.buffers.keys():
             return self.buffers[path]
         try:
