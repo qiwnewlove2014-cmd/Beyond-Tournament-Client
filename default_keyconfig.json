@@ -45,6 +45,10 @@
         "toggle_beacons": "f6",
         "voice_chat": "g",
         "helper_menu": "n",
+        "open_volume_mixer": "f7",
+        "music_bot_toggle": "m",
+        "music_bot_vol_down": "f9",
+        "music_bot_vol_up": "f10",
         "raise_shield": "s",
         "spectator_switch_player": "tab",
         "spectator_cycle_camera": "p"

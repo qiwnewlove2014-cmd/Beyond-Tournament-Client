@@ -16,6 +16,7 @@ from collections import deque
 
 import cyal
 import cyal.exceptions
+import pygame
 
 from . import options
 from .speech import speak
@@ -495,11 +496,8 @@ class MapMusicBot:
     """Music Bot — searches YouTube and streams audio in real-time.
     Falls back to local files when YouTube is unavailable.
     
-    Controls (via gameplay.py key bindings):
-        M           = Open YouTube search / Pause-Resume
-        Shift+M     = Next track (local playlist)
-        Ctrl+M      = Stop
-        Alt+M       = Speak status
+    Controls are resolved from the player's key bindings in gameplay.py.
+    Modifier combinations continue to use the configured Music Bot key.
     """
 
     def __init__(self, game):
@@ -1104,16 +1102,26 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._show_mode_menu()
 
+        toggle_key = pygame.key.name(
+            self.game.keyconfig.get("music_bot_toggle", pygame.K_m)
+        )
+        volume_down_key = pygame.key.name(
+            self.game.keyconfig.get("music_bot_vol_down", pygame.K_F9)
+        )
+        volume_up_key = pygame.key.name(
+            self.game.keyconfig.get("music_bot_vol_up", pygame.K_F10)
+        )
+
         m = menu_mod.Menu(self.game, "Music Bot Controls Help", parrent=gp)
         items = [
-            ("M: Open mode menu", lambda: None),
-            ("Shift + M: Pause / Resume", lambda: None),
-            ("Ctrl + M: Stop / Replay last song", lambda: None),
-            ("Ctrl + Shift + M: Speak status", lambda: None),
-            ("Alt + M: Toggle broadcast (Private/Public)", lambda: None),
+            (f"{toggle_key}: Open mode menu", lambda: None),
+            (f"Shift + {toggle_key}: Pause / Resume", lambda: None),
+            (f"Ctrl + {toggle_key}: Stop / Replay last song", lambda: None),
+            (f"Ctrl + Shift + {toggle_key}: Speak status", lambda: None),
+            (f"Alt + {toggle_key}: Toggle broadcast (Private/Public)", lambda: None),
             ("Personal Music Feed: Ctrl left bracket for previous; Ctrl right bracket for next", lambda: None),
-            ("F9: Decrease volume", lambda: None),
-            ("F10: Increase volume", lambda: None),
+            (f"{volume_down_key}: Decrease volume", lambda: None),
+            (f"{volume_up_key}: Increase volume", lambda: None),
             ("Back", go_back)
         ]
         m.add_items(items)

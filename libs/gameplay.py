@@ -453,7 +453,9 @@ class Gameplay(state.State):
                 pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
                 pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
                 pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p,
-                pygame.K_m, pygame.K_F9, pygame.K_F10
+                self.kc.get("music_bot_toggle", pygame.K_m),
+                self.kc.get("music_bot_vol_down", pygame.K_F9),
+                self.kc.get("music_bot_vol_up", pygame.K_F10),
             ]
             allowed_keys.extend(key for key, _ in self.configurable_key_actions)
             events = [e for e in events if e.type == pygame.KEYDOWN and e.key in allowed_keys]
@@ -543,7 +545,9 @@ class Gameplay(state.State):
                     pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
                     pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
                     pygame.K_COMMA, pygame.K_PERIOD, pygame.K_p,
-                    pygame.K_m, pygame.K_F9, pygame.K_F10
+                    self.kc.get("music_bot_toggle", pygame.K_m),
+                    self.kc.get("music_bot_vol_down", pygame.K_F9),
+                    self.kc.get("music_bot_vol_up", pygame.K_F10),
                 ]
                 allowed_keys.extend(key for key, _ in self.configurable_key_actions)
                 if event.type == pygame.KEYDOWN and event.key in allowed_keys:
@@ -1332,12 +1336,12 @@ class Gameplay(state.State):
         speak(f"music volume: {str(self.music_volume)} percent. ")
 
     def music_bot_control(self, mod):
-        """Music Bot controls using M key:
-        M              = Open YouTube search
-        Shift+M        = Pause / Resume
-        Ctrl+M         = Stop playback
-        Ctrl+Shift+M   = Speak status
-        Alt+M          = Toggle broadcast (mute to others)
+        """Music Bot controls using the configured Music Bot key:
+        Key              = Open YouTube search
+        Shift+Key        = Pause / Resume
+        Ctrl+Key         = Stop playback
+        Ctrl+Shift+Key   = Speak status
+        Alt+Key          = Toggle broadcast (mute to others)
         """
         if not hasattr(self, 'music_bot') or not self.music_bot:
             return
@@ -1366,7 +1370,7 @@ class Gameplay(state.State):
             self.music_bot.open_search()
 
     def music_bot_volume(self, delta):
-        """Adjust Music Bot volume by delta (F9 = down, F10 = up)"""
+        """Adjust Music Bot volume through the configured volume keys."""
         if not hasattr(self, 'music_bot') or not self.music_bot:
             return
         new_vol = max(0, min(100, self.music_bot.volume + delta))

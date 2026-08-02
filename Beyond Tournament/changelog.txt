@@ -10,6 +10,7 @@
 • Music Bot Companion Controls
 - **Personal Music Feed:** Added a shuffled Favorites feed. It keeps the listener's current normal Broadcast or authorized Megaphone routing, so staff can test PA broadcasts while moving between feed songs.
 - **Feed Shortcuts:** Added `Ctrl + [` for the previous feed song and `Ctrl + ]` for the next feed song. The ordinary `[` and `]` buffer controls are unchanged.
+- **Rebindable Music Bot Controls:** Added the Volume Mixer, Music Bot control, volume-down, and volume-up shortcuts to `Configure key bindings`. The existing `F7`, `M`, `F9`, and `F10` defaults remain unchanged; modifier commands follow the newly selected Music Bot key, the help menu announces the active bindings, and custom Music Bot keys also work while spectating.
 
 • Client Navigation Audio
 - **Wall Proximity Tone:** Added an optional, directional 3D wall cue. While moving forward, backward, or strafing, it checks only the active movement path up to five tiles and smoothly raises pitch as the first wall becomes closer.

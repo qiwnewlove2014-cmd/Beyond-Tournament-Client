@@ -8,6 +8,7 @@
 • Music Bot
 - Personal Music Feed shuffles Favorites, supports previous/next controls, and can use normal Broadcast or authorized Megaphone routing.
 - Fixed stale background music loads that could start after selecting another song or pressing Stop.
+- Music Bot control, Music Bot volume, and Volume Mixer shortcuts can now be changed through `Configure key bindings`; existing defaults remain unchanged, modifier commands follow the selected Music Bot key, and the help menu announces the active bindings.
 
 • Staff AI
 - Removed automated Mason AI broadcasts and the related broadcast toggle commands. Mason remains available for direct staff assistance.
