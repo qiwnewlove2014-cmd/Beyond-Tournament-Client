@@ -63,6 +63,12 @@ class Gameplay(state.State):
         self.pa_test_mode = False  # PA Test Mode for testing megaphone speakers
         self.game_started = False   # Track if game has started (blocks PA Test Mode)
         self.pong_mode = False      # True when player is in an active Pong match (suppresses normal footsteps)
+        # ENet guarantees ordering inside one channel, not across CHANNEL_MISC
+        # and CHANNEL_MAP.  Player spawn packets can therefore arrive before
+        # the connected event enters this state.  Create the mapping here and
+        # preserve it in enter() so those current-session packets are not lost.
+        self.voice_channels = {}
+        self.voice_chat = None
         self.tracking_target = None
         self.tracking_clock = None
         self.facing_sound_clock = self.game.new_clock()
@@ -309,8 +315,8 @@ class Gameplay(state.State):
         super().enter()
         self.game.network.put(("should_poll", True))
         self.ambience = self.game.audio_mngr.create_soundgroup(direct=True)
-        self.voice_channels = {}
-        self.voice_chat = None
+        # Do not reset voice_channels here. CHANNEL_MAP spawn packets may have
+        # populated it before CHANNEL_MISC connected was delivered.
         self.megaphone = MegaphoneManager(self)
         
         # === MAP MUSIC BOT ===

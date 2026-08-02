@@ -69,9 +69,11 @@ class EventHandeler:
                 pass
             self.gameplay.voice_chat = None
             
-        # Cleanup stale voice channels (especially Megaphone which holds compression threads)
-        if hasattr(self.gameplay, 'voice_channels') and isinstance(self.gameplay.voice_channels, dict):
-             self.gameplay.voice_channels.clear()
+        # Do not clear voice_channels here. The server constructs the player and
+        # sends map/player spawn packets on CHANNEL_MAP before this connected
+        # event on CHANNEL_MISC. ENet orders each channel independently, so the
+        # current connection's mappings may already be present. A reconnect gets
+        # a fresh EventHandeler/Gameplay instance and cannot inherit this dict.
         if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
              self.gameplay.megaphone.setup_megaphone_speakers(force=True)
 
@@ -145,6 +147,10 @@ class EventHandeler:
         self.game.audio_mngr.apply_filter(
             None, exclude=self.game.exclude_water, clear=True
         )
+        # A full map load destroys every entity referenced by this lookup.
+        # Clear it here (on CHANNEL_MAP) so subsequent spawn_entity packets on
+        # that same ordered channel rebuild only valid mappings for the new map.
+        self.gameplay.voice_channels.clear()
         self.gameplay.parser.load(data["data"])
         raw_x = data.get("x")
         raw_y = data.get("y")
