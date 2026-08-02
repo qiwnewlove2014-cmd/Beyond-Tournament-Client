@@ -78,7 +78,7 @@ def soft_limit_audio(audio_bytes, threshold=0.35, ratio=12.0):
         return audio_bytes
 
 # ============================================================================
-# PROFESSIONAL JITTER BUFFER FOR MEGAPHONE (Discord/TeamSpeak Style)
+# PROFESSIONAL JITTER BUFFER FOR MEGAPHONE
 # 
 # How professional VoIP apps handle multiple speakers:
 # 1. Jitter Buffer: Collect packets before playing (absorbs network jitter)
@@ -90,7 +90,7 @@ def soft_limit_audio(audio_bytes, threshold=0.35, ratio=12.0):
 class MegaphoneJitterBuffer:
     """
     Professional jitter buffer for megaphone voice chat.
-    Based on techniques used by Discord, TeamSpeak, and Mumble.
+    Uses adaptive buffering techniques common to real-time voice systems.
     """
     
     # === CONFIGURATION ===

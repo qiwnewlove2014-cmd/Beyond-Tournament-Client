@@ -10,6 +10,13 @@
 - Fixed stale background music loads that could start after selecting another song or pressing Stop.
 - Music Bot control, Music Bot volume, and Volume Mixer shortcuts can now be changed through `Configure key bindings`; existing defaults remain unchanged, modifier commands follow the selected Music Bot key, and the help menu announces the active bindings.
 
+• Native Feedback
+- Added an accessible Feedback and Bug Report center at the end of the authenticated Main Menu with Bug, Suggestion, and General categories.
+- Feedback and replies are limited to 1,000 characters; new submissions have a 60-second per-account cooldown and replies have a 10-second cooldown, with independent Server validation and protected ownership checks.
+- Moderator-level staff and above can review, reply to, and close Feedback inside the game; Builder-only accounts cannot access the review queue.
+- Removed the Discord integration so Feedback and staff notifications no longer depend on an external chat service.
+- Fixed compiled Server packages missing required Pong JSON resources during startup.
+
 • Staff AI
 - Removed automated Mason AI broadcasts and the related broadcast toggle commands. Mason remains available for direct staff assistance.
 

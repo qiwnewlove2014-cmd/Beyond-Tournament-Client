@@ -67,7 +67,6 @@ class Game:
         self.events = []
         self.input_history = [""]
         self.input = virtual_input.Virtual_input(self)
-        options.set("discord_intergration", True)
         self.network = None
         self.last_fps = 60
         self.automations = []

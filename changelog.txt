@@ -18,6 +18,13 @@
 - **Playback Cancellation:** Prevented stale background music loads from starting after a newer song is selected or playback is stopped.
 - **Rebindable Music Bot Controls:** Added the Volume Mixer, Music Bot control, volume-down, and volume-up shortcuts to `Configure key bindings`. The existing `F7`, `M`, `F9`, and `F10` defaults remain unchanged; modifier commands follow the newly selected Music Bot key, the help menu announces the active bindings, and custom Music Bot keys also work while spectating.
 
+• Native Feedback & Platform Independence
+- **In-Game Feedback Center:** Added `Send feedback or report a bug` at the end of the authenticated Main Menu, with separate Bug Report, Suggestion, and General Feedback categories plus an accessible history and reply interface.
+- **Strict Submission Limits:** Feedback and replies are limited to 1,000 characters. New submissions have a 60-second per-account cooldown and replies have a 10-second cooldown. The Client provides an immediate character limit while the Server independently validates the category, content, identity, ownership, and cooldown.
+- **Protected Staff Review:** Moderator-level staff and above receive a separate `Review player feedback` menu and may reply to or close open feedback. Builder-only accounts cannot access the review queue.
+- **Discord Removal:** Removed the Discord integration and replaced its ticket dependency with persistent in-game Feedback and staff notifications.
+- **Compiled Server Resources:** The Server build now includes the required Pong JSON resources so compiled deployments can start reliably.
+
 • Custom Online & Offline Sounds
 - **Player Profile Sounds:** Added separate custom online and offline sounds tied to each player's profile, with accessible in-game controls to upload, replace, remove, or restore either sound to the game default.
 - **How to Upload:** After logging in, open the in-game Options menu, choose `Configure custom online and offline sounds`, then select `Upload online sound` or `Upload offline sound`. Choose an OGG Vorbis file in the file picker and wait for the spoken upload confirmation.

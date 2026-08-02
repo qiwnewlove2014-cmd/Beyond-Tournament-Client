@@ -610,12 +610,29 @@ class EventHandeler:
     def tickets_menu(self, data):
         if not data:
             return
-        self.tickets.view_tickets(data["tickets"])
+        self.tickets.view_tickets(
+            data.get("tickets", []),
+            reviewer=data.get("reviewer", data.get("moderator", False)),
+        )
 
     def view_closed_tickets(self, data):
         if not data:
             return
-        self.tickets.view_tickets(data["tickets"])
+        self.tickets.view_tickets(
+            data.get("tickets", []),
+            reviewer=data.get("reviewer", data.get("moderator", False)),
+        )
+
+    def feedback_home(self, data):
+        self.tickets.show_home(reviewer=bool((data or {}).get("reviewer", False)))
+
+    def feedback_list(self, data):
+        if not data:
+            return
+        self.tickets.show_list(
+            data.get("tickets", []),
+            reviewer=bool(data.get("reviewer", False)),
+        )
 
     def enter_match(self, data):
         self.gameplay.player.lock_weapon = False
