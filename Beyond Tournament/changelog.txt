@@ -12,6 +12,13 @@
 - **Feed Shortcuts:** Added `Ctrl + [` for the previous feed song and `Ctrl + ]` for the next feed song. The ordinary `[` and `]` buffer controls are unchanged.
 - **Rebindable Music Bot Controls:** Added the Volume Mixer, Music Bot control, volume-down, and volume-up shortcuts to `Configure key bindings`. The existing `F7`, `M`, `F9`, and `F10` defaults remain unchanged; modifier commands follow the newly selected Music Bot key, the help menu announces the active bindings, and custom Music Bot keys also work while spectating.
 
+• Native Feedback & Platform Independence
+- **In-Game Feedback Center:** Added `Send feedback or report a bug` at the end of the authenticated Main Menu, with separate Bug Report, Suggestion, and General Feedback categories plus an accessible history and reply interface.
+- **Strict Submission Limits:** Feedback and replies are limited to 1,000 characters. New submissions have a 60-second per-account cooldown and replies have a 10-second cooldown. The Client provides an immediate character limit while the Server independently validates the category, content, identity, ownership, and cooldown.
+- **Protected Staff Review:** Moderator-level staff and above receive a separate `Review player feedback` menu and may reply to or close open feedback. Builder-only accounts cannot access the review queue.
+- **Discord Removal:** Removed the Discord integration, channel configuration, startup/status hooks, and `discord.js` dependency. Feedback and staff notifications now remain inside the game and its persistent database.
+- **Compiled Server Resources:** The Server build now copies required Pong JSON resources into `dist/resources`, preventing compiled deployments from stopping during startup because runtime data was missing.
+
 • Client Navigation Audio
 - **Wall Proximity Tone:** Added an optional, directional 3D wall cue. While moving forward, backward, or strafing, it checks only the active movement path up to five tiles and smoothly raises pitch as the first wall becomes closer.
 - **Compass Direction Check:** Tab now reports the current 16-way compass direction during normal play and provides a spatial `facing.ogg` cue toward the nearest cardinal direction, including while between cardinal headings.
