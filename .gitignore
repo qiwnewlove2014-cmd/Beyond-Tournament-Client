@@ -105,6 +105,9 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv.backup-*/
+setup_logs/
+.bt-bootstrap/
 env/
 venv/
 ENV/

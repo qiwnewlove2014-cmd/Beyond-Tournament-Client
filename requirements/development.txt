@@ -1,0 +1,27 @@
+# Tested direct dependencies for the Beyond Tournament Client development environment.
+# Transitive dependencies are resolved by pip for the selected supported Python.
+
+pygame==2.6.1
+cyal==0.4.5
+PyOgg @ https://github.com/TeamPyOgg/PyOgg/archive/4118fc40067eb475468726c6bccf1242abfc24fc.zip#sha256=0526efef994506497f749cd5a42d0e64c7040a606dd684cce30021033c719239
+pyenet==1.3.17
+accessible_output2 @ https://github.com/soundmud/accessible_output2/archive/900fcc6ae259a7ec30f44e65d8781d15eb08eb1f.zip#sha256=b2eb5fbf18c87a1f43d5f45ef0c04fad43101fc591751725a4771e0c885720fd
+
+requests==2.33.1
+yt-dlp==2026.3.17
+ffmpeg-downloader==0.4.1
+appdirs==1.4.4
+cryptography==48.0.0
+psutil==7.2.2
+pySmartDL==1.3.4
+pyperclip==1.11.0
+semver==3.0.4
+urlextract==1.9.0
+linkpreview==0.12.1
+pydub==0.25.1
+texteditor==1.4.1
+
+# Build-only dependencies used by build.bat and Nuitka.
+Nuitka==4.0.8
+ordered-set==4.1.0
+zstandard==0.25.0

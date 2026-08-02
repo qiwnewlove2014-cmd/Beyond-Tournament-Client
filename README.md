@@ -16,30 +16,45 @@ These instructions will get you a copy of the project up and running on your loc
 
 ### Prerequisites
 
-Before you begin, ensure you have [Pipenv](https://pipenv.pypa.io/en/latest/) installed. If you don't have it, you can install it using pip:
-
-```sh
-pip install pipenv
-```
+On 64-bit Windows, the automatic setup handles Python and all Python
+libraries. Visual Studio and the Desktop development with C++ workload are not
+required. Python 3.12 is preferred and Python 3.11 is also supported. Newer
+system Python installations are left untouched when a dependency does not yet
+provide a compatible wheel.
 
 ### Installation
 
 1.  Clone the repository to your local machine:
 
     ```sh
-    git clone https://github.com/lower-elements/final-hour-client-public.git
+    git clone https://github.com/qiwnewlove2014-cmd/Beyond-Tournament-Client.git
     ```
 
 2.  Navigate to the project directory:
 
     ```sh
-    cd final-hour-client-public
+    cd Beyond-Tournament-Client
     ```
 
-3.  Install the project dependencies using Pipenv:
+3.  Run the accessible console setup:
 
-    ```sh
-    pipenv install
+    ```bat
+    install_libs.bat
+    ```
+
+    The setup reports every action, creates an isolated `.venv`, requires
+    prebuilt wheels for native libraries, and performs a complete import and
+    project-file health check. If no compatible Python is installed, it uses
+    Windows Package Manager to install Python 3.12 for the current user. During
+    the first compilation, Nuitka may download its portable MinGW64 compiler;
+    Visual Studio Build Tools are not needed.
+
+    Useful diagnostics:
+
+    ```bat
+    install_libs.bat -DryRun
+    install_libs.bat -SelfTest
+    build.bat --check
     ```
 
 ### Running the Game
@@ -47,7 +62,7 @@ pip install pipenv
 To play the game, run the following command in the project's root directory on a Windows machine:
 
 ```sh
-pipenv run python final_hour.py
+launch.bat
 ```
 
 ## Building the Game
@@ -69,7 +84,7 @@ To build an executable version of the game, follow these steps:
 4.  **Run the Build Script:** Execute the build script to create the game executable:
 
     ```sh
-    pipenv run build.bat
+    build.bat
     ```
 
 ## Contributing

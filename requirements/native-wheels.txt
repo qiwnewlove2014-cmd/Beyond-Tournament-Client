@@ -1,0 +1,10 @@
+# These packages contain native code. The setup script installs this list with
+# --only-binary=:all: so pip must never invoke Visual C++ Build Tools.
+pygame==2.6.1
+cyal==0.4.5
+pyenet==1.3.17
+cryptography==48.0.0
+psutil==7.2.2
+pywin32==311
+cffi==2.0.0
+zstandard==0.25.0
