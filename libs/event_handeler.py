@@ -632,6 +632,8 @@ class EventHandeler:
         self.tickets.show_list(
             data.get("tickets", []),
             reviewer=bool(data.get("reviewer", False)),
+            scope=data.get("scope", "own"),
+            can_permanently_delete=bool(data.get("can_permanently_delete", False)),
         )
 
     def enter_match(self, data):

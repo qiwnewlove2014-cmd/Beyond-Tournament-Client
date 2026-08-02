@@ -21,9 +21,14 @@
 • Native Feedback & Platform Independence
 - **In-Game Feedback Center:** Added `Send feedback or report a bug` at the end of the authenticated Main Menu, with separate Bug Report, Suggestion, and General Feedback categories plus an accessible history and reply interface.
 - **Strict Submission Limits:** Feedback and replies are limited to 1,000 characters. New submissions have a 60-second per-account cooldown and replies have a 10-second cooldown. The Client provides an immediate character limit while the Server independently validates the category, content, identity, ownership, and cooldown.
-- **Protected Staff Review:** Moderator-level staff and above receive a separate `Review player feedback` menu and may reply to or close open feedback. Builder-only accounts cannot access the review queue.
+- **Protected Staff Review:** Moderator-level staff and above receive a separate `Review player feedback` menu and may reply to or resolve open feedback. Builder-only accounts cannot access the review queue.
+- **Respectful Reply Notices:** Feedback directions are spoken at most twice per item, and online staff-reply notices are limited to once per minute without dropping any saved replies.
+- **Resolve & Archive:** Staff must leave a reply before resolving feedback. Resolved items leave the active queue, remain readable in player history, and are available in a separate staff review list.
+- **Protected Permanent Removal:** Only Contributor/Admin-level staff may permanently remove resolved feedback. The action requires a reason and two confirmations, while the Server records it atomically before deleting.
+- **Staff Review Guidelines:** Added an inviting staff-only guide covering professional replies, player privacy, fair handling of criticism, responsible resolution, escalation, and the narrow situations where permanent deletion is appropriate.
 - **Discord Removal:** Removed the Discord integration and replaced its ticket dependency with persistent in-game Feedback and staff notifications.
 - **Compiled Server Resources:** The Server build now includes the required Pong JSON resources so compiled deployments can start reliably.
+- **Safe Same-Map Staff Movement:** Fixed the staff `move` command clearing a player's test items and gameplay state when moving them to new coordinates on their current map. Cross-map moves retain the existing equipment reset.
 
 • Custom Online & Offline Sounds
 - **Player Profile Sounds:** Added separate custom online and offline sounds tied to each player's profile, with accessible in-game controls to upload, replace, remove, or restore either sound to the game default.
