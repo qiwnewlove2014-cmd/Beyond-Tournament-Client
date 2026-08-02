@@ -57,8 +57,12 @@ echo build completed...
 echo copying required data...
 xcopy /E /I /Q data "Beyond Tournament\data\"
 xcopy /E /I /Q urlextract "Beyond Tournament\urlextract\"
-FOR /F "tokens=*" %%g IN ('"%PYTHON_EXE%" -c "import yt_dlp, os; print(os.path.dirname(yt_dlp.__file__))"') do (SET YT_DLP_PATH=%%g)
-xcopy /E /I /Q "%YT_DLP_PATH%" "Beyond Tournament\yt_dlp"
+echo validating compiled package...
+"%PYTHON_EXE%" tools\finalize_client_package.py --output "Beyond Tournament"
+if errorlevel 1 (
+    echo [FAILED] The compiled package is incomplete. No package was published.
+    goto :cleanup
+)
 echo build complete!
 set "BUILD_EXIT_CODE=0"
 goto :cleanup

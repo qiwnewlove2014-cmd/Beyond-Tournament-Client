@@ -16,6 +16,9 @@ IMPORT_CHECKS = (
     ("pyogg", "Ogg and Opus audio support"),
     ("enet", "multiplayer networking"),
     ("accessible_output2", "screen-reader output"),
+    ("tkinter", "native file dialogs and critical-error windows"),
+    ("win32gui", "Windows focus and screen-reader integration"),
+    ("texteditor", "legacy external text-editor compatibility"),
     ("requests", "HTTP support"),
     ("cryptography", "encrypted settings"),
     ("psutil", "process monitoring"),
@@ -35,6 +38,7 @@ REQUIRED_PROJECT_PATHS = (
     "dlls_windows",
     "ffmpeg.exe",
     "openal.dll",
+    "tools/finalize_client_package.py",
 )
 
 

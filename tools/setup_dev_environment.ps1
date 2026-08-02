@@ -216,6 +216,7 @@ function Test-SelectionPolicy {
     $buildSource = Get-Content -LiteralPath (Join-Path $ProjectDir "build.bat") -Raw
     Assert-Equal "Missing native wheels cannot fall back to C++ compilation" $true $setupSource.Contains('"--only-binary=:all:"')
     Assert-Equal "Nuitka build requests automatic MinGW64" $true $buildSource.Contains("--mingw64")
+    Assert-Equal "Build runs the package completeness safeguard" $true $buildSource.Contains("tools\finalize_client_package.py")
 
     Write-Host ""
     Write-Host "Self-test result: $($script:__testCount - $script:__testFailures)/$($script:__testCount) passed."
