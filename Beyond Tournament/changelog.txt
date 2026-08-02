@@ -15,7 +15,11 @@
 • Native Feedback & Platform Independence
 - **In-Game Feedback Center:** Added `Send feedback or report a bug` at the end of the authenticated Main Menu, with separate Bug Report, Suggestion, and General Feedback categories plus an accessible history and reply interface.
 - **Strict Submission Limits:** Feedback and replies are limited to 1,000 characters. New submissions have a 60-second per-account cooldown and replies have a 10-second cooldown. The Client provides an immediate character limit while the Server independently validates the category, content, identity, ownership, and cooldown.
-- **Protected Staff Review:** Moderator-level staff and above receive a separate `Review player feedback` menu and may reply to or close open feedback. Builder-only accounts cannot access the review queue.
+- **Protected Staff Review:** Moderator-level staff and above receive a separate `Review player feedback` menu and may reply to or resolve open feedback. Builder-only accounts cannot access the review queue.
+- **Respectful Reply Notices:** Feedback directions are spoken at most twice per item, and online staff-reply notices are limited to once per minute without dropping any saved replies.
+- **Resolve & Archive:** Staff must leave a reply before resolving feedback. Resolved items leave the active queue, remain readable in player history, and are available in a separate staff review list.
+- **Protected Permanent Removal:** Only Contributor/Admin-level staff may permanently remove resolved feedback. The action requires a 3–200 character reason, two Client confirmations, and an atomic audit record so a logging failure cannot delete the feedback.
+- **Staff Review Guidelines:** Added an inviting staff-only guide covering professional replies, player privacy, fair handling of criticism, responsible resolution, escalation, and the narrow situations where permanent deletion is appropriate.
 - **Discord Removal:** Removed the Discord integration, channel configuration, startup/status hooks, and `discord.js` dependency. Feedback and staff notifications now remain inside the game and its persistent database.
 - **Compiled Server Resources:** The Server build now copies required Pong JSON resources into `dist/resources`, preventing compiled deployments from stopping during startup because runtime data was missing.
 
@@ -26,6 +30,7 @@
 
 • Staff AI Cleanup
 - **Mason AI Broadcast Removal:** Removed the automated Mason AI broadcast timer and the `/aibroadcast` / `/aib` controls. Mason remains available for direct staff assistance and questions.
+- **Safe Same-Map Staff Movement:** Fixed the staff `move` command clearing a player's test items, weapons, perks, and related state when only changing coordinates inside the same map. Cross-map moves still perform the established reset so mode-specific equipment cannot leak between maps.
 
 • Custom Online & Offline Sounds
 - **Player Profile Sounds:** Added separate custom online and offline sounds tied to each player's profile, with accessible in-game controls to upload, replace, remove, or restore either sound to the game default.
