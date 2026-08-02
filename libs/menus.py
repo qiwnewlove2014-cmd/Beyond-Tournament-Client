@@ -140,10 +140,76 @@ def no_account(game):
     set_default_sounds(m)
     game.replace(m)
 
+
+class OptionsMenu(menu.Menu):
+    """Options menu with an inline Left/Right turning-sensitivity control."""
+
+    def __init__(self, game, title, parent=None):
+        super().__init__(game, title, parrent=parent)
+        self.turning_sensitivity_item_index = None
+
+    @staticmethod
+    def turning_sensitivity_value_text():
+        level = options.get_turning_sensitivity()
+        label = options.get_turning_sensitivity_label(level)
+        return f"{label}, level {level} of 4"
+
+    @classmethod
+    def turning_sensitivity_item_text(cls):
+        return (
+            f"Turning sensitivity. Current setting: {cls.turning_sensitivity_value_text()}. "
+            "Press Left or Right to adjust. Press Escape when finished."
+        )
+
+    def _adjust_turning_sensitivity(self, direction):
+        current = options.get_turning_sensitivity()
+        updated = max(1, min(4, current + direction))
+        if updated == current:
+            if self.edge:
+                self.direct_soundgroup.play(self.edge, cat="ui")
+            speech.speak(
+                f"{self.turning_sensitivity_value_text()}. Limit.",
+                id="turning_sensitivity",
+            )
+            return
+        options.set_turning_sensitivity(updated)
+        speech.speak(
+            self.turning_sensitivity_value_text(),
+            id="turning_sensitivity",
+        )
+
+    def update(self, events):
+        remaining_events = []
+        for event in events:
+            on_turning_sensitivity = (
+                self.turning_sensitivity_item_index is not None
+                and self.pos == self.turning_sensitivity_item_index
+            )
+            if (
+                on_turning_sensitivity
+                and event.type == pygame.KEYDOWN
+                and event.key == pygame.K_LEFT
+            ):
+                self._adjust_turning_sensitivity(-1)
+            elif (
+                on_turning_sensitivity
+                and event.type == pygame.KEYDOWN
+                and event.key == pygame.K_RIGHT
+            ):
+                self._adjust_turning_sensitivity(1)
+            else:
+                remaining_events.append(event)
+        return super().update(remaining_events)
+
+
 def options_menu(game, func_call, replace_call=None, parent=None, in_game=False):
     """append the options menu to the games stack."""
-    m = menu.Menu(game, "Options menu", parrent=parent, )
+    m = OptionsMenu(game, "Options menu", parent=parent)
     set_default_sounds(m)
+    turning_sensitivity_item = (
+        m.turning_sensitivity_item_text,
+        lambda: None,
+    )
     items=[
         (f"Server hostname: {options.get('host', consts.DEFAULT_HOST)}", lambda: configure_host(game, func_call, replace_call)),
         (f"Server port: {options.get('port', consts.DEFAULT_PORT)}", lambda: configure_port(game, func_call, replace_call)),
@@ -155,6 +221,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         (game.toggle_item("Player beacons", "beacons")),
         (game.toggle_item("Wall proximity tone", "wall_tone", False)),
         (game.toggle_item("Compass turn cue", "compass_turn_cue", False)),
+        turning_sensitivity_item,
         (game.toggle_item("play intro at start up", "play_intro_at_start")),
         (
             game.toggle_item(
@@ -189,6 +256,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         ))
     items.append(("Back", lambda: func_call()))
     m.add_items(items)
+    m.turning_sensitivity_item_index = m.items.index(turning_sensitivity_item)
     m.set_music("music/10.ogg")  # Continue main menu music
     if replace_call is None: game.replace(m)
     else: replace_call(m)

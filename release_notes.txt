@@ -3,6 +3,7 @@
 • Navigation Audio & Input
 - Optional Wall Proximity Tone provides a directional 3D cue for walls within five tiles.
 - Tab direction check provides a spatial compass cue; turning cues and post-turn degree announcements are configurable and disabled by default.
+- Turning sensitivity now has four persistent levels starting at the game's original turning rate and reaching Very Fast. Highlight it in Options and adjust directly with Left or Right; Enter stays in Options and Escape returns to gameplay.
 - Direction check, spectator switching, and Pong spectator camera keys are configurable, including intentional overlapping bindings.
 
 • Music Bot

@@ -769,7 +769,7 @@ class Gameplay(state.State):
         ):
             self.player.turning_clock.restart()
             self.turning = True
-            amount=2 if self.running else 1
+            amount = options.get_turning_step() * (2 if self.running else 1)
             self.player.face(self.player.hfacing - amount, self.player.vfacing)
             self.compass_turn_cue.on_turn(self.player.hfacing)
 
@@ -808,7 +808,7 @@ class Gameplay(state.State):
         ):
             self.player.turning_clock.restart()
             self.turning = True
-            amount=2 if self.running else 1
+            amount = options.get_turning_step() * (2 if self.running else 1)
             self.player.face(self.player.hfacing + amount, self.player.vfacing)
             self.compass_turn_cue.on_turn(self.player.hfacing)
 
@@ -846,7 +846,11 @@ class Gameplay(state.State):
             self.player.turning_clock.restart()
             self.turning = True
             if self.player.vfacing > -90:
-                self.player.face(self.player.hfacing, self.player.vfacing - 1)
+                amount = options.get_turning_step()
+                self.player.face(
+                    self.player.hfacing,
+                    max(-90, self.player.vfacing - amount),
+                )
 
     def pitch_up(self, mod, turn=False):
         if getattr(self.game, 'pong_mode', False):
@@ -867,7 +871,11 @@ class Gameplay(state.State):
             self.player.turning_clock.restart()
             self.turning = True
             if self.player.vfacing < 90:
-                self.player.face(self.player.hfacing, self.player.vfacing + 1)
+                amount = options.get_turning_step()
+                self.player.face(
+                    self.player.hfacing,
+                    min(90, self.player.vfacing + amount),
+                )
 
     def turn_start(self, mod):
         self.player.play_sound("foley/turn/start.ogg", cat="self")

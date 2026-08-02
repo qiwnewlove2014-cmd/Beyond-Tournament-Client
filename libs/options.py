@@ -15,6 +15,15 @@ prefs = {
     "host": consts.DEFAULT_HOST,
     "port": consts.DEFAULT_PORT,
     "stream_ambience": True,
+    "turning_sensitivity": 1,
+}
+
+TURNING_SENSITIVITY_DEFAULT = 1
+TURNING_SENSITIVITY_LEVELS = {
+    1: ("Slow", 1.0),
+    2: ("Moderate", 1.5),
+    3: ("Fast", 2.0),
+    4: ("Very fast", 3.0),
 }
 fernet = Fernet(consts.SETTINGS_KEY)
 
@@ -51,3 +60,29 @@ def set(key, value, autosave=True):
     prefs[key] = value
     if autosave:
         save()
+
+
+def get_turning_sensitivity():
+    """Return a safe persisted turning-sensitivity level from 1 through 4."""
+    try:
+        level = int(get("turning_sensitivity", TURNING_SENSITIVITY_DEFAULT))
+    except (TypeError, ValueError):
+        level = TURNING_SENSITIVITY_DEFAULT
+    return max(1, min(4, level))
+
+
+def set_turning_sensitivity(level):
+    level = max(1, min(4, int(level)))
+    set("turning_sensitivity", level)
+    return level
+
+
+def get_turning_sensitivity_label(level=None):
+    if level is None:
+        level = get_turning_sensitivity()
+    return TURNING_SENSITIVITY_LEVELS[level][0]
+
+
+def get_turning_step():
+    """Return degrees per update while a continuous turn key is held."""
+    return TURNING_SENSITIVITY_LEVELS[get_turning_sensitivity()][1]

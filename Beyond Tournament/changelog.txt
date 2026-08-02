@@ -27,6 +27,7 @@
 - **Wall Proximity Tone:** Added an optional, directional 3D wall cue. While moving forward, backward, or strafing, it checks only the active movement path up to five tiles and smoothly raises pitch as the first wall becomes closer.
 - **Compass Direction Check:** Tab now reports the current 16-way compass direction during normal play and provides a spatial `facing.ogg` cue toward the nearest cardinal direction, including while between cardinal headings.
 - **Compass Turn Cue:** Added an optional smooth cue that moves left/right with the player's real turning angle. It is disabled by default; the existing post-turn degree announcement is also disabled by default and remains independently configurable.
+- **Turning Sensitivity:** Added four persistent turning-speed levels from the game's original turning rate to Very Fast. Highlight the setting in Options and adjust it directly with Left and Right; Enter safely does nothing, and Escape returns to gameplay to try the new speed.
 
 • Staff AI Cleanup
 - **Mason AI Broadcast Removal:** Removed the automated Mason AI broadcast timer and the `/aibroadcast` / `/aib` controls. Mason remains available for direct staff assistance and questions.

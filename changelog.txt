@@ -11,6 +11,7 @@
 - **Wall Proximity Tone:** Added an optional 3D wall cue that checks only the direction the player is moving, raising pitch as a wall comes within five tiles.
 - **Compass Direction Check:** Added a configurable direction check with a spatial compass cue toward the nearest cardinal direction.
 - **Compass Turn Cue:** Added an optional left/right spatial compass cue while turning. It is disabled by default, as is the optional post-turn degree announcement.
+- **Turning Sensitivity:** Added four persistent turning-speed levels from the game's original turning rate to Very Fast. Highlight the setting in Options and adjust it directly with Left and Right; Enter safely does nothing, and Escape returns to gameplay to try the new speed.
 - **Flexible Key Bindings:** Direction check, spectator switching, and Pong spectator camera controls can now be rebound. Multiple actions may intentionally share one key.
 
 • Music Bot
