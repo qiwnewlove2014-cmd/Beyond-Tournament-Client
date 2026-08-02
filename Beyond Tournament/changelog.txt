@@ -28,6 +28,7 @@
 - **Strict Upload Validation:** The server independently validates every upload before linking it to the player's profile, so modified clients cannot bypass the file type, size, audio format, or duration limits.
 - **Portable Sound Cache:** Fixed custom sound loading when the game and the Windows user cache are located on different drives.
 - **Automatic Radmin VPN Uploads:** Players connected through Radmin VPN can upload or remove custom sounds over the encrypted VPN without configuring HTTPS. The Client permits this exception only when the server uses Radmin's 26.0.0.0/8 range and the player's computer has an active address in that range.
+- **Accessible Windows Server Installer:** Added a screen-reader-friendly one-click installer for Radmin-only and public HTTPS deployments. It detects dependencies, prepares persistent sound storage, configures Firewall and automatic startup, and includes a side-effect-free simulation test suite.
 
 🔒 Security & Client Diagnostics
 - **Centralized Client Error Reports:** Client exceptions are queued safely and delivered after authenticated login, then retained until the server acknowledges receipt. Full reports are stored per player on the server so staff do not need to request local crash logs.
