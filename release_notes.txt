@@ -1,31 +1,10 @@
-[v1.5.9] Navigation Audio & Music Control Patch — 2026-08-02
+--------------------------------------------------------------------------------
+[v1.6.0] Music Bot Broadcast Fix & Auto-Restart Watchdog — 2026-08-05
+--------------------------------------------------------------------------------
 
-• Navigation Audio & Input
-- Optional Wall Proximity Tone provides a directional 3D cue for walls within five tiles.
-- Tab direction check provides a spatial compass cue; turning cues and post-turn degree announcements are configurable and disabled by default.
-- Turning sensitivity now has four persistent levels starting at the game's original turning rate and reaching Very Fast. Highlight it in Options and adjust directly with Left or Right; Enter stays in Options and Escape returns to gameplay.
-- Direction check, spectator switching, and Pong spectator camera keys are configurable, including intentional overlapping bindings.
+• Audio Engine & Voice Chat
+- **Music Bot Broadcast Reliability:** Resolved a critical buffer handling issue where minor network fluctuations (buffer underruns) caused the Music Bot broadcast to become permanently silent for listeners. The audio buffer queue now safely recovers and resumes playback smoothly.
 
-• Music Bot
-- Personal Music Feed shuffles Favorites, supports previous/next controls, and can use normal Broadcast or authorized Megaphone routing.
-- Fixed stale background music loads that could start after selecting another song or pressing Stop.
-- Music Bot control, Music Bot volume, and Volume Mixer shortcuts can now be changed through `Configure key bindings`; existing defaults remain unchanged, modifier commands follow the selected Music Bot key, and the help menu announces the active bindings.
-
-• Native Feedback
-- Added an accessible Feedback and Bug Report center at the end of the authenticated Main Menu with Bug, Suggestion, and General categories.
-- Feedback and replies are limited to 1,000 characters; new submissions have a 60-second per-account cooldown and replies have a 10-second cooldown, with independent Server validation and protected ownership checks.
-- Moderator-level staff and above can review, reply to, and resolve Feedback inside the game; Builder-only accounts cannot access the review queue.
-- Staff reply guidance is limited to two notices per Feedback, with online notifications limited to once per minute while every reply remains saved.
-- Staff can resolve and archive answered Feedback without erasing player history, and review resolved items separately.
-- Contributor/Admin-level staff can permanently remove resolved Feedback only after entering a reason and completing two confirmations; the Server requires an atomic audit record before deletion.
-- Added a staff-only review guide covering respectful replies, privacy, fair treatment of criticism, escalation, and responsible permanent deletion.
-- Removed the Discord integration so Feedback and staff notifications no longer depend on an external chat service.
-- Fixed compiled Server packages missing required Pong JSON resources during startup.
-- Fixed the staff `move` command clearing test items and gameplay state during same-map teleports; cross-map moves still reset mode-specific equipment.
-
-• Staff AI
-- Removed automated Mason AI broadcasts and the related broadcast toggle commands. Mason remains available for direct staff assistance.
-
-🔒 Security & Client Diagnostics
-- Caught client errors now create a verified diagnostic report with the error type and traceback, allowing staff to investigate real failures sooner.
-- Normal exits and unexplained process closures no longer create staff warnings, preventing false security alerts during ordinary play or development testing.
+• Security & Client Diagnostics
+- **Native Deadlock Failsafe (Freeze Watchdog):** Upgraded the background crash reporter to detect catastrophic native C/C++ engine freezes (e.g. OpenAL deadlocks). If the game is unresponsive for over 15 seconds, the watchdog will automatically dump all active thread stack traces, securely submit a `fatal` crash report to the development team, speak an auditory warning to the player, and seamlessly auto-restart the game to the login screen.
+- **English Auditory Warning:** The critical freeze TTS warning is now spoken in English ("A critical freeze was detected...") and reassures players that the crash report was successfully dispatched.

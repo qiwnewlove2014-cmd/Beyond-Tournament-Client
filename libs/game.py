@@ -33,6 +33,7 @@ from . import (
     instance_manager,
     anti_cheat,
     keyboard_layout,
+    watchdog,
 )
 from .speech import speak
 from .logger import log, log_exception
@@ -96,6 +97,9 @@ class Game:
         try:
             anti_cheat.set_game_reference(self)
         except Exception: pass
+
+        self.watchdog = watchdog.GameWatchdog(self)
+        self.watchdog.start()
 
     def start(self):
         if len(sys.argv) > 3:
@@ -401,6 +405,7 @@ class Game:
                 elif isinstance(value, tuple):
                     # another thread asked to set a value on this class.
                     setattr(self, value[0], value[1])
+            self.watchdog.heartbeat()
             with self.lock:
                 self.update(self.delta)
                 self.events = pygame.event.get()

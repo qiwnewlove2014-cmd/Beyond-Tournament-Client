@@ -24,4 +24,4 @@ CHANNEL_MUSICBOT = 22
 SOUNDSPREPEND="/data/"
 
 # 🔢 Version for server compatibility check
-CLIENT_VERSION = "BT-1.5.9"
+CLIENT_VERSION = "BT-1.6.0"

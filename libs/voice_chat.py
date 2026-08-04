@@ -480,65 +480,170 @@ class VoiceChatRecord(threading.Thread):
         self.running = False
 
 
-class MusicCompression:
+class MusicCompression(threading.Thread):
     PRE_BUFFER_FRAMES = 8   # 160ms before first play
     RESUME_FRAMES     = 3   # 60ms before resuming after underrun
 
+    # Max gap between two packets before we treat the next packet as the start
+    # of a brand-new broadcast.  When a broadcaster stops and restarts music,
+    # this gap lets the receiver reset exactly like a fresh map load instead of
+    # trying to resume a stale, stopped source (which stays silent).
+    SESSION_RESET_GAP = 1.0
+
     def __init__(self, game):
-        self.game = game
-        from pyogg import OpusDecoder
-        self.decoder = OpusDecoder()
-        self.decoder.set_channels(1)
-        self.decoder.set_sampling_frequency(48000)
-        self._has_started = False
+        try:
+            super().__init__(daemon=True)
+            self.game = game
+            self.queue = queue.SimpleQueue()
+            from pyogg import OpusDecoder
+            self.decoder = OpusDecoder()
+            self.decoder.set_channels(1)
+            self.decoder.set_sampling_frequency(48000)
+            self._has_started = False
+            self._last_recv_time = None
+            self._running = True
+            self.start()
+        except Exception as e:
+            logger.log_exception(e, "MusicCompression.__init__")
+
+    def put(self, value):
+        if getattr(self, '_running', True):
+            self.queue.put_nowait(value)
+
+    def close(self):
+        self._running = False
+        self.queue.put_nowait(None)
+
+    def run(self):
+        print("[DEBUG MusicCompression] Thread started successfully!")
+        while getattr(self, '_running', True):
+            try:
+                time.sleep(0.002)
+                if self.queue.empty(): continue
+                value = self.queue.get_nowait()
+                if value is None: break
+                if callable(value):
+                    if not hasattr(self, '_last_run_debug'): self._last_run_debug = 0
+                    if time.time() - self._last_run_debug > 1.0:
+                        print("[DEBUG MusicCompression] Executing queued task from Listener...")
+                        self._last_run_debug = time.time()
+                    value()
+            except Exception as e:
+                print(f"[ERROR MusicCompression.run] {e}")
+                logger.log_exception(e, "MusicCompression.run")
 
     def recieve(self, data, music_source, radio_source, channelID, gameplay):
+        if music_source is None:
+            return
+        self.put(lambda: self.recieve_actual(data, music_source, radio_source, channelID, gameplay))
+
+    def recieve_actual(self, data, music_source, radio_source, channelID, gameplay):
+        if music_source is None:
+            return
+            
+        # Decode Opus packet OUTSIDE the batch lock to prevent GIL/OpenAL deadlocks!
+        try:
+            pcm = bytearray(self.decoder.decode(bytearray(data)))
+        except Exception as e:
+            if not hasattr(self, '_last_err'): self._last_err = 0
+            if time.time() - self._last_err > 1.0:
+                print(f"[ERROR MusicCompression] Opus decoding failed: {e}")
+                self._last_err = time.time()
+            return
+
         try:
             with self.game.audio_mngr.context.batch():
                 if gameplay.player.dead:
                     return
 
-                state = music_source.state
+                now = time.time()
+                is_new_session = (
+                    self._last_recv_time is None
+                    or (now - self._last_recv_time) > self.SESSION_RESET_GAP
+                )
+                if is_new_session:
+                    # New broadcast (or first after a stop): discard everything
+                    # queued on the source — including silent keep-alive buffers
+                    # that entity.loop() pushes when the queue runs empty — and
+                    # reset the pre-buffer threshold so playback starts cleanly,
+                    # mirroring the behaviour of a fresh map load.
+                    try:
+                        music_source.stop()
+                        while getattr(music_source, 'buffers_processed', 0) > 0:
+                            music_source.unqueue_buffers()
+                    except Exception:
+                        pass
+                    self._has_started = False
+                self._last_recv_time = now
+
+                try:
+                    state = music_source.state
+                except Exception:
+                    state = cyal.SourceState.STOPPED
+
+                # If we were playing but just hit an underrun and STOPPED, we need to
+                # flush out the old processed buffers and restart the pre-buffering phase.
+                if state == cyal.SourceState.STOPPED and self._has_started:
+                    try:
+                        self._has_started = False
+                        while getattr(music_source, 'buffers_processed', 0) > 0:
+                            music_source.unqueue_buffers()
+                    except Exception:
+                        pass
 
                 # Recycle or generate buffer
+                # Only recycle if we are actively playing. If we are in STOPPED/INITIAL state,
+                # all buffers are marked as "processed" by OpenAL, so unqueuing them would 
+                # destroy our pre-buffer before it ever reaches the playback threshold!
                 buf = None
-                try:
-                    while music_source.buffers_processed > 0:
-                        result = music_source.unqueue_buffers()
-                        if result is not None:
-                            if isinstance(result, (list, tuple)):
-                                if buf is None: buf = result[0]
-                            else:
-                                if buf is None: buf = result
-                except Exception:
-                    pass
-
-                # Decode Opus packet
-                try:
-                    pcm = bytearray(self.decoder.decode(bytearray(data)))
-                except Exception:
-                    return
+                if self._has_started:
+                    try:
+                        while getattr(music_source, 'buffers_processed', 0) > 0:
+                            result = music_source.unqueue_buffers()
+                            if result is not None:
+                                if isinstance(result, (list, tuple)):
+                                    if buf is None and len(result) > 0:
+                                        buf = result[0]
+                                else:
+                                    if buf is None:
+                                        buf = result
+                    except Exception:
+                        pass
 
                 if buf is None:
                     try:
                         buf = self.game.audio_mngr.context.gen_buffer()
-                    except Exception:
+                    except Exception as e:
+                        print(f"[ERROR MusicCompression] gen_buffer failed: {e}")
                         return
 
                 # Fill and queue
-                buf.set_data(bytes(pcm), sample_rate=48000, format=cyal.BufferFormat.MONO16)
                 try:
+                    buf.set_data(bytes(pcm), sample_rate=48000, format=cyal.BufferFormat.MONO16)
                     music_source.queue_buffers(buf)
-                except Exception:
+                except Exception as e:
+                    if not hasattr(self, '_last_err2'): self._last_err2 = 0
+                    if time.time() - self._last_err2 > 1.0:
+                        print(f"[ERROR MusicCompression] queue_buffers failed: {e}")
+                        self._last_err2 = time.time()
                     return
+
+                queued = getattr(music_source, 'buffers_queued', 0)
+                if not hasattr(self, '_last_debug'): self._last_debug = 0
+                if now - self._last_debug > 1.0:
+                    print(f"[DEBUG MusicCompression] Queued buffer. Total queued: {queued}, State: {state}")
+                    self._last_debug = now
 
                 # Start or resume playback
                 if state == cyal.SourceState.STOPPED or state == cyal.SourceState.INITIAL:
                     threshold = self.PRE_BUFFER_FRAMES if not self._has_started else self.RESUME_FRAMES
-                    if music_source.buffers_queued >= threshold:
+                    if queued >= threshold:
                         try:
+                            if getattr(music_source, 'gain', 0.0) < 0.2:
+                                music_source.gain = 1.0
                             music_source.play()
                             self._has_started = True
+                            print("[DEBUG MusicCompression] Threshold reached! Started playing.")
                         except Exception:
                             pass
 
