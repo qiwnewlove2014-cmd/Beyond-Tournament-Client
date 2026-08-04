@@ -515,7 +515,6 @@ class MusicCompression(threading.Thread):
         self.queue.put_nowait(None)
 
     def run(self):
-        print("[DEBUG MusicCompression] Thread started successfully!")
         while getattr(self, '_running', True):
             try:
                 time.sleep(0.002)
@@ -523,10 +522,6 @@ class MusicCompression(threading.Thread):
                 value = self.queue.get_nowait()
                 if value is None: break
                 if callable(value):
-                    if not hasattr(self, '_last_run_debug'): self._last_run_debug = 0
-                    if time.time() - self._last_run_debug > 1.0:
-                        print("[DEBUG MusicCompression] Executing queued task from Listener...")
-                        self._last_run_debug = time.time()
                     value()
             except Exception as e:
                 print(f"[ERROR MusicCompression.run] {e}")
@@ -629,10 +624,6 @@ class MusicCompression(threading.Thread):
                     return
 
                 queued = getattr(music_source, 'buffers_queued', 0)
-                if not hasattr(self, '_last_debug'): self._last_debug = 0
-                if now - self._last_debug > 1.0:
-                    print(f"[DEBUG MusicCompression] Queued buffer. Total queued: {queued}, State: {state}")
-                    self._last_debug = now
 
                 # Start or resume playback
                 if state == cyal.SourceState.STOPPED or state == cyal.SourceState.INITIAL:
@@ -643,7 +634,6 @@ class MusicCompression(threading.Thread):
                                 music_source.gain = 1.0
                             music_source.play()
                             self._has_started = True
-                            print("[DEBUG MusicCompression] Threshold reached! Started playing.")
                         except Exception:
                             pass
 

@@ -46,20 +46,15 @@ class UIRenderer:
             'logo': 'logo.png'
         }
         
-        print("\n[UI] --- Loading Assets ---")
         for key, filename in target_images.items():
             full_path = os.path.join(assets_path, filename)
             self.images[key] = self.load_image(full_path)
-            
-        print("[UI] --- Asset Load Complete ---\n")
 
     def load_image(self, path):
         """โหลดภาพแบบ Safe Mode"""
         try:
             if os.path.exists(path):
-                img = pygame.image.load(path).convert_alpha()
-                print(f"[UI] ✅ Loaded: {path} ({img.get_width()}x{img.get_height()})")
-                return img
+                return pygame.image.load(path).convert_alpha()
             else:
                 print(f"[UI] ❌ File not found: {path} (Will use fallback)")
                 return None
@@ -72,11 +67,10 @@ class UIRenderer:
         self.screen.fill("black")
 
     def set_screen_context(self, screen_name):
-        """บอก Renderer ว่าตอนนี้อยู่หน้าไหน (เพื่อ Log)"""
+        """บอก Renderer ว่าตอนนี้อยู่หน้าไหน"""
         if self.current_screen != screen_name:
             self.last_screen = self.current_screen
             self.current_screen = screen_name
-            print(f"[UI] 📺 Screen Changed: {self.last_screen} -> {self.current_screen}")
 
     def draw_background(self, context="menu"):
         """วาดพื้นหลังตามบริบท"""

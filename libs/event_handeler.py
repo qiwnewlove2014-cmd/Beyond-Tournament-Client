@@ -404,7 +404,6 @@ class EventHandeler:
         m = menu.Menu(self.game, data["title"], autoclose=False, parrent=self.gameplay)
         m.menu_event = data.get("event", "")
         m.menu_type = data.get("menu_type", "normal")
-        print(f"[CLIENT HANDLER DEBUG] Received make_menu: title='{data['title']}', event='{m.menu_event}', menu_type='{m.menu_type}', options_count={len(data.get('options', []))}")
         options = []
         for idx, i in enumerate(data["options"]):
             options.append(
@@ -713,13 +712,21 @@ class EventHandeler:
         
         if entity_channel_id in self.gameplay.voice_channels:
             entity = self.gameplay.voice_channels[entity_channel_id]
-            if hasattr(entity, 'music_source'):
-                # We need a dedicated decoder and jitter buffer for music per entity
+            music_src = getattr(entity, 'music_source', None)
+            if music_src is not None:
+                import time
+
                 if not hasattr(entity, 'music_compression') or not entity.music_compression:
                     from .voice_chat import MusicCompression
                     entity.music_compression = MusicCompression(self.game)
-                
-                entity.music_compression.recieve(opus_data, entity.music_source, None, entity_channel_id, self.gameplay)
+
+                # Stamp the last receive time so entity.loop() can avoid pushing
+                # silent keep-alive buffers that would interleave with real audio.
+                entity._music_last_recv = time.time()
+                try:
+                    entity.music_compression.recieve(opus_data, music_src, None, entity_channel_id, self.gameplay)
+                except Exception as e:
+                    pass
 
     def has_radio(self, data):
         if not hasattr(self.gameplay, 'voice_channels') or not isinstance(self.gameplay.voice_channels, dict):
@@ -752,7 +759,6 @@ class EventHandeler:
     def request_scandir(self, data):
         """Scan client's local asset directory and return file/folder items to server"""
         speak("Requesting directory scan: " + str(data.get("path", "")), False)
-        print("DEBUG: request_scandir: path=" + str(data.get("path", "")) + ", category=" + str(data.get("category", "")))
         rel_path = data.get("path", "")
         category = data.get("category", "")
         
