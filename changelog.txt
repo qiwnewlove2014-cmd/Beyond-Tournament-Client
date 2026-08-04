@@ -9,6 +9,7 @@
 
 • Audio Engine & Voice Chat
 - **Music Bot Broadcast Reliability:** Resolved a critical buffer handling issue where minor network fluctuations (buffer underruns) caused the Music Bot broadcast to become permanently silent for listeners. The audio buffer queue now safely recovers and resumes playback smoothly.
+- **Music Bot Broadcast Distance Range:** Smoothly balanced the 3D spatial attenuation for Music Bot broadcasts over voice chat. Broadcast audio now extends up to 50 tiles and fades down continuously to complete silence without abrupt volume drops or clipping.
 
 • Security & Client Diagnostics
 - **Native Deadlock Failsafe (Freeze Watchdog):** Upgraded the background crash reporter to detect catastrophic native C/C++ engine freezes (e.g. OpenAL deadlocks). If the game is unresponsive for over 15 seconds, the watchdog will automatically dump all active thread stack traces, securely submit a `fatal` crash report to the development team, speak an auditory warning to the player, and seamlessly auto-restart the game to the login screen.

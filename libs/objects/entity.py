@@ -1,4 +1,5 @@
 import os
+import time
 from random import randint as random
 from .. import options
 from .. import voice_chat
@@ -65,9 +66,9 @@ class Entity(Object):
             self.vc_source.position = (ex, ey, ez)
             self.vc_source.reference_distance = 1.7  # Boost volume to ~20% at 8 meters
             self.music_source.position = (ex, ey, ez)
-            self.music_source.rolloff_factor = 2.0
+            self.music_source.rolloff_factor = 0.5
             self.music_source.reference_distance = 5.0
-            self.music_source.max_distance = 150.0
+            self.music_source.max_distance = 50.0
             self.radio_source.position = (0,0,0)
             self.radio_source.relative = True
             self.radio_source.gain=0.7
@@ -89,6 +90,7 @@ class Entity(Object):
                 print(f"[Entity] Warning: Failed to chain distortion to equalizer target: {e}")
             self.soundgroup.parent.efx.send(self.radio_source, 1, self.distortion_slot)
             self.vc_compression = voice_chat.voice_chat_compression(self.game)
+            self.music_compression = voice_chat.MusicCompression(self.game)
             
             # Apply initial reverb to the newly created voice/music sources
             reverb = self.map.get_reverb_at(self.x, self.y, self.z)
@@ -140,7 +142,15 @@ class Entity(Object):
                     else:
                         gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
                     self.vc_source.gain = gain
-                    self.music_source.gain = gain
+
+                    music_max = 50.0
+                    if dist <= min_dist:
+                        music_gain = 1.0
+                    elif dist >= music_max:
+                        music_gain = 0.0
+                    else:
+                        music_gain = 1.0 - ((dist - min_dist) / (music_max - min_dist))
+                    self.music_source.gain = music_gain
             except (cyal.exceptions.InvalidAlValueError, cyal.exceptions.InvalidOperationError) as e:
                 log(f"[ENTITY.AUDIO] Voice position update skipped for {self.name!r}: {e}")
         try:
@@ -295,6 +305,7 @@ class Entity(Object):
                     min_dist = 5.0
                     if getattr(self, "muted_by_spectator", False):
                         gain = 0.0
+                        music_gain = 0.0
                     else:
                         if dist <= min_dist:
                             gain = 1.0
@@ -302,8 +313,16 @@ class Entity(Object):
                             gain = 0.0
                         else:
                             gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
+
+                        music_max = 50.0
+                        if dist <= min_dist:
+                            music_gain = 1.0
+                        elif dist >= music_max:
+                            music_gain = 0.0
+                        else:
+                            music_gain = 1.0 - ((dist - min_dist) / (music_max - min_dist))
                     self.vc_source.gain = gain
-                    self.music_source.gain = gain
+                    self.music_source.gain = music_gain if not getattr(self, "muted_by_spectator", False) else 0.0
 
                     # Real-time filter sync with soundgroup filter state (optimized)
                     current_filter = self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None
@@ -343,16 +362,26 @@ class Entity(Object):
                     except Exception as e:
                         pass
 
-                if self.music_source.buffers_queued == 0: 
+                music_src = getattr(self, 'music_source', None)
+                if music_src is not None:
                     try:
-                        buffer = self.game.audio_mngr.context.gen_buffer()
-                        buffer.set_data(
-                            self.game.audio_mngr.silent_buf,
-                            sample_rate=48000,
-                            format=cyal.BufferFormat.MONO16
-                        )
-                        self.music_source.queue_buffers(buffer)
-                    except Exception as e:
+                        if getattr(music_src, 'buffers_queued', 0) == 0:
+                            # Skip the silent keep-alive buffer while a music broadcast
+                            # is actively being received — otherwise it interleaves with
+                            # real audio and can leave the source stopped/silent after a
+                            # broadcaster stop/restart.  The window mirrors the session
+                            # reset gap used by MusicCompression.
+                            if time.time() - getattr(self, '_music_last_recv', 0) < 0.5:
+                                pass
+                            else:
+                                buffer = self.game.audio_mngr.context.gen_buffer()
+                                buffer.set_data(
+                                    self.game.audio_mngr.silent_buf,
+                                    sample_rate=48000,
+                                    format=cyal.BufferFormat.MONO16
+                                )
+                                music_src.queue_buffers(buffer)
+                    except Exception:
                         pass
         # 🛡️ Protection: Skip tile checks if coordinates are None
         if self.x is None or self.y is None or self.z is None:
@@ -536,6 +565,12 @@ class Entity(Object):
 
         if self.player: 
             self.vc_compression.put(None)
+            if hasattr(self, 'music_compression') and self.music_compression:
+                try:
+                    self.music_compression.close()
+                except Exception:
+                    pass
+                self.music_compression = None
             # Release OpenAL sources for player entities
             for src_name in ['vc_source', 'radio_source', 'music_source']:
                 src = getattr(self, src_name, None)
@@ -543,11 +578,12 @@ class Entity(Object):
                     try:
                         src.stop()
                         src.buffer = None
-                        while src.buffers_queued > 0:
+                        while getattr(src, 'buffers_queued', 0) > 0:
                             src.unqueue_buffers()
                         src.delete()
                     except Exception:
                         pass
+                    setattr(self, src_name, None)
             # Return EFX effect slots to pool
             for slot_name in ['distortion_slot', 'eq_slot']:
                 slot = getattr(self, slot_name, None)
