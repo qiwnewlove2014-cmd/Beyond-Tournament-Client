@@ -1,17 +1,11 @@
 --------------------------------------------------------------------------------
-[v1.6.0] Music Bot Broadcast Fix & Auto-Restart Watchdog — 2026-08-05
+[v1.6.1] Client Security Patch 1 — 2026-08-06
 --------------------------------------------------------------------------------
 
-• Audio Engine & Voice Chat
-- **Music Bot Broadcast Reliability:** Resolved a critical buffer handling issue where minor network fluctuations (buffer underruns) caused the Music Bot broadcast to become permanently silent for listeners. The audio buffer queue now safely recovers and resumes playback smoothly.
-- **Music Bot Broadcast Distance Range:** Smoothly balanced the 3D spatial attenuation for Music Bot broadcasts over voice chat. Broadcast audio now extends up to 50 tiles and fades down continuously to complete silence without abrupt volume drops or clipping.
-- **3D Ambient Audio & Wall Occlusion System:** Comprehensively rebuilt the ambient sound fading and wall occlusion systems. This complex and time-intensive rewrite eliminates audio "popping" or "stuttering" when moving rapidly in and out of sound zones, prevents indoor sounds from leaking through walls, ensures perfectly smooth fade transitions even when moving between floors (Z-axis), and completely stops out-of-bounds ambient audio from bleeding into the background.
-
 • Security & Client Diagnostics
+- **Client Asset Security:** Upgraded the data protection system to encrypt and secure audio assets, preventing unauthorized extraction or tampering with game files.
 - **Native Deadlock Failsafe (Freeze Watchdog):** Upgraded the background crash reporter to detect catastrophic native C/C++ engine freezes (e.g. OpenAL deadlocks). If the game is unresponsive for over 15 seconds, the watchdog will automatically dump all active thread stack traces, securely submit a `fatal` crash report to the development team, speak an auditory warning to the player, and seamlessly auto-restart the game to the login screen.
 - **English Auditory Warning:** The critical freeze TTS warning is now spoken in English ("A critical freeze was detected...") and reassures players that the crash report was successfully dispatched.
 
 • Map Builder & User Interface
-- **Door Tile Options:** Added an "Air (Invisible)" floor option when configuring the opened state of doors, available during both new door creation and when editing existing doors.
-- **Interactive Notification Menus:** Upgraded the auto-updater and login failure notifications (such as version mismatches) to use a fully interactive, navigable in-game menu instead of immediately speaking and closing. This allows players to review the error text comfortably at their own pace using the arrow keys.
-- **Menu Focus Accessibility:** Fixed a minor accessibility issue in the new notification menus where players were forced to press an arrow key before the Enter key would register. Menus now immediately lock focus to the primary message, allowing instantaneous closing if desired.
+- **Builder & Weapon Menus:** Refactored the directory scanning backend for the Map Builder and /createweapon systems. These tools now securely query the client's virtual file system for sound libraries, ensuring compatibility across all deployment environments (e.g. cloud VPS).

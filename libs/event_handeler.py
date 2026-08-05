@@ -772,7 +772,7 @@ class EventHandeler:
         category = data.get("category", "")
         
         import os
-        base_dir = os.path.abspath("data")
+        base_dir = os.path.abspath(consts.SOUNDPREPEND.rstrip('/\\'))
         
         # Calculate full absolute path safely
         target_dir = os.path.abspath(os.path.join(base_dir, rel_path))

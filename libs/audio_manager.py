@@ -123,25 +123,31 @@ class AudioManager():
             "ui/pm.ogg", "ui/kill.ogg", "ui/notify1.ogg", "ui/notify2.ogg",
         ]
         for snd in ui_sounds:
-            self._preloaded_buffers[os.path.relpath(f"data/{snd}")] = None  # Mark for strong ref
+            snd_path = os.path.join(consts.SOUNDPREPEND, snd)
+            try:
+                rel_snd = os.path.relpath(snd_path)
+            except ValueError:
+                rel_snd = os.path.normpath(snd_path)
+                
+            self._preloaded_buffers[rel_snd] = None  # Mark for strong ref
             buf = self.load_buffer(snd)
-            if buf is not None:
-                self._preloaded_buffers[os.path.relpath(f"data/{snd}")] = buf
+            if buf:
+                self._preloaded_buffers[rel_snd] = buf
 
     def load_buffer(self, path: str) -> cyal.Buffer | None:
         if path.split(":")[0] == "server_sounds":
             path = path.split(":")[1]
             if not os.path.exists(path):
-                if path.startswith("server_sounds/") and not os.path.exists("data/server_sounds/"):
-                    os.mkdir("data/server_sounds")
+                if path.startswith("server_sounds/") and not os.path.exists(os.path.join(consts.SOUNDPREPEND, "server_sounds")):
+                    os.mkdir(os.path.join(consts.SOUNDPREPEND, "server_sounds"))
                 data = requests.get(f"{consts.SERVER_SOUNDS_URL}{path}")
                 if data.ok:
                     try:
-                        with open(f"data/{path}", 'wb+') as f:
+                        with open(os.path.join(consts.SOUNDPREPEND, path), 'wb+') as f:
                             f.write(data.content)
                     except e:
                         print(e)
-        if not os.path.isabs(path) and path.split("/")[0] != "data": path= f"data/{path}"
+        if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND): path = os.path.join(consts.SOUNDPREPEND, path)
         if not path.endswith(".ogg"): path = path_utils.get_next_cycle_item(path)
         # Presence sounds are cached under the user's profile, which may be on
         # a different Windows drive than the game. relpath() raises ValueError

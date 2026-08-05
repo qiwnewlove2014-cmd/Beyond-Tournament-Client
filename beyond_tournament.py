@@ -12,6 +12,9 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 
 def main():
+    from libs import vfs
+    vfs.init_vfs()
+
     from libs import logger
     from libs import crash_reporting
     crash_reporting.begin_session()
