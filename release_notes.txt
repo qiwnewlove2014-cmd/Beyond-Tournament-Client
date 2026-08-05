@@ -10,3 +10,8 @@
 • Security & Client Diagnostics
 - **Native Deadlock Failsafe (Freeze Watchdog):** Upgraded the background crash reporter to detect catastrophic native C/C++ engine freezes (e.g. OpenAL deadlocks). If the game is unresponsive for over 15 seconds, the watchdog will automatically dump all active thread stack traces, securely submit a `fatal` crash report to the development team, speak an auditory warning to the player, and seamlessly auto-restart the game to the login screen.
 - **English Auditory Warning:** The critical freeze TTS warning is now spoken in English ("A critical freeze was detected...") and reassures players that the crash report was successfully dispatched.
+
+• Map Builder & User Interface
+- **Door Tile Options:** Added an "Air (Invisible)" floor option when configuring the opened state of doors, available during both new door creation and when editing existing doors.
+- **Interactive Notification Menus:** Upgraded the auto-updater and login failure notifications (such as version mismatches) to use a fully interactive, navigable in-game menu instead of immediately speaking and closing. This allows players to review the error text comfortably at their own pace using the arrow keys.
+- **Menu Focus Accessibility:** Fixed a minor accessibility issue in the new notification menus where players were forced to press an arrow key before the Enter key would register. Menus now immediately lock focus to the primary message, allowing instantaneous closing if desired.
