@@ -290,7 +290,11 @@ class Updater(state.State):
         if self.check:
             try:
                 release = get_latest_release()
-                if release and not release.get("no_release"):
+                if not release:
+                    speak("Could not check for updates. Check your internet connection.", True)
+                elif release.get("no_release"):
+                    speak("No releases are available yet.", True)
+                else:
                     current = _current_version_tuple()
                     if is_newer(release["tag"], current) and release.get("zip_url"):
                         self.update_info = release
@@ -302,8 +306,11 @@ class Updater(state.State):
                             True,
                         )
                         return  # รอ input จากผู้เล่นใน update()
+                    else:
+                        current_str = _current_version_string()
+                        speak(f"You are up to date. Current version {current_str}.", True)
             except Exception:
-                pass
+                speak("Could not check for updates.", True)
         menus.main_menu(self.game)
 
     def exit(self):
