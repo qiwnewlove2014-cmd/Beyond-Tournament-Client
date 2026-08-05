@@ -27,7 +27,7 @@ class Key_config_screen(state.State):
                 self.game.direct_soundgroup.play("ui/keyconfig/end.ogg")
                 speak("Done.", False)
                 
-                self.game.call_after(800, self.func_call)
+                self.game.call_after(500, self.func_call)
                 break
         return True
 
