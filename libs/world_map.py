@@ -1084,7 +1084,7 @@ class SoundSource(BaseMapObj):
         self.path = sound
         self.volume = volume
         self.playing = False
-        self.fade_range = 10.0
+        self.fade_range = 25.0
         self.current_gain = 0.0
 
     def loop(self, player_x, player_y, player_z):
