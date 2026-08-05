@@ -9,20 +9,27 @@ class Key_config_screen(state.State):
         super().__init__(game)
         self.func = func
         self.func_call= options_menu
+        self.done = False
 
     def enter(self):
         self.game.direct_soundgroup.play("ui/keyconfig/start.ogg")
         speak(f"Please press the key you want for {self.func}.")
 
     def update(self, events):
+        if self.done:
+            return True
         for event in events:
             if event.type == pygame.KEYDOWN:
+                self.done = True
                 speak(pygame.key.name(event.key))
                 self.game.keyconfig.set(event.key, self.func)
-                self.func_call()
+                
+                self.game.direct_soundgroup.play("ui/keyconfig/end.ogg")
+                speak("Done.", False)
+                
+                self.game.call_after(800, self.func_call)
                 break
         return True
 
     def exit(self):
-        self.game.direct_soundgroup.play("ui/keyconfig/end.ogg")
-        speak("Done.", False)
+        pass
