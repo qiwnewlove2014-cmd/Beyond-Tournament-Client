@@ -9,3 +9,4 @@
 
 • Map Builder & User Interface
 - **Builder & Weapon Menus:** Refactored the directory scanning backend for the Map Builder and /createweapon systems. These tools now securely query the client's virtual file system for sound libraries, ensuring compatibility across all deployment environments (e.g. cloud VPS).
+- **Auto-Updater UX Improvements:** The auto-updater now silently bypasses the "You are up to date" prompt during game startup, streamlining the login experience and eliminating the need for an unnecessary keypress. Manually checking for updates via the main menu will still explicitly report the version status as expected.

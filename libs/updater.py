@@ -267,9 +267,10 @@ class Updater(state.State):
       Space = เปอร์เซ็นต์, 1 = ความเร็ว, 2 = ขนาด, 3 = เวลาเหลือ
     ถ้าไม่มีอัปเดตหรือผิดพลาดจะไป main_menu ตามปกติ"""
 
-    def __init__(self, game, check=True):
+    def __init__(self, game, check=True, silent_if_uptodate=False):
         super().__init__(game)
         self.check = check
+        self.silent_if_uptodate = silent_if_uptodate
         self.update_info = None
         self.downloading = False
         self.smart_dl = None  # อ้างอิง SmartDL object สำหรับดูสถานะ
@@ -291,6 +292,9 @@ class Updater(state.State):
             try:
                 release = get_latest_release()
                 if not release:
+                    if self.silent_if_uptodate:
+                        self.game.replace(menus.main_menu(self.game))
+                        return
                     msg = "Could not check for updates. Check your internet connection. Press Enter to return."
                     m = menu.Menu(self.game, "Check for Updates")
                     m.add_item(msg, lambda: menus.main_menu(self.game))
@@ -299,6 +303,9 @@ class Updater(state.State):
                     speak(msg, False)
                     return
                 elif release.get("no_release"):
+                    if self.silent_if_uptodate:
+                        self.game.replace(menus.main_menu(self.game))
+                        return
                     msg = "No releases are available yet. Press Enter to return."
                     m = menu.Menu(self.game, "Check for Updates")
                     m.add_item(msg, lambda: menus.main_menu(self.game))
@@ -319,6 +326,9 @@ class Updater(state.State):
                         )
                         return  # รอ input จากผู้เล่นใน update()
                     else:
+                        if self.silent_if_uptodate:
+                            self.game.replace(menus.main_menu(self.game))
+                            return
                         current_str = _current_version_string()
                         msg = f"You are up to date. Current version {current_str}. Press Enter to return."
                         m = menu.Menu(self.game, "Check for Updates")
@@ -328,6 +338,9 @@ class Updater(state.State):
                         speak(msg, False)
                         return
             except Exception:
+                if self.silent_if_uptodate:
+                    self.game.replace(menus.main_menu(self.game))
+                    return
                 msg = "Could not check for updates. Check your internet connection. Press Enter to return."
                 m = menu.Menu(self.game, "Check for Updates")
                 m.add_item(msg, lambda: menus.main_menu(self.game))

@@ -112,7 +112,7 @@ class Game:
             speak("Beyond Tournament!")
             self.suspend(4.5)
         if "__compiled__" in globals():
-            self.append(updater.Updater(self))
+            self.append(updater.Updater(self, silent_if_uptodate=True))
         else:
             menus.main_menu(self)
             speak("Bypassing updater in uncompiled version...", False)
