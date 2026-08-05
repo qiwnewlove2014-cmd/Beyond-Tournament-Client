@@ -146,7 +146,12 @@ class AudioManager():
         # Presence sounds are cached under the user's profile, which may be on
         # a different Windows drive than the game. relpath() raises ValueError
         # across drives, so absolute cache paths must remain absolute.
-        path = os.path.normpath(path) if os.path.isabs(path) else os.path.relpath(path)
+        try:
+            path = os.path.normpath(path) if os.path.isabs(path) else os.path.relpath(path)
+        except ValueError:
+            # Different drive letters (e.g. sound cached on C: while the game
+            # runs on D:).  Keep the absolute path as-is; OpenAL/cyal accepts it.
+            path = os.path.normpath(path)
         if path in self.buffers.keys():
             return self.buffers[path]
         try:

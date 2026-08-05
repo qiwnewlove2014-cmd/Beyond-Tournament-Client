@@ -1,4 +1,5 @@
 import functools
+import re
 from operator import mod
 from string import Template
 from . import menu, options, updater, keyconfig, consts, speech, audio_manager
@@ -220,7 +221,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         (game.toggle_item("microphone", "microphone", True)),
         (game.toggle_item("Player beacons", "beacons")),
         (game.toggle_item("Wall proximity tone", "wall_tone", False)),
-        (game.toggle_item("Compass turn cue", "compass_turn_cue", False)),
+        (game.toggle_item("Compass turn cue", "compass_turn_cue", True)),
         turning_sensitivity_item,
         (game.toggle_item("play intro at start up", "play_intro_at_start")),
         (
@@ -481,15 +482,22 @@ def configure_jitter_buffer(game, func_call, replace_call=None):
     )
 
 def configure_jitter_buffer2(game, message, func_call):
-    if message.strip()=="": 
+    if message.strip()=="":
         func_call()
         speech.speak("canceled")
         return
-    message = int(message)
-    if message < 20: message = 20
-    if message > 120: message = 120
+    # Robustly parse the user's input: strip anything that is not a digit (for
+    # example a stray trailing backslash like "12010\\") and clamp to the valid
+    # range.  Invalid input falls back to the stored value instead of raising.
+    digits = re.sub(r"\D", "", message)
+    try:
+        value = int(digits) if digits else int(options.get("jitter_buffer", 60))
+    except ValueError:
+        value = int(options.get("jitter_buffer", 60))
+    if value < 20: value = 20
+    if value > 120: value = 120
 
-    options.set("jitter_buffer", message)
+    options.set("jitter_buffer", value)
     game.audio_mngr.silent_buffer = bytearray(96 * options.get("jitter_buffer", 60))
     func_call()
 
@@ -527,11 +535,17 @@ def configure_port(game, func_call, replace_call=None):
     )
 
 def configure_port2(game, message, func_call):
-    if message.strip()=="": 
+    if message.strip()=="":
         func_call()
         speech.speak("canceled")
         return
-    message = int(message)
+    # Strip non-digit characters (e.g. a stray trailing backslash) before
+    # parsing so malformed input does not crash the main loop.
+    digits = re.sub(r"\D", "", message)
+    try:
+        message = int(digits) if digits else 0
+    except ValueError:
+        message = 0
     if message not in range(1, 2 **     16):
         func_call()
         speech.speak("Invalid port number")

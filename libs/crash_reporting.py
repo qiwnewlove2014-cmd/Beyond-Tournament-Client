@@ -219,6 +219,22 @@ def _debug_log_tail(limit=5000):
         return ""
 
 
+def _get_freeze_trace():
+    freeze_path = os.path.join(_SESSION_DIR, "last_freeze.txt")
+    if os.path.exists(freeze_path):
+        try:
+            with open(freeze_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            try:
+                os.unlink(freeze_path)
+            except OSError:
+                pass
+            return content
+        except OSError:
+            pass
+    return None
+
+
 def _process_matches_session(session):
     try:
         import psutil
@@ -271,6 +287,8 @@ def begin_session():
     except OSError:
         session_tracking_available = False
     log_tail = _debug_log_tail()
+    freeze_trace = _get_freeze_trace()
+    trace_to_use = freeze_trace or log_tail or "No client debug log was available."
 
     # Migrate the single-session marker used by older clients once.
     with _REPORT_LOCK, _pending_process_lock():
@@ -281,7 +299,7 @@ def begin_session():
                 "Previous client session",
                 "UncleanExit",
                 "The previous client process ended without a clean shutdown.",
-                log_tail or "No client debug log was available.",
+                trace_to_use,
                 "unclean_exit",
             )
             reports = _pending_reports()
@@ -312,7 +330,7 @@ def begin_session():
                 "Previous client session",
                 "UncleanExit",
                 "A previous client process ended unexpectedly or was terminated.",
-                log_tail or "No client debug log was available.",
+                trace_to_use,
                 "unclean_exit",
             )
             reports = _pending_reports()

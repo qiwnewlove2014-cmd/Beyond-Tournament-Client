@@ -8,7 +8,7 @@ from .. import movement, options
 class CompassTurnCue:
     """Own one looping facing source while the player is actively turning."""
 
-    VOLUME = 45
+    VOLUME = 85
     ACTIVITY_TIMEOUT = 0.12
 
     def __init__(self, gameplay):
@@ -31,7 +31,7 @@ class CompassTurnCue:
 
     def on_turn(self, facing):
         """Update the intended compass landmark from the player's actual angle."""
-        if not options.get("compass_turn_cue", False):
+        if not options.get("compass_turn_cue", True):
             self.target_gain = 0.0
             return
         self._last_turn_time = time.monotonic()
@@ -45,7 +45,7 @@ class CompassTurnCue:
 
     def update(self):
         """Move the source smoothly and fade it after the turn key is released."""
-        if not options.get("compass_turn_cue", False):
+        if not options.get("compass_turn_cue", True):
             self.target_gain = 0.0
         elif time.monotonic() - self._last_turn_time > self.ACTIVITY_TIMEOUT:
             self.target_gain = 0.0
@@ -53,7 +53,7 @@ class CompassTurnCue:
         if self.target_gain > 0.0 and self.sound is None:
             source_pos = self._source_position(self.current_direction)
             self.sound = self.gameplay.game.audio_mngr.play_unbound(
-                "ui/facing.ogg",
+                "ui/direction.ogg",
                 *source_pos,
                 looping=True,
                 cat="ui",
@@ -72,6 +72,17 @@ class CompassTurnCue:
             source.position = self._source_position(self.current_direction)
             ui_gain = self.gameplay.game.audio_mngr.volume_categories["ui"][0] / 100.0
             source.gain = self.current_gain * (self.VOLUME / 100.0) * ui_gain
+
+            # Sync environmental reverb at the player's position
+            try:
+                player = self.gameplay.player
+                if self.gameplay.map:
+                    reverb = self.gameplay.map.get_reverb_at(player.x, player.y, player.z)
+                    audio_mngr = self.gameplay.game.audio_mngr
+                    if reverb and hasattr(reverb, "reverb") and reverb.reverb and hasattr(audio_mngr, "efx"):
+                        audio_mngr.efx.send(source, 0, reverb.reverb)
+            except Exception:
+                pass
         except Exception:
             self.destroy()
 
