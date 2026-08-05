@@ -349,8 +349,12 @@ def keyconfig_menu(game, func_call, replace_call=None, parent=None, in_game=Fals
         # closure would make every lambda use the final loop value, causing
         # the cursor to always jump to the last item.
         current_index = len(items)
-        func = functools.partial(replace_call, Key_config_screen(game, i, options_menu=func_call if in_game else lambda _idx=current_index: keyconfig_menu(game, func_call, in_game=in_game, restore_pos=_idx)))
-        # we use functools.partial because lambdas dont work as they should with loops like that.
+        if in_game:
+            on_bind_done = lambda _idx=current_index: [parent.pop_last_substate(), keyconfig_menu(game, func_call, replace_call=parent.replace_last_substate, parent=parent, in_game=True, restore_pos=_idx)]
+        else:
+            on_bind_done = lambda _idx=current_index: keyconfig_menu(game, func_call, in_game=False, restore_pos=_idx)
+
+        func = functools.partial(replace_call, Key_config_screen(game, i, options_menu=on_bind_done))
         items.append(
             (
                 f"{i}: {pygame.key.name(game.keyconfig.get(i, default_keys.keys[i]))}",

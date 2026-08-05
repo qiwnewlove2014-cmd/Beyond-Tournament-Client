@@ -73,6 +73,11 @@ class Gameplay(state.State):
         self.tracking_clock = None
         self.facing_sound_clock = self.game.new_clock()
         self.is_facing_target = False
+        self.reload_keyconfig()
+
+    def reload_keyconfig(self):
+        kc = self.game.keyconfig
+        self.kc = kc
         self.keys_held = {
             kc.get("strafe_left", pygame.K_q): self.strafe_left,
             kc.get("strafe_right", pygame.K_e): self.strafe_right,
@@ -1541,7 +1546,10 @@ class Gameplay(state.State):
 
     def open_options(self, mod):
         if mod & pygame.KMOD_ALT:
-            menus.options_menu(self.game, self.pop_last_substate, replace_call=self.add_substate, parent=self, in_game=True)
+            def on_exit():
+                self.pop_last_substate()
+                self.reload_keyconfig()
+            menus.options_menu(self.game, on_exit, replace_call=self.add_substate, parent=self, in_game=True)
     
     def handle_o_key(self, mod):
         """Handle O key: PA Test Mode (no modifier) or Options Menu (ALT+O)"""

@@ -21,6 +21,7 @@ class Key_config_screen(state.State):
                 self.game.keyconfig.set(event.key, self.func)
                 self.func_call()
                 break
+        return True
 
     def exit(self):
         self.game.direct_soundgroup.play("ui/keyconfig/end.ogg")
