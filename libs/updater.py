@@ -291,9 +291,21 @@ class Updater(state.State):
             try:
                 release = get_latest_release()
                 if not release:
-                    speak("Could not check for updates. Check your internet connection.", True)
+                    msg = "Could not check for updates. Check your internet connection. Press Enter to return."
+                    m = menu.Menu(self.game, "Check for Updates")
+                    m.add_item(msg, lambda: menus.main_menu(self.game))
+                    m.pos = 0
+                    self.game.replace(m)
+                    speak(msg, False)
+                    return
                 elif release.get("no_release"):
-                    speak("No releases are available yet.", True)
+                    msg = "No releases are available yet. Press Enter to return."
+                    m = menu.Menu(self.game, "Check for Updates")
+                    m.add_item(msg, lambda: menus.main_menu(self.game))
+                    m.pos = 0
+                    self.game.replace(m)
+                    speak(msg, False)
+                    return
                 else:
                     current = _current_version_tuple()
                     if is_newer(release["tag"], current) and release.get("zip_url"):
@@ -308,10 +320,21 @@ class Updater(state.State):
                         return  # รอ input จากผู้เล่นใน update()
                     else:
                         current_str = _current_version_string()
-                        speak(f"You are up to date. Current version {current_str}.", True)
+                        msg = f"You are up to date. Current version {current_str}. Press Enter to return."
+                        m = menu.Menu(self.game, "Check for Updates")
+                        m.add_item(msg, lambda: menus.main_menu(self.game))
+                        m.pos = 0
+                        self.game.replace(m)
+                        speak(msg, False)
+                        return
             except Exception:
-                speak("Could not check for updates.", True)
-        menus.main_menu(self.game)
+                msg = "Could not check for updates. Check your internet connection. Press Enter to return."
+                m = menu.Menu(self.game, "Check for Updates")
+                m.add_item(msg, lambda: menus.main_menu(self.game))
+                m.pos = 0
+                self.game.replace(m)
+                speak(msg, False)
+                return
 
     def exit(self):
         super().exit()

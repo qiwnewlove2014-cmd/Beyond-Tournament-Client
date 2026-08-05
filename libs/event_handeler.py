@@ -23,15 +23,20 @@ class EventHandeler:
         self.tickets = tickets.Tickets(self.game)
 
     def create_fail(self, data):
-        menus.main_menu(self.game)
-        speak("Account creation failed.", False)
+        msg = "Account creation failed. Press Enter to return."
+        m = menu.Menu(self.game, "Account Creation")
+        m.add_item(msg, lambda: menus.main_menu(self.game))
+        m.pos = 0
+        self.game.replace(m)
+        speak(msg, False)
 
     def create_done(self, data):
-        menus.main_menu(self.game)
-        speak(
-            "Account creation finished. You can now login using the given information",
-            False,
-        )
+        msg = "Account creation finished. You can now login using the given information. Press Enter to return."
+        m = menu.Menu(self.game, "Account Creation")
+        m.add_item(msg, lambda: menus.main_menu(self.game))
+        m.pos = 0
+        self.game.replace(m)
+        speak(msg, False)
 
     def connected(self, data):
         self.game.reconnecting = False
@@ -666,8 +671,12 @@ class EventHandeler:
         if not data:
             return
         self.game.pop()
-        menus.main_menu(self.game)
-        speak(data["message"])
+        msg = f"{data['message']} Press Enter to return."
+        m = menu.Menu(self.game, "Login Failed")
+        m.add_item(msg, lambda: menus.main_menu(self.game))
+        m.pos = 0
+        self.game.replace(m)
+        speak(msg, False)
 
 
     def double_tap_root_beer(self, data):
