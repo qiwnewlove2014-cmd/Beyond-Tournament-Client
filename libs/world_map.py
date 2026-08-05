@@ -1087,7 +1087,7 @@ class SoundSource(BaseMapObj):
         self.fade_range = 10.0
         self.current_gain = 0.0
 
-    def loop(self, player_x, player_y, player_z, reverb_slot=None):
+    def loop(self, player_x, player_y, player_z):
         if not self.soundgroup:
             return
 
@@ -1156,7 +1156,11 @@ class SoundSource(BaseMapObj):
             with contextlib.suppress(Exception):
                 self.sound.source.gain = self.current_gain
                 if hasattr(self.map.game.audio_mngr, "efx"):
-                    self.map.game.audio_mngr.efx.send(self.sound.source, 0, reverb_slot)
+                    # Get reverb at the sound source's spatialized position, NOT the player's position,
+                    # so the echo naturally bleeds out of the zone when the player walks away.
+                    reverb_zone = self.map.get_reverb_at(cx, cy, cz)
+                    reverb = reverb_zone.reverb if reverb_zone and hasattr(reverb_zone, "reverb") else None
+                    self.map.game.audio_mngr.efx.send(self.sound.source, 0, reverb)
 
     def check_out_x(self, x):
         if self.minx <= x <= self.maxx:
