@@ -856,17 +856,7 @@ class EventHandeler:
 
         speak("You have left spectator mode.")
 
-    def concert_spectator_toggle(self, data):
-        enabled = data.get("enabled", False)
-        self.gameplay.spectator_mode = enabled
-        self.gameplay.concert_spectator_mode = enabled
-        
-        import time as _time
-        self.gameplay.concert_fade_in_start = _time.time()
-        self.gameplay.concert_fade_in_duration = 1.5
-        
-        if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
-            self.gameplay.megaphone.trigger_fade_transition(duration=1.5)
+
 
     def spectator_update(self, data):
         from .logger import log, log_exception

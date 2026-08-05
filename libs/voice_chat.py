@@ -660,96 +660,57 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
         buf = gameplay.game.audio_mngr.context.gen_buffer()
     
     try:
-        is_concert = force_concert_mode if force_concert_mode is not None else getattr(gameplay, 'concert_spectator_mode', False)
-        if is_concert:
-            import array, audioop
-            global _haas_delay_buffers
-            if '_haas_delay_buffers' not in globals():
-                _haas_delay_buffers = {}
-                
-            if len(_haas_delay_buffers) > 50:
-                _haas_delay_buffers.clear()
-                
-            src_key = id(src)
-            samples = array.array('h', play_packet)
-            
-            # 15ms Haas delay (720 samples at 48kHz)
-            delay_samples = int(48000 * 0.015)
-            if src_key not in _haas_delay_buffers:
-                _haas_delay_buffers[src_key] = array.array('h', [0] * delay_samples)
-                
-            combined = _haas_delay_buffers[src_key] + samples
-            delayed_samples = combined[:len(samples)]
-            _haas_delay_buffers[src_key] = combined[len(samples):]
-            
-            # Lauridsen Pseudo-Stereo (Mid/Side processing)
-            # Center (Mid) = Original, Sides (Width) = Delayed phase-inverted
-            M_bytes = play_packet
-            S_bytes = delayed_samples.tobytes()
-            
-            # Scale down slightly to prevent clipping
-            M_scaled = audioop.mul(M_bytes, 2, 0.75)
-            S_pos = audioop.mul(S_bytes, 2, 0.35)
-            S_neg = audioop.mul(S_bytes, 2, -0.35)
-            
-            # L = Mid + Side, R = Mid - Side
-            L_bytes = audioop.add(M_scaled, S_pos, 2)
-            R_bytes = audioop.add(M_scaled, S_neg, 2)
-            
-            # Interleave into stereo buffer
-            stereo_samples = array.array('h', [0] * (len(samples) * 2))
-            stereo_samples[0::2] = array.array('h', L_bytes)
-            stereo_samples[1::2] = array.array('h', R_bytes)
-            
-            buf.set_data(stereo_samples.tobytes(), sample_rate=48000, format=cyal.BufferFormat.STEREO16)
-        else:
-            buf.set_data(play_packet, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+        buf.set_data(play_packet, sample_rate=48000, format=cyal.BufferFormat.MONO16)
         src.queue_buffers(buf)
-    except (cyal.exceptions.InvalidOperationError, cyal.exceptions.ALError): 
-        return
-        # Start playing if stopped
+    except Exception:
+        pass
+    
+    # Start playing if stopped
     if src.state == cyal.SourceState.STOPPED or src.state == cyal.SourceState.INITIAL:
         # Re-apply EFX effects before playing using the source's unique filter
-        spk_idx = idx // 2
-        is_reflection = (idx % 2 == 1)
-        if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'speaker_data') and spk_idx < len(gameplay.megaphone.speaker_data):
-            speaker_data = gameplay.megaphone.speaker_data[spk_idx]
-            
-            # Lookup unique filter belonging to this source
-            filter_to_apply = None
-            if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'player_sources'):
-                for entry in gameplay.megaphone.player_sources.values():
-                    if 'sources' in entry and src in entry['sources']:
-                        src_idx = entry['sources'].index(src)
-                        if 'filters' in entry and src_idx < len(entry['filters']):
-                            filter_to_apply = entry['filters'][src_idx]
-                        break
-            
-            if filter_to_apply is None and hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'fading_sources'):
-                for fade_obj in gameplay.megaphone.fading_sources:
-                    if 'sources' in fade_obj and src in fade_obj['sources']:
-                        src_idx = fade_obj['sources'].index(src)
-                        if 'filters' in fade_obj and src_idx < len(fade_obj['filters']):
-                            filter_to_apply = fade_obj['filters'][src_idx]
-                        break
-            
-            # Fallback to physical templates
-            if filter_to_apply is None:
-                filter_to_apply = speaker_data.get('refl_filter' if is_reflection else 'filter')
+        is_concert = getattr(gameplay, 'concert_spectator_mode', False)
+        
+        if not is_concert:
+            spk_idx = idx // 2
+            is_reflection = (idx % 2 == 1)
+            if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'speaker_data') and spk_idx < len(gameplay.megaphone.speaker_data):
+                speaker_data = gameplay.megaphone.speaker_data[spk_idx]
+                
+                # Lookup unique filter belonging to this source
+                filter_to_apply = None
+                if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'player_sources'):
+                    for entry in gameplay.megaphone.player_sources.values():
+                        if 'sources' in entry and src in entry['sources']:
+                            src_idx = entry['sources'].index(src)
+                            if 'filters' in entry and src_idx < len(entry['filters']):
+                                filter_to_apply = entry['filters'][src_idx]
+                            break
+                
+                if filter_to_apply is None and hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'fading_sources'):
+                    for fade_obj in gameplay.megaphone.fading_sources:
+                        if 'sources' in fade_obj and src in fade_obj['sources']:
+                            src_idx = fade_obj['sources'].index(src)
+                            if 'filters' in fade_obj and src_idx < len(fade_obj['filters']):
+                                filter_to_apply = fade_obj['filters'][src_idx]
+                            break
+                
+                # Fallback to physical templates
+                if filter_to_apply is None:
+                    filter_to_apply = speaker_data.get('refl_filter' if is_reflection else 'filter')
 
-            if hasattr(gameplay.game.audio_mngr, 'efx'):
-                if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'eq_slot') and gameplay.megaphone.eq_slot:
-                    gameplay.game.audio_mngr.efx.send(src, 0, gameplay.megaphone.eq_slot, filter=filter_to_apply)
-                if speaker_data.get('reverb_slot'):
-                    gameplay.game.audio_mngr.efx.send(src, 1, speaker_data['reverb_slot'], filter=filter_to_apply)
-                if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'compressor_slot') and gameplay.megaphone.compressor_slot:
-                    gameplay.game.audio_mngr.efx.send(src, 2, gameplay.megaphone.compressor_slot, filter=filter_to_apply)
-            
-            if filter_to_apply:
-                try:
-                    src.direct_filter = filter_to_apply
-                except:
-                    pass
+                if hasattr(gameplay.game.audio_mngr, 'efx'):
+                    if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'eq_slot') and gameplay.megaphone.eq_slot:
+                        gameplay.game.audio_mngr.efx.send(src, 0, gameplay.megaphone.eq_slot, filter=filter_to_apply)
+                    if speaker_data.get('reverb_slot'):
+                        gameplay.game.audio_mngr.efx.send(src, 1, speaker_data['reverb_slot'], filter=filter_to_apply)
+                    if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'compressor_slot') and gameplay.megaphone.compressor_slot:
+                        gameplay.game.audio_mngr.efx.send(src, 2, gameplay.megaphone.compressor_slot, filter=filter_to_apply)
+                
+                if filter_to_apply:
+                    try:
+                        src.direct_filter = filter_to_apply
+                    except:
+                        pass
         try:
             src.play()
         except:
@@ -757,7 +718,6 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
 
 
 def queue_and_delay_frame(gameplay, sender_id, sources, packet):
-
 
     global _speaker_delay_queues
     import math
@@ -864,7 +824,11 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                 static_delay = spk_data.get('delay', 0.0)
                 speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
                 
-            if needs_initial_delay or moved_enough or idx not in _speaker_initial_delays[sender_id]:
+            if getattr(gameplay, 'concert_spectator_mode', False):
+                _speaker_initial_delays[sender_id][idx] = 0.0
+                propagation_delay = 0.0
+                static_delay = 0.0
+            elif needs_initial_delay or moved_enough or idx not in _speaker_initial_delays[sender_id]:
                 # Recalculate propagation delay from the live position (speed of sound = 343 m/s).
                 # Triggered only for a fresh source or when the listener moved
                 # >= 1.5 units; pause/resume intentionally retains the old delay.
@@ -898,7 +862,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             target_active = frames_delay + JITTER_MARGIN_FRAMES
             current_active = active_counts[idx]
             pad_frames = max(0, target_active - current_active)
-            
+
             if pad_frames > 0:
                 silence_packet = bytes(len(packet))
                 for _ in range(pad_frames):
@@ -910,7 +874,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                             if fade_obj['sid'] == sender_id and idx < len(fade_obj['sources']):
                                 f_src = fade_obj['sources'][idx]
                                 if f_src and getattr(f_src, "is_valid", lambda: False)():
-                                    _queue_packet_to_source(gameplay, idx, f_src, silence_packet, force_concert_mode=fade_obj['is_concert'])
+                                    _queue_packet_to_source(gameplay, idx, f_src, silence_packet)
                     
     _speaker_last_calc_time[sender_id] = now
     _speaker_last_calc_pos[sender_id] = player_pos
@@ -931,7 +895,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                         if f_src and getattr(f_src, "is_valid", lambda: False)():
                             start_vol = fade_obj['start_vols'][idx] if idx < len(fade_obj['start_vols']) else 1.0
                             f_src.gain = max(0.0, start_vol * (1.0 - t))
-                            _queue_packet_to_source(gameplay, idx, f_src, packet, force_concert_mode=fade_obj['is_concert'])
+                            _queue_packet_to_source(gameplay, idx, f_src, packet)
 
 
 def tick_megaphone_delay(gameplay):

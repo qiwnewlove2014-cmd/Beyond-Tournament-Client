@@ -226,7 +226,7 @@ class Gameplay(state.State):
 
     def check_direction_in_play(self, mod=0):
         """Direction checks are available while playing, not while spectating."""
-        if self.spectator_mode and not getattr(self, "concert_spectator_mode", False):
+        if self.spectator_mode:
             return
         self.check_direction()
 
@@ -455,8 +455,7 @@ class Gameplay(state.State):
         self.megaphone.update_megaphone_audio(0, None)
         self.wall_tone.update()
         self.compass_turn_cue.update()
-        is_concert = getattr(self, 'concert_spectator_mode', False)
-        if not self.spectator_mode or is_concert:
+        if not self.spectator_mode:
             self.player.loop()
         elif not self.substates:
             # Filter events for spectator mode when idle (Allow ESC, TAB, Chat, RETURN, Brackets, PageUp/Down, and Comma/Period)
@@ -551,7 +550,7 @@ class Gameplay(state.State):
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
                 self.game.network.send(consts.CHANNEL_MAP, "pong_serve", {})
                 continue
-            if self.spectator_mode and not getattr(self, 'concert_spectator_mode', False):
+            if self.spectator_mode:
                 allowed_keys = [
                     pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
                     pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
@@ -1308,11 +1307,6 @@ class Gameplay(state.State):
         self.add_substate(m)
 
     def leave_spectator_match(self):
-        if getattr(self, 'concert_spectator_mode', False):
-            self.game.network.send(consts.CHANNEL_CHAT, "chat", {"message": "/spec"})
-            self.pop_last_substate()
-            return
-            
         self.spectator_mode = False
         self.camera.set_focus_object(self.player)
         self.pop_last_substate()

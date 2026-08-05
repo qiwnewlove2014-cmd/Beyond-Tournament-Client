@@ -132,9 +132,7 @@ class MegaphoneManager:
                             'sources': fade_sources,
                             'filters': fade_filters,
                             'start_vols': start_vols,
-                            'fade_start': _time.time(),
-                            'fade_duration': duration,
-                            'is_concert': getattr(self.gameplay, 'concert_spectator_mode', False)
+                            'fade_duration': duration
                         })
             self.player_sources.clear()
 
@@ -571,40 +569,7 @@ class MegaphoneManager:
         filters = []
         global_vol = options.get("megaphone_volume", 100) / 100.0
 
-        if getattr(self.gameplay, 'concert_spectator_mode', False):
-            # 2D Concert Spectator Mode
-            src = None
-            p_filter = None
-            try:
-                src = self.game.audio_mngr.context.gen_source()
-                src.position = [0, 0, 0]
-                src.relative = True
-                src.gain = global_vol
-                src.rolloff_factor = 0.0
-
-                # Apply flat EQ for Concert Mode to ensure high fidelity
-                eq_bass = 1.0
-                eq_treble = 1.0
-                
-                p_filter = self.game.audio_mngr.gen_filter("BANDPASS")
-                if p_filter:
-                    try:
-                        p_filter.set("GAIN", eq_bass)
-                        p_filter.set("GAINHF", eq_treble)
-                        p_filter.set("GAINLF", eq_bass)
-                        src.direct_filter = p_filter
-                    except Exception as e:
-                        pass
-                
-                sources.append(src)
-                if p_filter:
-                    filters.append(p_filter)
-            except Exception as e:
-                print(f"[MEGAPHONE] Error initializing 2D spectator source: {e}")
-                if src: src.destroy()
-                if p_filter: p_filter.destroy()
-        else:
-            for i, spk_data in enumerate(self.speaker_data):
+        for i, spk_data in enumerate(self.speaker_data):
                 # Skip entries that are ground reflections (they are stored under reflection_source in the primary speaker dict)
                 if 'source' not in spk_data:
                     continue
@@ -1093,7 +1058,7 @@ class MegaphoneManager:
                             pass
             
             # ALSO sync all active per-player megaphone sources
-            if hasattr(self, 'player_sources') and not getattr(self.gameplay, 'concert_spectator_mode', False):
+            if hasattr(self, 'player_sources'):
                 for player_entry in self.player_sources.values():
                     if 'sources' in player_entry:
                         for src in player_entry['sources']:
@@ -1236,15 +1201,6 @@ class MegaphoneManager:
                         # Store targets on player cloned sources
                         if hasattr(self, 'player_sources'):
                             for player_entry in self.player_sources.values():
-                                if getattr(self.gameplay, 'concert_spectator_mode', False):
-                                    if len(player_entry.get('targets_vol', [])) > 0 and i == 0:
-                                        player_entry['targets_vol'][0] = data['base_volume'] * global_vol
-                                        player_entry['targets_gain'][0] = 1.0
-                                        player_entry['targets_gainhf'][0] = 1.0
-                                        if 'targets_gainlf' in player_entry and len(player_entry['targets_gainlf']) > 0:
-                                            player_entry['targets_gainlf'][0] = 1.0
-                                    continue
-                                    
                                 if 'sources' in player_entry:
                                     prim_idx = 2 * i
                                     refl_idx = 2 * i + 1
@@ -1404,9 +1360,9 @@ class MegaphoneManager:
                                         concert_fade_in_mult = elapsed / dur
                                 
                                 # Interpolate player primary source
-                                if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None and player_entry['filters'][prim_idx] is not None:
+                                if prim_idx < len(player_entry['sources']) and player_entry['sources'][prim_idx] is not None:
                                     src = player_entry['sources'][prim_idx]
-                                    flt = player_entry['filters'][prim_idx]
+                                    flt = player_entry['filters'][prim_idx] if prim_idx < len(player_entry['filters']) else None
 
                                     # Volume
                                     t_vol = player_entry['targets_vol'][prim_idx] * duck_mult * concert_fade_in_mult
@@ -1419,59 +1375,56 @@ class MegaphoneManager:
                                         player_entry['currents_vol'][prim_idx] = t_vol
                                         src.gain = t_vol
 
-                                    # Filter GAIN
-                                    t_g = player_entry['targets_gain'][prim_idx]
-                                    c_g = player_entry['currents_gain'][prim_idx]
-                                    if abs(t_g - c_g) > 0.001:
-                                        new_g = c_g + (t_g - c_g) * smooth_factor
-                                        player_entry['currents_gain'][prim_idx] = new_g
-                                        flt.set("GAIN", new_g)
-                                    elif c_g != t_g:
-                                        player_entry['currents_gain'][prim_idx] = t_g
-                                        flt.set("GAIN", t_g)
-                                    
-                                    # Filter GAINHF
-                                    t_ghf = player_entry['targets_gainhf'][prim_idx]
-                                    c_ghf = player_entry['currents_gainhf'][prim_idx]
-                                    if abs(t_ghf - c_ghf) > 0.001:
-                                        new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
-                                        player_entry['currents_gainhf'][prim_idx] = new_ghf
-                                        flt.set("GAINHF", new_ghf)
-                                    elif c_ghf != t_ghf:
-                                        player_entry['currents_gainhf'][prim_idx] = t_ghf
-                                        flt.set("GAINHF", t_ghf)
-
-                                    # Filter GAINLF
-                                    t_glf = player_entry.get('targets_gainlf', player_entry['targets_gainhf'])[prim_idx]
-                                    c_glf = player_entry.get('currents_gainlf', player_entry['currents_gainhf'])[prim_idx]
-                                    if abs(t_glf - c_glf) > 0.001:
-                                        new_glf = c_glf + (t_glf - c_glf) * smooth_factor
-                                        if 'currents_gainlf' in player_entry:
-                                            player_entry['currents_gainlf'][prim_idx] = new_glf
-                                        flt.set("GAINLF", new_glf)
-                                    elif c_glf != t_glf:
-                                        if 'currents_gainlf' in player_entry:
-                                            player_entry['currents_gainlf'][prim_idx] = t_glf
-                                        flt.set("GAINLF", t_glf)
+                                    if flt is not None:
+                                        # Filter GAIN
+                                        t_g = player_entry['targets_gain'][prim_idx]
+                                        c_g = player_entry['currents_gain'][prim_idx]
+                                        if abs(t_g - c_g) > 0.001:
+                                            new_g = c_g + (t_g - c_g) * smooth_factor
+                                            player_entry['currents_gain'][prim_idx] = new_g
+                                            flt.set("GAIN", new_g)
+                                        elif c_g != t_g:
+                                            player_entry['currents_gain'][prim_idx] = t_g
+                                            flt.set("GAIN", t_g)
                                         
-                                    # CRITICAL: Re-apply filter object to source so changes take effect.
-                                    # The filter is shared between direct_filter AND EFX sends (slot 0=EQ,
-                                    # 1=reverb, 2=compressor, 3=local reverb). After mutating GAIN/GAINHF/
-                                    # GAINLF we must re-send each slot so OpenAL picks up the new filter
-                                    # state — otherwise the muffle values are computed but never heard.
-                                    src.direct_filter = flt
-                                    if hasattr(self.game.audio_mngr, 'efx'):
-                                        try:
-                                            if hasattr(self, 'eq_slot') and self.eq_slot:
-                                                self.game.audio_mngr.efx.send(src, 0, self.eq_slot, filter=flt)
-                                            if i < len(self.speaker_data) and self.speaker_data[i].get('reverb_slot'):
-                                                self.game.audio_mngr.efx.send(src, 1, self.speaker_data[i]['reverb_slot'], filter=flt)
-                                            if hasattr(self, 'compressor_slot') and self.compressor_slot:
-                                                self.game.audio_mngr.efx.send(src, 2, self.compressor_slot, filter=flt)
-                                            if hasattr(self, 'current_player_reverb_slot') and self.current_player_reverb_slot not in (None, 'UNINIT'):
-                                                self.game.audio_mngr.efx.send(src, 3, self.current_player_reverb_slot, filter=flt)
-                                        except Exception:
-                                            pass
+                                        # Filter GAINHF
+                                        t_ghf = player_entry['targets_gainhf'][prim_idx]
+                                        c_ghf = player_entry['currents_gainhf'][prim_idx]
+                                        if abs(t_ghf - c_ghf) > 0.001:
+                                            new_ghf = c_ghf + (t_ghf - c_ghf) * smooth_factor
+                                            player_entry['currents_gainhf'][prim_idx] = new_ghf
+                                            flt.set("GAINHF", new_ghf)
+                                        elif c_ghf != t_ghf:
+                                            player_entry['currents_gainhf'][prim_idx] = t_ghf
+                                            flt.set("GAINHF", t_ghf)
+
+                                        # Filter GAINLF
+                                        t_glf = player_entry.get('targets_gainlf', player_entry['targets_gainhf'])[prim_idx]
+                                        c_glf = player_entry.get('currents_gainlf', player_entry['currents_gainhf'])[prim_idx]
+                                        if abs(t_glf - c_glf) > 0.001:
+                                            new_glf = c_glf + (t_glf - c_glf) * smooth_factor
+                                            if 'currents_gainlf' in player_entry:
+                                                player_entry['currents_gainlf'][prim_idx] = new_glf
+                                            flt.set("GAINLF", new_glf)
+                                        elif c_glf != t_glf:
+                                            if 'currents_gainlf' in player_entry:
+                                                player_entry['currents_gainlf'][prim_idx] = t_glf
+                                            flt.set("GAINLF", t_glf)
+                                            
+                                        # CRITICAL: Re-apply filter object to source so changes take effect.
+                                        src.direct_filter = flt
+                                        if hasattr(self.game.audio_mngr, 'efx'):
+                                            try:
+                                                if hasattr(self, 'eq_slot') and self.eq_slot:
+                                                    self.game.audio_mngr.efx.send(src, 0, self.eq_slot, filter=flt)
+                                                if i < len(self.speaker_data) and self.speaker_data[i].get('reverb_slot'):
+                                                    self.game.audio_mngr.efx.send(src, 1, self.speaker_data[i]['reverb_slot'], filter=flt)
+                                                if hasattr(self, 'compressor_slot') and self.compressor_slot:
+                                                    self.game.audio_mngr.efx.send(src, 2, self.compressor_slot, filter=flt)
+                                                if hasattr(self, 'current_player_reverb_slot') and self.current_player_reverb_slot not in (None, 'UNINIT'):
+                                                    self.game.audio_mngr.efx.send(src, 3, self.current_player_reverb_slot, filter=flt)
+                                            except Exception:
+                                                pass
 
                                 # Interpolate player reflection source
                                 if refl_idx < len(player_entry['sources']) and player_entry['sources'][refl_idx] is not None and player_entry['filters'][refl_idx] is not None:
