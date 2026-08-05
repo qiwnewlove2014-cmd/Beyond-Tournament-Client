@@ -79,8 +79,11 @@ class CompassTurnCue:
                 if self.gameplay.map:
                     reverb = self.gameplay.map.get_reverb_at(player.x, player.y, player.z)
                     audio_mngr = self.gameplay.game.audio_mngr
-                    if reverb and hasattr(reverb, "reverb") and reverb.reverb and hasattr(audio_mngr, "efx"):
-                        audio_mngr.efx.send(source, 0, reverb.reverb)
+                    if hasattr(audio_mngr, "efx"):
+                        if reverb and hasattr(reverb, "reverb") and reverb.reverb:
+                            audio_mngr.efx.send(source, 0, reverb.reverb)
+                        else:
+                            audio_mngr.efx.send(source, 0, None)
             except Exception:
                 pass
         except Exception:

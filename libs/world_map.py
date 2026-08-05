@@ -1087,7 +1087,7 @@ class SoundSource(BaseMapObj):
         self.fade_range = 10.0
         self.current_gain = 0.0
 
-    def loop(self, player_x, player_y, player_z):
+    def loop(self, player_x, player_y, player_z, reverb_slot=None):
         if not self.soundgroup:
             return
 
@@ -1155,6 +1155,8 @@ class SoundSource(BaseMapObj):
         if self.sound and hasattr(self.sound, "source") and self.sound.source:
             with contextlib.suppress(Exception):
                 self.sound.source.gain = self.current_gain
+                if hasattr(self.map.game.audio_mngr, "efx"):
+                    self.map.game.audio_mngr.efx.send(self.sound.source, 0, reverb_slot)
 
     def check_out_x(self, x):
         if self.minx <= x <= self.maxx:

@@ -485,7 +485,7 @@ class Gameplay(state.State):
             entity.player_dead=True if self.player.dead else False
         self.map.loop()
         for i in self.map.source_list.copy():
-            i.loop(self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
+            i.loop(self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z, reverb_slot=getattr(self, 'current_player_reverb_slot', None))
         
         # === Music Bot loop (auto-advance tracks) ===
         if hasattr(self, 'music_bot') and self.music_bot:
