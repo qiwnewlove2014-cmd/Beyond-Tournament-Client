@@ -441,7 +441,7 @@ def set_device(game, device, func_call):
     options.set("audio_device", device)
     if device == "system default": device = cyal.util.get_default_all_device_specifier()
     game.audio_mngr.context.device.reopen(name=device)
-    game.audio_mngr.hrtf.use(options.get("hrtf_model", "Built-In HRTF"))
+    game.audio_mngr.hrtf.use(options.get("hrtf_model", "oalsoft_hrtf_48000"))
     func_call()
 
 def input_menu(game, func_call, replace_call=None, parent=None, in_game=False):

@@ -33,7 +33,7 @@ class AudioManager():
         )
         self.silent_buf = bytearray(96*options.get("jitter_buffer", 60))
         self.hrtf = cyal.hrtf.HrtfExtension(self.context.device)
-        self.hrtf.use(options.get("hrtf_model", "Built-In HRTF"))
+        self.hrtf.use(options.get("hrtf_model", "oalsoft_hrtf_48000"))
         self.muted=False
         self.max_distance = 59
         self.efx = cyal.efx.EfxExtension(self.context)
