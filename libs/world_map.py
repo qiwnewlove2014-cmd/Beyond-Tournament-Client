@@ -872,6 +872,201 @@ class Pannable(BaseMapObj):
         self.game = game
         self.soundgroup = self.game.audio_mngr.create_soundgroup()
         self.soundgroup.position = (x, y, z)
+        self.map = map
+        self.decay_time = t60
+        self.reverb = self.map.game.audio_mngr.gen_effect(
+            "EAXREVERB",
+            ("decay_time", float(t60)),
+            ("density", float(density)),
+            ("diffusion", float(diffusion)),
+            ("gain", float(gain)),
+            ("gainhf", float(gainhf)),
+            ("gainlf", float(gainlf)),
+            ("decay_hfratio", float(hfratio)),
+            ("decay_lfratio", float(lfratio)),
+            ("reflections_gain", float(reflections_gain)),
+            ("reflections_delay", float(reflections_delay)),
+            ("reflections_pan", tuple(reflections_pan)),
+            ("late_reverb_gain", float(late_reverb_gain)),
+            ("late_reverb_delay", float(late_reverb_delay)),
+            ("late_reverb_pan", tuple(late_reverb_pan)),
+            ("echo_time", float(echo_time)),
+            ("echo_depth", float(echo_depth)),
+            ("modulation_time", float(modulation_time)),
+            ("modulation_depth", float(modulation_depth)),
+            ("air_absorption_gainhf", float(air_absorption_gainhf)),
+            ("hfreference", float(hfrefference)),
+            ("lfreference", float(lfrefference)),
+            ("room_rolloff_factor", float(room_rolloff_factor)),
+        )
+
+    def destroy(self):
+        with contextlib.suppress(Exception):
+            if self.reverb:
+                # Detach from audio manager sends if it was the active reverb
+                am = self.map.game.audio_mngr
+                for send_idx, slot in enumerate(am.sends):
+                    if slot == self.reverb:
+                        am.apply_effect(None, send_idx)
+                
+                am.release_effect_slot(self.reverb)
+                self.reverb = None
+
+
+class Ambience(BaseMapObj):
+    def __init__(
+        self,
+        map,
+        id,
+        minx,
+        maxx,
+        miny,
+        maxy,
+        minz,
+        maxz,
+        sound,
+        volume=100,
+        type="ambience",
+    ):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, type)
+        self.map = map
+        self.file = sound if sound is not str else ""
+        self.volume = volume
+        self.fade_time = 0.5
+        self.soundgroup = self.map.game.audio_mngr.create_soundgroup(
+            direct=True, filterable=True if type == "ambience" else False
+        )
+        self.sound = self.soundgroup.play(self.file, True, cat=type, volume=self.volume)
+
+        self.playing = False
+        with contextlib.suppress(AttributeError):
+            self.sound.source.gain = 0.0
+            self.sound.muted = True
+
+    def enter(self):
+        if not self.playing:
+            self.playing = True
+            if self.sound and self.sound.source is not None:
+                try:
+                    self.map.game.automate(
+                        self.sound.source,
+                        "gain",
+                        (self.volume / 100)
+                        * (self.map.game.audio_mngr.volume_categories[self.type][0] / 100),
+                        500,
+                        callback=lambda: setattr(self.sound, "muted", False),
+                    )
+                except cyal.exceptions.InvalidOperationError:
+                    pass
+
+    def leave(self, destroy=False):
+        def _on_fade_complete():
+            if self.sound:
+                setattr(self.sound, "muted", True)
+                if destroy:
+                    self.sound.destroy()
+
+        if self.playing:
+            self.playing = False
+            if self.sound:
+                try:
+                    self.map.game.automate(
+                        self.sound.source,
+                        "gain",
+                        0.0,
+                        500,
+                        callback=_on_fade_complete,
+                    )
+                except cyal.exceptions.InvalidOperationError:
+                    if destroy:
+                        self.sound.destroy()
+        else:
+            if self.sound and destroy:
+                self.sound.destroy()
+
+
+class Tile(BaseMapObj):
+    """An internal tile class. You do not need to create any objects with this type externally"""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, type):
+        super(Tile, self).__init__(id, minx, maxx, miny, maxy, minz, maxz, "tile")
+        self.tiletype = type
+
+
+class Door(BaseMapObj):
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "door")
+
+
+class Zone(BaseMapObj):
+    """an internal zone class"""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, name):
+        super(Zone, self).__init__(id, minx, maxx, miny, maxy, minz, maxz, "zone")
+        self.zonename = name
+
+
+class Wallbuy(BaseMapObj):
+    """A wall-mounted weapon buy station. Mirrors server Wallbuy bounds (±1)."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, weaponName="", weaponCost=0, ammoCost=0):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "wallbuy")
+        self.weaponName = weaponName
+        self.weaponCost = weaponCost
+        self.ammoCost = ammoCost
+
+    def in_bound(self, x, y, z):
+        # Match server: wallbuy is interactable from ±1 tile around its bounds
+        if x is None or y is None or z is None:
+            return False
+        try:
+            ix = floor(x); iy = floor(y); iz = floor(z)
+            return (
+                ix >= floor(self.minx) - 1 and ix <= floor(self.maxx) + 1
+                and iy >= floor(self.miny) - 1 and iy <= floor(self.maxy) + 1
+                and iz >= floor(self.minz) - 1 and iz <= floor(self.maxz) + 1
+            )
+        except TypeError:
+            return False
+
+
+class Interactable(BaseMapObj):
+    """A generic interactable object (lever, switch, button, etc.)."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, innerText=""):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "interactable")
+        self.label = innerText or "Interactable"
+
+
+class PerkMachine(BaseMapObj):
+    """A perk-a-cola machine. Display name comes from server 'name' or 'perk'."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, perk="", name=""):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "perkMachine")
+        self.perk = perk
+        self.label = name or perk or "Perk Machine"
+
+
+class MinigameTable(BaseMapObj):
+    """An arcade/minigame table (e.g. Pong, Blackjack, Multi-Game)."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, game_type="pong"):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "minigameTable")
+        self.game_type = game_type or "pong"
+        if self.game_type == "blackjack":
+            self.label = "Blackjack Arcade Table"
+        elif self.game_type == "all":
+            self.label = "Multi-Game Arcade Cabinet"
+        else:
+            self.label = "Pong Arcade Table"
+
+
+class Pannable(BaseMapObj):
+    def __init__(self, game, x, y, z, sound, volume=100):
+        super().__init__(x, x, y, y, z, z, sound)
+        self.game = game
+        self.soundgroup = self.game.audio_mngr.create_soundgroup()
+        self.soundgroup.position = (x, y, z)
         self.sound = self.soundgroup.play(sound, looping=True, volume=volume)
 
     def destroy(self):
@@ -884,25 +1079,80 @@ class SoundSource(BaseMapObj):
     def __init__(self, map, id, minx, maxx, miny, maxy, minz, maxz, sound, volume=100):
         super().__init__(id, minx, maxx, miny, maxy, minz, maxz, sound)
         self.map = map
-        self.soundgroup = self.map.game.audio_mngr.create_soundgroup(radius=1.0)
+        self.soundgroup = self.map.game.audio_mngr.create_soundgroup(radius=10.0, filterable=True)
         self.sound = None
         self.path = sound
         self.volume = volume
         self.playing = False
+        self.fade_range = 10.0
+        self.current_gain = 0.0
 
     def loop(self, player_x, player_y, player_z):
         if not self.soundgroup:
             return
-        self.soundgroup.position = (
-            self.check_out_x(player_x),
-            self.check_out_y(player_y),
-            self.check_out_z(player_z),
-        )
+
+        # Calculate 3D distance to the nearest point on the bounding box (with 3.5x Z altitude weighting)
+        dx = max(0.0, self.minx - player_x, player_x - self.maxx)
+        dy = max(0.0, self.miny - player_y, player_y - self.maxy)
+        dz = max(0.0, self.minz - player_z, player_z - self.maxz) * 3.5
+        distance = (dx * dx + dy * dy + dz * dz) ** 0.5
+
+        # Calculate distance-attenuated target gain
+        fade_factor = max(0.0, 1.0 - (distance / self.fade_range))
+        ui_cat_vol = self.map.game.audio_mngr.volume_categories.get("sound_source", [100])[0] / 100.0
+        base_gain = (self.volume / 100.0) * ui_cat_vol
+        target_gain = base_gain * fade_factor
+
+        # Smooth frame-by-frame interpolation for buttery smooth fade in/out (eliminates pops and thread conflicts!)
+        if self.current_gain < target_gain:
+            self.current_gain = min(target_gain, self.current_gain + 0.05)
+        elif self.current_gain > target_gain:
+            self.current_gain = max(target_gain, self.current_gain - 0.05)
+
+        # Once completely silent and out of range, cleanly pause to prevent leaks
+        if self.current_gain <= 0.0 and target_gain <= 0.0:
+            if self.playing:
+                self.playing = False
+                if self.sound and hasattr(self.sound, "source") and self.sound.source:
+                    with contextlib.suppress(Exception):
+                        self.sound.source.gain = 0.0
+                        self.sound.source.pause()
+            return
+
+        # Position sound source at closest boundary point for 3D spatial panning when turning
+        cx = self.check_out_x(player_x)
+        cy = self.check_out_y(player_y)
+        cz = self.check_out_z(player_z)
+
+        if distance == 0:
+            self.soundgroup.position = (cx, cy + 0.5, cz)
+        else:
+            self.soundgroup.position = (cx, cy, cz)
+
         if not self.playing:
             self.playing = True
-            self.sound = self.soundgroup.play(
-                self.path, True, cat="sound_source", volume=self.volume
-            )
+            if not self.sound:
+                self.sound = self.soundgroup.play(
+                    self.path, True, cat="sound_source", volume=self.volume
+                )
+                if self.sound and hasattr(self.sound, "source") and self.sound.source:
+                    with contextlib.suppress(Exception):
+                        self.sound.source.gain = self.current_gain
+                        self.sound.source.spatialize = True
+                        self.sound.source.direct_channels = False
+                        if hasattr(self.sound.source, "radius"):
+                            self.sound.source.radius = 15.0
+                        if hasattr(self.sound.source, "reference_distance"):
+                            self.sound.source.reference_distance = 10.0
+            else:
+                with contextlib.suppress(Exception):
+                    if self.sound and self.sound.source:
+                        self.sound.source.gain = self.current_gain
+                        self.sound.source.play()
+
+        if self.sound and hasattr(self.sound, "source") and self.sound.source:
+            with contextlib.suppress(Exception):
+                self.sound.source.gain = self.current_gain
 
     def check_out_x(self, x):
         if self.minx <= x <= self.maxx:

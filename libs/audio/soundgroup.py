@@ -312,6 +312,8 @@ class SoundGroup:
         else: self.muted = False
 
     def aclude_check(self, map):
+        if not self.filterable:
+            return
         # Helper to get or create a filter safely
         def get_occlusion_filter():
             if self.cached_filter is None:
@@ -334,11 +336,11 @@ class SoundGroup:
             )
             
             if result is True:
-                # Path is CLEAR: Remove any existing occlusion filter
+                # Path is CLEAR (Inside room / Line of sight): Clear occlusion filter so sound is 100% crystal clear
                 self.apply_filter(None, replace=True, clear=True)
                 
             elif result is False:
-                # Path is BLOCKED: Apply occlusion filter
+                # Path is BLOCKED (Behind wall): Apply occlusion filter
                 filter_obj = get_occlusion_filter()
                 if filter_obj:
                     try:
