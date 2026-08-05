@@ -1097,8 +1097,10 @@ class SoundSource(BaseMapObj):
         dz = max(0.0, self.minz - player_z, player_z - self.maxz) * 3.5
         distance = (dx * dx + dy * dy + dz * dz) ** 0.5
 
-        # Calculate distance-attenuated target gain
-        fade_factor = max(0.0, 1.0 - (distance / self.fade_range))
+        # Calculate distance-attenuated target gain using Smoothstep (S-Curve) for realistic auditory falloff
+        t = max(0.0, min(1.0, 1.0 - (distance / self.fade_range)))
+        fade_factor = t * t * (3.0 - 2.0 * t)
+        
         ui_cat_vol = self.map.game.audio_mngr.volume_categories.get("sound_source", [100])[0] / 100.0
         base_gain = (self.volume / 100.0) * ui_cat_vol
         target_gain = base_gain * fade_factor
