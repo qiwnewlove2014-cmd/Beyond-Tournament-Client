@@ -4,6 +4,19 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.6.0] Music Bot Broadcast Fix & Auto-Restart Watchdog — 2026-08-05
+--------------------------------------------------------------------------------
+
+• Audio Engine & Voice Chat
+- **Music Bot Broadcast Reliability:** Resolved a critical buffer handling issue where minor network fluctuations (buffer underruns) caused the Music Bot broadcast to become permanently silent for listeners. The audio buffer queue now safely recovers and resumes playback smoothly.
+- **Music Bot Broadcast Distance Range:** Smoothly balanced the 3D spatial attenuation for Music Bot broadcasts over voice chat. Broadcast audio now extends up to 50 tiles and fades down continuously to complete silence without abrupt volume drops or clipping.
+- **3D Ambient Audio & Wall Occlusion System:** Comprehensively rebuilt the ambient sound fading and wall occlusion systems. This complex and time-intensive rewrite eliminates audio "popping" or "stuttering" when moving rapidly in and out of sound zones, prevents indoor sounds from leaking through walls, ensures perfectly smooth fade transitions even when moving between floors (Z-axis), and completely stops out-of-bounds ambient audio from bleeding into the background.
+
+• Security & Client Diagnostics
+- **Native Deadlock Failsafe (Freeze Watchdog):** Upgraded the background crash reporter to detect catastrophic native C/C++ engine freezes (e.g. OpenAL deadlocks). If the game is unresponsive for over 15 seconds, the watchdog will automatically dump all active thread stack traces, securely submit a `fatal` crash report to the development team, speak an auditory warning to the player, and seamlessly auto-restart the game to the login screen.
+detected...") and reassures players that the crash report was successfully dispatched.
+
+--------------------------------------------------------------------------------
 [v1.5.9] Navigation Audio, Music Controls & Staff AI Cleanup — 2026-08-02
 --------------------------------------------------------------------------------
 
