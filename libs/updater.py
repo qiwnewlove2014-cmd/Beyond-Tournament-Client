@@ -293,7 +293,7 @@ class Updater(state.State):
                 release = get_latest_release()
                 if not release:
                     if self.silent_if_uptodate:
-                        self.game.replace(menus.main_menu(self.game))
+                        menus.main_menu(self.game)
                         return
                     msg = "Could not check for updates. Check your internet connection. Press Enter to return."
                     m = menu.Menu(self.game, "Check for Updates")
@@ -304,7 +304,7 @@ class Updater(state.State):
                     return
                 elif release.get("no_release"):
                     if self.silent_if_uptodate:
-                        self.game.replace(menus.main_menu(self.game))
+                        menus.main_menu(self.game)
                         return
                     msg = "No releases are available yet. Press Enter to return."
                     m = menu.Menu(self.game, "Check for Updates")
@@ -327,7 +327,7 @@ class Updater(state.State):
                         return  # รอ input จากผู้เล่นใน update()
                     else:
                         if self.silent_if_uptodate:
-                            self.game.replace(menus.main_menu(self.game))
+                            menus.main_menu(self.game)
                             return
                         current_str = _current_version_string()
                         msg = f"You are up to date. Current version {current_str}. Press Enter to return."
@@ -339,7 +339,7 @@ class Updater(state.State):
                         return
             except Exception:
                 if self.silent_if_uptodate:
-                    self.game.replace(menus.main_menu(self.game))
+                    menus.main_menu(self.game)
                     return
                 msg = "Could not check for updates. Check your internet connection. Press Enter to return."
                 m = menu.Menu(self.game, "Check for Updates")
