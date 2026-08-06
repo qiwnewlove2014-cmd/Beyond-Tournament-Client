@@ -319,23 +319,26 @@ class AudioManager():
             if not buf_l or not buf_r:
                 return None
             try:
-                # Left channel 3D source (offset -1.2 on X axis)
-                src_l = self.context.gen_source(position=(x - 1.2, y, z), velocity=(0,0,0), pitch=1.0, gain=gain)
+                gain_l = gain * 1.15  # Equalize left channel acoustic energy to balance right channel bias
+                gain_r = gain
+
+                # Left channel 3D source (offset -2.5 on X axis for wider extended stereo field)
+                src_l = self.context.gen_source(position=(x - 2.5, y, z), velocity=(0,0,0), pitch=1.0, gain=gain_l)
                 src_l.relative = False
                 src_l.direct_channels = False
                 src_l.spatialize = True
-                src_l.reference_distance = 3.0
-                src_l.rolloff_factor = 1.0
+                src_l.reference_distance = 6.0
+                src_l.rolloff_factor = 0.6
                 src_l.max_distance = max_distance
                 src_l.buffer = buf_l
 
-                # Right channel 3D source (offset +1.2 on X axis)
-                src_r = self.context.gen_source(position=(x + 1.2, y, z), velocity=(0,0,0), pitch=1.0, gain=gain)
+                # Right channel 3D source (offset +2.5 on X axis for wider extended stereo field)
+                src_r = self.context.gen_source(position=(x + 2.5, y, z), velocity=(0,0,0), pitch=1.0, gain=gain_r)
                 src_r.relative = False
                 src_r.direct_channels = False
                 src_r.spatialize = True
-                src_r.reference_distance = 3.0
-                src_r.rolloff_factor = 1.0
+                src_r.reference_distance = 6.0
+                src_r.rolloff_factor = 0.6
                 src_r.max_distance = max_distance
                 src_r.buffer = buf_r
             except Exception as e:
