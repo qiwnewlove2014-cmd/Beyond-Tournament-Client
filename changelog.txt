@@ -9,6 +9,7 @@
 
 • Interactive Objects & Audio
 - **Piano Sustain & Staccato Polish:** Fine-tuned the piano's acoustic behavior. Re-mapped the sustain pedal to the Spacebar for a more comfortable playing experience, and fixed an issue where remote listeners could not properly hear staccato notes.
+- **Realistic Environmental Reverb:** Integrated dynamic map reverb directly into piano performances. Piano notes now automatically absorb the acoustic environment of the room or area they are played in, providing rich, realistic reverberation for an elevated musical experience for both performers and listeners.
 
 --------------------------------------------------------------------------------
 [v1.6.2] Piano Patch — 2026-08-06

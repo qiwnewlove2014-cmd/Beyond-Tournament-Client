@@ -339,7 +339,6 @@ class AudioManager():
     def stop_piano_note(self, peer_id, note_name):
         piano_key = f"{peer_id}-{note_name}"
         snd = self.active_piano_notes.pop(piano_key, None)
-        print(f"[DEBUG PIANO] audio_mngr.stop_piano_note called for {piano_key}. Found snd? {snd is not None}")
         if snd and snd.source:
             # Smooth damper fade-out (~200ms) instead of harsh instant stop
             def _fade_out(source, steps=10, duration=0.2):

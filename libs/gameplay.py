@@ -600,12 +600,19 @@ class Gameplay(state.State):
                         if event.key in key_to_note:
                             note_name = key_to_note[event.key]
                             # Instant 0ms local audio feedback (client prediction)
-                            self.game.audio_mngr.play_piano_note(
+                            snd = self.game.audio_mngr.play_piano_note(
                                 "local", note_name,
                                 self.player.x, self.player.y, self.player.z,
                                 self.player.x, self.player.y, self.player.z,
                                 volume=300
                             )
+                            if snd and snd.source and getattr(self, 'map', None):
+                                reverb = self.map.get_reverb_at(self.player.x, self.player.y, self.player.z)
+                                if reverb and reverb.reverb:
+                                    try:
+                                        self.game.audio_mngr.efx.send(snd.source, 0, reverb.reverb)
+                                    except Exception:
+                                        pass
                             self.game.network.send(consts.CHANNEL_MAP, "play_piano_note", {"note": note_name})
                 elif event.type == pygame.KEYUP:
                     # Sustain pedal release (Space) — stop all sustained notes
