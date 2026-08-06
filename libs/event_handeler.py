@@ -312,9 +312,18 @@ class EventHandeler:
         )
 
     def play_unbound(self, data):
-        snd = self.game.audio_mngr.play_unbound(
-            data["sound"], data["x"], data["y"], data["z"], False, volume=data["volume"], cat=data.get("cat", "miscelaneous")
-        )
+        if data.get("is_stereo_spatial") and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
+            lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
+            facing = getattr(self.gameplay.player, 'facing', 0.0)
+            snd = self.game.audio_mngr.play_unbound_stereo_spatial(
+                data["sound"], data["x"], data["y"], data["z"], lx, ly, lz,
+                volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"), max_distance=data.get("max_distance", 25.0), facing_angle=facing
+            )
+        else:
+            snd = self.game.audio_mngr.play_unbound(
+                data["sound"], data["x"], data["y"], data["z"], False, volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"),
+                reference_distance=data.get("reference_distance", 3.0), rolloff=data.get("rolloff", 1.0), max_distance=data.get("max_distance", 25.0)
+            )
         if snd and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'map', None):
             reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
             if reverb and reverb.reverb:
@@ -322,6 +331,24 @@ class EventHandeler:
                     self.game.audio_mngr.efx.send(snd.source, 0, reverb.reverb)
                 except Exception:
                     pass
+
+    def piano_start(self, data):
+        """Enable piano mode to intercept keyboard input for playing piano notes and pre-load audio buffers strongly into RAM."""
+        self.gameplay.piano_mode = True
+        notes = ["C4", "Db4", "D4", "Eb4", "E4", "F4", "Gb4", "G4", "Ab4", "A4", "Bb4", "B4", "C5", "Db5", "D5", "Eb5", "E5", "F5"]
+        for note in notes:
+            snd = f"piano/Piano.mf.{note}.ogg"
+            snd_path = os.path.join(consts.SOUNDPREPEND, snd)
+            try:
+                rel_snd = os.path.relpath(snd_path)
+            except ValueError:
+                rel_snd = os.path.normpath(snd_path)
+            try:
+                buf = self.game.audio_mngr.load_buffer(snd)
+                if buf:
+                    self.game.audio_mngr._preloaded_buffers[rel_snd] = buf
+            except Exception:
+                pass
 
     def set_game_mode(self, data):
         """Receive game mode from server (e.g. 'pong' or 'normal') and update game state."""

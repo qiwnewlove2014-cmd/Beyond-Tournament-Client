@@ -1,12 +1,7 @@
 --------------------------------------------------------------------------------
-[v1.6.1] Client Security Patch 1 — 2026-08-06
+[v1.6.2] Piano Patch — 2026-08-06
 --------------------------------------------------------------------------------
 
-• Security & Client Diagnostics
-- **Client Asset Security:** Upgraded the data protection system to encrypt and secure audio assets, preventing unauthorized extraction or tampering with game files.
-- **Native Deadlock Failsafe (Freeze Watchdog):** Upgraded the background crash reporter to detect catastrophic native C/C++ engine freezes (e.g. OpenAL deadlocks). If the game is unresponsive for over 15 seconds, the watchdog will automatically dump all active thread stack traces, securely submit a `fatal` crash report to the development team, speak an auditory warning to the player, and seamlessly auto-restart the game to the login screen.
-- **English Auditory Warning:** The critical freeze TTS warning is now spoken in English ("A critical freeze was detected...") and reassures players that the crash report was successfully dispatched.
-
-• Map Builder & User Interface
-- **Builder & Weapon Menus:** Refactored the directory scanning backend for the Map Builder and /createweapon systems. These tools now securely query the client's virtual file system for sound libraries, ensuring compatibility across all deployment environments (e.g. cloud VPS).
-- **Auto-Updater UX Improvements:** The auto-updater now silently bypasses the "You are up to date" prompt during game startup, streamlining the login experience and eliminating the need for an unnecessary keypress. Manually checking for updates via the main menu will still explicitly report the version status as expected.
+• Interactive Objects & Audio
+- **Playable Piano:** Added a fully interactive, network-synced Piano! Players can now perform live music in real-time. We've designed a highly responsive custom keyboard layout for smooth playing across multiple octaves.
+- **Dynamic Piano Acoustics:** The piano features a brand-new dynamic acoustic system. When you play or stand close to the piano, the sound envelopes you in a rich, wide stereo experience. As you walk away, the sound naturally and seamlessly transitions into a realistic 3D directional audio source, providing an incredibly immersive and natural listening experience for everyone around.

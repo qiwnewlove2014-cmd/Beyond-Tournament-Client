@@ -1,3 +1,4 @@
+import os
 import time
 import random
 import contextlib
@@ -63,6 +64,8 @@ class Gameplay(state.State):
         self.pa_test_mode = False  # PA Test Mode for testing megaphone speakers
         self.game_started = False   # Track if game has started (blocks PA Test Mode)
         self.pong_mode = False      # True when player is in an active Pong match (suppresses normal footsteps)
+        self.piano_mode = False     # True when playing piano
+        self.piano_octave = 4       # Default octave (Octave 4 - Middle C)
         # ENet guarantees ordering inside one channel, not across CHANNEL_MISC
         # and CHANNEL_MAP.  Player spawn packets can therefore arrive before
         # the connected event enters this state.  Create the mapping here and
@@ -543,10 +546,67 @@ class Gameplay(state.State):
         key = pygame.key.get_pressed()
         is_concert = getattr(self, 'concert_spectator_mode', False)
         if not self.spectator_mode or is_concert:
-            for i in self.keys_held:
-                if key[i]:
-                    self.keys_held[i](pygame.key.get_mods())
+            if not getattr(self, 'piano_mode', False):
+                for i in self.keys_held:
+                    if key[i]:
+                        self.keys_held[i](pygame.key.get_mods())
         for event in events:
+            if getattr(self, 'piano_mode', False):
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_RETURN):
+                        self.piano_mode = False
+                        self.game.network.send(consts.CHANNEL_MAP, "piano_stop", {})
+                    elif event.key == pygame.K_TAB:
+                        mods = pygame.key.get_mods()
+                        if mods & pygame.KMOD_SHIFT:
+                            self.piano_octave = max(1, getattr(self, 'piano_octave', 4) - 1)
+                        else:
+                            self.piano_octave = min(7, getattr(self, 'piano_octave', 4) + 1)
+                        speak(f"Octave {self.piano_octave}")
+                        # Preload octave notes
+                        oct_notes = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+                        for n in oct_notes:
+                            snd = f"piano/Piano.mf.{n}{self.piano_octave}.ogg"
+                            snd_path = os.path.join(consts.SOUNDPREPEND, snd)
+                            try:
+                                rel_snd = os.path.relpath(snd_path)
+                            except ValueError:
+                                rel_snd = os.path.normpath(snd_path)
+                            try:
+                                buf = self.game.audio_mngr.load_buffer(snd)
+                                if buf:
+                                    self.game.audio_mngr._preloaded_buffers[rel_snd] = buf
+                            except Exception:
+                                pass
+                    else:
+                        oct = getattr(self, 'piano_octave', 4)
+                        oct_next = min(7, oct + 1)
+                        oct_prev = max(1, oct - 1)
+                        key_to_note = {
+                            # Lower Octave (Octave - 1)
+                            pygame.K_z: f"C{oct_prev}", pygame.K_s: f"Db{oct_prev}", pygame.K_x: f"D{oct_prev}",
+                            pygame.K_d: f"Eb{oct_prev}", pygame.K_c: f"E{oct_prev}", pygame.K_v: f"F{oct_prev}",
+                            pygame.K_g: f"Gb{oct_prev}", pygame.K_b: f"G{oct_prev}", pygame.K_h: f"Ab{oct_prev}",
+                            pygame.K_n: f"A{oct_prev}", pygame.K_j: f"Bb{oct_prev}", pygame.K_m: f"B{oct_prev}",
+
+                            # Upper / Main Octave (Octave N & N+1)
+                            pygame.K_q: f"C{oct}", pygame.K_2: f"Db{oct}", pygame.K_w: f"D{oct}",
+                            pygame.K_3: f"Eb{oct}", pygame.K_e: f"E{oct}", pygame.K_r: f"F{oct}",
+                            pygame.K_5: f"Gb{oct}", pygame.K_t: f"G{oct}", pygame.K_6: f"Ab{oct}",
+                            pygame.K_y: f"A{oct}", pygame.K_7: f"Bb{oct}", pygame.K_u: f"B{oct}",
+                            pygame.K_i: f"C{oct_next}", pygame.K_9: f"Db{oct_next}", pygame.K_o: f"D{oct_next}",
+                            pygame.K_0: f"Eb{oct_next}", pygame.K_p: f"E{oct_next}",
+                        }
+                        if event.key in key_to_note:
+                            note_name = key_to_note[event.key]
+                            # Instant 0ms local audio feedback (client prediction)
+                            self.game.audio_mngr.play_unbound(
+                                f"piano/Piano.mf.{note_name}.ogg",
+                                self.player.x, self.player.y, self.player.z,
+                                False, volume=300, direct=True
+                            )
+                            self.game.network.send(consts.CHANNEL_MAP, "play_piano_note", {"note": note_name})
+                continue
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
                 self.game.network.send(consts.CHANNEL_MAP, "pong_serve", {})
                 continue

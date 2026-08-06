@@ -207,11 +207,13 @@ class AudioManager():
                     gain = (self.volume_categories[cat][0] / 100) * (source.volume / 100)
                     if not source.muted: source.source.gain = gain
 
-    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0):
+    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0, reference_distance=15.0, rolloff=1.0, max_distance=100.0):
         if self.muted and not looping: return
         direction=self.make_orientation(*direction)
         buffer = self.load_buffer(path)
         if not buffer: return
+        if cat not in self.volume_categories:
+            cat = "miscelaneous"
         if not self.volume_categories[cat] or cat == "master": return
         source = self.context.gen_source(
             looping=looping, 
@@ -229,6 +231,9 @@ class AudioManager():
         else:
             source.direct_channels = False
             source.spatialize=True
+            source.reference_distance = reference_distance
+            source.rolloff_factor = rolloff
+            source.max_distance = max_distance
             source.cone_inner_angle = cone_inner_angle
             source.cone_outer_angle = cone_outer_angle
             source.cone_outer_gain = cone_outer_gain
@@ -243,8 +248,71 @@ class AudioManager():
             try: self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
             except cyal.exceptions.InvalidOperationError as e: print(e)
         source.play()
-        self.volume_categories["master"][1].add(source)
-        self.volume_categories[cat][1].add(source)
+        self.volume_categories["master"][1].add(snd)
+        self.volume_categories[cat][1].add(snd)
+        return snd
+
+    def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0):
+        if self.muted:
+            return None
+        buffer = self.load_buffer(path)
+        if not buffer:
+            return None
+        if cat not in self.volume_categories:
+            cat = "miscelaneous"
+        if not self.volume_categories[cat] or cat == "master":
+            return None
+
+        ui_cat_vol = self.volume_categories.get(cat, [100])[0] / 100
+        gain = (volume / 100) * ui_cat_vol
+
+        try:
+            source = self.context.gen_source(
+                position=(x, y, z),
+                velocity=(0, 0, 0),
+                pitch=1.0,
+                gain=gain
+            )
+        except Exception as e:
+            print(f"Error generating source for stereo spatial: {e}")
+            return None
+
+        dx = x - listener_x
+        dy = y - listener_y
+        dz = z - listener_z
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+        if dist <= 2.5:
+            # Inside inner radius: 2D direct wide stereo (like SoundSource)
+            source.position = (0, 0, 0)
+            source.relative = True
+            source.direct_channels = True
+            source.spatialize = False
+        else:
+            # Outside inner radius: 3D spatial with wide 180° stereo field (-90° to +90°)
+            source.position = (x, y, z)
+            source.relative = False
+            source.direct_channels = False
+            source.spatialize = True
+            source.reference_distance = 3.0
+            source.rolloff_factor = 1.0
+            source.max_distance = max_distance
+
+            # OpenAL Soft AL_STEREO_ANGLES extension for wide 180-degree stereo spatial panning
+            with contextlib.suppress(Exception):
+                source.set(0x1030, (math.radians(-90), math.radians(90)))
+
+        source.buffer = buffer
+        snd = Sound(source, volume, False, cat=cat)
+        self.unbound_sources.append(snd)
+        if len(self.filter) > 0 and self.filter[-1] is not None:
+            source.direct_filter = self.filter[-1]
+        for i in self.sends:
+            with contextlib.suppress(Exception):
+                self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+        source.play()
+        self.volume_categories["master"][1].add(snd)
+        self.volume_categories[cat][1].add(snd)
         return snd
 
     def loop(self):
