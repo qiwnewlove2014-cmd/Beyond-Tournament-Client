@@ -9,6 +9,7 @@ import pyogg
 import requests
 from .audio.soundgroup import SoundGroup
 from .audio.sound import Sound
+from .piano import PianoAudio
 from . import options
 from . import path_utils
 from . import consts
@@ -66,8 +67,7 @@ class AudioManager():
         self.unbound_sources = []
         self.buffers = weakref.WeakValueDictionary()
         self._preloaded_buffers = {}  # Strong references for preloaded sounds to prevent GC
-        self.active_piano_notes = {}
-        self._piano_occlusion_filter = None
+        self.piano = PianoAudio(self)
         
         # Initialize volumes
         for cat, val in self.volume_categories.items():
@@ -262,46 +262,7 @@ class AudioManager():
         self.volume_categories[cat][1].add(snd)
         return snd
 
-    def load_stereo_split_buffers(self, path: str):
-        if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND): path = os.path.join(consts.SOUNDPREPEND, path)
-        if not path.endswith(".ogg"): path = path_utils.get_next_cycle_item(path)
-        try:
-            path = os.path.normpath(path) if os.path.isabs(path) else os.path.relpath(path)
-        except ValueError:
-            path = os.path.normpath(path)
-            
-        cache_key_l = f"{path}_split_L"
-        cache_key_r = f"{path}_split_R"
-        if cache_key_l in self.buffers and cache_key_r in self.buffers:
-            return self.buffers[cache_key_l], self.buffers[cache_key_r]
-        
-        try:
-            file = pyogg.VorbisFile(path)
-            audio_data = bytes(file.buffer)
-            if file.channels == 2:
-                import array
-                stereo_samples = array.array('h', audio_data)
-                l_bytes = array.array('h', stereo_samples[0::2]).tobytes()
-                r_bytes = array.array('h', stereo_samples[1::2]).tobytes()
-                
-                try: buf_l = self.context.gen_buffer()
-                except cyal.exceptions.InvalidOperationError: buf_l = self.context.gen_buffer()
-                
-                try: buf_r = self.context.gen_buffer()
-                except cyal.exceptions.InvalidOperationError: buf_r = self.context.gen_buffer()
-                
-                buf_l.set_data(l_bytes, sample_rate=file.frequency, format=cyal.BufferFormat.MONO16)
-                buf_r.set_data(r_bytes, sample_rate=file.frequency, format=cyal.BufferFormat.MONO16)
-                
-                self.buffers[cache_key_l] = buf_l
-                self.buffers[cache_key_r] = buf_r
-                return buf_l, buf_r
-            else:
-                buf = self.load_buffer(path)
-                return buf, buf
-        except Exception as e:
-            print(f"Error loading split stereo buffers for {path}: {e}")
-            return None, None
+
 
     def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0, as_mono=False, as_3d_stereo=False, occluded=False):
         if self.muted:
@@ -315,7 +276,7 @@ class AudioManager():
         gain = (volume / 100) * ui_cat_vol
 
         if as_3d_stereo:
-            buf_l, buf_r = self.load_stereo_split_buffers(path)
+            buf_l, buf_r = self.piano.load_stereo_split_buffers(path)
             if not buf_l or not buf_r:
                 return None
             try:
@@ -346,7 +307,7 @@ class AudioManager():
                 return None
 
             if occluded:
-                filter_obj = self.get_piano_occlusion_filter()
+                filter_obj = self.piano.get_occlusion_filter()
                 if filter_obj:
                     with contextlib.suppress(Exception):
                         src_l.direct_filter = filter_obj
@@ -433,66 +394,7 @@ class AudioManager():
         self.volume_categories[cat][1].add(snd)
         return snd
 
-    def get_piano_occlusion_filter(self):
-        if self._piano_occlusion_filter is None:
-            self._piano_occlusion_filter = self.gen_filter(
-                "LOWPASS",
-                ("GAINHF", 0.15),  # Muffle high frequencies behind walls
-                ("GAIN", 0.5)      # Attenuate overall direct volume
-            )
-        return self._piano_occlusion_filter
 
-    def play_piano_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False):
-        is_local = (peer_id == "local")
-        snd = self.play_unbound_stereo_spatial(
-            path=f"piano/Piano.mf.{note_name}.ogg",
-            x=x, y=y, z=z,
-            listener_x=listener_x,
-            listener_y=listener_y,
-            listener_z=listener_z,
-            volume=volume,
-            cat="miscelaneous",
-            as_3d_stereo=not is_local,
-            occluded=occluded
-        )
-        if snd:
-            if occluded:
-                filter_obj = self.get_piano_occlusion_filter()
-                if filter_obj:
-                    with contextlib.suppress(Exception):
-                        if isinstance(snd, (list, tuple)):
-                            for s in snd:
-                                if s and hasattr(s, 'source') and s.source:
-                                    s.source.direct_filter = filter_obj
-                        elif hasattr(snd, 'source') and snd.source:
-                            snd.source.direct_filter = filter_obj
-            piano_key = f"{peer_id}-{note_name}"
-            # If the same peer plays the same note very rapidly, stop the old one first
-            if piano_key in self.active_piano_notes:
-                self.stop_piano_note(peer_id, note_name)
-            self.active_piano_notes[piano_key] = snd
-        return snd
-
-    def stop_piano_note(self, peer_id, note_name):
-        piano_key = f"{peer_id}-{note_name}"
-        snds = self.active_piano_notes.pop(piano_key, None)
-        if snds:
-            if not isinstance(snds, (list, tuple)):
-                snds = [snds]
-            for snd in snds:
-                if snd and hasattr(snd, 'source') and snd.source:
-                    # Smooth damper fade-out (~180ms) instead of harsh instant stop
-                    def _fade_out(source, steps=10, duration=0.18):
-                        try:
-                            original_gain = source.gain
-                            step_time = duration / steps
-                            for i in range(steps, 0, -1):
-                                source.gain = original_gain * (i / steps)
-                                time.sleep(step_time)
-                            source.stop()
-                        except Exception:
-                            pass
-                    threading.Thread(target=_fade_out, args=(snd.source,), daemon=True).start()
 
     def loop(self):
         with contextlib.suppress(RuntimeError):

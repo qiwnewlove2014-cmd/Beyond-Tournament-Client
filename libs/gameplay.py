@@ -600,7 +600,7 @@ class Gameplay(state.State):
                         if event.key in key_to_note:
                             note_name = key_to_note[event.key]
                             # Instant 0ms local audio feedback (client prediction)
-                            snd = self.game.audio_mngr.play_piano_note(
+                            snd = self.game.audio_mngr.piano.play_note(
                                 "local", note_name,
                                 self.player.x, self.player.y, self.player.z,
                                 self.player.x, self.player.y, self.player.z,
@@ -619,7 +619,7 @@ class Gameplay(state.State):
                     if event.key == pygame.K_SPACE:
                         sustained = getattr(self, '_piano_sustained_notes', [])
                         for sn in sustained:
-                            self.game.audio_mngr.stop_piano_note("local", sn)
+                            self.game.audio_mngr.piano.stop_note("local", sn)
                             self.game.network.send(consts.CHANNEL_MAP, "stop_piano_note", {"note": sn})
                         self._piano_sustained_notes = []
                         continue
@@ -652,7 +652,7 @@ class Gameplay(state.State):
                                 self._piano_sustained_notes.append(note_name)
                         else:
                             # No pedal — stop immediately (staccato)
-                            self.game.audio_mngr.stop_piano_note("local", note_name)
+                            self.game.audio_mngr.piano.stop_note("local", note_name)
                             self.game.network.send(consts.CHANNEL_MAP, "stop_piano_note", {"note": note_name})
                 continue
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):

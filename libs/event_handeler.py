@@ -346,14 +346,14 @@ class EventHandeler:
         # Track piano notes for staccato/sustain pedal support
         if snd and data.get("piano_note") and data.get("peer_id") is not None:
             piano_key = f"{data['peer_id']}-{data['piano_note']}"
-            old_snds = self.game.audio_mngr.active_piano_notes.pop(piano_key, None)
+            old_snds = self.game.audio_mngr.piano.active_piano_notes.pop(piano_key, None)
             if old_snds:
                 s_old_list = old_snds if isinstance(old_snds, (list, tuple)) else [old_snds]
                 for old_s in s_old_list:
                     if old_s and hasattr(old_s, 'source') and old_s.source:
                         with contextlib.suppress(Exception):
                             old_s.source.stop()
-            self.game.audio_mngr.active_piano_notes[piano_key] = snd
+            self.game.audio_mngr.piano.active_piano_notes[piano_key] = snd
 
     def play_piano_note(self, data):
         if getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
@@ -365,7 +365,7 @@ class EventHandeler:
                     if los is False:
                         occluded = True
 
-            snd = self.game.audio_mngr.play_piano_note(
+            snd = self.game.audio_mngr.piano.play_note(
                 peer_id=data["peer_id"], note_name=data["note"],
                 x=data["x"], y=data["y"], z=data["z"],
                 listener_x=lx, listener_y=ly, listener_z=lz,
@@ -382,7 +382,7 @@ class EventHandeler:
 
     def stop_piano_note(self, data):
         if data and data.get("peer_id") is not None and data.get("note"):
-            self.game.audio_mngr.stop_piano_note(data["peer_id"], data["note"])
+            self.game.audio_mngr.piano.stop_note(data["peer_id"], data["note"])
 
     def piano_start(self, data):
         """Enable piano mode to intercept keyboard input for playing piano notes and pre-load audio buffers strongly into RAM."""
