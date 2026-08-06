@@ -465,8 +465,10 @@ def input_menu(game, func_call, replace_call=None, parent=None, in_game=False):
 def set_input_device(game, device, func_call, parent, capture, in_game=False):
     options.set("audio_input_device", device)
     if device == "system default": device = str(capture.default_device.decode('utf-8'))
-    if in_game and parent.voice_chat.audio_input.name != device: 
-        del parent.voice_chat.audio_input
+    current_name = parent.voice_chat.audio_input.name if parent.voice_chat.audio_input else None
+    if in_game and current_name != device: 
+        if parent.voice_chat.audio_input:
+            del parent.voice_chat.audio_input
         try:
             parent.voice_chat.audio_input = parent.voice_chat.capture_ext.open_device(name=device.encode(), sample_rate=48000, format=cyal.BufferFormat.MONO16)
         except (cyal.exceptions.DeviceNotFoundError, TypeError):

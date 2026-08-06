@@ -56,6 +56,7 @@ class Entity(Object):
     def player(self, value):
         self._player = value
         if value:
+            self.soundgroup.filterable = True
             try: self.vc_source, self.radio_source, self.music_source = self.game.audio_mngr.context.gen_sources(3)
             except cyal.exceptions.InvalidOperationError as e:
                 print(e)
@@ -332,10 +333,14 @@ class Entity(Object):
                             self.vc_source.direct_filter = current_filter
                             self.music_source.direct_filter = current_filter
                         else:
-                            try: del self.vc_source.direct_filter
-                            except Exception: pass
-                            try: del self.music_source.direct_filter
-                            except Exception: pass
+                            try: self.vc_source.direct_filter = None
+                            except Exception:
+                                try: del self.vc_source.direct_filter
+                                except Exception: pass
+                            try: self.music_source.direct_filter = None
+                            except Exception:
+                                try: del self.music_source.direct_filter
+                                except Exception: pass
 
                 if self.vc_source.buffers_queued == 0 and not self.is_user: 
                     try:

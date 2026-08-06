@@ -21,8 +21,8 @@ xcopy /E /I /Q beyond_tournament.dist "Beyond Tournament"
 ren "Beyond Tournament\beyond_tournament.exe" "Beyond Tournament.exe"
 echo build completed...
 echo copying required data...
-copy sound.dat "Beyond Tournament\"
-del sound.dat
+copy sounds.dat "Beyond Tournament\"
+del sounds.dat
 xcopy /E /I /Q urlextract "Beyond Tournament\urlextract\"
 FOR /F "tokens=*" %%g IN ('python -c "import yt_dlp, os; print(os.path.dirname(yt_dlp.__file__))"') do (SET YT_DLP_PATH=%%g)
 xcopy /E /I /Q "%YT_DLP_PATH%" "Beyond Tournament\yt_dlp"
