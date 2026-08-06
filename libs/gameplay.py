@@ -600,12 +600,53 @@ class Gameplay(state.State):
                         if event.key in key_to_note:
                             note_name = key_to_note[event.key]
                             # Instant 0ms local audio feedback (client prediction)
-                            self.game.audio_mngr.play_unbound(
-                                f"piano/Piano.mf.{note_name}.ogg",
+                            self.game.audio_mngr.play_piano_note(
+                                "local", note_name,
                                 self.player.x, self.player.y, self.player.z,
-                                False, volume=300, direct=True
+                                self.player.x, self.player.y, self.player.z,
+                                volume=300
                             )
                             self.game.network.send(consts.CHANNEL_MAP, "play_piano_note", {"note": note_name})
+                elif event.type == pygame.KEYUP:
+                    # Sustain pedal release (Space) — stop all sustained notes
+                    if event.key == pygame.K_SPACE:
+                        sustained = getattr(self, '_piano_sustained_notes', [])
+                        for sn in sustained:
+                            self.game.audio_mngr.stop_piano_note("local", sn)
+                            self.game.network.send(consts.CHANNEL_MAP, "stop_piano_note", {"note": sn})
+                        self._piano_sustained_notes = []
+                        continue
+                    oct = getattr(self, 'piano_octave', 4)
+                    oct_next = min(7, oct + 1)
+                    oct_prev = max(1, oct - 1)
+                    key_to_note = {
+                        # Lower Octave (Octave - 1)
+                        pygame.K_z: f"C{oct_prev}", pygame.K_s: f"Db{oct_prev}", pygame.K_x: f"D{oct_prev}",
+                        pygame.K_d: f"Eb{oct_prev}", pygame.K_c: f"E{oct_prev}", pygame.K_v: f"F{oct_prev}",
+                        pygame.K_g: f"Gb{oct_prev}", pygame.K_b: f"G{oct_prev}", pygame.K_h: f"Ab{oct_prev}",
+                        pygame.K_n: f"A{oct_prev}", pygame.K_j: f"Bb{oct_prev}", pygame.K_m: f"B{oct_prev}",
+                        # Upper / Main Octave (Octave N & N+1)
+                        pygame.K_q: f"C{oct}", pygame.K_2: f"Db{oct}", pygame.K_w: f"D{oct}",
+                        pygame.K_3: f"Eb{oct}", pygame.K_e: f"E{oct}", pygame.K_r: f"F{oct}",
+                        pygame.K_5: f"Gb{oct}", pygame.K_t: f"G{oct}", pygame.K_6: f"Ab{oct}",
+                        pygame.K_y: f"A{oct}", pygame.K_7: f"Bb{oct}", pygame.K_u: f"B{oct}",
+                        pygame.K_i: f"C{oct_next}", pygame.K_9: f"Db{oct_next}", pygame.K_o: f"D{oct_next}",
+                        pygame.K_0: f"Eb{oct_next}", pygame.K_p: f"E{oct_next}",
+                    }
+                    if event.key in key_to_note:
+                        note_name = key_to_note[event.key]
+                        # Check if sustain pedal (Space) is currently held
+                        keys = pygame.key.get_pressed()
+                        if keys[pygame.K_SPACE]:
+                            # Pedal is down — don't stop, just remember to stop later
+                            if not hasattr(self, '_piano_sustained_notes'):
+                                self._piano_sustained_notes = []
+                            if note_name not in self._piano_sustained_notes:
+                                self._piano_sustained_notes.append(note_name)
+                        else:
+                            # No pedal — stop immediately (staccato)
+                            self.game.audio_mngr.stop_piano_note("local", note_name)
+                            self.game.network.send(consts.CHANNEL_MAP, "stop_piano_note", {"note": note_name})
                 continue
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
                 self.game.network.send(consts.CHANNEL_MAP, "pong_serve", {})

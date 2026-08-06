@@ -331,6 +331,40 @@ class EventHandeler:
                     self.game.audio_mngr.efx.send(snd.source, 0, reverb.reverb)
                 except Exception:
                     pass
+        # Track piano notes for staccato/sustain pedal support
+        if snd and data.get("piano_note") and data.get("peer_id") is not None:
+            piano_key = f"{data['peer_id']}-{data['piano_note']}"
+            print(f"[DEBUG PIANO] Client received play_unbound. Tracking peer_id: {data['peer_id']} note: {data['piano_note']} as {piano_key}")
+            old_snd = self.game.audio_mngr.active_piano_notes.pop(piano_key, None)
+            if old_snd and old_snd.source:
+                try:
+                    old_snd.source.stop()
+                except Exception:
+                    pass
+            self.game.audio_mngr.active_piano_notes[piano_key] = snd
+            print(f"[DEBUG PIANO] current active_piano_notes: {list(self.game.audio_mngr.active_piano_notes.keys())}")
+
+    def play_piano_note(self, data):
+        if getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
+            lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
+            snd = self.game.audio_mngr.play_piano_note(
+                peer_id=data["peer_id"], note_name=data["note"],
+                x=data["x"], y=data["y"], z=data["z"],
+                listener_x=lx, listener_y=ly, listener_z=lz,
+                volume=data.get("volume", 300)
+            )
+            if snd and getattr(self.gameplay, 'map', None):
+                reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
+                if reverb and reverb.reverb:
+                    try:
+                        self.game.audio_mngr.efx.send(snd.source, 0, reverb.reverb)
+                    except Exception:
+                        pass
+
+    def stop_piano_note(self, data):
+        print(f"[DEBUG PIANO] Client received stop_piano_note packet: {data}")
+        if data and data.get("peer_id") is not None and data.get("note"):
+            self.game.audio_mngr.stop_piano_note(data["peer_id"], data["note"])
 
     def piano_start(self, data):
         """Enable piano mode to intercept keyboard input for playing piano notes and pre-load audio buffers strongly into RAM."""

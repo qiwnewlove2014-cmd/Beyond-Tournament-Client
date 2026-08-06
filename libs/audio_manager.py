@@ -3,6 +3,8 @@ import contextlib
 import os
 import weakref
 import math
+import threading
+import time
 import pyogg
 import requests
 from .audio.soundgroup import SoundGroup
@@ -64,6 +66,7 @@ class AudioManager():
         self.unbound_sources = []
         self.buffers = weakref.WeakValueDictionary()
         self._preloaded_buffers = {}  # Strong references for preloaded sounds to prevent GC
+        self.active_piano_notes = {}
         
         # Initialize volumes
         for cat, val in self.volume_categories.items():
@@ -314,6 +317,42 @@ class AudioManager():
         self.volume_categories["master"][1].add(snd)
         self.volume_categories[cat][1].add(snd)
         return snd
+
+    def play_piano_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300):
+        snd = self.play_unbound_stereo_spatial(
+            path=f"piano/Piano.mf.{note_name}.ogg",
+            x=x, y=y, z=z,
+            listener_x=listener_x,
+            listener_y=listener_y,
+            listener_z=listener_z,
+            volume=volume,
+            cat="miscelaneous"
+        )
+        if snd:
+            piano_key = f"{peer_id}-{note_name}"
+            # If the same peer plays the same note very rapidly, stop the old one first
+            if piano_key in self.active_piano_notes:
+                self.stop_piano_note(peer_id, note_name)
+            self.active_piano_notes[piano_key] = snd
+        return snd
+
+    def stop_piano_note(self, peer_id, note_name):
+        piano_key = f"{peer_id}-{note_name}"
+        snd = self.active_piano_notes.pop(piano_key, None)
+        print(f"[DEBUG PIANO] audio_mngr.stop_piano_note called for {piano_key}. Found snd? {snd is not None}")
+        if snd and snd.source:
+            # Smooth damper fade-out (~200ms) instead of harsh instant stop
+            def _fade_out(source, steps=10, duration=0.2):
+                try:
+                    original_gain = source.gain
+                    step_time = duration / steps
+                    for i in range(steps, 0, -1):
+                        source.gain = original_gain * (i / steps)
+                        time.sleep(step_time)
+                    source.stop()
+                except Exception:
+                    pass
+            threading.Thread(target=_fade_out, args=(snd.source,), daemon=True).start()
 
     def loop(self):
         with contextlib.suppress(RuntimeError):

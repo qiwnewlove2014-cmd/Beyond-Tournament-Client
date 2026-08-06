@@ -1,7 +1,4 @@
---------------------------------------------------------------------------------
-[v1.6.2] Piano Patch — 2026-08-06
---------------------------------------------------------------------------------
+[v1.6.3] Piano Hotfix & Tuning — 2026-08-06
 
 • Interactive Objects & Audio
-- **Playable Piano:** Added a fully interactive, network-synced Piano! Players can now perform live music in real-time. We've designed a highly responsive custom keyboard layout for smooth playing across multiple octaves.
-- **Dynamic Piano Acoustics:** The piano features a brand-new dynamic acoustic system. When you play or stand close to the piano, the sound envelopes you in a rich, wide stereo experience. As you walk away, the sound naturally and seamlessly transitions into a realistic 3D directional audio source, providing an incredibly immersive and natural listening experience for everyone around.
+- **Piano Sustain & Staccato Polish:** Fine-tuned the piano's acoustic behavior. Re-mapped the sustain pedal to the Spacebar for a more comfortable playing experience, and fixed an issue where remote listeners could not properly hear staccato notes.

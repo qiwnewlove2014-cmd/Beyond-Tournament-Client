@@ -23,5 +23,5 @@ CHANNEL_MEGAPHONE = 30
 CHANNEL_MUSICBOT = 22
 SOUNDSPREPEND="/data/"
 
-# 🔢 Version for server compatibility check
-CLIENT_VERSION = "BT-1.6.2"
+# Update this variable to force clients to update their game
+CLIENT_VERSION = "BT-1.6.3"
