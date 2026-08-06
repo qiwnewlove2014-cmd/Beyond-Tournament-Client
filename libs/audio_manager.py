@@ -67,6 +67,7 @@ class AudioManager():
         self.buffers = weakref.WeakValueDictionary()
         self._preloaded_buffers = {}  # Strong references for preloaded sounds to prevent GC
         self.active_piano_notes = {}
+        self._piano_occlusion_filter = None
         
         # Initialize volumes
         for cat, val in self.volume_categories.items():
@@ -137,7 +138,7 @@ class AudioManager():
             if buf:
                 self._preloaded_buffers[rel_snd] = buf
 
-    def load_buffer(self, path: str) -> cyal.Buffer | None:
+    def load_buffer(self, path: str, as_mono: bool = False) -> cyal.Buffer | None:
         if path.split(":")[0] == "server_sounds":
             path = path.split(":")[1]
             if not os.path.exists(path):
@@ -161,8 +162,9 @@ class AudioManager():
             # Different drive letters (e.g. sound cached on C: while the game
             # runs on D:).  Keep the absolute path as-is; OpenAL/cyal accepts it.
             path = os.path.normpath(path)
-        if path in self.buffers.keys():
-            return self.buffers[path]
+        cache_key = f"{path}_mono" if as_mono else path
+        if cache_key in self.buffers.keys():
+            return self.buffers[cache_key]
         try:
             file = pyogg.VorbisFile(path)
             try: buffer = self.context.gen_buffer()
@@ -171,19 +173,24 @@ class AudioManager():
                 buffer = self.context.gen_buffer()
         
             format = None
-            match file.channels:
-                case 1: format= cyal.BufferFormat.MONO16
-                case 2: format = cyal.BufferFormat.STEREO16
-                case _: raise(RuntimeError("file is neither mono or stereo 16 bit"))
-            # PyOgg 0.7 returns a ctypes array instead of raw bytes;
-            # convert so that cyal's set_data always receives bytes.
             audio_data = bytes(file.buffer)
+            if as_mono and file.channels == 2:
+                import array
+                stereo_samples = array.array('h', audio_data)
+                mono_samples = array.array('h', ((l + r) // 2 for l, r in zip(stereo_samples[0::2], stereo_samples[1::2])))
+                audio_data = mono_samples.tobytes()
+                format = cyal.BufferFormat.MONO16
+            else:
+                match file.channels:
+                    case 1: format = cyal.BufferFormat.MONO16
+                    case 2: format = cyal.BufferFormat.STEREO16
+                    case _: raise(RuntimeError("file is neither mono or stereo 16 bit"))
             buffer.set_data(
                 audio_data,
                 sample_rate=file.frequency,
                 format = format
             )
-            self.buffers[path] = buffer
+            self.buffers[cache_key] = buffer
             # Keep strong reference if this path was preloaded
             if path in self._preloaded_buffers:
                 self._preloaded_buffers[path] = buffer
@@ -255,11 +262,49 @@ class AudioManager():
         self.volume_categories[cat][1].add(snd)
         return snd
 
-    def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0):
+    def load_stereo_split_buffers(self, path: str):
+        if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND): path = os.path.join(consts.SOUNDPREPEND, path)
+        if not path.endswith(".ogg"): path = path_utils.get_next_cycle_item(path)
+        try:
+            path = os.path.normpath(path) if os.path.isabs(path) else os.path.relpath(path)
+        except ValueError:
+            path = os.path.normpath(path)
+            
+        cache_key_l = f"{path}_split_L"
+        cache_key_r = f"{path}_split_R"
+        if cache_key_l in self.buffers and cache_key_r in self.buffers:
+            return self.buffers[cache_key_l], self.buffers[cache_key_r]
+        
+        try:
+            file = pyogg.VorbisFile(path)
+            audio_data = bytes(file.buffer)
+            if file.channels == 2:
+                import array
+                stereo_samples = array.array('h', audio_data)
+                l_bytes = array.array('h', stereo_samples[0::2]).tobytes()
+                r_bytes = array.array('h', stereo_samples[1::2]).tobytes()
+                
+                try: buf_l = self.context.gen_buffer()
+                except cyal.exceptions.InvalidOperationError: buf_l = self.context.gen_buffer()
+                
+                try: buf_r = self.context.gen_buffer()
+                except cyal.exceptions.InvalidOperationError: buf_r = self.context.gen_buffer()
+                
+                buf_l.set_data(l_bytes, sample_rate=file.frequency, format=cyal.BufferFormat.MONO16)
+                buf_r.set_data(r_bytes, sample_rate=file.frequency, format=cyal.BufferFormat.MONO16)
+                
+                self.buffers[cache_key_l] = buf_l
+                self.buffers[cache_key_r] = buf_r
+                return buf_l, buf_r
+            else:
+                buf = self.load_buffer(path)
+                return buf, buf
+        except Exception as e:
+            print(f"Error loading split stereo buffers for {path}: {e}")
+            return None, None
+
+    def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0, as_mono=False, as_3d_stereo=False, occluded=False):
         if self.muted:
-            return None
-        buffer = self.load_buffer(path)
-        if not buffer:
             return None
         if cat not in self.volume_categories:
             cat = "miscelaneous"
@@ -268,6 +313,64 @@ class AudioManager():
 
         ui_cat_vol = self.volume_categories.get(cat, [100])[0] / 100
         gain = (volume / 100) * ui_cat_vol
+
+        if as_3d_stereo:
+            buf_l, buf_r = self.load_stereo_split_buffers(path)
+            if not buf_l or not buf_r:
+                return None
+            try:
+                # Left channel 3D source (offset -1.2 on X axis)
+                src_l = self.context.gen_source(position=(x - 1.2, y, z), velocity=(0,0,0), pitch=1.0, gain=gain)
+                src_l.relative = False
+                src_l.direct_channels = False
+                src_l.spatialize = True
+                src_l.reference_distance = 3.0
+                src_l.rolloff_factor = 1.0
+                src_l.max_distance = max_distance
+                src_l.buffer = buf_l
+
+                # Right channel 3D source (offset +1.2 on X axis)
+                src_r = self.context.gen_source(position=(x + 1.2, y, z), velocity=(0,0,0), pitch=1.0, gain=gain)
+                src_r.relative = False
+                src_r.direct_channels = False
+                src_r.spatialize = True
+                src_r.reference_distance = 3.0
+                src_r.rolloff_factor = 1.0
+                src_r.max_distance = max_distance
+                src_r.buffer = buf_r
+            except Exception as e:
+                print(f"Error generating 3D split stereo sources: {e}")
+                return None
+
+            if occluded:
+                filter_obj = self.get_piano_occlusion_filter()
+                if filter_obj:
+                    with contextlib.suppress(Exception):
+                        src_l.direct_filter = filter_obj
+                        src_r.direct_filter = filter_obj
+
+            snd_l = Sound(src_l, volume, False, cat=cat)
+            snd_r = Sound(src_r, volume, False, cat=cat)
+            self.unbound_sources.append(snd_l)
+            self.unbound_sources.append(snd_r)
+            if len(self.filter) > 0 and self.filter[-1] is not None:
+                src_l.direct_filter = self.filter[-1]
+                src_r.direct_filter = self.filter[-1]
+            for i in self.sends:
+                with contextlib.suppress(Exception):
+                    self.efx.send(src_l, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+                    self.efx.send(src_r, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+            src_l.play()
+            src_r.play()
+            self.volume_categories["master"][1].add(snd_l)
+            self.volume_categories["master"][1].add(snd_r)
+            self.volume_categories[cat][1].add(snd_l)
+            self.volume_categories[cat][1].add(snd_r)
+            return (snd_l, snd_r)
+
+        buffer = self.load_buffer(path, as_mono=as_mono)
+        if not buffer:
+            return None
 
         try:
             source = self.context.gen_source(
@@ -285,20 +388,29 @@ class AudioManager():
         dz = z - listener_z
         dist = math.sqrt(dx * dx + dy * dy + dz * dz)
 
-        if dist <= 2.5:
-            # Inside inner radius: 2D direct wide stereo (like SoundSource)
-            source.position = (0, 0, 0)
-            source.relative = True
-            source.direct_channels = True
-            source.spatialize = False
-        else:
-            # Outside inner radius: 3D spatial with wide 180° stereo field (-90° to +90°)
+        if as_mono:
+            # Full 3D spatial positioning for 1-channel mono sound (remote players / map pianos)
             source.position = (x, y, z)
             source.relative = False
             source.direct_channels = False
             source.spatialize = True
             source.reference_distance = 3.0
             source.rolloff_factor = 1.0
+            source.max_distance = max_distance
+        elif dist <= 2.5:
+            # Inside inner radius: 2D direct wide stereo for full head-filling richness (local player)
+            source.position = (0, 0, 0)
+            source.relative = True
+            source.direct_channels = True
+            source.spatialize = False
+        else:
+            # Outside inner radius: 3D spatial with wide 180° stereo field (-90° to +90°) and smooth rolloff
+            source.position = (x, y, z)
+            source.relative = False
+            source.direct_channels = False
+            source.spatialize = True
+            source.reference_distance = 3.5
+            source.rolloff_factor = 0.7
             source.max_distance = max_distance
 
             # OpenAL Soft AL_STEREO_ANGLES extension for wide 180-degree stereo spatial panning
@@ -318,7 +430,17 @@ class AudioManager():
         self.volume_categories[cat][1].add(snd)
         return snd
 
-    def play_piano_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300):
+    def get_piano_occlusion_filter(self):
+        if self._piano_occlusion_filter is None:
+            self._piano_occlusion_filter = self.gen_filter(
+                "LOWPASS",
+                ("GAINHF", 0.15),  # Muffle high frequencies behind walls
+                ("GAIN", 0.5)      # Attenuate overall direct volume
+            )
+        return self._piano_occlusion_filter
+
+    def play_piano_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False):
+        is_local = (peer_id == "local")
         snd = self.play_unbound_stereo_spatial(
             path=f"piano/Piano.mf.{note_name}.ogg",
             x=x, y=y, z=z,
@@ -326,9 +448,21 @@ class AudioManager():
             listener_y=listener_y,
             listener_z=listener_z,
             volume=volume,
-            cat="miscelaneous"
+            cat="miscelaneous",
+            as_3d_stereo=not is_local,
+            occluded=occluded
         )
         if snd:
+            if occluded:
+                filter_obj = self.get_piano_occlusion_filter()
+                if filter_obj:
+                    with contextlib.suppress(Exception):
+                        if isinstance(snd, (list, tuple)):
+                            for s in snd:
+                                if s and hasattr(s, 'source') and s.source:
+                                    s.source.direct_filter = filter_obj
+                        elif hasattr(snd, 'source') and snd.source:
+                            snd.source.direct_filter = filter_obj
             piano_key = f"{peer_id}-{note_name}"
             # If the same peer plays the same note very rapidly, stop the old one first
             if piano_key in self.active_piano_notes:
@@ -338,20 +472,24 @@ class AudioManager():
 
     def stop_piano_note(self, peer_id, note_name):
         piano_key = f"{peer_id}-{note_name}"
-        snd = self.active_piano_notes.pop(piano_key, None)
-        if snd and snd.source:
-            # Smooth damper fade-out (~200ms) instead of harsh instant stop
-            def _fade_out(source, steps=10, duration=0.2):
-                try:
-                    original_gain = source.gain
-                    step_time = duration / steps
-                    for i in range(steps, 0, -1):
-                        source.gain = original_gain * (i / steps)
-                        time.sleep(step_time)
-                    source.stop()
-                except Exception:
-                    pass
-            threading.Thread(target=_fade_out, args=(snd.source,), daemon=True).start()
+        snds = self.active_piano_notes.pop(piano_key, None)
+        if snds:
+            if not isinstance(snds, (list, tuple)):
+                snds = [snds]
+            for snd in snds:
+                if snd and hasattr(snd, 'source') and snd.source:
+                    # Smooth damper fade-out (~180ms) instead of harsh instant stop
+                    def _fade_out(source, steps=10, duration=0.18):
+                        try:
+                            original_gain = source.gain
+                            step_time = duration / steps
+                            for i in range(steps, 0, -1):
+                                source.gain = original_gain * (i / steps)
+                                time.sleep(step_time)
+                            source.stop()
+                        except Exception:
+                            pass
+                    threading.Thread(target=_fade_out, args=(snd.source,), daemon=True).start()
 
     def loop(self):
         with contextlib.suppress(RuntimeError):

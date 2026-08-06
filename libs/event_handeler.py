@@ -315,9 +315,20 @@ class EventHandeler:
         if data.get("is_stereo_spatial") and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
             facing = getattr(self.gameplay.player, 'facing', 0.0)
+
+            occluded = False
+            if getattr(self.gameplay, 'map', None):
+                with contextlib.suppress(Exception):
+                    los = self.gameplay.map.valid_straight_path((data["x"], data["y"], data["z"]), (lx, ly, lz))
+                    if los is False:
+                        occluded = True
+
+            is_piano = bool(data.get("piano_note"))
             snd = self.game.audio_mngr.play_unbound_stereo_spatial(
                 data["sound"], data["x"], data["y"], data["z"], lx, ly, lz,
-                volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"), max_distance=data.get("max_distance", 25.0), facing_angle=facing
+                volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"), max_distance=data.get("max_distance", 25.0), facing_angle=facing,
+                as_3d_stereo=is_piano,
+                occluded=occluded
             )
         else:
             snd = self.game.audio_mngr.play_unbound(
@@ -327,29 +338,39 @@ class EventHandeler:
         if snd and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'map', None):
             reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
             if reverb and reverb.reverb:
-                try:
-                    self.game.audio_mngr.efx.send(snd.source, 0, reverb.reverb)
-                except Exception:
-                    pass
+                s_list = snd if isinstance(snd, (list, tuple)) else [snd]
+                for s in s_list:
+                    if s and hasattr(s, 'source') and s.source:
+                        with contextlib.suppress(Exception):
+                            self.game.audio_mngr.efx.send(s.source, 0, reverb.reverb)
         # Track piano notes for staccato/sustain pedal support
         if snd and data.get("piano_note") and data.get("peer_id") is not None:
             piano_key = f"{data['peer_id']}-{data['piano_note']}"
-            old_snd = self.game.audio_mngr.active_piano_notes.pop(piano_key, None)
-            if old_snd and old_snd.source:
-                try:
-                    old_snd.source.stop()
-                except Exception:
-                    pass
+            old_snds = self.game.audio_mngr.active_piano_notes.pop(piano_key, None)
+            if old_snds:
+                s_old_list = old_snds if isinstance(old_snds, (list, tuple)) else [old_snds]
+                for old_s in s_old_list:
+                    if old_s and hasattr(old_s, 'source') and old_s.source:
+                        with contextlib.suppress(Exception):
+                            old_s.source.stop()
             self.game.audio_mngr.active_piano_notes[piano_key] = snd
 
     def play_piano_note(self, data):
         if getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
+            occluded = False
+            if getattr(self.gameplay, 'map', None):
+                with contextlib.suppress(Exception):
+                    los = self.gameplay.map.valid_straight_path((data["x"], data["y"], data["z"]), (lx, ly, lz))
+                    if los is False:
+                        occluded = True
+
             snd = self.game.audio_mngr.play_piano_note(
                 peer_id=data["peer_id"], note_name=data["note"],
                 x=data["x"], y=data["y"], z=data["z"],
                 listener_x=lx, listener_y=ly, listener_z=lz,
-                volume=data.get("volume", 300)
+                volume=data.get("volume", 300),
+                occluded=occluded
             )
             if snd and getattr(self.gameplay, 'map', None):
                 reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
