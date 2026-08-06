@@ -588,14 +588,20 @@ class Gameplay(state.State):
                             pygame.K_d: f"Eb{oct_prev}", pygame.K_c: f"E{oct_prev}", pygame.K_v: f"F{oct_prev}",
                             pygame.K_g: f"Gb{oct_prev}", pygame.K_b: f"G{oct_prev}", pygame.K_h: f"Ab{oct_prev}",
                             pygame.K_n: f"A{oct_prev}", pygame.K_j: f"Bb{oct_prev}", pygame.K_m: f"B{oct_prev}",
+                            # Lower Octave extended (Octave N)
+                            pygame.K_COMMA: f"C{oct}", pygame.K_l: f"Db{oct}", pygame.K_PERIOD: f"D{oct}",
+                            pygame.K_SEMICOLON: f"Eb{oct}", pygame.K_SLASH: f"E{oct}", pygame.K_QUOTE: f"F{oct}",
 
-                            # Upper / Main Octave (Octave N & N+1)
+                            # Upper / Main Octave (Octave N)
                             pygame.K_q: f"C{oct}", pygame.K_2: f"Db{oct}", pygame.K_w: f"D{oct}",
                             pygame.K_3: f"Eb{oct}", pygame.K_e: f"E{oct}", pygame.K_r: f"F{oct}",
                             pygame.K_5: f"Gb{oct}", pygame.K_t: f"G{oct}", pygame.K_6: f"Ab{oct}",
                             pygame.K_y: f"A{oct}", pygame.K_7: f"Bb{oct}", pygame.K_u: f"B{oct}",
+                            # Upper / Main Octave extended (Octave N+1)
                             pygame.K_i: f"C{oct_next}", pygame.K_9: f"Db{oct_next}", pygame.K_o: f"D{oct_next}",
-                            pygame.K_0: f"Eb{oct_next}", pygame.K_p: f"E{oct_next}",
+                            pygame.K_0: f"Eb{oct_next}", pygame.K_p: f"E{oct_next}", pygame.K_LEFTBRACKET: f"F{oct_next}",
+                            pygame.K_MINUS: f"Gb{oct_next}", pygame.K_RIGHTBRACKET: f"G{oct_next}", 
+                            pygame.K_EQUALS: f"Ab{oct_next}", pygame.K_BACKSLASH: f"A{oct_next}"
                         }
                         if event.key in key_to_note:
                             note_name = key_to_note[event.key]
@@ -632,13 +638,19 @@ class Gameplay(state.State):
                         pygame.K_d: f"Eb{oct_prev}", pygame.K_c: f"E{oct_prev}", pygame.K_v: f"F{oct_prev}",
                         pygame.K_g: f"Gb{oct_prev}", pygame.K_b: f"G{oct_prev}", pygame.K_h: f"Ab{oct_prev}",
                         pygame.K_n: f"A{oct_prev}", pygame.K_j: f"Bb{oct_prev}", pygame.K_m: f"B{oct_prev}",
-                        # Upper / Main Octave (Octave N & N+1)
+                        # Lower Octave extended (Octave N)
+                        pygame.K_COMMA: f"C{oct}", pygame.K_l: f"Db{oct}", pygame.K_PERIOD: f"D{oct}",
+                        pygame.K_SEMICOLON: f"Eb{oct}", pygame.K_SLASH: f"E{oct}", pygame.K_QUOTE: f"F{oct}",
+                        # Upper / Main Octave (Octave N)
                         pygame.K_q: f"C{oct}", pygame.K_2: f"Db{oct}", pygame.K_w: f"D{oct}",
                         pygame.K_3: f"Eb{oct}", pygame.K_e: f"E{oct}", pygame.K_r: f"F{oct}",
                         pygame.K_5: f"Gb{oct}", pygame.K_t: f"G{oct}", pygame.K_6: f"Ab{oct}",
                         pygame.K_y: f"A{oct}", pygame.K_7: f"Bb{oct}", pygame.K_u: f"B{oct}",
+                        # Upper / Main Octave extended (Octave N+1)
                         pygame.K_i: f"C{oct_next}", pygame.K_9: f"Db{oct_next}", pygame.K_o: f"D{oct_next}",
-                        pygame.K_0: f"Eb{oct_next}", pygame.K_p: f"E{oct_next}",
+                        pygame.K_0: f"Eb{oct_next}", pygame.K_p: f"E{oct_next}", pygame.K_LEFTBRACKET: f"F{oct_next}",
+                        pygame.K_MINUS: f"Gb{oct_next}", pygame.K_RIGHTBRACKET: f"G{oct_next}", 
+                        pygame.K_EQUALS: f"Ab{oct_next}", pygame.K_BACKSLASH: f"A{oct_next}"
                     }
                     if event.key in key_to_note:
                         note_name = key_to_note[event.key]
