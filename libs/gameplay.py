@@ -66,6 +66,7 @@ class Gameplay(state.State):
         self.pong_mode = False      # True when player is in an active Pong match (suppresses normal footsteps)
         self.piano_mode = False     # True when playing piano
         self.piano_octave = 4       # Default octave (Octave 4 - Middle C)
+        self.piano_transpose = 0    # Default transpose offset in semitones (-12 to +12)
         # ENet guarantees ordering inside one channel, not across CHANNEL_MISC
         # and CHANNEL_MAP.  Player spawn packets can therefore arrive before
         # the connected event enters this state.  Create the mapping here and
@@ -578,6 +579,22 @@ class Gameplay(state.State):
                                     self.game.audio_mngr._preloaded_buffers[rel_snd] = buf
                             except Exception:
                                 pass
+                    elif event.key in (pygame.K_F1, pygame.K_F2, pygame.K_F3):
+                        key_names = {
+                            0: "C", 1: "C sharp", 2: "D", 3: "E flat", 4: "E", 5: "F",
+                            6: "F sharp", 7: "G", 8: "A flat", 9: "A", 10: "B flat", 11: "B",
+                            -1: "B", -2: "B flat", -3: "A", -4: "A flat", -5: "G", -6: "F sharp",
+                            -7: "F", -8: "E", -9: "E flat", -10: "D", -11: "C sharp", -12: "C"
+                        }
+                        if event.key == pygame.K_F1:
+                            self.piano_transpose = max(-12, getattr(self, 'piano_transpose', 0) - 1)
+                        elif event.key == pygame.K_F2:
+                            self.piano_transpose = min(12, getattr(self, 'piano_transpose', 0) + 1)
+                        elif event.key == pygame.K_F3:
+                            self.piano_transpose = 0
+                        
+                        target_key = key_names.get(self.piano_transpose, f"{self.piano_transpose}")
+                        speak(f"Transpose to {target_key}")
                     else:
                         oct = getattr(self, 'piano_octave', 4)
                         oct_next = min(7, oct + 1)
@@ -604,7 +621,32 @@ class Gameplay(state.State):
                             pygame.K_EQUALS: f"Ab{oct_next}", pygame.K_BACKSLASH: f"A{oct_next}"
                         }
                         if event.key in key_to_note:
-                            note_name = key_to_note[event.key]
+                            raw_note = key_to_note[event.key]
+                            # Apply semitone transpose offset if non-zero
+                            transpose = getattr(self, 'piano_transpose', 0)
+                            if transpose != 0:
+                                chromatic = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+                                import re
+                                match = re.match(r"([A-Za-z]+)(\d+)", raw_note)
+                                if match:
+                                    n_str, o_num = match.group(1), int(match.group(2))
+                                    if n_str in chromatic:
+                                        abs_idx = o_num * 12 + chromatic.index(n_str) + transpose
+                                        # Modular octave wrap-around [12=C1, 95=B7]
+                                        # Prevents entire row from flatlining into a single note at boundaries
+                                        while abs_idx < 12:
+                                            abs_idx += 12
+                                        while abs_idx > 95:
+                                            abs_idx -= 12
+                                        final_oct = abs_idx // 12
+                                        final_note_str = chromatic[abs_idx % 12]
+                                        note_name = f"{final_note_str}{final_oct}"
+                                    else:
+                                        note_name = raw_note
+                                else:
+                                    note_name = raw_note
+                            else:
+                                note_name = raw_note
                             # Instant 0ms local audio feedback (client prediction)
                             snd = self.game.audio_mngr.piano.play_note(
                                 "local", note_name,
@@ -653,7 +695,32 @@ class Gameplay(state.State):
                         pygame.K_EQUALS: f"Ab{oct_next}", pygame.K_BACKSLASH: f"A{oct_next}"
                     }
                     if event.key in key_to_note:
-                        note_name = key_to_note[event.key]
+                        raw_note = key_to_note[event.key]
+                        # Apply semitone transpose offset if non-zero
+                        transpose = getattr(self, 'piano_transpose', 0)
+                        if transpose != 0:
+                            chromatic = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+                            import re
+                            match = re.match(r"([A-Za-z]+)(\d+)", raw_note)
+                            if match:
+                                n_str, o_num = match.group(1), int(match.group(2))
+                                if n_str in chromatic:
+                                    abs_idx = o_num * 12 + chromatic.index(n_str) + transpose
+                                    # Modular octave wrap-around [12=C1, 95=B7]
+                                    # Prevents entire row from flatlining into a single note at boundaries
+                                    while abs_idx < 12:
+                                        abs_idx += 12
+                                    while abs_idx > 95:
+                                        abs_idx -= 12
+                                    final_oct = abs_idx // 12
+                                    final_note_str = chromatic[abs_idx % 12]
+                                    note_name = f"{final_note_str}{final_oct}"
+                                else:
+                                    note_name = raw_note
+                            else:
+                                note_name = raw_note
+                        else:
+                            note_name = raw_note
                         # Check if sustain pedal (Space) is currently held
                         keys = pygame.key.get_pressed()
                         if keys[pygame.K_SPACE]:
