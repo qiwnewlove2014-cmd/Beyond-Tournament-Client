@@ -28,6 +28,7 @@ class PianoAudio:
 
     def __init__(self, audio_manager):
         self.am = audio_manager
+        self.gameplay = None  # Set by Gameplay.__init__ after construction
         self.active_piano_notes = {}
         self._occlusion_filter = None
 
@@ -91,6 +92,7 @@ class PianoAudio:
         
         Automatically handles note re-triggering, occlusion filtering,
         and active note tracking for sustain/staccato pedal support.
+        Also routes notes through PA Megaphone Speakers if broadcasting to Megaphone.
         """
         is_local = (peer_id == "local")
         snd = self.am.play_unbound_stereo_spatial(
@@ -120,6 +122,42 @@ class PianoAudio:
             if piano_key in self.active_piano_notes:
                 self.stop_note(peer_id, note_name)
             self.active_piano_notes[piano_key] = snd
+
+        # Route through PA Megaphone speakers if performer is staff and broadcast to megaphone is active
+        try:
+            gp = self.gameplay
+            if gp and hasattr(gp, 'music_bot') and gp.music_bot:
+                if getattr(gp.music_bot, 'broadcast_to_megaphone', False) and hasattr(gp, 'megaphone') and gp.megaphone:
+                    if hasattr(gp.megaphone, 'speaker_data') and gp.megaphone.speaker_data:
+                        bot_vol = getattr(gp.music_bot, 'volume', 50) / 100.0
+                        for spk in gp.megaphone.speaker_data:
+                            spk_pos = spk.get('position', (x, y, z))
+                            sx, sy, sz = spk_pos[0], spk_pos[1], spk_pos[2]
+                            mega_vol = 300 * spk.get('base_volume', 0.6) * bot_vol
+                            mega_snd = self.am.play_unbound(
+                                f"piano/Piano.mf.{note_name}.ogg",
+                                sx, sy, sz,
+                                volume=mega_vol,
+                                cat="miscelaneous"
+                            )
+                            if mega_snd and hasattr(mega_snd, 'source') and mega_snd.source:
+                                # Apply Megaphone PA Filter & EQ effects
+                                if hasattr(gp.megaphone, 'lowpass_filter') and gp.megaphone.lowpass_filter:
+                                    mega_snd.source.direct_filter = gp.megaphone.lowpass_filter
+                                if hasattr(self.am, 'efx'):
+                                    if hasattr(gp.megaphone, 'eq_slot') and gp.megaphone.eq_slot:
+                                        self.am.efx.send(mega_snd.source, 1, gp.megaphone.eq_slot)
+                                    if hasattr(gp.megaphone, 'reverb_slot') and gp.megaphone.reverb_slot:
+                                        self.am.efx.send(mega_snd.source, 2, gp.megaphone.reverb_slot)
+                                mega_key = f"mega-{peer_id}-{note_name}"
+                                if mega_key not in self.active_piano_notes:
+                                    self.active_piano_notes[mega_key] = []
+                                elif not isinstance(self.active_piano_notes[mega_key], list):
+                                    self.active_piano_notes[mega_key] = [self.active_piano_notes[mega_key]]
+                                self.active_piano_notes[mega_key].append(mega_snd)
+        except Exception:
+            pass
+
         return snd
 
     def stop_note(self, peer_id, note_name):
@@ -129,11 +167,18 @@ class PianoAudio:
         from dual-source 3D stereo spreading.
         """
         piano_key = f"{peer_id}-{note_name}"
+        mega_key = f"mega-{peer_id}-{note_name}"
         snds = self.active_piano_notes.pop(piano_key, None)
+        mega_snds = self.active_piano_notes.pop(mega_key, None)
+        
+        all_snds = []
         if snds:
-            if not isinstance(snds, (list, tuple)):
-                snds = [snds]
-            for snd in snds:
+            all_snds.extend(snds if isinstance(snds, (list, tuple)) else [snds])
+        if mega_snds:
+            all_snds.extend(mega_snds if isinstance(mega_snds, (list, tuple)) else [mega_snds])
+
+        if all_snds:
+            for snd in all_snds:
                 if snd and hasattr(snd, 'source') and snd.source:
                     # Smooth damper fade-out (~180ms) instead of harsh instant stop
                     def _fade_out(source, steps=10, duration=0.18):

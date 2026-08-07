@@ -682,11 +682,16 @@ class MapMusicBot:
             ("Personal Music Feed", go_personal_feed),
         ]
         
-        # Check if staff to show megaphone routing option
+        # Check if staff to show megaphone routing option (all staff ranks: Admin, Mod, Dev, Contributor, Builder, Technician, Staff)
         is_staff = getattr(gp, 'is_staff', False) if gp else False
         is_builder = getattr(gp, 'is_builder', False) if gp else False
         is_technician = getattr(gp, 'is_technician', False) if gp else False
-        if is_staff or is_builder or is_technician:
+        is_admin = getattr(gp, 'is_admin', False) if gp else False
+        is_mod = getattr(gp, 'is_moderator', False) if gp else False
+        is_dev = getattr(gp, 'is_developer', False) if gp else False
+        is_contrib = getattr(gp, 'is_contributor', False) if gp else False
+        
+        if is_staff or is_builder or is_technician or is_admin or is_mod or is_dev or is_contrib:
             def get_megaphone_label():
                 status = "ON" if self.broadcast_to_megaphone else "OFF"
                 return f"Broadcast to Megaphone: {status}"
@@ -694,7 +699,7 @@ class MapMusicBot:
             def toggle_megaphone_routing():
                 if not self.broadcast_enabled:
                     self.game.direct_soundgroup.play("ui/error.ogg", cat="ui")
-                    speak("Cannot change option. Please turn on podcast first by pressing Alternate M.")
+                    speak("Cannot change option. Please turn on broadcast mode first by pressing Alternate Shift M.")
                     return
                 
                 self.broadcast_to_megaphone = not self.broadcast_to_megaphone

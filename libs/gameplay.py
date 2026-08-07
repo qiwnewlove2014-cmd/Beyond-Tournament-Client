@@ -330,6 +330,8 @@ class Gameplay(state.State):
         
         # === MAP MUSIC BOT ===
         self.music_bot = music_bot.MapMusicBot(self.game)
+        # Wire gameplay reference into PianoAudio for megaphone broadcast routing
+        self.game.audio_mngr.piano.gameplay = self
         
 
 
@@ -393,6 +395,9 @@ class Gameplay(state.State):
         if hasattr(self, 'music_bot') and self.music_bot:
             self.music_bot.destroy()
             self.music_bot = None
+        # Clear PianoAudio gameplay reference to prevent stale refs
+        if hasattr(self.game, 'audio_mngr') and self.game.audio_mngr and hasattr(self.game.audio_mngr, 'piano'):
+            self.game.audio_mngr.piano.gameplay = None
         if hasattr(self, 'megaphone') and self.megaphone:
             self.megaphone._cleanup_megaphone_efx()
         if hasattr(self, 'wall_tone') and self.wall_tone:
