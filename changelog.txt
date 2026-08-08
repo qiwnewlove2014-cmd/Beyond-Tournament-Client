@@ -4,6 +4,18 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.6.5] Piano Expression & MIDI Support — 2026-08-08
+--------------------------------------------------------------------------------
+
+• Interactive Objects & Audio
+- **Plug-and-Play MIDI Keyboard Support:** Connected MIDI keyboards are now detected automatically when entering a playable piano, with native C1-B6 note input that does not depend on the computer-keyboard octave setting.
+- **Velocity-Sensitive Performance:** MIDI key velocity now controls piano volume from gentle to powerful in real time, with Server validation and synchronized dynamics for both performers and listeners.
+- **MIDI Pedals & Pitch Wheel:** Added support for MIDI Sustain (CC64), Soft Pedal (CC67), and full-resolution 14-bit Pitch Bend wheels. Pitch movement is smooth for nearby listeners and safely returns to center if the MIDI device disconnects.
+- **Keyboard Pitch Bend Lever:** Hold the Up or Down Arrow while notes are sounding to bend them smoothly by one whole tone, then release to return to the original pitch. The effect also follows environmental reverb and PA/megaphone output without interrupting the performance with speech announcements.
+- **Real-Time Piano Soft Pedal:** Hold Left Control to smoothly soften and muffle the piano tone, then release it to restore the original sound. The transition is synchronized for performers, listeners, environmental reverb, and PA/megaphone speakers.
+- **Clearer Octave Controls:** The Left and Right Arrow keys now select octaves 1 through 6. Unavailable edge-octave rows are disabled instead of repeating notes, preventing duplicate pitches and making the playable range easier to understand.
+
+--------------------------------------------------------------------------------
 [v1.6.4] Piano Megaphone Broadcast Fix — 2026-08-08
 --------------------------------------------------------------------------------
 
