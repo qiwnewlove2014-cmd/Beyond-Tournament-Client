@@ -507,7 +507,7 @@ class AudioManager():
         if slot is None:
             return
         try:
-            slot.effect = None  # Detach effect from slot
+            slot.unload()  # Detach effect from slot before it is reused
         except Exception:
             pass
         if slot in self._slot_in_use:

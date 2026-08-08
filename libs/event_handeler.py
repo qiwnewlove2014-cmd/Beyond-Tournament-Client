@@ -277,8 +277,19 @@ class EventHandeler:
                 pass
 
     def remove_entity(self, data):
+        target_name = data.get("name")
+        if target_name is not None:
+            piano = self.game.audio_mngr.piano
+            if (
+                str(target_name) in piano.chorus_states
+                or str(target_name) in piano._chorus_slots
+            ):
+                self.game.put(
+                    lambda target_name=target_name: (
+                        self.game.audio_mngr.piano.remove_peer(target_name)
+                    )
+                )
         if hasattr(self.gameplay, 'voice_channels') and isinstance(self.gameplay.voice_channels, dict):
-            target_name = data.get("name")
             keys_to_remove = [k for k, v in self.gameplay.voice_channels.items() if getattr(v, 'name', None) == target_name]
             for k in keys_to_remove:
                 del self.gameplay.voice_channels[k]
@@ -348,6 +359,12 @@ class EventHandeler:
                         data.get("piano_pitch_bend"),
                         animate=False,
                     )
+                if "piano_chorus" in data:
+                    self.game.audio_mngr.piano.set_chorus(
+                        piano_peer_id,
+                        data.get("piano_chorus") is True,
+                        animate=False,
+                    )
                 piano_filter = self.game.audio_mngr.piano.get_note_filter(
                     piano_peer_id, occluded=occluded
                 )
@@ -368,6 +385,9 @@ class EventHandeler:
                 snd,
                 data["peer_id"],
                 "occluded" if occluded else "normal",
+            )
+            self.game.audio_mngr.piano.apply_chorus_send(
+                snd, data["peer_id"]
             )
         if snd and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'map', None):
             reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
@@ -420,6 +440,12 @@ class EventHandeler:
                     data.get("piano_pitch_bend"),
                     animate=False,
                 )
+            if "piano_chorus" in data:
+                self.game.audio_mngr.piano.set_chorus(
+                    data["peer_id"],
+                    data.get("piano_chorus") is True,
+                    animate=False,
+                )
             if getattr(self.gameplay, 'map', None):
                 with contextlib.suppress(Exception):
                     los = self.gameplay.map.valid_straight_path((data["x"], data["y"], data["z"]), (lx, ly, lz))
@@ -451,6 +477,20 @@ class EventHandeler:
             self.game.audio_mngr.piano.set_soft_pedal(
                 data["peer_id"], data["enabled"]
             )
+
+    def set_piano_chorus(self, data):
+        """Queue a server-replicated Chorus toggle onto the main thread."""
+        if not data or data.get("peer_id") is None:
+            return
+        enabled = data.get("enabled")
+        if not isinstance(enabled, bool):
+            return
+        peer_id = data["peer_id"]
+        self.game.put(
+            lambda peer_id=peer_id, enabled=enabled: (
+                self.game.audio_mngr.piano.set_chorus(peer_id, enabled)
+            )
+        )
 
     def set_piano_pitch_bend(self, data):
         """Apply a server-validated continuous or legacy pitch bend state."""

@@ -82,6 +82,8 @@ class Gameplay(state.State):
         self.piano_transpose = 0    # Default transpose offset in semitones (-12 to +12)
         self._piano_pressed_notes = {}  # Physical key -> exact sounding note
         self._piano_soft_pedal = False  # Left Ctrl realtime soft/mute pedal
+        self._piano_chorus_enabled = False  # Tab toggles realtime Chorus
+        self._piano_chorus_tab_down = False
         self._piano_pitch_bend_direction = 0
         self._piano_pitch_bend_keys = set()
         self._piano_pitch_bend_value = 0
@@ -258,6 +260,21 @@ class Gameplay(state.State):
         if changed and announce:
             speak("Soft pedal on" if enabled else "Soft pedal off")
 
+    def _set_piano_chorus(self, enabled, announce=True, force_network=False):
+        """Apply local Chorus prediction and replicate only toggle changes."""
+        enabled = bool(enabled)
+        changed = self._piano_chorus_enabled != enabled
+        self._piano_chorus_enabled = enabled
+        self.game.audio_mngr.piano.set_chorus("local", enabled)
+        if (changed or force_network) and self.game.network:
+            self.game.network.send(
+                consts.CHANNEL_MAP,
+                "set_piano_chorus",
+                {"enabled": enabled},
+            )
+        if changed and announce:
+            speak("Chorus on" if enabled else "Chorus off")
+
     def _set_piano_pitch_bend(self, direction, force_network=False):
         """Apply the spring-loaded bend locally and replicate only state changes."""
         if isinstance(direction, bool) or direction not in (-1, 0, 1):
@@ -380,6 +397,7 @@ class Gameplay(state.State):
         """Initialize client-owned piano input and audio state on the main thread."""
         self.piano_mode = True
         self._piano_pressed_notes.clear()
+        self._piano_chorus_tab_down = False
         self._piano_pitch_bend_keys.clear()
         self._piano_midi_pitch_bend_value = 0
         self._piano_midi_pitch_bend_source = None
@@ -387,6 +405,9 @@ class Gameplay(state.State):
         self._piano_pitch_bend_last_sent = None
         self._piano_pitch_bend_last_send_time = 0.0
         self._set_piano_soft_pedal(
+            False, announce=False, force_network=True
+        )
+        self._set_piano_chorus(
             False, announce=False, force_network=True
         )
         self._set_piano_pitch_bend(
@@ -960,6 +981,8 @@ class Gameplay(state.State):
                 if event.type == pygame.KEYDOWN:
                     if event.key in (pygame.K_ESCAPE, pygame.K_RETURN):
                         self._set_piano_soft_pedal(False, announce=False)
+                        self._set_piano_chorus(False, announce=False)
+                        self._piano_chorus_tab_down = False
                         self._piano_pitch_bend_keys.clear()
                         self._set_piano_pitch_bend(0)
                         self._deactivate_piano_midi()
@@ -967,6 +990,12 @@ class Gameplay(state.State):
                         self.game.network.send(consts.CHANNEL_MAP, "piano_stop", {})
                     elif event.key == pygame.K_LCTRL:
                         self._set_piano_soft_pedal(True)
+                    elif event.key == pygame.K_TAB:
+                        if not self._piano_chorus_tab_down:
+                            self._piano_chorus_tab_down = True
+                            self._set_piano_chorus(
+                                not self._piano_chorus_enabled
+                            )
                     elif event.key in (pygame.K_UP, pygame.K_DOWN):
                         self._handle_piano_pitch_bend_key(event.key, True)
                     elif event.key in (pygame.K_LEFT, pygame.K_RIGHT):
@@ -1056,6 +1085,9 @@ class Gameplay(state.State):
                             self._piano_pressed_notes[event.key] = note_name
                             self._play_local_piano_note(note_name)
                 elif event.type == pygame.KEYUP:
+                    if event.key == pygame.K_TAB:
+                        self._piano_chorus_tab_down = False
+                        continue
                     if event.key == pygame.K_LCTRL:
                         self._set_piano_soft_pedal(False)
                         continue

@@ -39,6 +39,9 @@ class PianoAudio:
         self.pitch_bend_states = {}
         self._pitch_bend_values = {}
         self._pitch_bend_transitions = {}
+        self.chorus_states = {}
+        self._chorus_slots = {}
+        self._chorus_transitions = {}
 
     _FILTER_BASE_VALUES = {
         "normal": (1.0, 1.0),
@@ -58,6 +61,17 @@ class PianoAudio:
     _PITCH_BEND_SEMITONES = 2.0
     _PITCH_BEND_PRESS_SECONDS = 0.30
     _PITCH_BEND_RELEASE_SECONDS = 0.22
+    _CHORUS_SEND_INDEX = 3
+    _CHORUS_WET_GAIN = 0.24
+    _CHORUS_FADE_SECONDS = 0.12
+    _CHORUS_PARAMETERS = (
+        ("WAVEFORM", 0),
+        ("PHASE", 90),
+        ("RATE", 0.65),
+        ("DEPTH", 0.18),
+        ("FEEDBACK", 0.08),
+        ("DELAY", 0.012),
+    )
 
     def load_stereo_split_buffers(self, path: str):
         """Split a stereo .ogg file into two MONO16 OpenAL buffers (L/R) in RAM.
@@ -371,6 +385,131 @@ class PianoAudio:
                     source, send_idx, slot, filter=filter_obj
                 )
 
+    def _iter_peer_sounds(self, peer_id):
+        """Yield each live Sound tagged for one piano performer once."""
+        peer_id = str(peer_id)
+        candidates = list(getattr(self.am, "unbound_sources", []))
+        for sounds in self.active_piano_notes.values():
+            candidates.extend(self._iter_sounds(sounds))
+        seen = set()
+        for snd in candidates:
+            if (
+                snd is None
+                or id(snd) in seen
+                or getattr(snd, "_piano_peer_id", None) != peer_id
+            ):
+                continue
+            seen.add(id(snd))
+            yield snd
+
+    def _get_chorus_slot(self, peer_id, initial_gain=None):
+        """Lazily borrow one pooled Chorus slot for a performer."""
+        peer_id = str(peer_id)
+        slot = self._chorus_slots.get(peer_id)
+        if slot is not None:
+            return slot
+        try:
+            slot = self.am.gen_effect("CHORUS", *self._CHORUS_PARAMETERS)
+            if slot is not None:
+                slot.gain = (
+                    self._CHORUS_WET_GAIN
+                    if initial_gain is None
+                    and self.chorus_states.get(peer_id, False)
+                    else float(initial_gain or 0.0)
+                )
+                self._chorus_slots[peer_id] = slot
+        except Exception as error:
+            print(f"[PianoAudio] Chorus unavailable: {error}")
+            slot = None
+        return slot
+
+    def apply_chorus_send(self, sounds, peer_id):
+        """Route new performer sounds through Chorus when their state is on."""
+        peer_id = str(peer_id)
+        if not self.chorus_states.get(peer_id, False):
+            return
+        slot = self._get_chorus_slot(peer_id)
+        if slot is not None:
+            self.apply_effect_send(sounds, self._CHORUS_SEND_INDEX, slot)
+
+    def _release_chorus_slot(self, peer_id):
+        """Detach every send before returning this performer's slot to the pool."""
+        peer_id = str(peer_id)
+        slot = self._chorus_slots.pop(peer_id, None)
+        self._chorus_transitions.pop(peer_id, None)
+        if slot is None:
+            return
+        for snd in self._iter_peer_sounds(peer_id):
+            source = getattr(snd, "source", None)
+            sends = getattr(snd, "_piano_effect_sends", {})
+            if source is not None and hasattr(self.am, "efx"):
+                with contextlib.suppress(Exception):
+                    self.am.efx.send(source, self._CHORUS_SEND_INDEX, None)
+            sends.pop(self._CHORUS_SEND_INDEX, None)
+        with contextlib.suppress(Exception):
+            slot.unload()
+        self.am.release_effect_slot(slot)
+
+    def set_chorus(self, peer_id, enabled, animate=True):
+        """Enable or disable one performer's Chorus with a short wet fade."""
+        peer_id = str(peer_id)
+        enabled = bool(enabled)
+        previous = self.chorus_states.get(peer_id, False)
+        self.chorus_states[peer_id] = enabled
+
+        # Repeated note packets carry the current state for recovery, but must
+        # not restart an in-progress fade on every played note.
+        if previous == enabled:
+            if not enabled or peer_id in self._chorus_slots:
+                return False
+
+        if enabled:
+            peer_sounds = list(self._iter_peer_sounds(peer_id))
+            if not peer_sounds:
+                # Keep only the boolean while silent. The next note lazily
+                # acquires a slot at the target wet gain.
+                self._chorus_transitions.pop(peer_id, None)
+                return previous != enabled
+            slot = self._get_chorus_slot(peer_id, initial_gain=0.0)
+            if slot is None:
+                return previous != enabled
+            self.apply_effect_send(
+                peer_sounds,
+                self._CHORUS_SEND_INDEX,
+                slot,
+            )
+        else:
+            slot = self._chorus_slots.get(peer_id)
+            if slot is None:
+                self._chorus_transitions.pop(peer_id, None)
+                return previous != enabled
+
+        try:
+            current_gain = float(slot.gain)
+        except Exception:
+            current_gain = self._CHORUS_WET_GAIN if previous else 0.0
+        target_gain = self._CHORUS_WET_GAIN if enabled else 0.0
+        if not animate:
+            with contextlib.suppress(Exception):
+                slot.gain = target_gain
+            self._chorus_transitions.pop(peer_id, None)
+            if not enabled:
+                self._release_chorus_slot(peer_id)
+            return previous != enabled
+
+        if abs(current_gain - target_gain) <= 0.001:
+            if not enabled:
+                self._release_chorus_slot(peer_id)
+            return previous != enabled
+        self._chorus_transitions[peer_id] = {
+            "started": time.monotonic(),
+            "duration": self._CHORUS_FADE_SECONDS,
+            "start": current_gain,
+            "target": target_gain,
+            "release": not enabled,
+        }
+        return previous != enabled
+
     def _peer_has_active_notes(self, peer_id):
         normal_prefix = f"{peer_id}-"
         mega_prefix = f"mega-{peer_id}-"
@@ -412,8 +551,35 @@ class PianoAudio:
         self._pedal_transitions.pop(peer_id, None)
         self._filter_cleanup_deadlines.pop(peer_id, None)
 
+    def remove_peer(self, peer_id):
+        """Stop and release all piano state when a remote performer leaves."""
+        peer_id = str(peer_id)
+        normal_prefix = f"{peer_id}-"
+        mega_prefix = f"mega-{peer_id}-"
+        sounds_to_stop = []
+        for key in list(self.active_piano_notes):
+            if key.startswith(normal_prefix) or key.startswith(mega_prefix):
+                sounds_to_stop.extend(
+                    self._iter_sounds(self.active_piano_notes.pop(key, None))
+                )
+
+        # Filters and auxiliary sends must be detached before the pooled
+        # Chorus slot can be returned safely.
+        self._delete_peer_filters(peer_id)
+        self._release_chorus_slot(peer_id)
+        for snd in sounds_to_stop:
+            source = getattr(snd, "source", None)
+            if source is not None:
+                with contextlib.suppress(Exception):
+                    source.stop()
+        self.soft_pedal_states.pop(peer_id, None)
+        self.pitch_bend_states.pop(peer_id, None)
+        self._pitch_bend_values.pop(peer_id, None)
+        self._pitch_bend_transitions.pop(peer_id, None)
+        self.chorus_states.pop(peer_id, None)
+
     def update(self):
-        """Advance pedal and pitch transitions on the owning audio/game thread."""
+        """Advance pedal, bend, and Chorus transitions on the audio/game thread."""
         now = time.monotonic()
         transitioning_peers = set()
         base_values_by_mode = {}
@@ -463,6 +629,9 @@ class PianoAudio:
         for peer_id, deadline in list(self._filter_cleanup_deadlines.items()):
             if now >= deadline and not self._peer_has_active_notes(peer_id):
                 self._delete_peer_filters(peer_id)
+                # Preserve the replicated on/off state, but do not reserve a
+                # scarce EFX slot while this performer is silent.
+                self._release_chorus_slot(peer_id)
 
         for peer_id, transition in list(self._pitch_bend_transitions.items()):
             linear_progress = min(
@@ -478,6 +647,28 @@ class PianoAudio:
             self._apply_pitch_bend(peer_id, semitones)
             if linear_progress >= 1.0:
                 self._pitch_bend_transitions.pop(peer_id, None)
+
+        for peer_id, transition in list(self._chorus_transitions.items()):
+            slot = self._chorus_slots.get(peer_id)
+            if slot is None:
+                self._chorus_transitions.pop(peer_id, None)
+                continue
+            linear_progress = min(
+                1.0,
+                (now - transition["started"]) / transition["duration"],
+            )
+            progress = linear_progress * linear_progress * (
+                3.0 - (2.0 * linear_progress)
+            )
+            gain = transition["start"] + (
+                (transition["target"] - transition["start"]) * progress
+            )
+            with contextlib.suppress(Exception):
+                slot.gain = gain
+            if linear_progress >= 1.0:
+                self._chorus_transitions.pop(peer_id, None)
+                if transition["release"]:
+                    self._release_chorus_slot(peer_id)
 
     def reset(self):
         """Release PianoAudio-owned filters and state during gameplay teardown."""
@@ -516,6 +707,10 @@ class PianoAudio:
         self.pitch_bend_states.clear()
         self._pitch_bend_values.clear()
         self._pitch_bend_transitions.clear()
+        for peer_id in list(self._chorus_slots):
+            self._release_chorus_slot(peer_id)
+        self.chorus_states.clear()
+        self._chorus_transitions.clear()
         if self._occlusion_filter is not None:
             self._occlusion_filter = None
 
@@ -545,6 +740,7 @@ class PianoAudio:
         )
         if snd:
             self._tag_sounds(snd, peer_id, filter_mode)
+            self.apply_chorus_send(snd, peer_id)
             piano_key = f"{peer_id}-{note_name}"
             # If the same peer plays the same note very rapidly, stop the old one first
             if piano_key in self.active_piano_notes:
@@ -601,6 +797,7 @@ class PianoAudio:
                     if pedal_filter is None and hasattr(gp.megaphone, 'lowpass_filter') and gp.megaphone.lowpass_filter:
                         mega_snd.source.direct_filter = gp.megaphone.lowpass_filter
                     self._tag_sounds(mega_snd, peer_id, "pa")
+                    self.apply_chorus_send(mega_snd, peer_id)
                     if hasattr(self.am, 'efx'):
                         if hasattr(gp.megaphone, 'eq_slot') and gp.megaphone.eq_slot:
                             self.apply_effect_send(mega_snd, 1, gp.megaphone.eq_slot)

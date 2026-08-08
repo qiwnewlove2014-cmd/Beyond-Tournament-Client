@@ -4,6 +4,13 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.6.6] Piano Chorus Effect — 2026-08-08
+--------------------------------------------------------------------------------
+
+• Interactive Objects & Audio
+- **Real-Time Piano Chorus:** Press Tab while playing a piano to toggle a dimensional Chorus effect with a short wet fade. The effect is predicted instantly for the performer, synchronized to nearby listeners, and follows environmental reverb plus PA/megaphone output without interrupting held notes.
+
+--------------------------------------------------------------------------------
 [v1.6.5] Piano Expression & MIDI Support — 2026-08-08
 --------------------------------------------------------------------------------
 
