@@ -1,6 +1,6 @@
 import contextlib
 from . import audio_manager, consts, options
-from .objects import entity
+from .objects import entity, motorcycle
 import cyal.exceptions
 from .speech import speak
 
@@ -112,6 +112,13 @@ class Map:
 
     def destroy(self, destroy_entities=True):
         # audio.set_global_reverb(None)
+        # Map-owned effect slots must not be released while a specialized
+        # entity still has an auxiliary send attached to them.
+        for entity_obj in self.entities.values():
+            detach_effects = getattr(entity_obj, "detach_environment_effects", None)
+            if callable(detach_effects):
+                with contextlib.suppress(Exception):
+                    detach_effects()
         for i in self.reverb_list.copy():
             i.destroy()
         if destroy_entities:
@@ -572,10 +579,14 @@ class Map:
     def spawn_zombieSpawn(self, **kwargs):
         pass
 
-    def spawn_entity(self, name, x, y, z, hp=100):
+    def spawn_entity(self, name, x, y, z, hp=100, entity_type=None):
         if self.entities.get(name):
             self.entities[name].destroy()
-        self.entities[name] = entity.Entity(self.game, self, x, y, z, hp, name=name)
+        if entity_type == "motorcycle":
+            spawned = motorcycle.Motorcycle(self.game, self, x, y, z, hp, name=name)
+        else:
+            spawned = entity.Entity(self.game, self, x, y, z, hp, name=name)
+        self.entities[name] = spawned
         return self.entities[name]
 
     def get_entities_at(self, x, y, z):

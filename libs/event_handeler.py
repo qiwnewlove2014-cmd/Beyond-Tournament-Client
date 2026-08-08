@@ -219,6 +219,13 @@ class EventHandeler:
         if not isinstance(data, dict) or not data.get("name"):
             log("[ENTITY] Ignored spawn_entity packet without a valid name")
             return
+        if data.get("type") == "motorcycle" and not data.get("_motorcycle_main_thread"):
+            spawn_data = dict(data)
+            spawn_data["_motorcycle_main_thread"] = True
+            self.game.put(
+                lambda spawn_data=spawn_data: self.spawn_entity(spawn_data)
+            )
+            return
         raw_x = data.get("x")
         raw_y = data.get("y")
         raw_z = data.get("z")
@@ -230,7 +237,9 @@ class EventHandeler:
             getattr(self.gameplay.camera, "focus_object", None) is existing
         )
         try:
-            entity = self.gameplay.map.spawn_entity(data["name"], x, y, z)
+            entity = self.gameplay.map.spawn_entity(
+                data["name"], x, y, z, entity_type=data.get("type")
+            )
         except Exception as e:
             log_exception(e, f"spawn_entity name={data['name']!r}")
             return
@@ -262,6 +271,13 @@ class EventHandeler:
             except:
                 pass
 
+        if getattr(entity, "entity_type", None) == "motorcycle":
+            state_data = dict(data)
+            state_data["_initial_spawn"] = True
+            self.game.put(
+                lambda state_data=state_data: self._apply_motorcycle_state(state_data)
+            )
+
         # Auto-focus spectator camera if this is the target player we were spectating
         if getattr(self.gameplay, "spectator_mode", False) and data["name"] == getattr(self.gameplay, "spectator_target_name", ""):
             self.gameplay.camera.set_focus_object(entity)
@@ -278,6 +294,15 @@ class EventHandeler:
 
     def remove_entity(self, data):
         target_name = data.get("name")
+        target_entity = self.gameplay.map.entities.get(target_name)
+        if (getattr(target_entity, "entity_type", None) == "motorcycle" and
+                not data.get("_motorcycle_main_thread")):
+            remove_data = dict(data)
+            remove_data["_motorcycle_main_thread"] = True
+            self.game.put(
+                lambda remove_data=remove_data: self.remove_entity(remove_data)
+            )
+            return
         if target_name is not None:
             piano = self.game.audio_mngr.piano
             if (
@@ -297,11 +322,20 @@ class EventHandeler:
             self.gameplay.map.remove_entity(data["name"])
 
     def play_sound(self, data):
-        if entity := (
+        entity = (
             self.gameplay.player
             if data["name"] == self.gameplay.player.name
             else self.gameplay.map.entities.get(data["name"])
-        ):
+        )
+        if (getattr(entity, "entity_type", None) == "motorcycle" and
+                not data.get("_motorcycle_main_thread")):
+            sound_data = dict(data)
+            sound_data["_motorcycle_main_thread"] = True
+            self.game.put(
+                lambda sound_data=sound_data: self.play_sound(sound_data)
+            )
+            return
+        if entity:
             entity.play_sound(
                 data["sound"],
                 data["looping"],
@@ -559,6 +593,12 @@ class EventHandeler:
         if not entity and name == self.gameplay.player.name:
             entity = self.gameplay.player
         if entity:
+            if getattr(entity, "entity_type", None) == "motorcycle":
+                move_data = dict(data)
+                self.game.put(
+                    lambda move_data=move_data: self._apply_motorcycle_move(move_data)
+                )
+                return
             try:
                 entity.move(
                     data.get("x"), data.get("y"), data.get("z"),
@@ -569,6 +609,49 @@ class EventHandeler:
                 log_exception(e, f"move name={name!r} data={data!r}")
         else:
             log(f"[ENTITY] Ignored move for unknown entity {name!r}")
+
+    def _apply_motorcycle_move(self, data):
+        entity = self.gameplay.map.entities.get(data.get("name"))
+        if not entity or getattr(entity, "entity_type", None) != "motorcycle":
+            return
+        entity.move(
+            data.get("x"), data.get("y"), data.get("z"),
+            False, "vehicle"
+        )
+        entity.apply_state(
+            data.get("vehicle_speed", 0.0),
+            data.get("engine_on", False),
+            data.get("rider", ""),
+            data.get("vehicle_facing", data.get("angle", 0.0)),
+        )
+
+    def _apply_motorcycle_state(self, data):
+        entity = self.gameplay.map.entities.get(data.get("name"))
+        if not entity or getattr(entity, "entity_type", None) != "motorcycle":
+            return
+        entity.apply_state(
+            data.get("vehicle_speed", 0.0),
+            data.get("engine_on", False),
+            data.get("rider", ""),
+            data.get("vehicle_facing", 0.0),
+            bool(data.get("_initial_spawn", False)),
+        )
+
+    def motorcycle_state(self, data):
+        if not isinstance(data, dict):
+            return
+        state_data = dict(data)
+        self.game.put(
+            lambda state_data=state_data: self._apply_motorcycle_state(state_data)
+        )
+
+    def motorcycle_session(self, data):
+        if not isinstance(data, dict):
+            return
+        session_data = dict(data)
+        self.game.put(
+            lambda session_data=session_data: self.gameplay.set_motorcycle_session(session_data)
+        )
 
     def quit(self, data):
         self.game.put(lambda: self.gameplay.quit("quit"))

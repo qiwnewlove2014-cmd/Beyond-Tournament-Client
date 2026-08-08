@@ -78,6 +78,11 @@ class Gameplay(state.State):
         self.game_started = False   # Track if game has started (blocks PA Test Mode)
         self.pong_mode = False      # True when player is in an active Pong match (suppresses normal footsteps)
         self.piano_mode = False     # True when playing piano
+        self.motorcycle_mode = False
+        self.motorcycle_name = None
+        self._motorcycle_keys_down = set()
+        self._motorcycle_last_input = (0, 0)
+        self._motorcycle_horn_down = False
         self.piano_octave = 4       # Default octave (Octave 4 - Middle C)
         self.piano_transpose = 0    # Default transpose offset in semitones (-12 to +12)
         self._piano_pressed_notes = {}  # Physical key -> exact sounding note
@@ -238,6 +243,71 @@ class Gameplay(state.State):
             (kc.get("spectator_cycle_camera", pygame.K_p), self.cycle_spectator_camera_if_active),
         ]
         self.turn_mod = False
+
+    def set_motorcycle_session(self, data):
+        active = bool(data.get("active", False))
+        self.motorcycle_mode = active
+        self.motorcycle_name = str(data.get("name", "")) if active else None
+        self._motorcycle_keys_down.clear()
+        self._motorcycle_last_input = (0, 0)
+        self._motorcycle_horn_down = False
+        if not active:
+            return
+        # Suppress any normal held-key movement that was active while mounting.
+        self.running = False
+
+    def _motorcycle_key_role(self, key):
+        forward = {self.kc.get("move_forward", pygame.K_w), pygame.K_UP}
+        backward = {self.kc.get("move_backward", pygame.K_s), pygame.K_DOWN}
+        left = {self.kc.get("turn_left", pygame.K_a), pygame.K_LEFT}
+        right = {self.kc.get("turn_right", pygame.K_d), pygame.K_RIGHT}
+        if key in forward:
+            return "forward"
+        if key in backward:
+            return "backward"
+        if key in left:
+            return "left"
+        if key in right:
+            return "right"
+        return None
+
+    def _send_motorcycle_input(self):
+        throttle = int("forward" in self._motorcycle_keys_down) - int("backward" in self._motorcycle_keys_down)
+        steer = int("right" in self._motorcycle_keys_down) - int("left" in self._motorcycle_keys_down)
+        current = (throttle, steer)
+        if current == self._motorcycle_last_input or not self.motorcycle_name:
+            return
+        self._motorcycle_last_input = current
+        self.game.network.send(
+            consts.CHANNEL_MOVEMENT,
+            "motorcycle_input",
+            {"name": self.motorcycle_name, "throttle": throttle, "steer": steer},
+        )
+
+    def _handle_motorcycle_control_event(self, event):
+        if event.type not in (pygame.KEYDOWN, pygame.KEYUP):
+            return False
+        if event.key == pygame.K_SPACE:
+            if event.type == pygame.KEYDOWN and not self._motorcycle_horn_down:
+                self._motorcycle_horn_down = True
+                if self.motorcycle_name:
+                    self.game.network.send(
+                        consts.CHANNEL_MOVEMENT,
+                        "motorcycle_horn",
+                        {"name": self.motorcycle_name},
+                    )
+            elif event.type == pygame.KEYUP:
+                self._motorcycle_horn_down = False
+            return True
+        role = self._motorcycle_key_role(event.key)
+        if role is None:
+            return False
+        if event.type == pygame.KEYDOWN:
+            self._motorcycle_keys_down.add(role)
+        else:
+            self._motorcycle_keys_down.discard(role)
+        self._send_motorcycle_input()
+        return True
 
     def _dispatch_configurable_key_actions(self, event):
         """Run every configurable action sharing this key, in menu order."""
@@ -970,7 +1040,7 @@ class Gameplay(state.State):
         key = pygame.key.get_pressed()
         is_concert = getattr(self, 'concert_spectator_mode', False)
         if not self.spectator_mode or is_concert:
-            if not getattr(self, 'piano_mode', False):
+            if not getattr(self, 'piano_mode', False) and not getattr(self, 'motorcycle_mode', False):
                 for i in self.keys_held:
                     if key[i]:
                         self.keys_held[i](pygame.key.get_mods())
@@ -1139,6 +1209,8 @@ class Gameplay(state.State):
                         else:
                             note_name = raw_note
                         self._release_piano_note(note_name)
+                continue
+            if getattr(self, "motorcycle_mode", False) and self._handle_motorcycle_control_event(event):
                 continue
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
                 self.game.network.send(consts.CHANNEL_MAP, "pong_serve", {})
