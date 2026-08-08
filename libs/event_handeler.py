@@ -431,6 +431,7 @@ class EventHandeler:
     def piano_start(self, data):
         """Enable piano mode to intercept keyboard input for playing piano notes and pre-load audio buffers strongly into RAM."""
         self.gameplay.piano_mode = True
+        self.gameplay._piano_pressed_notes.clear()
         self.gameplay._set_piano_soft_pedal(
             False, announce=False, force_network=True
         )

@@ -37,6 +37,9 @@ import cyal
 
 
 class Gameplay(state.State):
+    _PIANO_MIN_BASE_OCTAVE = 1
+    _PIANO_MAX_BASE_OCTAVE = 6
+
     def __init__(self, game):
         super().__init__(game)
         self.kc = game.keyconfig
@@ -67,6 +70,7 @@ class Gameplay(state.State):
         self.piano_mode = False     # True when playing piano
         self.piano_octave = 4       # Default octave (Octave 4 - Middle C)
         self.piano_transpose = 0    # Default transpose offset in semitones (-12 to +12)
+        self._piano_pressed_notes = {}  # Physical key -> exact sounding note
         self._piano_soft_pedal = False  # Left Ctrl realtime soft/mute pedal
         # ENet guarantees ordering inside one channel, not across CHANNEL_MISC
         # and CHANNEL_MAP.  Player spawn packets can therefore arrive before
@@ -230,6 +234,68 @@ class Gameplay(state.State):
             )
         if changed and announce:
             speak("Soft pedal on" if enabled else "Soft pedal off")
+
+    def _get_piano_key_to_note(self):
+        """Build the note map without duplicating unavailable edge octaves."""
+        octave = max(
+            self._PIANO_MIN_BASE_OCTAVE,
+            min(
+                self._PIANO_MAX_BASE_OCTAVE,
+                getattr(self, "piano_octave", 4),
+            ),
+        )
+        key_to_note = {
+            # Lower-row extension and upper main row both continue octave N.
+            pygame.K_COMMA: f"C{octave}", pygame.K_l: f"Db{octave}",
+            pygame.K_PERIOD: f"D{octave}", pygame.K_SEMICOLON: f"Eb{octave}",
+            pygame.K_SLASH: f"E{octave}", pygame.K_QUOTE: f"F{octave}",
+            pygame.K_q: f"C{octave}", pygame.K_2: f"Db{octave}",
+            pygame.K_w: f"D{octave}", pygame.K_3: f"Eb{octave}",
+            pygame.K_e: f"E{octave}", pygame.K_r: f"F{octave}",
+            pygame.K_5: f"Gb{octave}", pygame.K_t: f"G{octave}",
+            pygame.K_6: f"Ab{octave}", pygame.K_y: f"A{octave}",
+            pygame.K_7: f"Bb{octave}", pygame.K_u: f"B{octave}",
+        }
+
+        # Octave 0 is incomplete, so the lower band is intentionally disabled
+        # at octave 1 instead of being clamped and duplicating octave 1 notes.
+        if octave > self._PIANO_MIN_BASE_OCTAVE:
+            lower = octave - 1
+            key_to_note.update({
+                pygame.K_z: f"C{lower}", pygame.K_s: f"Db{lower}",
+                pygame.K_x: f"D{lower}", pygame.K_d: f"Eb{lower}",
+                pygame.K_c: f"E{lower}", pygame.K_v: f"F{lower}",
+                pygame.K_g: f"Gb{lower}", pygame.K_b: f"G{lower}",
+                pygame.K_h: f"Ab{lower}", pygame.K_n: f"A{lower}",
+                pygame.K_j: f"Bb{lower}", pygame.K_m: f"B{lower}",
+            })
+
+        # Octave 7 is incomplete, so the upper extension is disabled at
+        # octave 6 rather than replaying octave 6 notes under different keys.
+        if octave < self._PIANO_MAX_BASE_OCTAVE:
+            upper = octave + 1
+            key_to_note.update({
+                pygame.K_i: f"C{upper}", pygame.K_9: f"Db{upper}",
+                pygame.K_o: f"D{upper}", pygame.K_0: f"Eb{upper}",
+                pygame.K_p: f"E{upper}", pygame.K_LEFTBRACKET: f"F{upper}",
+                pygame.K_MINUS: f"Gb{upper}", pygame.K_RIGHTBRACKET: f"G{upper}",
+                pygame.K_EQUALS: f"Ab{upper}", pygame.K_BACKSLASH: f"A{upper}",
+            })
+        return key_to_note
+
+    def _release_piano_note(self, note_name):
+        """Release the exact note started by a physical key press."""
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_SPACE]:
+            if not hasattr(self, "_piano_sustained_notes"):
+                self._piano_sustained_notes = []
+            if note_name not in self._piano_sustained_notes:
+                self._piano_sustained_notes.append(note_name)
+            return
+        self.game.audio_mngr.piano.stop_note("local", note_name)
+        self.game.network.send(
+            consts.CHANNEL_MAP, "stop_piano_note", {"note": note_name}
+        )
 
     def spectator_switch_player(self, mod):
         if not self.spectator_mode:
@@ -582,12 +648,24 @@ class Gameplay(state.State):
                         self.game.network.send(consts.CHANNEL_MAP, "piano_stop", {})
                     elif event.key == pygame.K_LCTRL:
                         self._set_piano_soft_pedal(True)
-                    elif event.key == pygame.K_TAB:
-                        mods = pygame.key.get_mods()
-                        if mods & pygame.KMOD_SHIFT:
-                            self.piano_octave = max(1, getattr(self, 'piano_octave', 4) - 1)
+                    elif event.key in (pygame.K_LEFT, pygame.K_RIGHT):
+                        current_octave = max(
+                            self._PIANO_MIN_BASE_OCTAVE,
+                            min(
+                                self._PIANO_MAX_BASE_OCTAVE,
+                                getattr(self, 'piano_octave', 4),
+                            ),
+                        )
+                        if event.key == pygame.K_LEFT:
+                            self.piano_octave = max(
+                                self._PIANO_MIN_BASE_OCTAVE,
+                                current_octave - 1,
+                            )
                         else:
-                            self.piano_octave = min(7, getattr(self, 'piano_octave', 4) + 1)
+                            self.piano_octave = min(
+                                self._PIANO_MAX_BASE_OCTAVE,
+                                current_octave + 1,
+                            )
                         speak(f"Octave {self.piano_octave}")
                         # Preload octave notes
                         oct_notes = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
@@ -621,31 +699,13 @@ class Gameplay(state.State):
                         target_key = key_names.get(self.piano_transpose, f"{self.piano_transpose}")
                         speak(f"Transpose to {target_key}")
                     else:
-                        oct = getattr(self, 'piano_octave', 4)
-                        oct_next = min(7, oct + 1)
-                        oct_prev = max(1, oct - 1)
-                        key_to_note = {
-                            # Lower Octave (Octave - 1)
-                            pygame.K_z: f"C{oct_prev}", pygame.K_s: f"Db{oct_prev}", pygame.K_x: f"D{oct_prev}",
-                            pygame.K_d: f"Eb{oct_prev}", pygame.K_c: f"E{oct_prev}", pygame.K_v: f"F{oct_prev}",
-                            pygame.K_g: f"Gb{oct_prev}", pygame.K_b: f"G{oct_prev}", pygame.K_h: f"Ab{oct_prev}",
-                            pygame.K_n: f"A{oct_prev}", pygame.K_j: f"Bb{oct_prev}", pygame.K_m: f"B{oct_prev}",
-                            # Lower Octave extended (Octave N)
-                            pygame.K_COMMA: f"C{oct}", pygame.K_l: f"Db{oct}", pygame.K_PERIOD: f"D{oct}",
-                            pygame.K_SEMICOLON: f"Eb{oct}", pygame.K_SLASH: f"E{oct}", pygame.K_QUOTE: f"F{oct}",
-
-                            # Upper / Main Octave (Octave N)
-                            pygame.K_q: f"C{oct}", pygame.K_2: f"Db{oct}", pygame.K_w: f"D{oct}",
-                            pygame.K_3: f"Eb{oct}", pygame.K_e: f"E{oct}", pygame.K_r: f"F{oct}",
-                            pygame.K_5: f"Gb{oct}", pygame.K_t: f"G{oct}", pygame.K_6: f"Ab{oct}",
-                            pygame.K_y: f"A{oct}", pygame.K_7: f"Bb{oct}", pygame.K_u: f"B{oct}",
-                            # Upper / Main Octave extended (Octave N+1)
-                            pygame.K_i: f"C{oct_next}", pygame.K_9: f"Db{oct_next}", pygame.K_o: f"D{oct_next}",
-                            pygame.K_0: f"Eb{oct_next}", pygame.K_p: f"E{oct_next}", pygame.K_LEFTBRACKET: f"F{oct_next}",
-                            pygame.K_MINUS: f"Gb{oct_next}", pygame.K_RIGHTBRACKET: f"G{oct_next}", 
-                            pygame.K_EQUALS: f"Ab{oct_next}", pygame.K_BACKSLASH: f"A{oct_next}"
-                        }
+                        key_to_note = self._get_piano_key_to_note()
                         if event.key in key_to_note:
+                            # Ignore OS key-repeat while the physical piano key
+                            # remains held. KEYUP uses this stored note so an
+                            # octave change cannot leave the old note sounding.
+                            if event.key in self._piano_pressed_notes:
+                                continue
                             raw_note = key_to_note[event.key]
                             # Apply semitone transpose offset if non-zero
                             transpose = getattr(self, 'piano_transpose', 0)
@@ -672,6 +732,7 @@ class Gameplay(state.State):
                                     note_name = raw_note
                             else:
                                 note_name = raw_note
+                            self._piano_pressed_notes[event.key] = note_name
                             # Instant 0ms local audio feedback (client prediction)
                             snd = self.game.audio_mngr.piano.play_note(
                                 "local", note_name,
@@ -702,29 +763,13 @@ class Gameplay(state.State):
                             self.game.network.send(consts.CHANNEL_MAP, "stop_piano_note", {"note": sn})
                         self._piano_sustained_notes = []
                         continue
-                    oct = getattr(self, 'piano_octave', 4)
-                    oct_next = min(7, oct + 1)
-                    oct_prev = max(1, oct - 1)
-                    key_to_note = {
-                        # Lower Octave (Octave - 1)
-                        pygame.K_z: f"C{oct_prev}", pygame.K_s: f"Db{oct_prev}", pygame.K_x: f"D{oct_prev}",
-                        pygame.K_d: f"Eb{oct_prev}", pygame.K_c: f"E{oct_prev}", pygame.K_v: f"F{oct_prev}",
-                        pygame.K_g: f"Gb{oct_prev}", pygame.K_b: f"G{oct_prev}", pygame.K_h: f"Ab{oct_prev}",
-                        pygame.K_n: f"A{oct_prev}", pygame.K_j: f"Bb{oct_prev}", pygame.K_m: f"B{oct_prev}",
-                        # Lower Octave extended (Octave N)
-                        pygame.K_COMMA: f"C{oct}", pygame.K_l: f"Db{oct}", pygame.K_PERIOD: f"D{oct}",
-                        pygame.K_SEMICOLON: f"Eb{oct}", pygame.K_SLASH: f"E{oct}", pygame.K_QUOTE: f"F{oct}",
-                        # Upper / Main Octave (Octave N)
-                        pygame.K_q: f"C{oct}", pygame.K_2: f"Db{oct}", pygame.K_w: f"D{oct}",
-                        pygame.K_3: f"Eb{oct}", pygame.K_e: f"E{oct}", pygame.K_r: f"F{oct}",
-                        pygame.K_5: f"Gb{oct}", pygame.K_t: f"G{oct}", pygame.K_6: f"Ab{oct}",
-                        pygame.K_y: f"A{oct}", pygame.K_7: f"Bb{oct}", pygame.K_u: f"B{oct}",
-                        # Upper / Main Octave extended (Octave N+1)
-                        pygame.K_i: f"C{oct_next}", pygame.K_9: f"Db{oct_next}", pygame.K_o: f"D{oct_next}",
-                        pygame.K_0: f"Eb{oct_next}", pygame.K_p: f"E{oct_next}", pygame.K_LEFTBRACKET: f"F{oct_next}",
-                        pygame.K_MINUS: f"Gb{oct_next}", pygame.K_RIGHTBRACKET: f"G{oct_next}", 
-                        pygame.K_EQUALS: f"Ab{oct_next}", pygame.K_BACKSLASH: f"A{oct_next}"
-                    }
+                    tracked_note = self._piano_pressed_notes.pop(
+                        event.key, None
+                    )
+                    if tracked_note is not None:
+                        self._release_piano_note(tracked_note)
+                        continue
+                    key_to_note = self._get_piano_key_to_note()
                     if event.key in key_to_note:
                         raw_note = key_to_note[event.key]
                         # Apply semitone transpose offset if non-zero
@@ -752,18 +797,7 @@ class Gameplay(state.State):
                                 note_name = raw_note
                         else:
                             note_name = raw_note
-                        # Check if sustain pedal (Space) is currently held
-                        keys = pygame.key.get_pressed()
-                        if keys[pygame.K_SPACE]:
-                            # Pedal is down — don't stop, just remember to stop later
-                            if not hasattr(self, '_piano_sustained_notes'):
-                                self._piano_sustained_notes = []
-                            if note_name not in self._piano_sustained_notes:
-                                self._piano_sustained_notes.append(note_name)
-                        else:
-                            # No pedal — stop immediately (staccato)
-                            self.game.audio_mngr.piano.stop_note("local", note_name)
-                            self.game.network.send(consts.CHANNEL_MAP, "stop_piano_note", {"note": note_name})
+                        self._release_piano_note(note_name)
                 continue
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
                 self.game.network.send(consts.CHANNEL_MAP, "pong_serve", {})
