@@ -217,7 +217,7 @@ class AudioManager():
                     gain = (self.volume_categories[cat][0] / 100) * (source.volume / 100)
                     if not source.muted: source.source.gain = gain
 
-    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0, reference_distance=15.0, rolloff=1.0, max_distance=100.0):
+    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0, reference_distance=15.0, rolloff=1.0, max_distance=100.0, direct_filter=None):
         if self.muted and not looping: return
         direction=self.make_orientation(*direction)
         buffer = self.load_buffer(path)
@@ -253,7 +253,10 @@ class AudioManager():
         source.buffer = buffer
         snd = Sound(source, volume, False, cat=cat)
         self.unbound_sources.append(snd)
-        if len(self.filter) > 0 and self.filter[-1] is not None: source.direct_filter = self.filter[-1]
+        if direct_filter is not None:
+            source.direct_filter = direct_filter
+        elif len(self.filter) > 0 and self.filter[-1] is not None:
+            source.direct_filter = self.filter[-1]
         for i in self.sends:
             try: self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
             except cyal.exceptions.InvalidOperationError as e: print(e)
@@ -264,7 +267,7 @@ class AudioManager():
 
 
 
-    def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0, as_mono=False, as_3d_stereo=False, occluded=False):
+    def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0, as_mono=False, as_3d_stereo=False, occluded=False, direct_filter=None):
         if self.muted:
             return None
         if cat not in self.volume_categories:
@@ -320,6 +323,11 @@ class AudioManager():
             if len(self.filter) > 0 and self.filter[-1] is not None:
                 src_l.direct_filter = self.filter[-1]
                 src_r.direct_filter = self.filter[-1]
+            if direct_filter is not None:
+                # Piano pedal filters are attached before playback so the note
+                # attack never leaks through at full brightness.
+                src_l.direct_filter = direct_filter
+                src_r.direct_filter = direct_filter
             for i in self.sends:
                 with contextlib.suppress(Exception):
                     self.efx.send(src_l, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
@@ -386,6 +394,8 @@ class AudioManager():
         self.unbound_sources.append(snd)
         if len(self.filter) > 0 and self.filter[-1] is not None:
             source.direct_filter = self.filter[-1]
+        if direct_filter is not None:
+            source.direct_filter = direct_filter
         for i in self.sends:
             with contextlib.suppress(Exception):
                 self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
@@ -399,6 +409,7 @@ class AudioManager():
     def loop(self):
         with contextlib.suppress(RuntimeError):
             with self.context.batch():
+                self.piano.update()
                 for source in self.unbound_sources:
                     if source.source.state == cyal.SourceState.STOPPED:
                         self.unbound_sources.pop(self.unbound_sources.index(source))

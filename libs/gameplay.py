@@ -67,6 +67,7 @@ class Gameplay(state.State):
         self.piano_mode = False     # True when playing piano
         self.piano_octave = 4       # Default octave (Octave 4 - Middle C)
         self.piano_transpose = 0    # Default transpose offset in semitones (-12 to +12)
+        self._piano_soft_pedal = False  # Left Ctrl realtime soft/mute pedal
         # ENet guarantees ordering inside one channel, not across CHANNEL_MISC
         # and CHANNEL_MAP.  Player spawn packets can therefore arrive before
         # the connected event enters this state.  Create the mapping here and
@@ -214,6 +215,21 @@ class Gameplay(state.State):
         for bound_key, action in self.configurable_key_actions:
             if event.key == bound_key:
                 action(event.mod)
+
+    def _set_piano_soft_pedal(self, enabled, announce=True, force_network=False):
+        """Apply the local pedal immediately and replicate its state reliably."""
+        enabled = bool(enabled)
+        changed = self._piano_soft_pedal != enabled
+        self._piano_soft_pedal = enabled
+        self.game.audio_mngr.piano.set_soft_pedal("local", enabled)
+        if (changed or force_network) and self.game.network:
+            self.game.network.send(
+                consts.CHANNEL_MAP,
+                "set_piano_soft_pedal",
+                {"enabled": enabled},
+            )
+        if changed and announce:
+            speak("Soft pedal on" if enabled else "Soft pedal off")
 
     def spectator_switch_player(self, mod):
         if not self.spectator_mode:
@@ -397,6 +413,7 @@ class Gameplay(state.State):
             self.music_bot = None
         # Clear PianoAudio gameplay reference to prevent stale refs
         if hasattr(self.game, 'audio_mngr') and self.game.audio_mngr and hasattr(self.game.audio_mngr, 'piano'):
+            self.game.audio_mngr.piano.reset()
             self.game.audio_mngr.piano.gameplay = None
         if hasattr(self, 'megaphone') and self.megaphone:
             self.megaphone._cleanup_megaphone_efx()
@@ -560,8 +577,11 @@ class Gameplay(state.State):
             if getattr(self, 'piano_mode', False):
                 if event.type == pygame.KEYDOWN:
                     if event.key in (pygame.K_ESCAPE, pygame.K_RETURN):
+                        self._set_piano_soft_pedal(False, announce=False)
                         self.piano_mode = False
                         self.game.network.send(consts.CHANNEL_MAP, "piano_stop", {})
+                    elif event.key == pygame.K_LCTRL:
+                        self._set_piano_soft_pedal(True)
                     elif event.key == pygame.K_TAB:
                         mods = pygame.key.get_mods()
                         if mods & pygame.KMOD_SHIFT:
@@ -662,12 +682,18 @@ class Gameplay(state.State):
                             if snd and snd.source and getattr(self, 'map', None):
                                 reverb = self.map.get_reverb_at(self.player.x, self.player.y, self.player.z)
                                 if reverb and reverb.reverb:
-                                    try:
-                                        self.game.audio_mngr.efx.send(snd.source, 0, reverb.reverb)
-                                    except Exception:
-                                        pass
-                            self.game.network.send(consts.CHANNEL_MAP, "play_piano_note", {"note": note_name})
+                                    self.game.audio_mngr.piano.apply_effect_send(
+                                        snd, 0, reverb.reverb
+                                    )
+                            self.game.network.send(
+                                consts.CHANNEL_MAP,
+                                "play_piano_note",
+                                {"note": note_name},
+                            )
                 elif event.type == pygame.KEYUP:
+                    if event.key == pygame.K_LCTRL:
+                        self._set_piano_soft_pedal(False)
+                        continue
                     # Sustain pedal release (Space) — stop all sustained notes
                     if event.key == pygame.K_SPACE:
                         sustained = getattr(self, '_piano_sustained_notes', [])

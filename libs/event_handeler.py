@@ -317,11 +317,11 @@ class EventHandeler:
         )
 
     def play_unbound(self, data):
+        occluded = False
         if data.get("is_stereo_spatial") and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
             facing = getattr(self.gameplay.player, 'facing', 0.0)
 
-            occluded = False
             if getattr(self.gameplay, 'map', None):
                 with contextlib.suppress(Exception):
                     los = self.gameplay.map.valid_straight_path((data["x"], data["y"], data["z"]), (lx, ly, lz))
@@ -329,25 +329,47 @@ class EventHandeler:
                         occluded = True
 
             is_piano = bool(data.get("piano_note"))
+            piano_filter = None
+            piano_peer_id = data.get("peer_id")
+            if is_piano and piano_peer_id is not None:
+                if "piano_soft" in data:
+                    self.game.audio_mngr.piano.set_soft_pedal(
+                        piano_peer_id, data.get("piano_soft") is True
+                    )
+                piano_filter = self.game.audio_mngr.piano.get_note_filter(
+                    piano_peer_id, occluded=occluded
+                )
             snd = self.game.audio_mngr.play_unbound_stereo_spatial(
                 data["sound"], data["x"], data["y"], data["z"], lx, ly, lz,
                 volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"), max_distance=data.get("max_distance", 25.0), facing_angle=facing,
                 as_3d_stereo=is_piano,
-                occluded=occluded
+                occluded=occluded,
+                direct_filter=piano_filter,
             )
         else:
             snd = self.game.audio_mngr.play_unbound(
                 data["sound"], data["x"], data["y"], data["z"], False, volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"),
                 reference_distance=data.get("reference_distance", 3.0), rolloff=data.get("rolloff", 1.0), max_distance=data.get("max_distance", 25.0)
             )
+        if snd and data.get("piano_note") and data.get("peer_id") is not None:
+            self.game.audio_mngr.piano._tag_sounds(
+                snd,
+                data["peer_id"],
+                "occluded" if occluded else "normal",
+            )
         if snd and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'map', None):
             reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
             if reverb and reverb.reverb:
-                s_list = snd if isinstance(snd, (list, tuple)) else [snd]
-                for s in s_list:
-                    if s and hasattr(s, 'source') and s.source:
-                        with contextlib.suppress(Exception):
-                            self.game.audio_mngr.efx.send(s.source, 0, reverb.reverb)
+                if data.get("piano_note") and data.get("peer_id") is not None:
+                    self.game.audio_mngr.piano.apply_effect_send(
+                        snd, 0, reverb.reverb
+                    )
+                else:
+                    s_list = snd if isinstance(snd, (list, tuple)) else [snd]
+                    for s in s_list:
+                        if s and hasattr(s, 'source') and s.source:
+                            with contextlib.suppress(Exception):
+                                self.game.audio_mngr.efx.send(s.source, 0, reverb.reverb)
         # Track piano notes for staccato/sustain pedal support
         if snd and data.get("piano_note") and data.get("peer_id") is not None:
             piano_key = f"{data['peer_id']}-{data['piano_note']}"
@@ -385,23 +407,33 @@ class EventHandeler:
                 x=data["x"], y=data["y"], z=data["z"],
                 listener_x=lx, listener_y=ly, listener_z=lz,
                 volume=data.get("volume", 300),
-                occluded=occluded
+                occluded=occluded,
+                soft=data.get("piano_soft") if "piano_soft" in data else None,
             )
             if snd and getattr(self.gameplay, 'map', None):
                 reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
                 if reverb and reverb.reverb:
-                    try:
-                        self.game.audio_mngr.efx.send(snd.source, 0, reverb.reverb)
-                    except Exception:
-                        pass
+                    self.game.audio_mngr.piano.apply_effect_send(
+                        snd, 0, reverb.reverb
+                    )
 
     def stop_piano_note(self, data):
         if data and data.get("peer_id") is not None and data.get("note"):
             self.game.audio_mngr.piano.stop_note(data["peer_id"], data["note"])
 
+    def set_piano_soft_pedal(self, data):
+        """Apply the server-replicated realtime pedal state for one performer."""
+        if data and data.get("peer_id") is not None and isinstance(data.get("enabled"), bool):
+            self.game.audio_mngr.piano.set_soft_pedal(
+                data["peer_id"], data["enabled"]
+            )
+
     def piano_start(self, data):
         """Enable piano mode to intercept keyboard input for playing piano notes and pre-load audio buffers strongly into RAM."""
         self.gameplay.piano_mode = True
+        self.gameplay._set_piano_soft_pedal(
+            False, announce=False, force_network=True
+        )
         notes = ["C4", "Db4", "D4", "Eb4", "E4", "F4", "Gb4", "G4", "Ab4", "A4", "Bb4", "B4", "C5", "Db5", "D5", "Eb5", "E5", "F5"]
         for note in notes:
             snd = f"piano/Piano.mf.{note}.ogg"

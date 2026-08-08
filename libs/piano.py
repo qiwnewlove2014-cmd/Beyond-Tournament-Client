@@ -31,6 +31,27 @@ class PianoAudio:
         self.gameplay = None  # Set by Gameplay.__init__ after construction
         self.active_piano_notes = {}
         self._occlusion_filter = None
+        self.soft_pedal_states = {}
+        self._pedal_filters = {}
+        self._pedal_filter_values = {}
+        self._pedal_transitions = {}
+        self._filter_cleanup_deadlines = {}
+
+    _FILTER_BASE_VALUES = {
+        "normal": (1.0, 1.0),
+        "occluded": (0.5, 0.15),
+        "pa": (0.95, 0.85),
+    }
+    # Keep most of the note body while the low-pass closes. A large gain drop
+    # makes the pedal feel like a volume cut instead of a tonal softening.
+    _SOFT_GAIN_FACTOR = 0.90
+    # The piano samples contain very little energy above 3 kHz, so a mild
+    # LOWPASS GAINHF value is barely audible. 0.03 also attenuates the
+    # 1-3 kHz presence band enough to produce a clearly muffled tone.
+    _SOFT_HIGH_FREQUENCY_FACTOR = 0.03
+    _PEDAL_PRESS_TRANSITION_SECONDS = 0.28
+    _PEDAL_RELEASE_TRANSITION_SECONDS = 0.22
+    _FILTER_CLEANUP_DELAY_SECONDS = 0.35
 
     def load_stereo_split_buffers(self, path: str):
         """Split a stereo .ogg file into two MONO16 OpenAL buffers (L/R) in RAM.
@@ -87,14 +108,309 @@ class PianoAudio:
             )
         return self._occlusion_filter
 
-    def play_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False):
+    @staticmethod
+    def _read_filter_values(filter_obj, defaults):
+        """Return (GAIN, GAINHF), falling back for unsupported EFX drivers."""
+        if filter_obj is None:
+            return defaults
+        try:
+            return (
+                float(filter_obj.get_float("GAIN")),
+                float(filter_obj.get_float("GAINHF")),
+            )
+        except Exception:
+            return defaults
+
+    def _get_filter_base_values(self, mode):
+        defaults = self._FILTER_BASE_VALUES.get(mode, self._FILTER_BASE_VALUES["normal"])
+        if mode == "normal":
+            global_filter = self.am.filter[-1] if getattr(self.am, "filter", None) else None
+            return self._read_filter_values(global_filter, defaults)
+        if mode == "pa":
+            gp = self.gameplay
+            megaphone = getattr(gp, "megaphone", None) if gp else None
+            return self._read_filter_values(getattr(megaphone, "lowpass_filter", None), defaults)
+        return defaults
+
+    def _get_filter_target_values(self, peer_id, mode, base_values=None):
+        gain, gain_hf = base_values or self._get_filter_base_values(mode)
+        if self.soft_pedal_states.get(str(peer_id), False):
+            gain *= self._SOFT_GAIN_FACTOR
+            gain_hf *= self._SOFT_HIGH_FREQUENCY_FACTOR
+        return gain, gain_hf
+
+    def _set_filter_values(self, key, gain, gain_hf):
+        filter_obj = self._pedal_filters.get(key)
+        if filter_obj is None:
+            return
+        try:
+            gain = max(0.0, min(1.0, gain))
+            gain_hf = max(0.0, min(1.0, gain_hf))
+            filter_obj.set("GAIN", gain)
+            filter_obj.set("GAINHF", gain_hf)
+            self._pedal_filter_values[key] = (gain, gain_hf)
+        except Exception:
+            return
+
+        # EFX copies filter parameters into a Source when the filter is
+        # attached. Updating the Filter object alone does not update sources
+        # that are already playing, so re-attach it after every interpolation
+        # step. The short eased transition minimizes audible handoff clicks.
+        peer_id, mode = key
+        for snd in list(getattr(self.am, "unbound_sources", [])):
+            if (
+                getattr(snd, "_piano_peer_id", None) != peer_id
+                or getattr(snd, "_piano_filter_mode", None) != mode
+            ):
+                continue
+            source = getattr(snd, "source", None)
+            if source is not None:
+                with contextlib.suppress(Exception):
+                    source.direct_filter = filter_obj
+                # Auxiliary sends keep their own copy of the filter settings,
+                # just like the dry/direct path. Re-attach each registered
+                # piano send so reverb and PA effects follow the pedal ramp.
+                for send_idx, slot in getattr(
+                    snd, "_piano_effect_sends", {}
+                ).items():
+                    with contextlib.suppress(Exception):
+                        self.am.efx.send(
+                            source, send_idx, slot, filter=filter_obj
+                        )
+
+    def _get_pedal_filter(self, peer_id, mode):
+        peer_id = str(peer_id)
+        key = (peer_id, mode)
+        filter_obj = self._pedal_filters.get(key)
+        if filter_obj is not None:
+            return filter_obj
+
+        gain, gain_hf = self._get_filter_target_values(peer_id, mode)
+        filter_obj = self.am.gen_filter(
+            "LOWPASS",
+            ("GAIN", gain),
+            ("GAINHF", gain_hf),
+        )
+        if filter_obj is not None:
+            self._pedal_filters[key] = filter_obj
+            self._pedal_filter_values[key] = (gain, gain_hf)
+        return filter_obj
+
+    def get_note_filter(self, peer_id, occluded=False):
+        """Return the shared realtime filter for one performer's piano notes."""
+        return self._get_pedal_filter(peer_id, "occluded" if occluded else "normal")
+
+    def set_soft_pedal(self, peer_id, enabled, animate=True):
+        """Change a performer's soft pedal and retune all sounding notes smoothly."""
+        peer_id = str(peer_id)
+        enabled = bool(enabled)
+        if self.soft_pedal_states.get(peer_id, False) == enabled:
+            return False
+
+        self.soft_pedal_states[peer_id] = enabled
+        keys = [key for key in self._pedal_filters if key[0] == peer_id]
+        if not keys:
+            return True
+
+        if not animate:
+            for key in keys:
+                self._set_filter_values(key, *self._get_filter_target_values(*key))
+            self._pedal_transitions.pop(peer_id, None)
+            return True
+
+        self._pedal_transitions[peer_id] = {
+            "started": time.monotonic(),
+            "duration": (
+                self._PEDAL_PRESS_TRANSITION_SECONDS
+                if enabled
+                else self._PEDAL_RELEASE_TRANSITION_SECONDS
+            ),
+            "starts": {
+                key: self._pedal_filter_values.get(
+                    key, self._get_filter_target_values(*key)
+                )
+                for key in keys
+            },
+        }
+        return True
+
+    @staticmethod
+    def _iter_sounds(sounds):
+        if not sounds:
+            return []
+        return sounds if isinstance(sounds, (list, tuple)) else [sounds]
+
+    def _tag_sounds(self, sounds, peer_id, mode):
+        for snd in self._iter_sounds(sounds):
+            if snd is not None:
+                snd._piano_peer_id = str(peer_id)
+                snd._piano_filter_mode = mode
+
+    def apply_effect_send(self, sounds, send_idx, slot):
+        """Route tagged piano sounds through an effect using their pedal filter."""
+        if slot is None or not hasattr(self.am, "efx"):
+            return
+        for snd in self._iter_sounds(sounds):
+            if snd is None:
+                continue
+            peer_id = getattr(snd, "_piano_peer_id", None)
+            mode = getattr(snd, "_piano_filter_mode", None)
+            source = getattr(snd, "source", None)
+            if peer_id is None or mode is None or source is None:
+                continue
+            filter_obj = self._get_pedal_filter(peer_id, mode)
+            effect_sends = getattr(snd, "_piano_effect_sends", None)
+            if effect_sends is None:
+                effect_sends = {}
+                snd._piano_effect_sends = effect_sends
+            effect_sends[send_idx] = slot
+            with contextlib.suppress(Exception):
+                self.am.efx.send(
+                    source, send_idx, slot, filter=filter_obj
+                )
+
+    def _peer_has_active_notes(self, peer_id):
+        normal_prefix = f"{peer_id}-"
+        mega_prefix = f"mega-{peer_id}-"
+        return any(
+            key.startswith(normal_prefix) or key.startswith(mega_prefix)
+            for key in self.active_piano_notes
+        )
+
+    def _schedule_filter_cleanup(self, peer_id):
+        self._filter_cleanup_deadlines[str(peer_id)] = (
+            time.monotonic() + self._FILTER_CLEANUP_DELAY_SECONDS
+        )
+
+    def _delete_peer_filters(self, peer_id):
+        peer_id = str(peer_id)
+        # Faded sources can remain in AudioManager until its next cleanup pass.
+        # Detach them before deleting the filters they reference.
+        for snd in list(getattr(self.am, "unbound_sources", [])):
+            if getattr(snd, "_piano_peer_id", None) != peer_id:
+                continue
+            source = getattr(snd, "source", None)
+            if source is not None:
+                if hasattr(self.am, "efx"):
+                    for send_idx in getattr(
+                        snd, "_piano_effect_sends", {}
+                    ):
+                        with contextlib.suppress(Exception):
+                            self.am.efx.send(source, send_idx, None)
+                with contextlib.suppress(Exception):
+                    del source.direct_filter
+
+        for key in [key for key in self._pedal_filters if key[0] == peer_id]:
+            filter_obj = self._pedal_filters.pop(key, None)
+            self._pedal_filter_values.pop(key, None)
+            if filter_obj is not None:
+                # cyal.Filter has no public delete(); dropping the final owner
+                # after detaching sources releases it through the wrapper.
+                del filter_obj
+        self._pedal_transitions.pop(peer_id, None)
+        self._filter_cleanup_deadlines.pop(peer_id, None)
+
+    def update(self):
+        """Advance pedal transitions on the audio/game thread without worker races."""
+        now = time.monotonic()
+        transitioning_peers = set()
+        base_values_by_mode = {}
+
+        def target_values(key):
+            mode = key[1]
+            if mode not in base_values_by_mode:
+                base_values_by_mode[mode] = self._get_filter_base_values(mode)
+            return self._get_filter_target_values(
+                *key, base_values=base_values_by_mode[mode]
+            )
+
+        for peer_id, transition in list(self._pedal_transitions.items()):
+            transitioning_peers.add(peer_id)
+            linear_progress = min(
+                1.0,
+                (now - transition["started"]) / transition["duration"],
+            )
+            # Smoothstep has zero slope at both ends, avoiding the perceived
+            # "drop" of a linear low-pass change while keeping input latency
+            # immediate and the full transition short.
+            progress = linear_progress * linear_progress * (
+                3.0 - (2.0 * linear_progress)
+            )
+            for key, start_values in transition["starts"].items():
+                if key not in self._pedal_filters:
+                    continue
+                targets = target_values(key)
+                gain = start_values[0] + (targets[0] - start_values[0]) * progress
+                gain_hf = start_values[1] + (targets[1] - start_values[1]) * progress
+                self._set_filter_values(key, gain, gain_hf)
+            if linear_progress >= 1.0:
+                self._pedal_transitions.pop(peer_id, None)
+
+        # Keep neutral/soft filters aligned with dynamic global and PA filters.
+        for key in list(self._pedal_filters):
+            if key[0] in transitioning_peers:
+                continue
+            targets = target_values(key)
+            current_values = self._pedal_filter_values.get(key)
+            if current_values is None or any(
+                abs(current - target) > 0.001
+                for current, target in zip(current_values, targets)
+            ):
+                self._set_filter_values(key, *targets)
+
+        for peer_id, deadline in list(self._filter_cleanup_deadlines.items()):
+            if now >= deadline and not self._peer_has_active_notes(peer_id):
+                self._delete_peer_filters(peer_id)
+
+    def reset(self):
+        """Release PianoAudio-owned filters and state during gameplay teardown."""
+        owned_sounds = []
+        for sounds in list(self.active_piano_notes.values()):
+            owned_sounds.extend(self._iter_sounds(sounds))
+        owned_sounds.extend(
+            snd for snd in list(getattr(self.am, "unbound_sources", []))
+            if getattr(snd, "_piano_peer_id", None) is not None
+        )
+        seen_sounds = set()
+        for snd in owned_sounds:
+            if id(snd) in seen_sounds:
+                continue
+            seen_sounds.add(id(snd))
+            source = getattr(snd, "source", None)
+            if source is not None:
+                if hasattr(self.am, "efx"):
+                    send_indices = set(
+                        range(len(getattr(self.am, "sends", [])))
+                    )
+                    send_indices.update(
+                        getattr(snd, "_piano_effect_sends", {})
+                    )
+                    for send_idx in send_indices:
+                        with contextlib.suppress(Exception):
+                            self.am.efx.send(source, send_idx, None)
+                with contextlib.suppress(Exception):
+                    source.stop()
+        self.active_piano_notes.clear()
+        for peer_id in {key[0] for key in self._pedal_filters}:
+            self._delete_peer_filters(peer_id)
+        self.soft_pedal_states.clear()
+        self._pedal_transitions.clear()
+        self._filter_cleanup_deadlines.clear()
+        if self._occlusion_filter is not None:
+            self._occlusion_filter = None
+
+    def play_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False, soft=None):
         """Play a piano note with 3D stereo spreading (remote) or direct stereo (local).
         
         Automatically handles note re-triggering, occlusion filtering,
         and active note tracking for sustain/staccato pedal support.
         Also routes notes through PA Megaphone Speakers if broadcasting to Megaphone.
         """
+        if soft is not None:
+            self.set_soft_pedal(peer_id, soft)
         is_local = (peer_id == "local")
+        filter_mode = "occluded" if occluded else "normal"
+        filter_obj = self.get_note_filter(peer_id, occluded=occluded)
         snd = self.am.play_unbound_stereo_spatial(
             path=f"piano/Piano.mf.{note_name}.ogg",
             x=x, y=y, z=z,
@@ -104,19 +420,11 @@ class PianoAudio:
             volume=volume,
             cat="miscelaneous",
             as_3d_stereo=not is_local,
-            occluded=occluded
+            occluded=occluded,
+            direct_filter=filter_obj,
         )
         if snd:
-            if occluded:
-                filter_obj = self.get_occlusion_filter()
-                if filter_obj:
-                    with contextlib.suppress(Exception):
-                        if isinstance(snd, (list, tuple)):
-                            for s in snd:
-                                if s and hasattr(s, 'source') and s.source:
-                                    s.source.direct_filter = filter_obj
-                        elif hasattr(snd, 'source') and snd.source:
-                            snd.source.direct_filter = filter_obj
+            self._tag_sounds(snd, peer_id, filter_mode)
             piano_key = f"{peer_id}-{note_name}"
             # If the same peer plays the same note very rapidly, stop the old one first
             if piano_key in self.active_piano_notes:
@@ -154,6 +462,7 @@ class PianoAudio:
             # performer and listener.
             bot_vol_raw = getattr(getattr(gp, 'music_bot', None), 'volume', 50) / 100.0 if getattr(gp, 'music_bot', None) else 0.5
             bot_vol = max(0.1, bot_vol_raw) * 0.5
+            pedal_filter = self._get_pedal_filter(peer_id, "pa")
             for spk in gp.megaphone.speaker_data:
                 spk_pos = spk.get('position', None)
                 if spk_pos is None:
@@ -164,17 +473,19 @@ class PianoAudio:
                     f"piano/Piano.mf.{note_name}.ogg",
                     sx, sy, sz,
                     volume=mega_vol,
-                    cat="miscelaneous"
+                    cat="miscelaneous",
+                    direct_filter=pedal_filter,
                 )
                 if mega_snd and hasattr(mega_snd, 'source') and mega_snd.source:
                     # Apply Megaphone PA Filter & EQ effects
-                    if hasattr(gp.megaphone, 'lowpass_filter') and gp.megaphone.lowpass_filter:
+                    if pedal_filter is None and hasattr(gp.megaphone, 'lowpass_filter') and gp.megaphone.lowpass_filter:
                         mega_snd.source.direct_filter = gp.megaphone.lowpass_filter
+                    self._tag_sounds(mega_snd, peer_id, "pa")
                     if hasattr(self.am, 'efx'):
                         if hasattr(gp.megaphone, 'eq_slot') and gp.megaphone.eq_slot:
-                            self.am.efx.send(mega_snd.source, 1, gp.megaphone.eq_slot)
+                            self.apply_effect_send(mega_snd, 1, gp.megaphone.eq_slot)
                         if hasattr(gp.megaphone, 'reverb_slot') and gp.megaphone.reverb_slot:
-                            self.am.efx.send(mega_snd.source, 2, gp.megaphone.reverb_slot)
+                            self.apply_effect_send(mega_snd, 2, gp.megaphone.reverb_slot)
                     mega_key = f"mega-{peer_id}-{note_name}"
                     if mega_key not in self.active_piano_notes:
                         self.active_piano_notes[mega_key] = []
@@ -216,3 +527,4 @@ class PianoAudio:
                         except Exception:
                             pass
                     threading.Thread(target=_fade_out, args=(snd.source,), daemon=True).start()
+        self._schedule_filter_cleanup(peer_id)
