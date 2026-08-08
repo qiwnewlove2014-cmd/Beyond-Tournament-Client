@@ -336,6 +336,18 @@ class EventHandeler:
                     self.game.audio_mngr.piano.set_soft_pedal(
                         piano_peer_id, data.get("piano_soft") is True
                     )
+                if "piano_pitch_bend_value" in data:
+                    self.game.audio_mngr.piano.set_pitch_bend_14bit(
+                        piano_peer_id,
+                        data.get("piano_pitch_bend_value"),
+                        animate=False,
+                    )
+                elif "piano_pitch_bend" in data:
+                    self.game.audio_mngr.piano.set_pitch_bend(
+                        piano_peer_id,
+                        data.get("piano_pitch_bend"),
+                        animate=False,
+                    )
                 piano_filter = self.game.audio_mngr.piano.get_note_filter(
                     piano_peer_id, occluded=occluded
                 )
@@ -396,6 +408,18 @@ class EventHandeler:
         if getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
             occluded = False
+            if "piano_pitch_bend_value" in data:
+                self.game.audio_mngr.piano.set_pitch_bend_14bit(
+                    data["peer_id"],
+                    data.get("piano_pitch_bend_value"),
+                    animate=False,
+                )
+            elif "piano_pitch_bend" in data:
+                self.game.audio_mngr.piano.set_pitch_bend(
+                    data["peer_id"],
+                    data.get("piano_pitch_bend"),
+                    animate=False,
+                )
             if getattr(self.gameplay, 'map', None):
                 with contextlib.suppress(Exception):
                     los = self.gameplay.map.valid_straight_path((data["x"], data["y"], data["z"]), (lx, ly, lz))
@@ -428,13 +452,26 @@ class EventHandeler:
                 data["peer_id"], data["enabled"]
             )
 
+    def set_piano_pitch_bend(self, data):
+        """Apply a server-validated continuous or legacy pitch bend state."""
+        if not data or data.get("peer_id") is None:
+            return
+        if "value" in data:
+            self.game.audio_mngr.piano.set_pitch_bend_14bit(
+                data["peer_id"], data.get("value"), animate=True
+            )
+            return
+        direction = data.get("direction")
+        if not isinstance(direction, bool) and direction in (-1, 0, 1):
+            self.game.audio_mngr.piano.set_pitch_bend(
+                data["peer_id"], direction
+            )
+
     def piano_start(self, data):
         """Enable piano mode to intercept keyboard input for playing piano notes and pre-load audio buffers strongly into RAM."""
-        self.gameplay.piano_mode = True
-        self.gameplay._piano_pressed_notes.clear()
-        self.gameplay._set_piano_soft_pedal(
-            False, announce=False, force_network=True
-        )
+        # The packet handler runs on the network thread. Queue all piano input
+        # and audio initialization onto the main thread that owns those states.
+        self.game.put(self.gameplay._start_piano_session)
         notes = ["C4", "Db4", "D4", "Eb4", "E4", "F4", "Gb4", "G4", "Ab4", "A4", "Bb4", "B4", "C5", "Db5", "D5", "Eb5", "E5", "F5"]
         for note in notes:
             snd = f"piano/Piano.mf.{note}.ogg"

@@ -36,6 +36,9 @@ class PianoAudio:
         self._pedal_filter_values = {}
         self._pedal_transitions = {}
         self._filter_cleanup_deadlines = {}
+        self.pitch_bend_states = {}
+        self._pitch_bend_values = {}
+        self._pitch_bend_transitions = {}
 
     _FILTER_BASE_VALUES = {
         "normal": (1.0, 1.0),
@@ -52,6 +55,9 @@ class PianoAudio:
     _PEDAL_PRESS_TRANSITION_SECONDS = 0.28
     _PEDAL_RELEASE_TRANSITION_SECONDS = 0.22
     _FILTER_CLEANUP_DELAY_SECONDS = 0.35
+    _PITCH_BEND_SEMITONES = 2.0
+    _PITCH_BEND_PRESS_SECONDS = 0.30
+    _PITCH_BEND_RELEASE_SECONDS = 0.22
 
     def load_stereo_split_buffers(self, path: str):
         """Split a stereo .ogg file into two MONO16 OpenAL buffers (L/R) in RAM.
@@ -235,16 +241,112 @@ class PianoAudio:
         return True
 
     @staticmethod
+    def _pitch_ratio(semitones):
+        return 2.0 ** (float(semitones) / 12.0)
+
+    def _apply_pitch_bend(self, peer_id, semitones):
+        """Apply one performer's bend to every active dry, wet, and PA source."""
+        peer_id = str(peer_id)
+        semitones = max(
+            -self._PITCH_BEND_SEMITONES,
+            min(self._PITCH_BEND_SEMITONES, float(semitones)),
+        )
+        self._pitch_bend_values[peer_id] = semitones
+        pitch = self._pitch_ratio(semitones)
+        for snd in list(getattr(self.am, "unbound_sources", [])):
+            if getattr(snd, "_piano_peer_id", None) != peer_id:
+                continue
+            source = getattr(snd, "source", None)
+            if source is not None:
+                with contextlib.suppress(Exception):
+                    source.pitch = pitch
+
+    def set_pitch_bend_value(
+        self, peer_id, value, animate=False, transition_seconds=0.06
+    ):
+        """Set a normalized continuous pitch bend in the range -1.0..+1.0."""
+        if isinstance(value, bool):
+            return False
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return False
+        if not -1.0 <= value <= 1.0:
+            return False
+
+        peer_id = str(peer_id)
+        if self.pitch_bend_states.get(peer_id, 0.0) == value:
+            if not animate and peer_id in self._pitch_bend_transitions:
+                self._pitch_bend_transitions.pop(peer_id, None)
+                self._apply_pitch_bend(
+                    peer_id, value * self._PITCH_BEND_SEMITONES
+                )
+                return True
+            return False
+        self.pitch_bend_states[peer_id] = value
+        start = self._pitch_bend_values.get(peer_id, 0.0)
+        target = value * self._PITCH_BEND_SEMITONES
+        if not animate:
+            self._pitch_bend_transitions.pop(peer_id, None)
+            self._apply_pitch_bend(peer_id, target)
+            return True
+
+        self._pitch_bend_transitions[peer_id] = {
+            "started": time.monotonic(),
+            "duration": max(0.012, float(transition_seconds)),
+            "start": start,
+            "target": target,
+        }
+        return True
+
+    def set_pitch_bend_14bit(self, peer_id, value, animate=False):
+        """Apply a centered MIDI/packet bend value in the -8192..8191 range."""
+        if isinstance(value, bool) or not isinstance(value, int):
+            return False
+        if not -8192 <= value <= 8191:
+            return False
+        normalized = value / (8192.0 if value < 0 else 8191.0)
+        return self.set_pitch_bend_value(
+            peer_id, normalized, animate=animate, transition_seconds=0.06
+        )
+
+    def set_pitch_bend(self, peer_id, direction, animate=True):
+        """Move the computer-keyboard pitch lever to -1, 0, or +1."""
+        if isinstance(direction, bool) or direction not in (-1, 0, 1):
+            return False
+        peer_id = str(peer_id)
+        start = self._pitch_bend_values.get(peer_id, 0.0)
+        target = float(direction) * self._PITCH_BEND_SEMITONES
+        base_duration = (
+            self._PITCH_BEND_RELEASE_SECONDS
+            if direction == 0
+            else self._PITCH_BEND_PRESS_SECONDS
+        )
+        distance_scale = abs(target - start) / self._PITCH_BEND_SEMITONES
+        return self.set_pitch_bend_value(
+            peer_id,
+            direction,
+            animate=animate,
+            transition_seconds=max(0.04, base_duration * distance_scale),
+        )
+
+    @staticmethod
     def _iter_sounds(sounds):
         if not sounds:
             return []
         return sounds if isinstance(sounds, (list, tuple)) else [sounds]
 
     def _tag_sounds(self, sounds, peer_id, mode):
+        peer_id = str(peer_id)
+        pitch = self._pitch_ratio(self._pitch_bend_values.get(peer_id, 0.0))
         for snd in self._iter_sounds(sounds):
             if snd is not None:
-                snd._piano_peer_id = str(peer_id)
+                snd._piano_peer_id = peer_id
                 snd._piano_filter_mode = mode
+                source = getattr(snd, "source", None)
+                if source is not None:
+                    with contextlib.suppress(Exception):
+                        source.pitch = pitch
 
     def apply_effect_send(self, sounds, send_idx, slot):
         """Route tagged piano sounds through an effect using their pedal filter."""
@@ -311,7 +413,7 @@ class PianoAudio:
         self._filter_cleanup_deadlines.pop(peer_id, None)
 
     def update(self):
-        """Advance pedal transitions on the audio/game thread without worker races."""
+        """Advance pedal and pitch transitions on the owning audio/game thread."""
         now = time.monotonic()
         transitioning_peers = set()
         base_values_by_mode = {}
@@ -362,6 +464,21 @@ class PianoAudio:
             if now >= deadline and not self._peer_has_active_notes(peer_id):
                 self._delete_peer_filters(peer_id)
 
+        for peer_id, transition in list(self._pitch_bend_transitions.items()):
+            linear_progress = min(
+                1.0,
+                (now - transition["started"]) / transition["duration"],
+            )
+            progress = linear_progress * linear_progress * (
+                3.0 - (2.0 * linear_progress)
+            )
+            semitones = transition["start"] + (
+                (transition["target"] - transition["start"]) * progress
+            )
+            self._apply_pitch_bend(peer_id, semitones)
+            if linear_progress >= 1.0:
+                self._pitch_bend_transitions.pop(peer_id, None)
+
     def reset(self):
         """Release PianoAudio-owned filters and state during gameplay teardown."""
         owned_sounds = []
@@ -396,6 +513,9 @@ class PianoAudio:
         self.soft_pedal_states.clear()
         self._pedal_transitions.clear()
         self._filter_cleanup_deadlines.clear()
+        self.pitch_bend_states.clear()
+        self._pitch_bend_values.clear()
+        self._pitch_bend_transitions.clear()
         if self._occlusion_filter is not None:
             self._occlusion_filter = None
 
