@@ -1,4 +1,7 @@
-[v1.6.3] Piano Hotfix & Tuning — 2026-08-06
+[v1.6.4] Piano Megaphone Broadcast Fix — 2026-08-08
 
-• Interactive Objects & Audio
-- **Piano Sustain & Staccato Polish:** Fine-tuned the piano's acoustic behavior. Re-mapped the sustain pedal to the Spacebar for a more comfortable playing experience, and fixed an issue where remote listeners could not properly hear staccato notes.
+• Audio Engine & Voice Chat
+- **Piano Broadcast to PA Speakers (Listener Fix):** Resolved a critical issue where piano notes played by a broadcasting staff performer never reached other players through the map's PA/megaphone speakers — listeners only heard the raw, localized piano. Piano notes now correctly route through every PA speaker on the map for all listeners whenever "Broadcast to Megaphone" is enabled, with smooth damper fade-out when keys are released.
+- **Independent Broadcast Toggle:** The "Broadcast to Megaphone" option no longer requires a music track to be playing first. Performers can now enable piano broadcast through the PA system at any time, independently of music playback, and it persists across play, stop, and pause.
+- **State-Based Megaphone Lock:** Reworked the megaphone broadcast lock from an idle-timer model to a reliable state-based (toggle on/off) model. The PA broadcast routing now holds steady regardless of how far apart piano notes are played, and releases cleanly when the performer toggles off, disconnects, or leaves the map. Music Bot and voice broadcasts remain fully unaffected.
+- **Server-Authoritative Broadcast Permission:** The server is now the single source of truth for who may broadcast through the PA system. The client menu visibility and the server-side lock are always kept in sync, eliminating cases where non-permitted accounts could appear to toggle broadcast on the client while the server silently ignored it.

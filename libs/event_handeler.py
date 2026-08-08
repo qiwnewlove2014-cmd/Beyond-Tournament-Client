@@ -55,10 +55,15 @@ class EventHandeler:
             self.gameplay.is_staff = bool(data.get("is_staff", False))
             self.gameplay.is_builder = bool(data.get("is_builder", False))
             self.gameplay.is_technician = bool(data.get("is_technician", False))
+            # Server is the single source of truth for megaphone broadcast permission.
+            # canBroadcastMegaphone() also gates the spectator lock; mirroring it client-side
+            # keeps the menu and the server lock perfectly in sync.
+            self.gameplay.can_broadcast_megaphone = bool(data.get("can_broadcast_megaphone", False))
         except Exception:
             self.gameplay.is_staff = False
             self.gameplay.is_builder = False
             self.gameplay.is_technician = False
+            self.gameplay.can_broadcast_megaphone = False
             
         # Reset PA Test Mode state
         if hasattr(self.gameplay, 'pa_test_mode'):
@@ -354,6 +359,16 @@ class EventHandeler:
                         with contextlib.suppress(Exception):
                             old_s.source.stop()
             self.game.audio_mngr.piano.active_piano_notes[piano_key] = snd
+
+        # Listener-side: if the server flagged this note as a megaphone broadcast,
+        # also spawn it at every PA speaker so listeners hear it over the PA system.
+        if data.get("via_megaphone") and data.get("piano_note") and data.get("peer_id") is not None:
+            with contextlib.suppress(Exception):
+                self.game.audio_mngr.piano.route_to_megaphone_speakers(
+                    peer_id=data["peer_id"],
+                    note_name=data["piano_note"],
+                    base_volume=data.get("volume", 300),
+                )
 
     def play_piano_note(self, data):
         if getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):

@@ -682,31 +682,26 @@ class MapMusicBot:
             ("Personal Music Feed", go_personal_feed),
         ]
         
-        # Check if staff to show megaphone routing option (all staff ranks: Admin, Mod, Dev, Contributor, Builder, Technician, Staff)
-        is_staff = getattr(gp, 'is_staff', False) if gp else False
-        is_builder = getattr(gp, 'is_builder', False) if gp else False
-        is_technician = getattr(gp, 'is_technician', False) if gp else False
-        is_admin = getattr(gp, 'is_admin', False) if gp else False
-        is_mod = getattr(gp, 'is_moderator', False) if gp else False
-        is_dev = getattr(gp, 'is_developer', False) if gp else False
-        is_contrib = getattr(gp, 'is_contributor', False) if gp else False
-        
-        if is_staff or is_builder or is_technician or is_admin or is_mod or is_dev or is_contrib:
+        # Show the megaphone routing option only when the server explicitly granted
+        # broadcast permission (canBroadcastMegaphone()). The server is the single
+        # source of truth; gating on it keeps the client menu and the server lock
+        # perfectly in sync (no client-side role guessing).
+        can_broadcast_megaphone = getattr(gp, 'can_broadcast_megaphone', False) if gp else False
+
+        if can_broadcast_megaphone:
             def get_megaphone_label():
                 status = "ON" if self.broadcast_to_megaphone else "OFF"
                 return f"Broadcast to Megaphone: {status}"
                 
             def toggle_megaphone_routing():
-                if not self.broadcast_enabled:
-                    self.game.direct_soundgroup.play("ui/error.ogg", cat="ui")
-                    speak("Cannot change option. Please turn on broadcast mode first by pressing Alternate Shift M.")
-                    return
-                
+                # No broadcast_enabled gate: piano broadcast is independent of music
+                # playback, so performers can broadcast the piano through PA speakers
+                # without starting a music track first.
                 self.broadcast_to_megaphone = not self.broadcast_to_megaphone
                 status_text = "enabled" if self.broadcast_to_megaphone else "disabled"
                 speak(f"Broadcast to megaphone {status_text}.")
                 m.speak_current_item()
-                
+
                 # Send lock request to the server
                 from . import consts
                 self.game.network.send(

@@ -127,38 +127,62 @@ class PianoAudio:
         try:
             gp = self.gameplay
             if gp and hasattr(gp, 'music_bot') and gp.music_bot:
-                if getattr(gp.music_bot, 'broadcast_to_megaphone', False) and hasattr(gp, 'megaphone') and gp.megaphone:
-                    if hasattr(gp.megaphone, 'speaker_data') and gp.megaphone.speaker_data:
-                        bot_vol = getattr(gp.music_bot, 'volume', 50) / 100.0
-                        for spk in gp.megaphone.speaker_data:
-                            spk_pos = spk.get('position', (x, y, z))
-                            sx, sy, sz = spk_pos[0], spk_pos[1], spk_pos[2]
-                            mega_vol = 300 * spk.get('base_volume', 0.6) * bot_vol
-                            mega_snd = self.am.play_unbound(
-                                f"piano/Piano.mf.{note_name}.ogg",
-                                sx, sy, sz,
-                                volume=mega_vol,
-                                cat="miscelaneous"
-                            )
-                            if mega_snd and hasattr(mega_snd, 'source') and mega_snd.source:
-                                # Apply Megaphone PA Filter & EQ effects
-                                if hasattr(gp.megaphone, 'lowpass_filter') and gp.megaphone.lowpass_filter:
-                                    mega_snd.source.direct_filter = gp.megaphone.lowpass_filter
-                                if hasattr(self.am, 'efx'):
-                                    if hasattr(gp.megaphone, 'eq_slot') and gp.megaphone.eq_slot:
-                                        self.am.efx.send(mega_snd.source, 1, gp.megaphone.eq_slot)
-                                    if hasattr(gp.megaphone, 'reverb_slot') and gp.megaphone.reverb_slot:
-                                        self.am.efx.send(mega_snd.source, 2, gp.megaphone.reverb_slot)
-                                mega_key = f"mega-{peer_id}-{note_name}"
-                                if mega_key not in self.active_piano_notes:
-                                    self.active_piano_notes[mega_key] = []
-                                elif not isinstance(self.active_piano_notes[mega_key], list):
-                                    self.active_piano_notes[mega_key] = [self.active_piano_notes[mega_key]]
-                                self.active_piano_notes[mega_key].append(mega_snd)
+                if getattr(gp.music_bot, 'broadcast_to_megaphone', False):
+                    self.route_to_megaphone_speakers(peer_id, note_name, volume)
         except Exception:
             pass
 
         return snd
+
+    def route_to_megaphone_speakers(self, peer_id, note_name, base_volume=300):
+        """Spawn a piano note at every megaphone PA speaker position with PA filter & EQ.
+
+        Shared by the local performer (play_note) and remote listeners
+        (event_handeler.play_unbound). Tracked under key "mega-<peer_id>-<note>"
+        so stop_note fades every spawned source out together.
+        """
+        try:
+            gp = self.gameplay
+            if not (gp and hasattr(gp, 'megaphone') and gp.megaphone):
+                return
+            if not (hasattr(gp.megaphone, 'speaker_data') and gp.megaphone.speaker_data):
+                return
+            # Volume scales with the local Music Bot volume but is floored at 10%
+            # so piano-through-PA stays audible when music is paused/muted, and
+            # scaled down overall (×0.5) to avoid the PA being much louder than the
+            # source piano when multiple speakers stack. Applies identically to
+            # performer and listener.
+            bot_vol_raw = getattr(getattr(gp, 'music_bot', None), 'volume', 50) / 100.0 if getattr(gp, 'music_bot', None) else 0.5
+            bot_vol = max(0.1, bot_vol_raw) * 0.5
+            for spk in gp.megaphone.speaker_data:
+                spk_pos = spk.get('position', None)
+                if spk_pos is None:
+                    continue
+                sx, sy, sz = spk_pos[0], spk_pos[1], spk_pos[2]
+                mega_vol = base_volume * spk.get('base_volume', 0.6) * bot_vol
+                mega_snd = self.am.play_unbound(
+                    f"piano/Piano.mf.{note_name}.ogg",
+                    sx, sy, sz,
+                    volume=mega_vol,
+                    cat="miscelaneous"
+                )
+                if mega_snd and hasattr(mega_snd, 'source') and mega_snd.source:
+                    # Apply Megaphone PA Filter & EQ effects
+                    if hasattr(gp.megaphone, 'lowpass_filter') and gp.megaphone.lowpass_filter:
+                        mega_snd.source.direct_filter = gp.megaphone.lowpass_filter
+                    if hasattr(self.am, 'efx'):
+                        if hasattr(gp.megaphone, 'eq_slot') and gp.megaphone.eq_slot:
+                            self.am.efx.send(mega_snd.source, 1, gp.megaphone.eq_slot)
+                        if hasattr(gp.megaphone, 'reverb_slot') and gp.megaphone.reverb_slot:
+                            self.am.efx.send(mega_snd.source, 2, gp.megaphone.reverb_slot)
+                    mega_key = f"mega-{peer_id}-{note_name}"
+                    if mega_key not in self.active_piano_notes:
+                        self.active_piano_notes[mega_key] = []
+                    elif not isinstance(self.active_piano_notes[mega_key], list):
+                        self.active_piano_notes[mega_key] = [self.active_piano_notes[mega_key]]
+                    self.active_piano_notes[mega_key].append(mega_snd)
+        except Exception:
+            pass
 
     def stop_note(self, peer_id, note_name):
         """Stop a piano note with a smooth 180ms damper fade-out.
