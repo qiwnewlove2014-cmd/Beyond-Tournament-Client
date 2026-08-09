@@ -489,13 +489,16 @@ class Gameplay(state.State):
         """Resolve configurable normalized keys to stable drum pad IDs."""
         return drum_keyconfig.key_to_pad(self.game.keyconfig)
 
-    def _start_drum_session(self):
+    def _start_drum_session(self, kit=None):
         """Enter low-latency drum input mode on the main game thread."""
         if self.piano_mode:
             self._end_piano_session(notify_server=True)
         self.drum_mode = True
         self._drum_pressed_keys.clear()
-        self.game.audio_mngr.drums.preload()
+        drums = self.game.audio_mngr.drums
+        if kit and drums.is_valid_kit(kit):
+            drums.set_active_kit(kit)
+        drums.preload()
         self._start_drum_midi()
 
     def _end_drum_session(self, notify_server=True):

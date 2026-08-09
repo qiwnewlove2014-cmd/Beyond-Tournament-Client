@@ -580,8 +580,9 @@ class EventHandeler:
                 pass
 
     def drum_start(self, data):
-        """Enter drum mode and preload the fixed kit on the main thread."""
-        self.game.put(self.gameplay._start_drum_session)
+        """Enter drum mode and preload the requested kit on the main thread."""
+        kit = data.get("kit") if isinstance(data, dict) else None
+        self.game.put(lambda: self.gameplay._start_drum_session(kit=kit))
 
     def play_drum_hit(self, data):
         """Queue a validated remote one-shot for main-thread audio playback."""
