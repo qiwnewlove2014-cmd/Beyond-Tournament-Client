@@ -219,9 +219,13 @@ class EventHandeler:
         if not isinstance(data, dict) or not data.get("name"):
             log("[ENTITY] Ignored spawn_entity packet without a valid name")
             return
-        if data.get("type") == "motorcycle" and not data.get("_motorcycle_main_thread"):
+        if (
+            data.get("type") in ("motorcycle", "vehicle")
+            and not data.get("_vehicle_main_thread")
+            and not data.get("_motorcycle_main_thread")
+        ):
             spawn_data = dict(data)
-            spawn_data["_motorcycle_main_thread"] = True
+            spawn_data["_vehicle_main_thread"] = True
             self.game.put(
                 lambda spawn_data=spawn_data: self.spawn_entity(spawn_data)
             )
@@ -238,7 +242,14 @@ class EventHandeler:
         )
         try:
             entity = self.gameplay.map.spawn_entity(
-                data["name"], x, y, z, entity_type=data.get("type")
+                data["name"],
+                x,
+                y,
+                z,
+                entity_type=data.get("type"),
+                vehicle_type=data.get("vehicle_type"),
+                sound_profile=data.get("sound_profile"),
+                vehicle_audio=data.get("vehicle_audio"),
             )
         except Exception as e:
             log_exception(e, f"spawn_entity name={data['name']!r}")
@@ -271,11 +282,11 @@ class EventHandeler:
             except:
                 pass
 
-        if getattr(entity, "entity_type", None) == "motorcycle":
+        if getattr(entity, "is_vehicle", False):
             state_data = dict(data)
             state_data["_initial_spawn"] = True
             self.game.put(
-                lambda state_data=state_data: self._apply_motorcycle_state(state_data)
+                lambda state_data=state_data: self._apply_vehicle_state(state_data)
             )
 
         # Auto-focus spectator camera if this is the target player we were spectating
@@ -295,10 +306,11 @@ class EventHandeler:
     def remove_entity(self, data):
         target_name = data.get("name")
         target_entity = self.gameplay.map.entities.get(target_name)
-        if (getattr(target_entity, "entity_type", None) == "motorcycle" and
+        if (getattr(target_entity, "is_vehicle", False) and
+                not data.get("_vehicle_main_thread") and
                 not data.get("_motorcycle_main_thread")):
             remove_data = dict(data)
-            remove_data["_motorcycle_main_thread"] = True
+            remove_data["_vehicle_main_thread"] = True
             self.game.put(
                 lambda remove_data=remove_data: self.remove_entity(remove_data)
             )
@@ -327,10 +339,11 @@ class EventHandeler:
             if data["name"] == self.gameplay.player.name
             else self.gameplay.map.entities.get(data["name"])
         )
-        if (getattr(entity, "entity_type", None) == "motorcycle" and
+        if (getattr(entity, "is_vehicle", False) and
+                not data.get("_vehicle_main_thread") and
                 not data.get("_motorcycle_main_thread")):
             sound_data = dict(data)
-            sound_data["_motorcycle_main_thread"] = True
+            sound_data["_vehicle_main_thread"] = True
             self.game.put(
                 lambda sound_data=sound_data: self.play_sound(sound_data)
             )
@@ -593,10 +606,10 @@ class EventHandeler:
         if not entity and name == self.gameplay.player.name:
             entity = self.gameplay.player
         if entity:
-            if getattr(entity, "entity_type", None) == "motorcycle":
+            if getattr(entity, "is_vehicle", False):
                 move_data = dict(data)
                 self.game.put(
-                    lambda move_data=move_data: self._apply_motorcycle_move(move_data)
+                    lambda move_data=move_data: self._apply_vehicle_move(move_data)
                 )
                 return
             try:
@@ -610,9 +623,9 @@ class EventHandeler:
         else:
             log(f"[ENTITY] Ignored move for unknown entity {name!r}")
 
-    def _apply_motorcycle_move(self, data):
+    def _apply_vehicle_move(self, data):
         entity = self.gameplay.map.entities.get(data.get("name"))
-        if not entity or getattr(entity, "entity_type", None) != "motorcycle":
+        if not entity or not getattr(entity, "is_vehicle", False):
             return
         entity.move(
             data.get("x"), data.get("y"), data.get("z"),
@@ -625,9 +638,9 @@ class EventHandeler:
             data.get("vehicle_facing", data.get("angle", 0.0)),
         )
 
-    def _apply_motorcycle_state(self, data):
+    def _apply_vehicle_state(self, data):
         entity = self.gameplay.map.entities.get(data.get("name"))
-        if not entity or getattr(entity, "entity_type", None) != "motorcycle":
+        if not entity or not getattr(entity, "is_vehicle", False):
             return
         entity.apply_state(
             data.get("vehicle_speed", 0.0),
@@ -637,21 +650,31 @@ class EventHandeler:
             bool(data.get("_initial_spawn", False)),
         )
 
-    def motorcycle_state(self, data):
+    def vehicle_state(self, data):
         if not isinstance(data, dict):
             return
         state_data = dict(data)
         self.game.put(
-            lambda state_data=state_data: self._apply_motorcycle_state(state_data)
+            lambda state_data=state_data: self._apply_vehicle_state(state_data)
+        )
+
+    def motorcycle_state(self, data):
+        self.vehicle_state(data)
+
+    def vehicle_session(self, data):
+        if not isinstance(data, dict):
+            return
+        session_data = dict(data)
+        self.game.put(
+            lambda session_data=session_data: self.gameplay.set_vehicle_session(session_data)
         )
 
     def motorcycle_session(self, data):
         if not isinstance(data, dict):
             return
         session_data = dict(data)
-        self.game.put(
-            lambda session_data=session_data: self.gameplay.set_motorcycle_session(session_data)
-        )
+        session_data.setdefault("vehicle_type", "motorcycle")
+        self.vehicle_session(session_data)
 
     def quit(self, data):
         self.game.put(lambda: self.gameplay.quit("quit"))

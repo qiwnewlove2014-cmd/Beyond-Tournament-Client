@@ -392,8 +392,8 @@ class Entity(Object):
         if self.x is None or self.y is None or self.z is None:
             return
         gameplay = getattr(self.game, "gameplay", None)
-        if getattr(self, "is_user", False) and getattr(gameplay, "motorcycle_mode", False):
-            # The mounted player's height follows the Server-owned motorcycle.
+        if getattr(self, "is_user", False) and getattr(gameplay, "vehicle_mode", False):
+            # The mounted player's height follows the Server-owned vehicle.
             # Do not also run the legacy local gravity/water-sinking simulator.
             self.falling = False
             self.fall_clock.restart()

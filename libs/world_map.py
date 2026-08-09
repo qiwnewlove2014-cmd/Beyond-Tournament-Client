@@ -1,6 +1,6 @@
 import contextlib
 from . import audio_manager, consts, options
-from .objects import entity, motorcycle
+from .objects import entity, vehicle
 import cyal.exceptions
 from .speech import speak
 
@@ -579,11 +579,35 @@ class Map:
     def spawn_zombieSpawn(self, **kwargs):
         pass
 
-    def spawn_entity(self, name, x, y, z, hp=100, entity_type=None):
+    def spawn_entity(
+        self,
+        name,
+        x,
+        y,
+        z,
+        hp=100,
+        entity_type=None,
+        vehicle_type=None,
+        sound_profile=None,
+        vehicle_audio=None,
+    ):
         if self.entities.get(name):
             self.entities[name].destroy()
-        if entity_type == "motorcycle":
-            spawned = motorcycle.Motorcycle(self.game, self, x, y, z, hp, name=name)
+        if entity_type in ("motorcycle", "vehicle"):
+            spawned = vehicle.Vehicle(
+                self.game,
+                self,
+                x,
+                y,
+                z,
+                hp,
+                name=name,
+                vehicle_type=vehicle_type or (
+                    "motorcycle" if entity_type == "motorcycle" else "vehicle"
+                ),
+                sound_profile=sound_profile,
+                audio_profile=vehicle_audio,
+            )
         else:
             spawned = entity.Entity(self.game, self, x, y, z, hp, name=name)
         self.entities[name] = spawned
