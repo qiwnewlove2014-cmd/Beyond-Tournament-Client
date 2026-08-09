@@ -1,0 +1,432 @@
+"""Playable drumset audio with one-shot polyphony and hi-hat choking."""
+
+import array
+import contextlib
+import os
+import queue
+import time
+from collections import deque
+
+import cyal
+import cyal.exceptions
+import pyogg
+
+from . import consts
+from . import path_utils
+
+
+class DrumAudio:
+    """Owns drum buffers, active voices, fades, and remote hit handoff."""
+
+    PAD_DEFS = (
+        ("Kick", "drums/Drums.hit.Kick.ogg", 0.34, 6),
+        ("Snare", "drums/Drums.hit.Snare.ogg", 0.32, 6),
+        ("Rim", "drums/Drums.hit.Rim.ogg", 0.62, 6),
+        ("Closed Hi-Hat", "drums/Drums.hit.HiHatClosed.ogg", 1.80, 8),
+        ("Open Hi-Hat", "drums/Drums.hit.HiHatOpen.ogg", 1.10, 4),
+        ("Foot Hi-Hat", "drums/Drums.hit.HiHatFoot.ogg", 4.00, 8),
+        ("Tom 1", "drums/Drums.hit.Tom1.ogg", 0.32, 6),
+        ("Tom 2", "drums/Drums.hit.Tom2.ogg", 0.56, 6),
+        ("Tom 3", "drums/Drums.hit.Tom3.ogg", 0.43, 6),
+        ("Tom 4", "drums/Drums.hit.Tom4.ogg", 0.69, 6),
+        ("Crash Left", "drums/Drums.hit.CrashLeft.ogg", 1.20, 3),
+        ("Crash Right", "drums/Drums.hit.CrashRight.ogg", 1.05, 3),
+        ("China", "drums/Drums.hit.China.ogg", 0.74, 3),
+        ("Splash", "drums/Drums.hit.Splash.ogg", 0.85, 3),
+        ("Ride", "drums/Drums.hit.Ride.ogg", 1.75, 4),
+        ("Ride Bell", "drums/Drums.hit.RideBell.ogg", 1.44, 4),
+        ("Cowbell", "drums/Drums.hit.Cowbell.ogg", 0.48, 6),
+    )
+    OPEN_HAT_PAD = 4
+    HAT_CHOKE_PADS = frozenset((3, 5))
+    MAX_VOICES_PER_PEER = 32
+    MAX_TOTAL_VOICES = 64
+    MAX_PENDING_HITS_PER_UPDATE = 64
+    CHOKE_SECONDS = 0.055
+    STEAL_SECONDS = 0.025
+
+    def __init__(self, audio_manager):
+        self.am = audio_manager
+        self.gameplay = None
+        self.active_voices = {}
+        self._fades = []
+        self._pending_hits = queue.Queue(maxsize=256)
+        self._occlusion_filter = None
+
+    @classmethod
+    def is_valid_pad(cls, pad):
+        return isinstance(pad, int) and not isinstance(pad, bool) and 0 <= pad < len(cls.PAD_DEFS)
+
+    @classmethod
+    def pad_name(cls, pad):
+        return cls.PAD_DEFS[pad][0] if cls.is_valid_pad(pad) else None
+
+    @staticmethod
+    def _iter_sounds(sounds):
+        if sounds is None:
+            return []
+        if isinstance(sounds, (list, tuple)):
+            flattened = []
+            for sound in sounds:
+                flattened.extend(DrumAudio._iter_sounds(sound))
+            return flattened
+        return [sounds]
+
+    @staticmethod
+    def _source_is_playing(sound):
+        source = getattr(sound, "source", None)
+        if source is None:
+            return False
+        try:
+            return source.state != cyal.SourceState.STOPPED
+        except Exception:
+            return False
+
+    def load_stereo_split_buffers(self, path):
+        """Return cached MONO16 left/right buffers for a stereo drum sample."""
+        if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND):
+            path = os.path.join(consts.SOUNDPREPEND, path)
+        if not path.endswith(".ogg"):
+            path = path_utils.get_next_cycle_item(path)
+        try:
+            path = os.path.normpath(path) if os.path.isabs(path) else os.path.relpath(path)
+        except ValueError:
+            path = os.path.normpath(path)
+
+        cache_key_l = f"{path}_drum_split_L"
+        cache_key_r = f"{path}_drum_split_R"
+        if cache_key_l in self.am.buffers and cache_key_r in self.am.buffers:
+            return self.am.buffers[cache_key_l], self.am.buffers[cache_key_r]
+
+        try:
+            file = pyogg.VorbisFile(path)
+            audio_data = bytes(file.buffer)
+            if file.channels != 2:
+                buffer = self.am.load_buffer(path)
+                return buffer, buffer
+            stereo_samples = array.array("h", audio_data)
+            left_bytes = array.array("h", stereo_samples[0::2]).tobytes()
+            right_bytes = array.array("h", stereo_samples[1::2]).tobytes()
+            try:
+                buffer_l = self.am.context.gen_buffer()
+            except cyal.exceptions.InvalidOperationError:
+                buffer_l = self.am.context.gen_buffer()
+            try:
+                buffer_r = self.am.context.gen_buffer()
+            except cyal.exceptions.InvalidOperationError:
+                buffer_r = self.am.context.gen_buffer()
+            buffer_l.set_data(left_bytes, sample_rate=file.frequency, format=cyal.BufferFormat.MONO16)
+            buffer_r.set_data(right_bytes, sample_rate=file.frequency, format=cyal.BufferFormat.MONO16)
+            self.am.buffers[cache_key_l] = buffer_l
+            self.am.buffers[cache_key_r] = buffer_r
+            return buffer_l, buffer_r
+        except Exception as error:
+            print(f"Error loading split drum buffers for {path}: {error}")
+            return None, None
+
+    def get_occlusion_filter(self):
+        if self._occlusion_filter is None:
+            self._occlusion_filter = self.am.gen_filter(
+                "LOWPASS", ("GAINHF", 0.10), ("GAIN", 0.40)
+            )
+        return self._occlusion_filter
+
+    def preload(self):
+        """Keep the small fixed drum kit resident for zero-latency first hits."""
+        for pad, (_, path, _, _) in enumerate(self.PAD_DEFS):
+            with contextlib.suppress(Exception):
+                stereo = self.am.load_buffer(path)
+                if stereo is not None:
+                    self.am._preloaded_buffers[f"drums:{pad}:stereo"] = stereo
+                left, right = self.load_stereo_split_buffers(path)
+                if left is not None:
+                    self.am._preloaded_buffers[f"drums:{pad}:left"] = left
+                if right is not None:
+                    self.am._preloaded_buffers[f"drums:{pad}:right"] = right
+
+    def enqueue_remote_hit(self, data):
+        """Transfer a network-thread packet to the audio-owning main thread."""
+        if not isinstance(data, dict) or not self.is_valid_pad(data.get("pad")):
+            return
+        with contextlib.suppress(queue.Full):
+            self._pending_hits.put_nowait(dict(data))
+
+    def _tag_sounds(self, sounds, peer_id, pad):
+        for sound in self._iter_sounds(sounds):
+            sound._drum_peer_id = str(peer_id)
+            sound._drum_pad = pad
+            if not hasattr(sound, "_drum_effect_sends"):
+                sound._drum_effect_sends = set()
+
+    def apply_effect_send(self, sounds, send_index, slot):
+        if slot is None or not hasattr(self.am, "efx"):
+            return
+        for sound in self._iter_sounds(sounds):
+            source = getattr(sound, "source", None)
+            if source is None:
+                continue
+            with contextlib.suppress(Exception):
+                self.am.efx.send(source, send_index, slot)
+                sound._drum_effect_sends.add(send_index)
+
+    def _schedule_fade(self, sounds, duration):
+        now = time.monotonic()
+        for sound in self._iter_sounds(sounds):
+            source = getattr(sound, "source", None)
+            if source is None:
+                continue
+            try:
+                start_gain = float(source.gain)
+            except Exception:
+                continue
+            self._fades.append({
+                "sound": sound,
+                "started": now,
+                "duration": max(0.001, duration),
+                "gain": start_gain,
+            })
+
+    def _remove_record(self, key, record, fade_seconds):
+        voices = self.active_voices.get(key)
+        if voices is not None:
+            with contextlib.suppress(ValueError):
+                voices.remove(record)
+            if not voices:
+                self.active_voices.pop(key, None)
+        self._schedule_fade(record["sounds"], fade_seconds)
+
+    def _choke_open_hat(self, peer_id):
+        key = (str(peer_id), self.OPEN_HAT_PAD)
+        for record in list(self.active_voices.get(key, ())):
+            self._remove_record(key, record, self.CHOKE_SECONDS)
+
+    def _oldest_record(self, predicate=None):
+        candidates = []
+        for key, records in self.active_voices.items():
+            if predicate is not None and not predicate(key):
+                continue
+            for record in records:
+                candidates.append((record["created"], key, record))
+        return min(candidates, default=None, key=lambda item: item[0])
+
+    def _enforce_voice_limits(self, peer_id, pad):
+        key = (str(peer_id), pad)
+        pad_limit = self.PAD_DEFS[pad][3]
+        while len(self.active_voices.get(key, ())) > pad_limit:
+            record = self.active_voices[key][0]
+            self._remove_record(key, record, self.STEAL_SECONDS)
+
+        def peer_record_count():
+            return sum(len(records) for record_key, records in self.active_voices.items() if record_key[0] == str(peer_id))
+
+        while peer_record_count() > self.MAX_VOICES_PER_PEER:
+            oldest = self._oldest_record(lambda record_key: record_key[0] == str(peer_id))
+            if oldest is None:
+                break
+            _, oldest_key, record = oldest
+            self._remove_record(oldest_key, record, self.STEAL_SECONDS)
+
+        while sum(len(records) for records in self.active_voices.values()) > self.MAX_TOTAL_VOICES:
+            oldest = self._oldest_record()
+            if oldest is None:
+                break
+            _, oldest_key, record = oldest
+            self._remove_record(oldest_key, record, self.STEAL_SECONDS)
+
+    def route_to_megaphone_speakers(self, peer_id, pad, adjusted_volume):
+        gameplay = self.gameplay
+        if not (
+            gameplay
+            and hasattr(gameplay, "megaphone")
+            and gameplay.megaphone
+            and getattr(gameplay.megaphone, "speaker_data", None)
+        ):
+            return []
+        path = self.PAD_DEFS[pad][1]
+        music_bot = getattr(gameplay, "music_bot", None)
+        bot_volume = max(0.1, getattr(music_bot, "volume", 50) / 100.0) * 0.5
+        sounds = []
+        for speaker in gameplay.megaphone.speaker_data:
+            position = speaker.get("position")
+            if position is None:
+                continue
+            volume = adjusted_volume * speaker.get("base_volume", 0.6) * bot_volume
+            try:
+                sound = self.am.play_unbound(
+                    path, position[0], position[1], position[2],
+                    volume=volume, cat="miscelaneous",
+                    direct_filter=getattr(gameplay.megaphone, "lowpass_filter", None),
+                )
+            except Exception:
+                continue
+            if sound is None:
+                continue
+            self._tag_sounds(sound, peer_id, pad)
+            self.apply_effect_send(sound, 1, getattr(gameplay.megaphone, "eq_slot", None))
+            self.apply_effect_send(sound, 2, getattr(gameplay.megaphone, "reverb_slot", None))
+            sounds.append(sound)
+        return sounds
+
+    def play_hit(self, peer_id, pad, x, y, z, listener_x, listener_y, listener_z,
+                 volume=300, occluded=False, via_megaphone=False):
+        if not self.is_valid_pad(pad):
+            return None
+        peer_id = str(peer_id)
+        if pad in self.HAT_CHOKE_PADS:
+            self._choke_open_hat(peer_id)
+
+        _, path, volume_scale, _ = self.PAD_DEFS[pad]
+        adjusted_volume = volume * volume_scale
+        primary = self.am.play_unbound_stereo_spatial(
+            path, x, y, z, listener_x, listener_y, listener_z,
+            volume=adjusted_volume,
+            cat="miscelaneous",
+            max_distance=30.0,
+            as_3d_stereo=(peer_id != "local"),
+            occluded=occluded,
+            stereo_provider=self,
+            stereo_offset=1.5,
+            stereo_reference_distance=8.0,
+            stereo_rolloff=0.4,
+            stereo_gain_l=1.0,
+            stereo_gain_r=1.0,
+        )
+        if primary is None:
+            return None
+        self._tag_sounds(primary, peer_id, pad)
+        sounds = self._iter_sounds(primary)
+
+        should_route_pa = via_megaphone
+        if peer_id == "local":
+            music_bot = getattr(self.gameplay, "music_bot", None)
+            should_route_pa = bool(getattr(music_bot, "broadcast_to_megaphone", False))
+        if should_route_pa:
+            sounds.extend(self.route_to_megaphone_speakers(peer_id, pad, adjusted_volume))
+
+        key = (peer_id, pad)
+        self.active_voices.setdefault(key, deque()).append({
+            "created": time.monotonic(),
+            "sounds": sounds,
+        })
+        self._enforce_voice_limits(peer_id, pad)
+        return primary
+
+    def _play_remote_hit(self, data):
+        gameplay = self.gameplay
+        player = getattr(gameplay, "player", None) if gameplay else None
+        if player is None:
+            return
+        try:
+            x, y, z = float(data["x"]), float(data["y"]), float(data["z"])
+            peer_id = str(data["peer_id"])
+            pad = data["pad"]
+        except (KeyError, TypeError, ValueError):
+            return
+        occluded = False
+        if getattr(gameplay, "map", None):
+            with contextlib.suppress(Exception):
+                occluded = gameplay.map.valid_straight_path(
+                    (x, y, z), (player.x, player.y, player.z)
+                ) is False
+        raw_volume = data.get("volume", 300)
+        if isinstance(raw_volume, bool):
+            raw_volume = 300
+        try:
+            volume = max(0.0, min(300.0, float(raw_volume)))
+        except (TypeError, ValueError):
+            volume = 300.0
+        sound = self.play_hit(
+            peer_id, pad, x, y, z,
+            player.x, player.y, player.z,
+            volume=volume,
+            occluded=occluded,
+            via_megaphone=data.get("via_megaphone") is True,
+        )
+        if sound and getattr(gameplay, "map", None):
+            reverb = gameplay.map.get_reverb_at(x, y, z)
+            if reverb and reverb.reverb:
+                self.apply_effect_send(sound, 0, reverb.reverb)
+
+    def _finish_fades(self, now):
+        remaining = []
+        for fade in self._fades:
+            sound = fade["sound"]
+            source = getattr(sound, "source", None)
+            if source is None:
+                continue
+            progress = min(1.0, (now - fade["started"]) / fade["duration"])
+            try:
+                source.gain = fade["gain"] * (1.0 - progress)
+                if progress >= 1.0:
+                    send_indices = set(range(len(getattr(self.am, "sends", ()))))
+                    send_indices.update(getattr(sound, "_drum_effect_sends", ()))
+                    for send_index in send_indices:
+                        with contextlib.suppress(Exception):
+                            self.am.efx.send(source, send_index, None)
+                    source.stop()
+                else:
+                    remaining.append(fade)
+            except Exception:
+                continue
+        self._fades = remaining
+
+    def _prune_finished_voices(self):
+        for key, records in list(self.active_voices.items()):
+            kept = deque(
+                record for record in records
+                if any(self._source_is_playing(sound) for sound in record["sounds"])
+            )
+            if kept:
+                self.active_voices[key] = kept
+            else:
+                self.active_voices.pop(key, None)
+
+    def update(self):
+        for _ in range(self.MAX_PENDING_HITS_PER_UPDATE):
+            try:
+                data = self._pending_hits.get_nowait()
+            except queue.Empty:
+                break
+            self._play_remote_hit(data)
+        now = time.monotonic()
+        self._finish_fades(now)
+        self._prune_finished_voices()
+
+    def remove_peer(self, peer_id):
+        peer_id = str(peer_id)
+        for key in [key for key in self.active_voices if key[0] == peer_id]:
+            for record in list(self.active_voices.get(key, ())):
+                self._remove_record(key, record, self.STEAL_SECONDS)
+
+    def reset(self):
+        """Detach DrumAudio-owned sends and stop all active drum sources."""
+        seen = set()
+        owned_groups = [
+            record["sounds"]
+            for records in list(self.active_voices.values())
+            for record in records
+        ]
+        owned_groups.extend([[fade["sound"]] for fade in self._fades])
+        for sounds in owned_groups:
+            for sound in sounds:
+                if id(sound) in seen:
+                    continue
+                seen.add(id(sound))
+                source = getattr(sound, "source", None)
+                if source is None:
+                    continue
+                send_indices = set(range(len(getattr(self.am, "sends", ()))))
+                send_indices.update(getattr(sound, "_drum_effect_sends", ()))
+                for send_index in send_indices:
+                    with contextlib.suppress(Exception):
+                        self.am.efx.send(source, send_index, None)
+                with contextlib.suppress(Exception):
+                    source.stop()
+        self.active_voices.clear()
+        self._fades.clear()
+        while True:
+            try:
+                self._pending_hits.get_nowait()
+            except queue.Empty:
+                break
+        self._occlusion_filter = None

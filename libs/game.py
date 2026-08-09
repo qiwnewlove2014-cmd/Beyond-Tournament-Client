@@ -39,6 +39,7 @@ from .speech import speak
 from .logger import log, log_exception
 from .os_tools import get_os
 from .keyconfig import Keyconfig
+from .midi import MidiHub
 import psutil
 import webbrowser
 
@@ -84,6 +85,8 @@ class Game:
         }
         
         self.audio_mngr = audio_manager.AudioManager()
+        # Game owns the sole PortMidi worker for the entire process lifetime.
+        self.midi_hub = MidiHub(announce=speak)
         self.device_clock = self.new_clock()
         self.title_clock = self.new_clock()
         self.direct_soundgroup = self.audio_mngr.create_soundgroup(True)
@@ -380,6 +383,7 @@ class Game:
             log(f"[RECOVERY] Could not stop network worker: {cleanup_error}")
         try:
             gameplay = getattr(self, "gameplay", None)
+            self.midi_hub.release_owner(gameplay, reason="crash_recovery")
             voice = getattr(gameplay, "voice_chat", None)
             if voice:
                 voice.close()
@@ -449,6 +453,7 @@ class Game:
                         self.audio_mngr.muted = True
                 if len(self.stack) == 0:
                     self.presence_sounds.shutdown()
+                    self.midi_hub.shutdown()
                     options.save()
                     self.keyconfig.save()
                     pygame.quit()

@@ -13,6 +13,7 @@ prefs = {
     "beacons": True,
     "buffer_timing": 2,
     "host": consts.DEFAULT_HOST,
+    "keyboard_typing_sounds": True,
     "port": consts.DEFAULT_PORT,
     "stream_ambience": True,
     "turning_sensitivity": 1,

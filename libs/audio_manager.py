@@ -10,6 +10,7 @@ import requests
 from .audio.soundgroup import SoundGroup
 from .audio.sound import Sound
 from .piano import PianoAudio
+from .drums import DrumAudio
 from . import options
 from . import path_utils
 from . import consts
@@ -68,6 +69,7 @@ class AudioManager():
         self.buffers = weakref.WeakValueDictionary()
         self._preloaded_buffers = {}  # Strong references for preloaded sounds to prevent GC
         self.piano = PianoAudio(self)
+        self.drums = DrumAudio(self)
         
         # Initialize volumes
         for cat, val in self.volume_categories.items():
@@ -267,7 +269,7 @@ class AudioManager():
 
 
 
-    def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0, as_mono=False, as_3d_stereo=False, occluded=False, direct_filter=None):
+    def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0, as_mono=False, as_3d_stereo=False, occluded=False, direct_filter=None, stereo_provider=None, stereo_offset=2.5, stereo_reference_distance=6.0, stereo_rolloff=0.6, stereo_gain_l=1.15, stereo_gain_r=1.0):
         if self.muted:
             return None
         if cat not in self.volume_categories:
@@ -279,30 +281,29 @@ class AudioManager():
         gain = (volume / 100) * ui_cat_vol
 
         if as_3d_stereo:
-            buf_l, buf_r = self.piano.load_stereo_split_buffers(path)
+            stereo_provider = stereo_provider or self.piano
+            buf_l, buf_r = stereo_provider.load_stereo_split_buffers(path)
             if not buf_l or not buf_r:
                 return None
             try:
-                gain_l = gain * 1.15  # Equalize left channel acoustic energy to balance right channel bias
-                gain_r = gain
+                gain_l = gain * stereo_gain_l
+                gain_r = gain * stereo_gain_r
 
-                # Left channel 3D source (offset -2.5 on X axis for wider extended stereo field)
-                src_l = self.context.gen_source(position=(x - 2.5, y, z), velocity=(0,0,0), pitch=1.0, gain=gain_l)
+                src_l = self.context.gen_source(position=(x - stereo_offset, y, z), velocity=(0,0,0), pitch=1.0, gain=gain_l)
                 src_l.relative = False
                 src_l.direct_channels = False
                 src_l.spatialize = True
-                src_l.reference_distance = 6.0
-                src_l.rolloff_factor = 0.6
+                src_l.reference_distance = stereo_reference_distance
+                src_l.rolloff_factor = stereo_rolloff
                 src_l.max_distance = max_distance
                 src_l.buffer = buf_l
 
-                # Right channel 3D source (offset +2.5 on X axis for wider extended stereo field)
-                src_r = self.context.gen_source(position=(x + 2.5, y, z), velocity=(0,0,0), pitch=1.0, gain=gain_r)
+                src_r = self.context.gen_source(position=(x + stereo_offset, y, z), velocity=(0,0,0), pitch=1.0, gain=gain_r)
                 src_r.relative = False
                 src_r.direct_channels = False
                 src_r.spatialize = True
-                src_r.reference_distance = 6.0
-                src_r.rolloff_factor = 0.6
+                src_r.reference_distance = stereo_reference_distance
+                src_r.rolloff_factor = stereo_rolloff
                 src_r.max_distance = max_distance
                 src_r.buffer = buf_r
             except Exception as e:
@@ -310,7 +311,7 @@ class AudioManager():
                 return None
 
             if occluded:
-                filter_obj = self.piano.get_occlusion_filter()
+                filter_obj = stereo_provider.get_occlusion_filter()
                 if filter_obj:
                     with contextlib.suppress(Exception):
                         src_l.direct_filter = filter_obj
@@ -410,6 +411,7 @@ class AudioManager():
         with contextlib.suppress(RuntimeError):
             with self.context.batch():
                 self.piano.update()
+                self.drums.update()
                 for source in self.unbound_sources:
                     if source.source.state == cyal.SourceState.STOPPED:
                         self.unbound_sources.pop(self.unbound_sources.index(source))

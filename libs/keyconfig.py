@@ -52,3 +52,9 @@ class Keyconfig:
         self.keys[func] = k
         if autosave:
             self.save()
+
+    def unset(self, func, autosave=True):
+        """Remove an optional binding without affecting its fallback default."""
+        self.keys.pop(func, None)
+        if autosave:
+            self.save()

@@ -1,11 +1,13 @@
-[v1.6.7] Classic Puppet Zombie & Builder Surface Expansion — 2026-08-09
+[v1.6.8] Playable Drumset & Extensible MIDI Instruments — 2026-08-10
 
-• Zombie Mode & Enemies
-- **Classic Puppet Zombie Miniboss:** Classic Puppet Zombies now silently infiltrate standard Zombie Mode waves from round 7 onward, replacing two or three ordinary zombies without increasing the total wave size or announcing their arrival.
-- **Distinct Miniboss Audio and Movement:** Classic Zombies use their own ambient, attack, damage, and death sounds, move with normal surface-aware zombie footsteps, and bring stronger health and melee damage without magical boss shields or spell abilities.
-- **Controlled Staff Testing:** Authorized staff can use `/spawnclassiczombie` to test up to three active Classic Zombies during a Zombie Mode match.
-
-• Map Builder & World Audio
-- **Separate Floor and Wall Tools:** The Builder now presents `Platform (Floor)` and `Wall` as separate top-level choices, keeping floor materials focused and making the expanded wall library easier to reach beside the other map-editing tools.
-- **Expanded Surface Audio Library:** Added 17 floor materials with dedicated footsteps and 48 additional wall sounds, including bare ground, broken glass, caves, ceramic, clay, cloth, debris, decks, deep sand, deep snow, hardwood, mud, bridges, metal structures, foliage, containers, and many more environmental surfaces.
-- **Consistent Editing Workflow:** Newly added floor and wall materials are available during placement and existing-element editing while older Builder menu requests remain compatible.
+• Interactive Objects & Live Music
+- **Playable 17-Piece Drumset:** Added a complete keyboard-playable drum kit with kick, snare, rim, three hi-hat articulations, four toms, crashes, china, splash, ride, ride bell, and cowbell. The accessible control layout works consistently with normalized Thai and English keyboard input.
+- **Custom Drum Key Bindings:** Added a dedicated accessible settings menu where every drum sound can have a primary and optional alternate computer key, enabling techniques such as double kick and alternating snare strokes. Spoken conflict warnings, safe exit-key protection, per-pad alternate clearing, and one-step default restoration are included, while MIDI mappings remain independent and unchanged.
+- **Reliable In-Game Drum Key Menu Navigation:** Fixed Escape navigation while configuring drum keys from the in-game Options menu. Canceling a key capture and backing out now returns one menu level at a time without reopening, swapping, or stacking stale configuration screens.
+- **Responsive Percussion Performance:** Drum hits are predicted instantly for the performer, support controlled one-shot polyphony for natural rolls and cymbal tails, and use realistic closed/foot hi-hat choking without cutting unrelated sounds.
+- **Spatial Drum Acoustics:** Nearby listeners hear balanced dual-source 3D drums with environmental reverb, wall occlusion, distance tuning, and optional Server-authorized PA/megaphone routing.
+- **Safe Multiplayer Sessions:** The Server validates drum sessions, pad identifiers, instrument proximity, and a bounded performance rate before broadcasting authoritative drum positions to other listeners.
+- **Persistent Drumset Placement:** Builders can place permanent Drumsets from the existing Musical Instruments menu with accessible coordinate suggestions, hot reload support, and unique identities for multiple kits on the same map.
+- **Temporary Drumset Testing:** Moderators and authorized Builders can spawn a temporary Drumset nearby for live testing without saving it to the map.
+- **Velocity-Sensitive MIDI Drums:** MIDI keyboards and electronic drum kits are detected automatically while playing, with General MIDI percussion support plus a compact C4-E5 layout covering all 17 pads.
+- **Extensible MIDI Instrument Support:** MIDI devices now use one safe shared input hub with instrument profiles, reliable hot-plug cleanup, and protected switching between Piano, Drumset, and future playable instruments.

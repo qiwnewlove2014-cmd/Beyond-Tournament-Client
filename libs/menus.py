@@ -2,7 +2,16 @@ import functools
 import re
 from operator import mod
 from string import Template
-from . import menu, options, updater, keyconfig, consts, speech, audio_manager
+from . import (
+    audio_manager,
+    consts,
+    drum_keyconfig,
+    keyconfig,
+    menu,
+    options,
+    speech,
+    updater,
+)
 from .key_config_screen import Key_config_screen
 from .os_tools import get_os
 import pygame
@@ -232,6 +241,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         ),
         (game.toggle_item("Mute audio when the game window does not have focus", "mute_on_focus_loss")),
         (game.toggle_item("Mute speech when out of the game window", "mute_speech_on_focus_loss")),
+        (game.toggle_item("Keyboard typing sounds", "keyboard_typing_sounds", True)),
         (game.toggle_item(
             "speak your direction when finished turning", 
             "speak_on_turn",
@@ -249,6 +259,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         ("edit location template. Currently set to: "+options.get("location_template", "{x}, \r\n{y}, \r\n{z}, \r\nOn {tile} \r\nFacing {direction} at {angle} degrees with a pitch of {pitch} degrees. \r\nYou are leaning by {lean} degrees and you are {balanced}. "), lambda: configure_location_template(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call)),
         ("reset your location template to default", lambda: options.set("location_template",             "{x}, \r\n{y}, \r\n{z}, \r\nOn {tile} \r\nFacing {direction} at {angle} degrees with a pitch of {pitch} degrees. \r\nYou are leaning by {lean} degrees and you are {balanced}. ")),
         ("Configure key bindings.", lambda: keyconfig_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
+        ("Configure drum keys.", lambda: drum_keyconfig_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
     ]
     if in_game:
         items.append((
@@ -368,6 +379,176 @@ def keyconfig_menu(game, func_call, replace_call=None, parent=None, in_game=Fals
     # Restore cursor to the item the user was on before binding (if any).
     if restore_pos is not None and 0 <= restore_pos < len(m.items):
         m.pos = restore_pos
+    replace_call(m)
+
+
+def drum_keyconfig_menu(
+    game,
+    func_call,
+    replace_call=None,
+    parent=None,
+    in_game=False,
+    restore_pos=None,
+):
+    """List each pad with its primary and optional alternate key."""
+    m = menu.Menu(game, "Configure drum keys.", parrent=parent)
+    set_default_sounds(m)
+    if replace_call is None:
+        replace_call = game.replace
+
+    # In-game menus live on Gameplay's substate stack.  Opening a child must
+    # push it, while refreshing this menu must replace only the current top.
+    # Outside gameplay, both operations use the normal game-state replacement.
+    open_child = parent.add_substate if in_game else replace_call
+    refresh_current = parent.replace_last_substate if in_game else replace_call
+
+    items = []
+    for binding in drum_keyconfig.DRUM_BINDINGS:
+        current_index = len(items)
+        primary = drum_keyconfig.binding_key(game.keyconfig, binding)
+        alternate = drum_keyconfig.alternate_key(game.keyconfig, binding)
+        alternate_name = (
+            pygame.key.name(alternate)
+            if alternate is not None
+            else "unassigned"
+        )
+        open_pad_menu = functools.partial(
+            drum_pad_keyconfig_menu,
+            game,
+            binding,
+            func_call,
+            replace_call=open_child,
+            parent=parent,
+            in_game=in_game,
+            list_position=current_index,
+        )
+        items.append((
+            f"{binding.label}: primary {pygame.key.name(primary)}, "
+            f"alternate {alternate_name}",
+            open_pad_menu,
+        ))
+
+    def reset_defaults():
+        drum_keyconfig.restore_defaults(game.keyconfig)
+        speech.speak("Drum keys restored to defaults.")
+        drum_keyconfig_menu(
+            game,
+            func_call,
+            replace_call=refresh_current,
+            parent=parent,
+            in_game=in_game,
+            restore_pos=len(drum_keyconfig.DRUM_BINDINGS),
+        )
+
+    items.append(("Restore default drum keys.", reset_defaults))
+    items.append(("Back", func_call))
+    m.add_items(items)
+    if restore_pos is not None and 0 <= restore_pos < len(m.items):
+        m.pos = restore_pos
+    replace_call(m)
+
+
+def drum_pad_keyconfig_menu(
+    game,
+    binding,
+    func_call,
+    replace_call,
+    parent=None,
+    in_game=False,
+    list_position=0,
+):
+    """Configure both playable key slots for one drum pad."""
+    primary = drum_keyconfig.binding_key(game.keyconfig, binding)
+    alternate = drum_keyconfig.alternate_key(game.keyconfig, binding)
+    alternate_name = (
+        pygame.key.name(alternate)
+        if alternate is not None
+        else "unassigned"
+    )
+    m = menu.Menu(game, f"Configure {binding.label} keys.", parrent=parent)
+    set_default_sounds(m)
+
+    open_child = parent.add_substate if in_game else replace_call
+    refresh_current = parent.replace_last_substate if in_game else replace_call
+
+    def reopen_pad_menu():
+        if in_game:
+            # A completed/canceled capture is still the top substate. Remove it
+            # before replacing the underlying pad menu with refreshed labels.
+            parent.pop_last_substate()
+        drum_pad_keyconfig_menu(
+            game,
+            binding,
+            func_call,
+            replace_call=refresh_current,
+            parent=parent,
+            in_game=in_game,
+            list_position=list_position,
+        )
+
+    def open_key_capture(function, display_name):
+        validator = functools.partial(
+            drum_keyconfig.validate_key,
+            game.keyconfig,
+            function,
+        )
+        open_child(Key_config_screen(
+            game,
+            function,
+            options_menu=reopen_pad_menu,
+            display_name=display_name,
+            key_validator=validator,
+            cancel_keys=(pygame.K_ESCAPE,),
+        ))
+
+    def clear_alternate():
+        drum_keyconfig.clear_alternate(game.keyconfig, binding)
+        speech.speak(f"{binding.label} alternate key cleared.")
+        drum_pad_keyconfig_menu(
+            game,
+            binding,
+            func_call,
+            replace_call=refresh_current,
+            parent=parent,
+            in_game=in_game,
+            list_position=list_position,
+        )
+
+    def return_to_list():
+        if in_game:
+            parent.pop_last_substate()
+            return
+        drum_keyconfig_menu(
+            game,
+            func_call,
+            replace_call=replace_call,
+            parent=parent,
+            in_game=in_game,
+            restore_pos=list_position,
+        )
+
+    items = [
+        (
+            f"Set primary key. Currently {pygame.key.name(primary)}.",
+            functools.partial(
+                open_key_capture,
+                binding.function,
+                f"{binding.label} primary",
+            ),
+        ),
+        (
+            f"Set alternate key. Currently {alternate_name}.",
+            functools.partial(
+                open_key_capture,
+                binding.alternate_function,
+                f"{binding.label} alternate",
+            ),
+        ),
+    ]
+    if alternate is not None:
+        items.append(("Clear alternate key.", clear_alternate))
+    items.append(("Back", return_to_list))
+    m.add_items(items)
     replace_call(m)
 
 

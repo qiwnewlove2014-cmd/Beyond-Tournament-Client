@@ -8,7 +8,8 @@ import cyal.exceptions
 from .systems.megaphone_system import MegaphoneManager
 from .systems.wall_tone_system import WallToneSystem
 from .systems.compass_turn_cue import CompassTurnCue
-from .piano_midi import PianoMidiService
+from .midi.profiles import DRUM_MIDI_PROFILE, PIANO_MIDI_PROFILE
+from . import drum_keyconfig
 import pygame
 import pyogg
 from .shields import ShieldManager
@@ -40,8 +41,8 @@ import cyal
 class Gameplay(state.State):
     _PIANO_MIN_BASE_OCTAVE = 1
     _PIANO_MAX_BASE_OCTAVE = 6
-    _PIANO_MIDI_MIN_NOTE = 24  # C1
-    _PIANO_MIDI_MAX_NOTE = 95  # B6 (complete sample range)
+    _PIANO_MIDI_MIN_NOTE = PIANO_MIDI_PROFILE.MIN_NOTE
+    _PIANO_MIDI_MAX_NOTE = PIANO_MIDI_PROFILE.MAX_NOTE
     _PIANO_MIDI_MIN_VOLUME = 60
     _PIANO_MIDI_MAX_VOLUME = 300
     _PIANO_MIDI_PITCH_MIN = -8192
@@ -49,6 +50,11 @@ class Gameplay(state.State):
     _PIANO_MIDI_PITCH_CENTER_DEADZONE = 32
     _PIANO_PITCH_NETWORK_STEP = 64
     _PIANO_PITCH_NETWORK_INTERVAL = 1.0 / 30.0
+    _DRUM_MIDI_MIN_VOLUME = 60
+    _DRUM_MIDI_MAX_VOLUME = 300
+    _DRUM_MIDI_CHROMATIC_FIRST_NOTE = DRUM_MIDI_PROFILE.CHROMATIC_FIRST_NOTE
+    _DRUM_MIDI_CHROMATIC_LAST_NOTE = DRUM_MIDI_PROFILE.CHROMATIC_LAST_NOTE
+    _DRUM_MIDI_GM_NOTE_TO_PAD = DRUM_MIDI_PROFILE.GENERAL_MIDI_NOTE_TO_PAD
 
     def __init__(self, game):
         super().__init__(game)
@@ -78,6 +84,9 @@ class Gameplay(state.State):
         self.game_started = False   # Track if game has started (blocks PA Test Mode)
         self.pong_mode = False      # True when player is in an active Pong match (suppresses normal footsteps)
         self.piano_mode = False     # True when playing piano
+        self.drum_mode = False      # True when playing a drumset
+        self._drum_pressed_keys = set()
+        self._midi_lease = None
         self.vehicle_mode = False
         self.vehicle_name = None
         self.vehicle_type = None
@@ -101,11 +110,10 @@ class Gameplay(state.State):
         self._piano_pitch_bend_pending = None
         self._piano_pitch_bend_last_sent = None
         self._piano_pitch_bend_last_send_time = 0.0
-        self._piano_midi = PianoMidiService()
         self._piano_midi_active_notes = {}
         self._piano_midi_sustained_notes = {}
+        self._piano_midi_sustain_sources = set()
         self._piano_midi_sustain = False
-        self._piano_midi_announced_devices = ()
         # ENet guarantees ordering inside one channel, not across CHANNEL_MISC
         # and CHANNEL_MAP.  Player spawn packets can therefore arrive before
         # the connected event enters this state.  Create the mapping here and
@@ -477,8 +485,86 @@ class Gameplay(state.State):
                 return
             self._set_piano_pitch_bend(direction)
 
+    def _get_drum_key_to_pad(self):
+        """Resolve configurable normalized keys to stable drum pad IDs."""
+        return drum_keyconfig.key_to_pad(self.game.keyconfig)
+
+    def _start_drum_session(self):
+        """Enter low-latency drum input mode on the main game thread."""
+        if self.piano_mode:
+            self._end_piano_session(notify_server=True)
+        self.drum_mode = True
+        self._drum_pressed_keys.clear()
+        self.game.audio_mngr.drums.preload()
+        self._start_drum_midi()
+
+    def _end_drum_session(self, notify_server=True):
+        """Release drum input state and the shared MIDI worker atomically."""
+        self._drum_pressed_keys.clear()
+        if self.drum_mode:
+            self._deactivate_drum_midi()
+        self.drum_mode = False
+        if notify_server and self.game.network:
+            self.game.network.send(consts.CHANNEL_MAP, "drum_stop", {})
+
+    @classmethod
+    def _drum_midi_note_to_pad(cls, midi_note):
+        """Map General MIDI percussion or the C4-E5 keyboard layout to a pad."""
+        return DRUM_MIDI_PROFILE.note_to_pad(midi_note)
+
+    @classmethod
+    def _drum_midi_velocity_volume(cls, velocity):
+        """Map MIDI velocity 1-127 to the drum kit's existing volume scale."""
+        return DRUM_MIDI_PROFILE.volume(velocity)
+
+    def _play_local_drum_hit(self, pad, velocity=None):
+        volume = (
+            300
+            if velocity is None
+            else self._drum_midi_velocity_volume(velocity)
+        )
+        sound = self.game.audio_mngr.drums.play_hit(
+            "local", pad,
+            self.player.x, self.player.y, self.player.z,
+            self.player.x, self.player.y, self.player.z,
+            volume=volume,
+        )
+        if sound and getattr(self, "map", None):
+            reverb = self.map.get_reverb_at(
+                self.player.x, self.player.y, self.player.z
+            )
+            if reverb and reverb.reverb:
+                self.game.audio_mngr.drums.apply_effect_send(
+                    sound, 0, reverb.reverb
+                )
+        if self.game.network:
+            packet = {"pad": pad}
+            if velocity is not None:
+                packet["velocity"] = max(1, min(127, int(velocity)))
+            self.game.network.send(
+                consts.CHANNEL_MAP, "play_drum_hit", packet
+            )
+
+    def _start_drum_midi(self):
+        """Acquire the process MIDI hub with the drum profile."""
+        if not self.drum_mode:
+            return
+        self._midi_lease = self.game.midi_hub.acquire(self, "drumset")
+
+    def _deactivate_drum_midi(self):
+        lease = self._midi_lease
+        if lease is not None and lease.profile_id == "drumset":
+            self.game.midi_hub.release(lease, reason="drum_mode_exit")
+            self._midi_lease = None
+
+    def _poll_drum_midi(self):
+        """Dispatch queued MIDI events through the active drum profile."""
+        self.game.midi_hub.poll()
+
     def _start_piano_session(self):
         """Initialize client-owned piano input and audio state on the main thread."""
+        if self.drum_mode:
+            self._end_drum_session(notify_server=True)
         self.piano_mode = True
         self._piano_pressed_notes.clear()
         self._piano_chorus_tab_down = False
@@ -498,6 +584,18 @@ class Gameplay(state.State):
             0, force_network=True
         )
         self._start_piano_midi()
+
+    def _end_piano_session(self, notify_server=True):
+        """Release all piano controls before another instrument owns MIDI."""
+        self._set_piano_soft_pedal(False, announce=False)
+        self._set_piano_chorus(False, announce=False)
+        self._piano_chorus_tab_down = False
+        self._piano_pitch_bend_keys.clear()
+        self._set_piano_pitch_bend(0)
+        self._deactivate_piano_midi()
+        self.piano_mode = False
+        if notify_server and self.game.network:
+            self.game.network.send(consts.CHANNEL_MAP, "piano_stop", {})
 
     def _get_piano_key_to_note(self):
         """Build the note map without duplicating unavailable edge octaves."""
@@ -561,27 +659,12 @@ class Gameplay(state.State):
     @classmethod
     def _piano_midi_note_name(cls, midi_note):
         """Convert a MIDI key number into an available piano sample name."""
-        if not isinstance(midi_note, int) or not (
-            cls._PIANO_MIDI_MIN_NOTE <= midi_note <= cls._PIANO_MIDI_MAX_NOTE
-        ):
-            return None
-        note_names = (
-            "C", "Db", "D", "Eb", "E", "F",
-            "Gb", "G", "Ab", "A", "Bb", "B",
-        )
-        return f"{note_names[midi_note % 12]}{(midi_note // 12) - 1}"
+        return PIANO_MIDI_PROFILE.note_name(midi_note)
 
     @classmethod
     def _piano_midi_velocity_volume(cls, velocity):
         """Map MIDI velocity 1-127 to the piano's existing volume scale."""
-        velocity = max(1, min(127, int(velocity)))
-        normalized = velocity / 127.0
-        volume_range = cls._PIANO_MIDI_MAX_VOLUME - cls._PIANO_MIDI_MIN_VOLUME
-        return int(
-            cls._PIANO_MIDI_MIN_VOLUME
-            + (volume_range * (normalized ** 1.35))
-            + 0.5
-        )
+        return PIANO_MIDI_PROFILE.volume(velocity)
 
     def _play_local_piano_note(self, note_name, velocity=None):
         """Predict a local note immediately, then send its compact action packet."""
@@ -619,14 +702,10 @@ class Gameplay(state.State):
             )
 
     def _start_piano_midi(self):
-        """Activate background-owned MIDI scanning for the current piano session."""
+        """Acquire the process MIDI hub with the piano profile."""
         if not self.piano_mode:
             return
-        self._piano_midi_active_notes.clear()
-        self._piano_midi_sustained_notes.clear()
-        self._piano_midi_sustain = False
-        self._piano_midi_announced_devices = ()
-        self._piano_midi.activate()
+        self._midi_lease = self.game.midi_hub.acquire(self, "piano")
 
     def _release_piano_midi_sustain(self):
         active_note_names = set(self._piano_midi_active_notes.values())
@@ -647,71 +726,20 @@ class Gameplay(state.State):
         note_names.update(self._piano_midi_sustained_notes.values())
         self._piano_midi_active_notes.clear()
         self._piano_midi_sustained_notes.clear()
+        self._piano_midi_sustain_sources.clear()
         self._piano_midi_sustain = False
         for note_name in note_names:
             self._stop_local_piano_note(note_name)
 
     def _deactivate_piano_midi(self):
-        self._stop_all_piano_midi_notes()
-        self._piano_midi.deactivate()
-        self._piano_midi_announced_devices = ()
-        self._piano_midi_pitch_bend_value = 0
-        self._piano_midi_pitch_bend_source = None
-        self._piano_pitch_bend_pending = None
+        lease = self._midi_lease
+        if lease is not None and lease.profile_id == "piano":
+            self.game.midi_hub.release(lease, reason="piano_mode_exit")
+            self._midi_lease = None
 
     def _poll_piano_midi(self):
-        """Apply worker-produced MIDI events on the main gameplay/audio thread."""
-        for event in self._piano_midi.drain_events():
-            event_type = event[0]
-            if event_type == "devices":
-                device_names = event[1]
-                if device_names and device_names != self._piano_midi_announced_devices:
-                    if len(device_names) == 1:
-                        speak(f"MIDI keyboard connected: {device_names[0]}")
-                    else:
-                        speak(f"{len(device_names)} MIDI inputs connected")
-                    self._piano_midi_announced_devices = device_names
-                continue
-
-            if event_type == "note_on":
-                _, device_id, channel, midi_note, velocity = event
-                note_name = self._piano_midi_note_name(midi_note)
-                if note_name is None:
-                    continue
-                note_key = (device_id, channel, midi_note)
-                self._piano_midi_sustained_notes.pop(note_key, None)
-                self._piano_midi_active_notes[note_key] = note_name
-                self._play_local_piano_note(note_name, velocity=velocity)
-            elif event_type == "note_off":
-                _, device_id, channel, midi_note = event
-                note_key = (device_id, channel, midi_note)
-                note_name = self._piano_midi_active_notes.pop(note_key, None)
-                if note_name is None:
-                    continue
-                if self._piano_midi_sustain or self._keyboard_sustain_is_down():
-                    self._piano_midi_sustained_notes[note_key] = note_name
-                elif note_name not in self._piano_midi_active_notes.values():
-                    self._stop_local_piano_note(note_name)
-            elif event_type == "sustain":
-                enabled = bool(event[1])
-                if (
-                    self._piano_midi_sustain
-                    and not enabled
-                    and not self._keyboard_sustain_is_down()
-                ):
-                    self._release_piano_midi_sustain()
-                self._piano_midi_sustain = enabled
-            elif event_type == "soft":
-                self._set_piano_soft_pedal(bool(event[1]))
-            elif event_type == "pitch_bend":
-                self._set_piano_midi_pitch_bend(
-                    int(event[3]), source=(event[1], event[2])
-                )
-            elif event_type == "device_lost":
-                source = self._piano_midi_pitch_bend_source
-                if source is not None and source[0] == event[1]:
-                    self._set_piano_midi_pitch_bend(0, force_network=True)
-        self._flush_piano_pitch_bend_network()
+        """Dispatch queued MIDI events through the active piano profile."""
+        self.game.midi_hub.poll()
 
     def spectator_switch_player(self, mod):
         if not self.spectator_mode:
@@ -830,6 +858,7 @@ class Gameplay(state.State):
         self.music_bot = music_bot.MapMusicBot(self.game)
         # Wire gameplay reference into PianoAudio for megaphone broadcast routing
         self.game.audio_mngr.piano.gameplay = self
+        self.game.audio_mngr.drums.gameplay = self
         
 
 
@@ -881,9 +910,10 @@ class Gameplay(state.State):
 
     def exit(self):
         super().exit()
-        if hasattr(self, "_piano_midi"):
-            self._stop_all_piano_midi_notes()
-            self._piano_midi.shutdown()
+        if getattr(self, "drum_mode", False):
+            self._end_drum_session(notify_server=False)
+        self.game.midi_hub.release_owner(self, reason="gameplay_exit")
+        self._midi_lease = None
         if self.player.locked and self.game.network and getattr(self.game.network, 'event_handeler', None):
             self.game.network.event_handeler.death({"dead": False})
         if self.game.network:
@@ -900,6 +930,9 @@ class Gameplay(state.State):
         if hasattr(self.game, 'audio_mngr') and self.game.audio_mngr and hasattr(self.game.audio_mngr, 'piano'):
             self.game.audio_mngr.piano.reset()
             self.game.audio_mngr.piano.gameplay = None
+        if hasattr(self.game, 'audio_mngr') and self.game.audio_mngr and hasattr(self.game.audio_mngr, 'drums'):
+            self.game.audio_mngr.drums.reset()
+            self.game.audio_mngr.drums.gameplay = None
         if hasattr(self, 'megaphone') and self.megaphone:
             self.megaphone._cleanup_megaphone_efx()
         if hasattr(self, 'wall_tone') and self.wall_tone:
@@ -1054,24 +1087,33 @@ class Gameplay(state.State):
         key = pygame.key.get_pressed()
         is_concert = getattr(self, 'concert_spectator_mode', False)
         if not self.spectator_mode or is_concert:
-            if not getattr(self, 'piano_mode', False) and not getattr(self, 'vehicle_mode', False):
+            if not getattr(self, 'piano_mode', False) and not getattr(self, 'drum_mode', False) and not getattr(self, 'vehicle_mode', False):
                 for i in self.keys_held:
                     if key[i]:
                         self.keys_held[i](pygame.key.get_mods())
         if getattr(self, "piano_mode", False):
             self._poll_piano_midi()
+        elif getattr(self, "drum_mode", False):
+            self._poll_drum_midi()
         for event in events:
+            if getattr(self, "drum_mode", False):
+                if event.type == pygame.KEYDOWN:
+                    if event.key in drum_keyconfig.RESERVED_DRUM_KEYS:
+                        self._end_drum_session(notify_server=True)
+                        continue
+                    key_to_pad = self._get_drum_key_to_pad()
+                    if event.key in key_to_pad:
+                        if event.key in self._drum_pressed_keys:
+                            continue
+                        self._drum_pressed_keys.add(event.key)
+                        self._play_local_drum_hit(key_to_pad[event.key])
+                elif event.type == pygame.KEYUP:
+                    self._drum_pressed_keys.discard(event.key)
+                continue
             if getattr(self, 'piano_mode', False):
                 if event.type == pygame.KEYDOWN:
                     if event.key in (pygame.K_ESCAPE, pygame.K_RETURN):
-                        self._set_piano_soft_pedal(False, announce=False)
-                        self._set_piano_chorus(False, announce=False)
-                        self._piano_chorus_tab_down = False
-                        self._piano_pitch_bend_keys.clear()
-                        self._set_piano_pitch_bend(0)
-                        self._deactivate_piano_midi()
-                        self.piano_mode = False
-                        self.game.network.send(consts.CHANNEL_MAP, "piano_stop", {})
+                        self._end_piano_session(notify_server=True)
                     elif event.key == pygame.K_LCTRL:
                         self._set_piano_soft_pedal(True)
                     elif event.key == pygame.K_TAB:

@@ -326,6 +326,11 @@ class EventHandeler:
                         self.game.audio_mngr.piano.remove_peer(target_name)
                     )
                 )
+            self.game.put(
+                lambda target_name=target_name: (
+                    self.game.audio_mngr.drums.remove_peer(target_name)
+                )
+            )
         if hasattr(self.gameplay, 'voice_channels') and isinstance(self.gameplay.voice_channels, dict):
             keys_to_remove = [k for k, v in self.gameplay.voice_channels.items() if getattr(v, 'name', None) == target_name]
             for k in keys_to_remove:
@@ -574,6 +579,14 @@ class EventHandeler:
             except Exception:
                 pass
 
+    def drum_start(self, data):
+        """Enter drum mode and preload the fixed kit on the main thread."""
+        self.game.put(self.gameplay._start_drum_session)
+
+    def play_drum_hit(self, data):
+        """Queue a validated remote one-shot for main-thread audio playback."""
+        self.game.audio_mngr.drums.enqueue_remote_hit(data)
+
     def set_game_mode(self, data):
         """Receive game mode from server (e.g. 'pong' or 'normal') and update game state."""
         mode = data.get("mode", "normal")
@@ -806,6 +819,11 @@ class EventHandeler:
 
     def death(self, data):  # sourcery skip: avoid-builtin-shadow
         if data["dead"] == True:
+            if getattr(self.gameplay, "drum_mode", False):
+                self.game.put(functools.partial(
+                    self.gameplay._end_drum_session,
+                    notify_server=False,
+                ))
             fall_direction = random.randint(1, 2)
             player = self.gameplay.player
             if fall_direction == 1:

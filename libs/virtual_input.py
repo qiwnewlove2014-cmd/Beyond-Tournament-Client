@@ -87,6 +87,55 @@ class Virtual_input:
         self._key_times = {}
         self.key_clock.restart()
 
+    def _play_keyboard_press(self, event):
+        """Play a local typing cue for text-producing keys only."""
+        if self.hidden or not options.get("keyboard_typing_sounds", True):
+            return
+        if event.mod & (pygame.KMOD_CTRL | pygame.KMOD_ALT):
+            return
+
+        if event.key in (pygame.K_BACKSPACE, pygame.K_DELETE):
+            filename = "press_back.ogg"
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            filename = "press_enter.ogg"
+        elif event.key == pygame.K_SPACE:
+            filename = "press_space.ogg"
+        elif event.unicode:
+            filename = f"press_key{random(1, 5)}.ogg"
+        else:
+            return
+
+        try:
+            soundgroup = self._keyboard_soundgroup()
+            soundgroup.play(
+                f"keyboard/{filename}",
+                cat="ui",
+            )
+        except Exception:
+            # Text input must remain usable if an optional cue cannot play.
+            pass
+
+    def _keyboard_soundgroup(self):
+        """Use local map acoustics in game, with a dry menu-safe fallback."""
+        direct = self.game.direct_soundgroup
+        gameplay = getattr(self.game, "gameplay", None)
+        player = getattr(gameplay, "player", None)
+        soundgroup = getattr(player, "soundgroup", None)
+        map_obj = getattr(player, "map", None)
+        if soundgroup is None or map_obj is None:
+            return direct
+
+        try:
+            reverb = map_obj.get_reverb_at(player.x, player.y, player.z)
+            slot = reverb.reverb if reverb and reverb.reverb else None
+            current_slot = soundgroup.sends[0] if soundgroup.sends else None
+            if current_slot != slot:
+                soundgroup.apply_effect(slot, 0)
+            return soundgroup
+        except Exception:
+            # A changing or unloaded map must never block text entry.
+            return direct
+
     def move_in_string(self, value):
         """Parameters:
         value (int): The value by which the cursor will be moved
@@ -307,6 +356,7 @@ class Virtual_input:
 
         for event in self.game.events:
             if event.type == pygame.KEYDOWN:
+                self._play_keyboard_press(event)
                 if self.repeating_keys and event.key not in self._key_times:
                     self._key_times[event.key] = [
                         self.key_clock.elapsed + self.initial_key_repeating_time,
