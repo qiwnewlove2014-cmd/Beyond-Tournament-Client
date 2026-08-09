@@ -528,10 +528,11 @@ class Menu(state.State):
                             self.game.pop()
 
                 elif key == pg.K_PAGEDOWN and self.music_volume is not None:
-                    # Builder paste: only meaningful in the builder menu
-                    if self.game.builder_clipboard:
-                        from libs.builder.utils import handle_builder_paste
-                        handle_builder_paste(self.game)
+                    self.set_music_volume(self.music_volume - 5)
+
+                elif key == pg.K_PAGEUP and self.music_volume is not None:
+                    self.set_music_volume(self.music_volume + 5)
+
                 elif key == pg.K_LEFT and self.sound_browse_mode:
                     if self.preview_volume > 0:
                         self.preview_volume = max(0, self.preview_volume - 5)
