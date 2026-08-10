@@ -4,6 +4,16 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.7.0] Client Stability — Map Loading & Instrument Crash Fix — 2026-08-11
+--------------------------------------------------------------------------------
+
+• Stability & Crash Fixes
+- **Fixed Map-Loading Crashes:** Resolved a frequent client crash (reported as unclean exits in `client_crashes`) that occurred when entering, changing, or building maps that contained Pianos and Drumsets. The root cause was remote piano note playback running on the network thread, where the audio (OpenAL) context is not current; under load this caused a native crash with no Python traceback.
+- **Piano Audio Now Runs on the Main Thread:** All remote piano events (note play, note stop, soft pedal, pitch bend, chorus, and the piano note preloader) now queue to the main audio thread before touching audio, mirroring the safe pattern already used by the drum kit.
+- **No More Instrument Memory Leaks Across Maps:** Switching maps now releases preloaded Piano and Drumset sample buffers. Previously, every map change kept the previous map's instrument buffers in memory, accumulating until the game crashed after long sessions.
+- **Safer Audio Error Handling:** Hardened the shared spatial audio path with exception guards around OpenAL source, filter, and effect calls so that a transient audio fault is recovered instead of crashing the client.
+
+--------------------------------------------------------------------------------
 [v1.6.9] Drum Kit Selection & Natural Instrument Acoustics — 2026-08-10
 --------------------------------------------------------------------------------
 
