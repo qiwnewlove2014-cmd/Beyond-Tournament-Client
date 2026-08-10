@@ -227,42 +227,52 @@ class AudioManager():
         if cat not in self.volume_categories:
             cat = "miscelaneous"
         if not self.volume_categories[cat] or cat == "master": return
-        source = self.context.gen_source(
-            looping=looping, 
-            gain = 
-            (volume / 100) *
-            (self.volume_categories[cat][0]/100),
-            direction=direction, 
-            position=(x,y,z), 
-            velocity=velocity,
-            pitch=pitch
-        )
-        if direct:
-            source.direct_channels=True
-            source.spatialize = False
-        else:
-            source.direct_channels = False
-            source.spatialize=True
-            source.reference_distance = reference_distance
-            source.rolloff_factor = rolloff
-            source.max_distance = max_distance
-            source.cone_inner_angle = cone_inner_angle
-            source.cone_outer_angle = cone_outer_angle
-            source.cone_outer_gain = cone_outer_gain
-            source.set("cone_outer_gainhf", cone_outer_gainhf)
-            
+        try:
+            source = self.context.gen_source(
+                looping=looping,
+                gain =
+                (volume / 100) *
+                (self.volume_categories[cat][0]/100),
+                direction=direction,
+                position=(x,y,z),
+                velocity=velocity,
+                pitch=pitch
+            )
+            if direct:
+                source.direct_channels=True
+                source.spatialize = False
+            else:
+                source.direct_channels = False
+                source.spatialize=True
+                source.reference_distance = reference_distance
+                source.rolloff_factor = rolloff
+                source.max_distance = max_distance
+                source.cone_inner_angle = cone_inner_angle
+                source.cone_outer_angle = cone_outer_angle
+                source.cone_outer_gain = cone_outer_gain
+                source.set("cone_outer_gainhf", cone_outer_gainhf)
 
-        source.buffer = buffer
+
+            source.buffer = buffer
+        except Exception:
+            # gen_source, source property setters, and buffer assignment are all
+            # OpenAL calls. If any of them fault, bail out rather than letting the
+            # error escalate into a native crash (unclean_exit).
+            return None
         snd = Sound(source, volume, False, cat=cat)
         self.unbound_sources.append(snd)
-        if direct_filter is not None:
-            source.direct_filter = direct_filter
-        elif len(self.filter) > 0 and self.filter[-1] is not None:
-            source.direct_filter = self.filter[-1]
-        for i in self.sends:
-            try: self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
-            except cyal.exceptions.InvalidOperationError as e: print(e)
-        source.play()
+        try:
+            if direct_filter is not None:
+                source.direct_filter = direct_filter
+            elif len(self.filter) > 0 and self.filter[-1] is not None:
+                source.direct_filter = self.filter[-1]
+            for i in self.sends:
+                try: self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+                except cyal.exceptions.InvalidOperationError as e: print(e)
+            source.play()
+        except Exception:
+            with contextlib.suppress(Exception):
+                source.stop()
         self.volume_categories["master"][1].add(snd)
         self.volume_categories[cat][1].add(snd)
         return snd
@@ -345,20 +355,30 @@ class AudioManager():
             snd_r = Sound(src_r, volume, False, cat=cat)
             self.unbound_sources.append(snd_l)
             self.unbound_sources.append(snd_r)
-            if len(self.filter) > 0 and self.filter[-1] is not None:
-                src_l.direct_filter = self.filter[-1]
-                src_r.direct_filter = self.filter[-1]
-            if direct_filter is not None:
-                # Piano pedal filters are attached before playback so the note
-                # attack never leaks through at full brightness.
-                src_l.direct_filter = direct_filter
-                src_r.direct_filter = direct_filter
-            for i in self.sends:
+            try:
+                if len(self.filter) > 0 and self.filter[-1] is not None:
+                    src_l.direct_filter = self.filter[-1]
+                    src_r.direct_filter = self.filter[-1]
+                if direct_filter is not None:
+                    # Piano pedal filters are attached before playback so the note
+                    # attack never leaks through at full brightness.
+                    src_l.direct_filter = direct_filter
+                    src_r.direct_filter = direct_filter
+                for i in self.sends:
+                    with contextlib.suppress(Exception):
+                        self.efx.send(src_l, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+                        self.efx.send(src_r, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+                src_l.play()
+                src_r.play()
+            except Exception:
+                # OpenAL calls here (direct_filter setter, efx.send, play) are
+                # not strictly necessary for the sound object to exist; if they
+                # fail we still return the Sounds so cleanup tracks them, but we
+                # avoid letting an AL fault propagate as a native crash.
                 with contextlib.suppress(Exception):
-                    self.efx.send(src_l, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
-                    self.efx.send(src_r, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
-            src_l.play()
-            src_r.play()
+                    src_l.stop()
+                with contextlib.suppress(Exception):
+                    src_r.stop()
             self.volume_categories["master"][1].add(snd_l)
             self.volume_categories["master"][1].add(snd_r)
             self.volume_categories[cat][1].add(snd_l)
@@ -385,46 +405,59 @@ class AudioManager():
         dz = z - listener_z
         dist = math.sqrt(dx * dx + dy * dy + dz * dz)
 
-        if as_mono:
-            # Full 3D spatial positioning for 1-channel mono sound (remote players / map pianos)
-            source.position = (x, y, z)
-            source.relative = False
-            source.direct_channels = False
-            source.spatialize = True
-            source.reference_distance = 3.0
-            source.rolloff_factor = 1.0
-            source.max_distance = max_distance
-        elif dist <= 2.5:
-            # Inside inner radius: 2D direct wide stereo for full head-filling richness (local player)
-            source.position = (0, 0, 0)
-            source.relative = True
-            source.direct_channels = True
-            source.spatialize = False
-        else:
-            # Outside inner radius: 3D spatial with wide 180° stereo field (-90° to +90°) and smooth rolloff
-            source.position = (x, y, z)
-            source.relative = False
-            source.direct_channels = False
-            source.spatialize = True
-            source.reference_distance = 3.5
-            source.rolloff_factor = 0.7
-            source.max_distance = max_distance
+        try:
+            if as_mono:
+                # Full 3D spatial positioning for 1-channel mono sound (remote players / map pianos)
+                source.position = (x, y, z)
+                source.relative = False
+                source.direct_channels = False
+                source.spatialize = True
+                source.reference_distance = 3.0
+                source.rolloff_factor = 1.0
+                source.max_distance = max_distance
+            elif dist <= 2.5:
+                # Inside inner radius: 2D direct wide stereo for full head-filling richness (local player)
+                source.position = (0, 0, 0)
+                source.relative = True
+                source.direct_channels = True
+                source.spatialize = False
+            else:
+                # Outside inner radius: 3D spatial with wide 180° stereo field (-90° to +90°) and smooth rolloff
+                source.position = (x, y, z)
+                source.relative = False
+                source.direct_channels = False
+                source.spatialize = True
+                source.reference_distance = 3.5
+                source.rolloff_factor = 0.7
+                source.max_distance = max_distance
 
-            # OpenAL Soft AL_STEREO_ANGLES extension for wide 180-degree stereo spatial panning
+                # OpenAL Soft AL_STEREO_ANGLES extension for wide 180-degree stereo spatial panning
+                with contextlib.suppress(Exception):
+                    source.set(0x1030, (math.radians(-90), math.radians(90)))
+
+            source.buffer = buffer
+        except Exception:
+            # OpenAL property/buffer assignment fault: stop the freshly-generated
+            # source and bail out rather than letting an AL error escalate to a
+            # native crash (unclean_exit).
             with contextlib.suppress(Exception):
-                source.set(0x1030, (math.radians(-90), math.radians(90)))
+                source.stop()
+            return None
 
-        source.buffer = buffer
         snd = Sound(source, volume, False, cat=cat)
         self.unbound_sources.append(snd)
-        if len(self.filter) > 0 and self.filter[-1] is not None:
-            source.direct_filter = self.filter[-1]
-        if direct_filter is not None:
-            source.direct_filter = direct_filter
-        for i in self.sends:
+        try:
+            if len(self.filter) > 0 and self.filter[-1] is not None:
+                source.direct_filter = self.filter[-1]
+            if direct_filter is not None:
+                source.direct_filter = direct_filter
+            for i in self.sends:
+                with contextlib.suppress(Exception):
+                    self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+            source.play()
+        except Exception:
             with contextlib.suppress(Exception):
-                self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
-        source.play()
+                source.stop()
         self.volume_categories["master"][1].add(snd)
         self.volume_categories[cat][1].add(snd)
         return snd

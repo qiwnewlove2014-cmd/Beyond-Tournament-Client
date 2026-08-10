@@ -501,3 +501,17 @@ class DrumAudio:
             except queue.Empty:
                 break
         self._occlusion_filter = None
+        # Release preloaded drum kit buffers so memory does not accumulate across
+        # map changes. _preloaded_buffers holds strong refs to OpenAL buffers;
+        # without this, every kit preload leaks 17*3 buffers per session.
+        for key in [k for k in list(self.am._preloaded_buffers) if k.startswith("drums:")]:
+            self.am._preloaded_buffers.pop(key, None)
+
+    def reset_for_map_change(self):
+        """Lightweight reset for map transitions.
+
+        Stops live voices, drops queued hits, and releases preloaded kit buffers
+        so the next map starts clean. Preserves the gameplay back-reference
+        because the same Gameplay instance keeps running on the new map.
+        """
+        self.reset()

@@ -9,6 +9,7 @@ import os
 import threading
 import time
 import array
+import queue
 
 import cyal
 import cyal.exceptions
@@ -42,6 +43,15 @@ class PianoAudio:
         self.chorus_states = {}
         self._chorus_slots = {}
         self._chorus_transitions = {}
+        # Queue for remote piano events. Network handlers must NOT touch OpenAL
+        # directly because the OpenAL context is current only on the main thread.
+        # Network handlers enqueue; update() drains on the main thread (inside the
+        # AudioManager.context.batch() block) where OpenAL calls are safe.
+        self._pending_notes = queue.Queue(maxsize=256)
+
+    # Maximum number of queued events to process per update tick. Bounds the
+    # worst-case frame cost when a performer floods notes faster than 60 FPS.
+    MAX_PENDING_NOTES_PER_UPDATE = 64
 
     _FILTER_BASE_VALUES = {
         "normal": (1.0, 1.0),
@@ -580,6 +590,10 @@ class PianoAudio:
 
     def update(self):
         """Advance pedal, bend, and Chorus transitions on the audio/game thread."""
+        # Drain queued remote piano events first so new notes/voices are created
+        # before we advance any pedal/bend/chorus transitions for them. This runs
+        # on the main thread inside AudioManager.context.batch().
+        self._process_pending_notes()
         now = time.monotonic()
         transitioning_peers = set()
         base_values_by_mode = {}
@@ -713,6 +727,145 @@ class PianoAudio:
         self._chorus_transitions.clear()
         if self._occlusion_filter is not None:
             self._occlusion_filter = None
+        # Drop any queued events so a stale note doesn't fire after teardown.
+        self._drain_pending_notes()
+        # Release preloaded piano buffers so memory does not accumulate across
+        # map changes. Matches DrumAudio.reset() behavior.
+        for key in [k for k in list(self.am._preloaded_buffers) if "piano/Piano" in k]:
+            self.am._preloaded_buffers.pop(key, None)
+
+    def reset_for_map_change(self):
+        """Lightweight reset for map transitions.
+
+        Stops live voices, drops queued events, and releases preloaded piano
+        buffers so the next map starts clean. Preserves the gameplay back-ref
+        because the same Gameplay instance keeps running on the new map.
+        Mirrors DrumAudio.reset_for_map_change().
+        """
+        self.reset()
+
+    # ------------------------------------------------------------------
+    # Network-thread → main-thread queue (mirror of DrumAudio pattern)
+    # ------------------------------------------------------------------
+
+    def enqueue_remote_note(self, data):
+        """Network-thread entry point for a remote piano note event.
+
+        Validates the packet and queues a copy for main-thread playback. Never
+        touches OpenAL from the calling (network) thread — the OpenAL context
+        is only current on the main thread.
+        """
+        if not isinstance(data, dict):
+            return
+        # Require either the dedicated play_piano_note fields or the play_unbound
+        # piano-note fields; accept both shapes.
+        has_note = isinstance(data.get("note"), str) or isinstance(data.get("piano_note"), str)
+        if not has_note or data.get("peer_id") is None:
+            return
+        data = dict(data)
+        data["_op"] = "play"
+        with contextlib.suppress(queue.Full):
+            self._pending_notes.put_nowait(data)
+
+    def enqueue_remote_stop(self, data):
+        """Network-thread entry point for a remote piano note-off event."""
+        if not isinstance(data, dict):
+            return
+        if data.get("peer_id") is None or not isinstance(data.get("note"), str):
+            return
+        data = dict(data)
+        data["_op"] = "stop"
+        with contextlib.suppress(queue.Full):
+            self._pending_notes.put_nowait(data)
+
+    def _drain_pending_notes(self):
+        """Drop every queued event without processing. Used by reset paths."""
+        while True:
+            try:
+                self._pending_notes.get_nowait()
+            except queue.Empty:
+                break
+
+    def _process_pending_notes(self):
+        """Drain queued remote piano events on the main thread.
+
+        Called from update() inside the AudioManager.context.batch() block, so
+        OpenAL calls made from _play_queued_note / _stop_queued_note are safe.
+        """
+        for _ in range(self.MAX_PENDING_NOTES_PER_UPDATE):
+            try:
+                data = self._pending_notes.get_nowait()
+            except queue.Empty:
+                break
+            op = data.get("_op")
+            if op == "play":
+                self._play_queued_note(data)
+            elif op == "stop":
+                self._stop_queued_note(data)
+
+    def _play_queued_note(self, data):
+        """Main-thread playback of a queued remote piano note.
+
+        Handles BOTH packet shapes (play_piano_note and play_unbound's piano
+        branch) so the queue is the single OpenAL entry point.
+        """
+        gameplay = self.gameplay
+        player = getattr(gameplay, "player", None) if gameplay else None
+        if player is None:
+            return
+        try:
+            peer_id = data["peer_id"]
+            note_name = data.get("note") or data.get("piano_note")
+            x = float(data["x"]); y = float(data["y"]); z = float(data["z"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if not isinstance(note_name, str) or not note_name:
+            return
+        # Apply realtime pedal/bend/chorus state mirrored in the packet.
+        # These setters now run on the main thread (where we are).
+        if "piano_soft" in data:
+            self.set_soft_pedal(peer_id, data.get("piano_soft") is True)
+        if "piano_pitch_bend_value" in data:
+            self.set_pitch_bend_14bit(peer_id, data.get("piano_pitch_bend_value"), animate=False)
+        elif "piano_pitch_bend" in data:
+            self.set_pitch_bend(peer_id, data.get("piano_pitch_bend"), animate=False)
+        if "piano_chorus" in data:
+            self.set_chorus(peer_id, data.get("piano_chorus") is True, animate=False)
+        # Recompute occlusion on the main thread (do not trust the packet).
+        occluded = False
+        if getattr(gameplay, "map", None):
+            with contextlib.suppress(Exception):
+                los = gameplay.map.valid_straight_path((x, y, z), (player.x, player.y, player.z))
+                if los is False:
+                    occluded = True
+        # Volume sanitization (never trust client/server-supplied volume blindly).
+        raw_volume = data.get("volume", 300)
+        if isinstance(raw_volume, bool):
+            raw_volume = 300
+        try:
+            volume = max(0.0, min(300.0, float(raw_volume)))
+        except (TypeError, ValueError):
+            volume = 300.0
+        soft = data.get("piano_soft") if "piano_soft" in data else None
+        snd = self.play_note(
+            peer_id=peer_id, note_name=note_name,
+            x=x, y=y, z=z,
+            listener_x=player.x, listener_y=player.y, listener_z=player.z,
+            volume=volume, occluded=occluded, soft=soft,
+        )
+        if snd and getattr(gameplay, "map", None):
+            reverb = gameplay.map.get_reverb_at(x, y, z)
+            if reverb and reverb.reverb:
+                self.apply_effect_send(snd, 0, reverb.reverb)
+
+    def _stop_queued_note(self, data):
+        """Main-thread note-off for a queued remote piano stop."""
+        try:
+            peer_id = data["peer_id"]
+            note_name = data["note"]
+        except (KeyError, TypeError):
+            return
+        self.stop_note(peer_id, note_name)
 
     def play_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False, soft=None):
         """Play a piano note with 3D stereo spreading (remote) or direct stereo (local).

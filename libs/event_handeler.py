@@ -152,6 +152,25 @@ class EventHandeler:
             )
             self.gameplay.pingging = False
 
+    def _reset_instruments_for_map_change(self):
+        """Queue piano/drum cleanup onto the main thread during a map change.
+
+        parse_map/update_map run on the network thread; the reset methods touch
+        OpenAL (stop sources, detach EFX sends) which is only safe on the main
+        thread where the context is current. The reset_for_map_change variants
+        preserve the gameplay back-reference because Gameplay keeps running on
+        the new map.
+        """
+        audio_mngr = getattr(self.game, 'audio_mngr', None)
+        if audio_mngr is None:
+            return
+        def _do_reset():
+            if hasattr(audio_mngr, 'piano') and audio_mngr.piano is not None:
+                audio_mngr.piano.reset_for_map_change()
+            if hasattr(audio_mngr, 'drums') and audio_mngr.drums is not None:
+                audio_mngr.drums.reset_for_map_change()
+        self.game.put(_do_reset)
+
     def parse_map(self, data):
         self.game.automations.clear()
         self.game.audio_mngr.apply_filter(
@@ -161,6 +180,10 @@ class EventHandeler:
         # Clear it here (on CHANNEL_MAP) so subsequent spawn_entity packets on
         # that same ordered channel rebuild only valid mappings for the new map.
         self.gameplay.voice_channels.clear()
+        # Release preloaded instrument buffers and live voices from the previous
+        # map so memory does not accumulate. Must run on the main thread because
+        # reset() touches OpenAL sources/filters.
+        self._reset_instruments_for_map_change()
         self.gameplay.parser.load(data["data"])
         raw_x = data.get("x")
         raw_y = data.get("y")
@@ -183,6 +206,9 @@ class EventHandeler:
         self.game.audio_mngr.apply_filter(
             None, exclude=self.game.exclude_water, clear=True
         )
+        # Same instrument cleanup as parse_map: a builder edit reloads the map
+        # and would otherwise keep stale buffers around.
+        self._reset_instruments_for_map_change()
         self.gameplay.player.in_water = False
         self.game.ignore_others_water = False
         self.game.exclude_water.clear()
@@ -382,6 +408,12 @@ class EventHandeler:
     def play_unbound(self, data):
         occluded = False
         if data.get("is_stereo_spatial") and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
+            # Piano notes go through the main-thread queue (piano_note field present).
+            # OpenAL context is only current on the main thread, so we MUST NOT play
+            # piano audio from this network-thread handler.
+            if data.get("piano_note"):
+                self.game.audio_mngr.piano.enqueue_remote_note(data)
+                return
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
             facing = getattr(self.gameplay.player, 'facing', 0.0)
 
@@ -391,146 +423,50 @@ class EventHandeler:
                     if los is False:
                         occluded = True
 
-            is_piano = bool(data.get("piano_note"))
-            piano_filter = None
-            piano_peer_id = data.get("peer_id")
-            if is_piano and piano_peer_id is not None:
-                if "piano_soft" in data:
-                    self.game.audio_mngr.piano.set_soft_pedal(
-                        piano_peer_id, data.get("piano_soft") is True
-                    )
-                if "piano_pitch_bend_value" in data:
-                    self.game.audio_mngr.piano.set_pitch_bend_14bit(
-                        piano_peer_id,
-                        data.get("piano_pitch_bend_value"),
-                        animate=False,
-                    )
-                elif "piano_pitch_bend" in data:
-                    self.game.audio_mngr.piano.set_pitch_bend(
-                        piano_peer_id,
-                        data.get("piano_pitch_bend"),
-                        animate=False,
-                    )
-                if "piano_chorus" in data:
-                    self.game.audio_mngr.piano.set_chorus(
-                        piano_peer_id,
-                        data.get("piano_chorus") is True,
-                        animate=False,
-                    )
-                piano_filter = self.game.audio_mngr.piano.get_note_filter(
-                    piano_peer_id, occluded=occluded
-                )
             snd = self.game.audio_mngr.play_unbound_stereo_spatial(
                 data["sound"], data["x"], data["y"], data["z"], lx, ly, lz,
                 volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"),
-                max_distance=50.0 if is_piano else data.get("max_distance", 25.0),
+                max_distance=data.get("max_distance", 25.0),
                 facing_angle=facing,
-                as_3d_stereo=is_piano,
+                as_3d_stereo=False,
                 occluded=occluded,
-                direct_filter=piano_filter,
-                stereo_reference_distance=8.0,
             )
         else:
             snd = self.game.audio_mngr.play_unbound(
                 data["sound"], data["x"], data["y"], data["z"], False, volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"),
                 reference_distance=data.get("reference_distance", 3.0), rolloff=data.get("rolloff", 1.0), max_distance=data.get("max_distance", 25.0)
             )
-        if snd and data.get("piano_note") and data.get("peer_id") is not None:
-            self.game.audio_mngr.piano._tag_sounds(
-                snd,
-                data["peer_id"],
-                "occluded" if occluded else "normal",
-            )
-            self.game.audio_mngr.piano.apply_chorus_send(
-                snd, data["peer_id"]
-            )
         if snd and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'map', None):
             reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
             if reverb and reverb.reverb:
-                if data.get("piano_note") and data.get("peer_id") is not None:
-                    self.game.audio_mngr.piano.apply_effect_send(
-                        snd, 0, reverb.reverb
-                    )
-                else:
-                    s_list = snd if isinstance(snd, (list, tuple)) else [snd]
-                    for s in s_list:
-                        if s and hasattr(s, 'source') and s.source:
-                            with contextlib.suppress(Exception):
-                                self.game.audio_mngr.efx.send(s.source, 0, reverb.reverb)
-        # Track piano notes for staccato/sustain pedal support
-        if snd and data.get("piano_note") and data.get("peer_id") is not None:
-            piano_key = f"{data['peer_id']}-{data['piano_note']}"
-            old_snds = self.game.audio_mngr.piano.active_piano_notes.pop(piano_key, None)
-            if old_snds:
-                s_old_list = old_snds if isinstance(old_snds, (list, tuple)) else [old_snds]
-                for old_s in s_old_list:
-                    if old_s and hasattr(old_s, 'source') and old_s.source:
+                s_list = snd if isinstance(snd, (list, tuple)) else [snd]
+                for s in s_list:
+                    if s and hasattr(s, 'source') and s.source:
                         with contextlib.suppress(Exception):
-                            old_s.source.stop()
-            self.game.audio_mngr.piano.active_piano_notes[piano_key] = snd
-
-        # Listener-side: if the server flagged this note as a megaphone broadcast,
-        # also spawn it at every PA speaker so listeners hear it over the PA system.
-        if data.get("via_megaphone") and data.get("piano_note") and data.get("peer_id") is not None:
-            with contextlib.suppress(Exception):
-                self.game.audio_mngr.piano.route_to_megaphone_speakers(
-                    peer_id=data["peer_id"],
-                    note_name=data["piano_note"],
-                    base_volume=data.get("volume", 300),
-                )
+                            self.game.audio_mngr.efx.send(s.source, 0, reverb.reverb)
 
     def play_piano_note(self, data):
-        if getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
-            lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
-            occluded = False
-            if "piano_pitch_bend_value" in data:
-                self.game.audio_mngr.piano.set_pitch_bend_14bit(
-                    data["peer_id"],
-                    data.get("piano_pitch_bend_value"),
-                    animate=False,
-                )
-            elif "piano_pitch_bend" in data:
-                self.game.audio_mngr.piano.set_pitch_bend(
-                    data["peer_id"],
-                    data.get("piano_pitch_bend"),
-                    animate=False,
-                )
-            if "piano_chorus" in data:
-                self.game.audio_mngr.piano.set_chorus(
-                    data["peer_id"],
-                    data.get("piano_chorus") is True,
-                    animate=False,
-                )
-            if getattr(self.gameplay, 'map', None):
-                with contextlib.suppress(Exception):
-                    los = self.gameplay.map.valid_straight_path((data["x"], data["y"], data["z"]), (lx, ly, lz))
-                    if los is False:
-                        occluded = True
+        """Queue a remote piano note for main-thread playback.
 
-            snd = self.game.audio_mngr.piano.play_note(
-                peer_id=data["peer_id"], note_name=data["note"],
-                x=data["x"], y=data["y"], z=data["z"],
-                listener_x=lx, listener_y=ly, listener_z=lz,
-                volume=data.get("volume", 300),
-                occluded=occluded,
-                soft=data.get("piano_soft") if "piano_soft" in data else None,
-            )
-            if snd and getattr(self.gameplay, 'map', None):
-                reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
-                if reverb and reverb.reverb:
-                    self.game.audio_mngr.piano.apply_effect_send(
-                        snd, 0, reverb.reverb
-                    )
+        Never touch OpenAL from the network thread: the OpenAL context is only
+        current on the main thread. enqueue_remote_note validates and copies the
+        packet; PianoAudio.update() drains and plays on the main thread.
+        """
+        self.game.audio_mngr.piano.enqueue_remote_note(data)
 
     def stop_piano_note(self, data):
-        if data and data.get("peer_id") is not None and data.get("note"):
-            self.game.audio_mngr.piano.stop_note(data["peer_id"], data["note"])
+        """Queue a remote piano note-off for main-thread processing."""
+        self.game.audio_mngr.piano.enqueue_remote_stop(data)
 
     def set_piano_soft_pedal(self, data):
         """Apply the server-replicated realtime pedal state for one performer."""
         if data and data.get("peer_id") is not None and isinstance(data.get("enabled"), bool):
-            self.game.audio_mngr.piano.set_soft_pedal(
-                data["peer_id"], data["enabled"]
+            peer_id = data["peer_id"]
+            enabled = data["enabled"]
+            self.game.put(
+                lambda peer_id=peer_id, enabled=enabled: (
+                    self.game.audio_mngr.piano.set_soft_pedal(peer_id, enabled)
+                )
             )
 
     def set_piano_chorus(self, data):
@@ -548,18 +484,28 @@ class EventHandeler:
         )
 
     def set_piano_pitch_bend(self, data):
-        """Apply a server-validated continuous or legacy pitch bend state."""
+        """Apply a server-validated continuous or legacy pitch bend state.
+
+        Queued to the main thread because set_pitch_bend* mutates OpenAL source
+        pitch and transition state that update() iterates on the main thread.
+        """
         if not data or data.get("peer_id") is None:
             return
+        peer_id = data["peer_id"]
         if "value" in data:
-            self.game.audio_mngr.piano.set_pitch_bend_14bit(
-                data["peer_id"], data.get("value"), animate=True
+            value = data.get("value")
+            self.game.put(
+                lambda peer_id=peer_id, value=value: (
+                    self.game.audio_mngr.piano.set_pitch_bend_14bit(peer_id, value, animate=True)
+                )
             )
             return
         direction = data.get("direction")
         if not isinstance(direction, bool) and direction in (-1, 0, 1):
-            self.game.audio_mngr.piano.set_pitch_bend(
-                data["peer_id"], direction
+            self.game.put(
+                lambda peer_id=peer_id, direction=direction: (
+                    self.game.audio_mngr.piano.set_pitch_bend(peer_id, direction)
+                )
             )
 
     def piano_start(self, data):
@@ -567,20 +513,24 @@ class EventHandeler:
         # The packet handler runs on the network thread. Queue all piano input
         # and audio initialization onto the main thread that owns those states.
         self.game.put(self.gameplay._start_piano_session)
-        notes = ["C4", "Db4", "D4", "Eb4", "E4", "F4", "Gb4", "G4", "Ab4", "A4", "Bb4", "B4", "C5", "Db5", "D5", "Eb5", "E5", "F5"]
-        for note in notes:
-            snd = f"piano/Piano.mf.{note}.ogg"
-            snd_path = os.path.join(consts.SOUNDPREPEND, snd)
-            try:
-                rel_snd = os.path.relpath(snd_path)
-            except ValueError:
-                rel_snd = os.path.normpath(snd_path)
-            try:
-                buf = self.game.audio_mngr.load_buffer(snd)
-                if buf:
-                    self.game.audio_mngr._preloaded_buffers[rel_snd] = buf
-            except Exception:
-                pass
+        # Preload piano buffers on the main thread too: load_buffer reaches OpenAL
+        # (context.genBuffer + set_data), which is unsafe on the network thread.
+        def _preload_piano_buffers():
+            notes = ["C4", "Db4", "D4", "Eb4", "E4", "F4", "Gb4", "G4", "Ab4", "A4", "Bb4", "B4", "C5", "Db5", "D5", "Eb5", "E5", "F5"]
+            for note in notes:
+                snd = f"piano/Piano.mf.{note}.ogg"
+                snd_path = os.path.join(consts.SOUNDPREPEND, snd)
+                try:
+                    rel_snd = os.path.relpath(snd_path)
+                except ValueError:
+                    rel_snd = os.path.normpath(snd_path)
+                try:
+                    buf = self.game.audio_mngr.load_buffer(snd)
+                    if buf:
+                        self.game.audio_mngr._preloaded_buffers[rel_snd] = buf
+                except Exception:
+                    pass
+        self.game.put(_preload_piano_buffers)
 
     def drum_start(self, data):
         """Enter drum mode and preload the requested kit on the main thread."""
