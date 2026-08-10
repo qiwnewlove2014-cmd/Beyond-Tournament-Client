@@ -4,6 +4,14 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.6.9] Drum Kit Selection & Natural Instrument Acoustics — 2026-08-10
+--------------------------------------------------------------------------------
+
+• Interactive Objects & Live Music
+- **Selectable Drum Sound Kits:** Drumsets can now use different sound kits. A second "Salamander" acoustic kit (CC-BY 3.0, by Alexander Holm) is available alongside the default kit. Builders pick the kit when placing a Drumset from the Musical Instruments menu, the chosen kit persists in the map, and each player hears the performer's real kit. Existing maps keep using the default kit automatically. Tom 3 and Tom 4 of the Salamander kit are intentionally silent because that kit only ships two toms.
+- **Natural Instrument Distance Fade:** Playable instruments (Piano, Drumset) now fade out smoothly and naturally for nearby listeners as they walk away, reaching true silence at about 50 steps. Previously the sound stayed audible at a fixed low volume far away and then cut off abruptly at the edge.
+
+--------------------------------------------------------------------------------
 [v1.6.8] Playable Drumset & Extensible MIDI Instruments — 2026-08-10
 --------------------------------------------------------------------------------
 
@@ -18,8 +26,6 @@
 - **Temporary Drumset Testing:** Moderators and authorized Builders can spawn a temporary Drumset nearby for live testing without saving it to the map.
 - **Velocity-Sensitive MIDI Drums:** MIDI keyboards and electronic drum kits are detected automatically while playing, with General MIDI percussion support plus a compact C4-E5 layout covering all 17 pads.
 - **Extensible MIDI Instrument Support:** MIDI devices now use one safe shared input hub with instrument profiles, reliable hot-plug cleanup, and protected switching between Piano, Drumset, and future playable instruments.
-- **Selectable Drum Sound Kits:** Drumsets can now use different sound kits. A second "Salamander" acoustic kit (CC-BY 3.0, by Alexander Holm) is available alongside the default kit. Builders pick the kit when placing a Drumset from the Musical Instruments menu, the chosen kit persists in the map, and each player hears the performer's real kit. Existing maps keep using the default kit automatically. Tom 3 and Tom 4 of the Salamander kit are intentionally silent because that kit only ships two toms.
-- **Natural Instrument Distance Fade:** Playable instruments (Piano, Drumset) now fade out smoothly and naturally for nearby listeners as they walk away, reaching true silence at about 50 steps. Previously the sound stayed audible at a fixed low volume far away and then cut off abruptly at the edge.
 
 --------------------------------------------------------------------------------
 [v1.6.7] Classic Puppet Zombie & Builder Surface Expansion — 2026-08-09
