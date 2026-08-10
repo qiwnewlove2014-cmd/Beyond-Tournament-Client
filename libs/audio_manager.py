@@ -281,6 +281,30 @@ class AudioManager():
         gain = (volume / 100) * ui_cat_vol
 
         if as_3d_stereo:
+            # Linear distance fade for playable instruments.
+            #
+            # cyal/OpenAL only exposes the INVERSE_DISTANCE_CLAMPED model, whose gain
+            # asymptotically approaches (but never reaches) zero. With that model a
+            # hard cutoff at max_distance feels like the sound is abruptly switched
+            # off, because the gain just before the cutoff is still audible. To make
+            # the fade-out natural AND reach true silence at the edge, we bypass the
+            # OpenAL rolloff entirely (rolloff_factor=0) and apply our own linear
+            # gain ramp: full gain inside reference_distance, then linearly down to
+            # 0 at max_distance. The remaining hard cutoff at max_distance is then
+            # inaudible (gain is already ~0).
+            ddx = x - listener_x
+            ddy = y - listener_y
+            ddz = z - listener_z
+            dist_sq = ddx * ddx + ddy * ddy + ddz * ddz
+            if dist_sq > (max_distance * max_distance):
+                return None
+            dist = dist_sq ** 0.5
+            if dist <= stereo_reference_distance:
+                dist_gain = 1.0
+            else:
+                span = max(0.0001, max_distance - stereo_reference_distance)
+                dist_gain = max(0.0, 1.0 - (dist - stereo_reference_distance) / span)
+            gain *= dist_gain
             stereo_provider = stereo_provider or self.piano
             buf_l, buf_r = stereo_provider.load_stereo_split_buffers(path)
             if not buf_l or not buf_r:
@@ -293,8 +317,8 @@ class AudioManager():
                 src_l.relative = False
                 src_l.direct_channels = False
                 src_l.spatialize = True
-                src_l.reference_distance = stereo_reference_distance
-                src_l.rolloff_factor = stereo_rolloff
+                src_l.reference_distance = max_distance
+                src_l.rolloff_factor = 0.0
                 src_l.max_distance = max_distance
                 src_l.buffer = buf_l
 
@@ -302,8 +326,8 @@ class AudioManager():
                 src_r.relative = False
                 src_r.direct_channels = False
                 src_r.spatialize = True
-                src_r.reference_distance = stereo_reference_distance
-                src_r.rolloff_factor = stereo_rolloff
+                src_r.reference_distance = max_distance
+                src_r.rolloff_factor = 0.0
                 src_r.max_distance = max_distance
                 src_r.buffer = buf_r
             except Exception as e:

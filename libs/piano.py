@@ -734,9 +734,11 @@ class PianoAudio:
             listener_z=listener_z,
             volume=volume,
             cat="miscelaneous",
+            max_distance=50.0,
             as_3d_stereo=not is_local,
             occluded=occluded,
             direct_filter=filter_obj,
+            stereo_reference_distance=8.0,
         )
         if snd:
             self._tag_sounds(snd, peer_id, filter_mode)

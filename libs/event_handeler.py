@@ -422,10 +422,13 @@ class EventHandeler:
                 )
             snd = self.game.audio_mngr.play_unbound_stereo_spatial(
                 data["sound"], data["x"], data["y"], data["z"], lx, ly, lz,
-                volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"), max_distance=data.get("max_distance", 25.0), facing_angle=facing,
+                volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"),
+                max_distance=50.0 if is_piano else data.get("max_distance", 25.0),
+                facing_angle=facing,
                 as_3d_stereo=is_piano,
                 occluded=occluded,
                 direct_filter=piano_filter,
+                stereo_reference_distance=8.0,
             )
         else:
             snd = self.game.audio_mngr.play_unbound(
