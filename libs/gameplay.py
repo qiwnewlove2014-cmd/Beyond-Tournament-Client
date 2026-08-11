@@ -1946,9 +1946,18 @@ class Gameplay(state.State):
 
 
     def speak_zone(self, mod):
-        zone_name = self.camera.focus_object.map.get_zone_at(
-            self.camera.x, self.camera.y, self.camera.z
-        )
+        focus = self.camera.focus_object
+        tp = focus.map.get_travel_point_at(focus.x, focus.y, focus.z)
+        if tp:
+            key = string_utils.friendly_key_name(
+                self.kc.get("interact", pygame.K_f)
+            ).upper()
+            speak(
+                f"You are at a travel point to {tp.target_map}. "
+                f"Press {key} to travel."
+            )
+            return
+        zone_name = focus.map.get_zone_at(focus.x, focus.y, focus.z)
         speak(str(zone_name) if zone_name else "No zone")
 
     def speak_fps(self, mod):

@@ -124,6 +124,22 @@ class EventHandeler:
             if data["sound"]:
                 self.game.direct_soundgroup.play(data["sound"])
 
+    def travel_point_hint(self, data):
+        """Server-side walk-in hint for a travel point. Rendered here so we can
+        name the player's actual (rebindable) interact key."""
+        import pygame
+        from .string_utils import friendly_key_name
+        map_name = (data or {}).get("map", "")
+        if not map_name:
+            return
+        key = friendly_key_name(
+            self.game.keyconfig.get("interact", pygame.K_f)
+        ).upper()
+        speak(
+            f"You are at a travel point to {map_name}. "
+            f"Press {key} to travel."
+        )
+
     def online(self, data):
         buffer.add_item(
             self.game,

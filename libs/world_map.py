@@ -41,6 +41,7 @@ class Map:
         self.interactable_list = []
         self.perk_machine_list = []
         self.minigame_table_list = []
+        self.travel_point_list = []
 
     def valid_straight_path(self, position1, position2):
         x1, y1, z1 = position1
@@ -133,6 +134,7 @@ class Map:
         self.interactable_list.clear()
         self.perk_machine_list.clear()
         self.minigame_table_list.clear()
+        self.travel_point_list.clear()
         for i in self.ambience_list.copy():
             i.leave(destroy=True)
         self.ambience_list.clear()
@@ -499,6 +501,37 @@ class Map:
             self.interactable_list[index] = obj
         else:
             self.interactable_list.append(obj)
+
+    def spawn_travel_point(
+        self,
+        minx=0,
+        maxx=0,
+        miny=0,
+        maxy=0,
+        minz=0,
+        maxz=0,
+        id="",
+        target_map="",
+        **kwargs,
+    ):
+        """Spawns a travel point zone (teleporter)."""
+        obj = TravelPoint(id, minx, maxx, miny, maxy, minz, maxz, target_map)
+        index = -1
+        for i, element in enumerate(self.travel_point_list):
+            if element.id == id:
+                index = i
+                break
+        if index > -1:
+            self.travel_point_list[index] = obj
+        else:
+            self.travel_point_list.append(obj)
+
+    def get_travel_point_at(self, x, y, z):
+        """Returns the travel point zone the given coordinate is inside, or None."""
+        for tp in self.travel_point_list:
+            if tp.in_bound(x, y, z):
+                return tp
+        return None
 
     def spawn_perkMachine(
         self,
@@ -1094,6 +1127,15 @@ class MinigameTable(BaseMapObj):
             self.label = "Multi-Game Arcade Cabinet"
         else:
             self.label = "Pong Arcade Table"
+
+
+class TravelPoint(BaseMapObj):
+    """A travel point (teleporter) zone. Checkable like a normal zone; pressing
+    the interact key while inside teleports the player to `target_map`."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, target_map=""):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "travel_point")
+        self.target_map = target_map or ""
 
 
 class Pannable(BaseMapObj):
