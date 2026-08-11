@@ -252,6 +252,99 @@ def _downmix_stereo(buf):
     return mono.astype(np.int16).tobytes()
 
 
+# Signal scan: how long to listen to each capture device and the minimum RMS
+# (0..1) for a device to count as carrying real signal. A strummed guitar
+# through a pedal is far louder than an idle microphone's ambient room noise,
+# so the scan finds the guitar input even when the device name is generic
+# (e.g. plain "USB Audio Device" that could be a mic).
+SIGNAL_SCAN_SECONDS = 0.5
+SIGNAL_SCAN_THRESHOLD = 0.03
+
+
+def _probe_device_signal(device, seconds=SIGNAL_SCAN_SECONDS):
+    """Open one capture device briefly and measure the loudest RMS it carries.
+
+    Returns (rms, stereo) or None if the device cannot be opened. Tries mono
+    first and falls back to stereo (downmixed for the measurement), matching
+    the instrument input's own open strategy.
+    """
+    try:
+        cap = cyal.CaptureExtension()
+        for fmt, stereo in ((cyal.BufferFormat.MONO16, False),
+                            (cyal.BufferFormat.STEREO16, True)):
+            try:
+                inp = cap.open_device(name=device.encode(),
+                                      sample_rate=48000, format=fmt)
+            except (cyal.exceptions.DeviceNotFoundError, TypeError):
+                continue
+            try:
+                inp.start()
+                deadline = time.perf_counter() + seconds
+                peak = 0.0
+                frames = 0
+                while time.perf_counter() < deadline:
+                    if inp.available_samples >= 960:
+                        buf = bytearray(960 * (4 if stereo else 2))
+                        inp.capture_samples(buf)
+                        if stereo:
+                            buf = bytearray(_downmix_stereo(buf))
+                        arr = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
+                        peak = max(peak, float(np.sqrt(np.mean(arr ** 2))))
+                        frames += 1
+                if frames > 0:
+                    return peak, stereo
+            finally:
+                try:
+                    inp.stop()
+                except Exception:
+                    pass
+    except Exception:
+        return None
+    return None
+
+
+def scan_for_signal_devices(devices=None, threshold=SIGNAL_SCAN_THRESHOLD):
+    """Probe every capture device and return the ones carrying real signal.
+
+    ``devices`` may be a list of device-name strings (for tests); otherwise the
+    real cyal capture device list is used. Returns dicts
+    ``{device, name, rms, stereo, guitar_pedal}`` sorted loudest-first with
+    named guitar/pedal devices ranked ahead of equally loud generic ones, so a
+    generic-named pedal ("USB Audio Device") is still found when the player
+    strums during the scan.
+    """
+    if devices is None:
+        try:
+            cap = cyal.CaptureExtension()
+            devices = list(cap.devices)
+        except Exception:
+            return []
+    found = []
+    for device in devices:
+        result = _probe_device_signal(device)
+        if result is None:
+            continue
+        rms, stereo = result
+        if rms >= threshold:
+            found.append({
+                "device": device,
+                "name": device[14:],
+                "rms": rms,
+                "stereo": stereo,
+                "guitar_pedal": is_guitar_input(device),
+            })
+    found.sort(key=lambda d: (d["guitar_pedal"], d["rms"]), reverse=True)
+    return found
+
+
+def pick_best_signal_device(found):
+    """Choose the device to use from a signal scan: a named guitar/pedal device
+    with signal wins; otherwise the loudest device."""
+    if not found:
+        return None
+    return found[0]["device"]
+
+
 def instrument_menu_entries(devices):
     """Build (label, raw_device) entries for the instrument input menu.
 

@@ -68,7 +68,7 @@ class EventHandeler:
         # Reset PA Test Mode state
         if hasattr(self.gameplay, 'pa_test_mode'):
             self.gameplay.pa_test_mode = False
-        
+
         # Cleanup old voice chat instance to prevent stale state crash
         if hasattr(self.gameplay, 'voice_chat') and self.gameplay.voice_chat:
             try:
@@ -96,6 +96,24 @@ class EventHandeler:
             pass
             
         speak("Welcome. You are now online")
+
+    def megaphone_permission(self, data):
+        """Server's authoritative answer to the PA Test Mode permission check.
+
+        Used when the login-time staff flags are missing/unknown (e.g. an
+        older server payload): the client asks the server when the player
+        presses O, and this completes the toggle with the live answer so every
+        staff level is honoured.
+        """
+        allowed = bool((data or {}).get("allowed", False))
+        gp = self.gameplay
+        if allowed:
+            gp.can_broadcast_megaphone = True
+            gp.is_staff = True
+            if hasattr(gp, "_finish_pa_toggle"):
+                gp._finish_pa_toggle()
+        else:
+            speak("System: PA Test Mode is only available for staff, builders, and sound technicians.")
 
     def client_crash_report_ack(self, data):
         from . import crash_reporting

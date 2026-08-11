@@ -1006,7 +1006,12 @@ class Gameplay(state.State):
         self.wall_tone.update()
         self.compass_turn_cue.update()
         if self.guitar_mode and self.instrument_input and not self.spectator_mode:
-            self._process_guitar_notes()
+            # Guitar audio is raw-only: the player's own strums play back 3D
+            # through the local monitor, and nearby players hear the real
+            # pedal/guitar sound streamed on the 3D voice channel. Piano
+            # placeholder notes are intentionally NOT played/broadcast so the
+            # real sound is what comes out, not a fake piano sample.
+            self.instrument_input.drain_notes()
             self._feed_guitar_monitor()
         if not self.spectator_mode:
             self.player.loop()
@@ -2307,14 +2312,28 @@ class Gameplay(state.State):
             return  # Ignore rapid presses
         self._pa_toggle_clock.restart()
         
-        # Staff OR Builder OR Technician can use this feature
+        # Any staff level (developer, contributor, admin, moderator, builder,
+        # technician) can use this feature. can_broadcast_megaphone is the
+        # server-authoritative permission and is accepted as well, so a player
+        # the server authorizes is never blocked by a missing level flag.
         is_staff = getattr(self, 'is_staff', False)
         is_builder = getattr(self, 'is_builder', False)
         is_technician = getattr(self, 'is_technician', False)
-        if not is_staff and not is_builder and not is_technician:
-            speak("System: PA Test Mode is only available for staff, builders, and sound technicians.")
+        can_broadcast = getattr(self, 'can_broadcast_megaphone', False)
+        if is_staff or is_builder or is_technician or can_broadcast:
+            self._finish_pa_toggle()
             return
-        
+
+        # Flags unknown/missing (e.g. an older server payload). Ask the server
+        # live - it is the authority - and finish the toggle when the answer
+        # arrives (see event_handeler.megaphone_permission).
+        self.game.network.send(
+            consts.CHANNEL_MISC, "check_megaphone_permission", {}
+        )
+        speak("Checking permission...")
+
+    def _finish_pa_toggle(self):
+        """Finish the PA Test Mode toggle once staff permission is confirmed."""
         # Check if game has started - block PA Test Mode if so
         if self.game_started:
             speak("System: PA Test Mode is only available before game starts.")
@@ -2442,12 +2461,13 @@ class Gameplay(state.State):
                 self.guitar_monitor.feed(frame)
 
     def _process_guitar_notes(self):
-        """Broadcast the line-in notes detected since the last frame.
+        """Legacy placeholder-note path (piano samples), now unused.
 
-        Mirrors the piano path: the performer hears their own note instantly
-        via local playback (client prediction), and the compact action packet
-        goes to the server which validates and broadcasts it to everyone on
-        the map (see the play_guitar_note handler on the server).
+        Guitar sound is raw-only since v1.7.0: the local monitor and the 3D
+        voice stream carry the real pedal/guitar audio. This method is kept so
+        note-based playback can be re-enabled later (e.g. when real guitar
+        samples ship); it plays a piano placeholder locally and broadcasts a
+        play_guitar_note event like the piano path.
         """
         for note, velocity in self.instrument_input.drain_notes():
             self._play_local_guitar_note(note, velocity)
@@ -2473,9 +2493,6 @@ class Gameplay(state.State):
         if self.instrument_input is None:
             from . import instrument_input
             self.instrument_input = instrument_input.InstrumentInput(self.game)
-        if self.instrument_input.audio_input is None:
-            speak("Instrument input device unavailable.")
-            return
 
         # If the instrument device is still the default and a USB guitar-like
         # interface is plugged in, select it automatically so the player can
@@ -2488,7 +2505,52 @@ class Gameplay(state.State):
                 options.set("audio_instrument_input_device", device)
                 self.instrument_input.reopen(device)
                 speak(f"USB guitar or effects pedal detected: {device[14:]}")
+            else:
+                # No device name revealed a guitar/pedal (e.g. a generic
+                # "USB Audio Device" pedal). Fall back to a real signal scan:
+                # briefly open every capture device and keep the one carrying
+                # signal while the player strums. Runs on a background thread
+                # so the game never freezes during the scan.
+                if self.instrument_input.audio_input is not None:
+                    self.instrument_input.audio_input.stop()
+                    self.instrument_input.audio_input = None
+                speak("No guitar or pedal name detected. Scanning for signal, play a note.")
+                import threading as _threading
+                _threading.Thread(
+                    target=self._run_signal_scan, daemon=True
+                ).start()
+                return
 
+        self._start_guitar_recording()
+
+    def _run_signal_scan(self):
+        """Probe every capture device off the main thread, then finish the
+        toggle on the main thread with the result."""
+        from . import instrument_input as _instr
+        try:
+            found = _instr.scan_for_signal_devices()
+        except Exception:
+            found = []
+        self.game.put(lambda: self._on_signal_scan_done(found))
+
+    def _on_signal_scan_done(self, found):
+        """Complete the guitar-mode toggle after a signal scan."""
+        from . import instrument_input as _instr
+        if found:
+            device = _instr.pick_best_signal_device(found)
+            options.set("audio_instrument_input_device", device)
+            self.instrument_input.reopen(device)
+            speak(f"Signal detected on {device[14:]}, from {len(found)} device.")
+            self._start_guitar_recording()
+        else:
+            speak("No signal found. Choose the input device manually in Options.")
+
+    def _start_guitar_recording(self):
+        """Turn on guitar mode with the currently selected instrument device."""
+        from . import instrument_input as _instr
+        if self.instrument_input.audio_input is None:
+            speak("Instrument input device unavailable.")
+            return
         self.instrument_input.start_recording()
         self.guitar_mode = True
         self.guitar_monitor = _instr.GuitarLocalMonitor(self.game.audio_mngr)

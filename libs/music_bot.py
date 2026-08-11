@@ -576,7 +576,7 @@ class MapMusicBot:
         # Line-in guitar raw PCM queue: the instrument input appends 20 ms
         # mono16 frames while guitar mode is on and this broadcast is enabled;
         # AudioStreamer mixes them into the outgoing stream.
-        self.guitar_pcm_queue = collections.deque(maxlen=10)
+        self.guitar_pcm_queue = deque(maxlen=10)
 
         # Personal Playlist & Favorites Manager (Stored locally on Client)
         from .playlist_manager import PlaylistManager
