@@ -225,6 +225,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         (f"Server port: {options.get('port', consts.DEFAULT_PORT)}", lambda: configure_port(game, func_call, replace_call)),
         (f"Select output device - currently set to {options.get('audio_device', '==============system default')[14:]}", lambda: output_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent)),
         (f"Select input device - currently set to {options.get('audio_input_device', '==============system default')[14:]}", lambda: input_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
+        (f"Select instrument input device - currently set to {options.get('audio_instrument_input_device', '==============system default')[14:]}", lambda: input_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game, target="instrument")),
         (f"Voice Chat Jitter Buffer: {options.get('jitter_buffer', 60)}", lambda: configure_jitter_buffer(game, func_call, replace_call)),
         (game.toggle_item("Voice Chat", "voice_chat", True)),
         (game.toggle_item("microphone", "microphone", True)),
@@ -625,17 +626,28 @@ def set_device(game, device, func_call):
     game.audio_mngr.hrtf.use(options.get("hrtf_model", "oalsoft_hrtf_48000"))
     func_call()
 
-def input_menu(game, func_call, replace_call=None, parent=None, in_game=False):
-    m = menu.Menu(game, "select audio input", parrent=parent)
+def input_menu(game, func_call, replace_call=None, parent=None, in_game=False, target="voice"):
+    m = menu.Menu(game, "select instrument audio input" if target == "instrument" else "select audio input", parrent=parent)
     set_default_sounds(m)
     capture = cyal.CaptureExtension()
     m.add_items([
-        (f"system default: {str(capture.default_device)[14:]}", lambda: set_input_device(game, 'system default', func_call, parent, capture, in_game))
+        (f"system default: {str(capture.default_device)[14:]}", lambda: set_input_device(game, 'system default', func_call, parent, capture, in_game, target))
     ])
-    for device in capture.devices:
-        m.add_items([
-            (device[14:], functools.partial(set_input_device, game, device, func_call, parent, capture, in_game))
-        ])
+    from . import instrument_input as _instr
+    if target == "instrument":
+        # Put likely guitar/bass interfaces and USB effects pedals first,
+        # tagged, so they are easy to find in the instrument input menu.
+        entries = [(label, functools.partial(
+            set_input_device, game, device, func_call, parent, capture,
+            in_game, target))
+            for label, device in _instr.instrument_menu_entries(capture.devices)]
+    else:
+        entries = [(device[14:], functools.partial(
+            set_input_device, game, device, func_call, parent, capture,
+            in_game, target))
+            for device in capture.devices]
+    for label, fn in entries:
+        m.add_items([(label, fn)])
     m.add_items([
         ("go back", func_call)
     ])
@@ -643,19 +655,30 @@ def input_menu(game, func_call, replace_call=None, parent=None, in_game=False):
     else: replace_call(m)
     
 
-def set_input_device(game, device, func_call, parent, capture, in_game=False):
-    options.set("audio_input_device", device)
+def set_input_device(game, device, func_call, parent, capture, in_game=False, target="voice"):
+    if target == "instrument":
+        option_key = "audio_instrument_input_device"
+    else:
+        option_key = "audio_input_device"
+    options.set(option_key, device)
     if device == "system default": device = str(capture.default_device.decode('utf-8'))
-    if in_game and hasattr(parent, 'voice_chat') and parent.voice_chat:
-        current_name = parent.voice_chat.audio_input.name if getattr(parent.voice_chat, 'audio_input', None) else None
-        if current_name != device: 
-            if getattr(parent.voice_chat, 'audio_input', None):
-                del parent.voice_chat.audio_input
-            try:
-                parent.voice_chat.audio_input = parent.voice_chat.capture_ext.open_device(name=device.encode(), sample_rate=48000, format=cyal.BufferFormat.MONO16)
-            except (cyal.exceptions.DeviceNotFoundError, TypeError):
-                parent.voice_chat.audio_input = None
-                speak(f"Failed to load audio device: {device}")
+    if in_game:
+        if target == "instrument":
+            from . import instrument_input
+            owner = getattr(parent, "instrument_input", None)
+            if owner is None:
+                owner = parent.instrument_input = instrument_input.InstrumentInput(parent.game)
+            owner.reopen(device)
+        elif hasattr(parent, 'voice_chat') and parent.voice_chat:
+            current_name = parent.voice_chat.audio_input.name if getattr(parent.voice_chat, 'audio_input', None) else None
+            if current_name != device:
+                if getattr(parent.voice_chat, 'audio_input', None):
+                    del parent.voice_chat.audio_input
+                try:
+                    parent.voice_chat.audio_input = parent.voice_chat.capture_ext.open_device(name=device.encode(), sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                except (cyal.exceptions.DeviceNotFoundError, TypeError):
+                    parent.voice_chat.audio_input = None
+                    speak(f"Failed to load audio device: {device}")
     func_call()
 
 

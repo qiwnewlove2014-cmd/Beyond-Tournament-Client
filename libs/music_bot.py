@@ -278,18 +278,43 @@ class AudioStreamer(threading.Thread):
             target_channel = consts.CHANNEL_MUSICBOT
             if self.bot and self.bot.broadcast_to_megaphone:
                 target_channel = consts.CHANNEL_MEGAPHONE
-                
-                # Check if there is mic PCM data queued to mix
-                if hasattr(self.bot, 'mic_pcm_queue') and self.bot.mic_pcm_queue:
-                    try:
+
+            # Mix queued live input (voice mic and/or line-in guitar) into the
+            # outgoing stream. This happens on BOTH broadcast paths (the 3D
+            # music bot channel and the megaphone), so a guitar strum is heard
+            # either way - always gated by broadcast_enabled above.
+            mic_data = None
+            guitar_data = None
+            if self.bot:
+                try:
+                    if getattr(self.bot, 'mic_pcm_queue', None) and self.bot.mic_pcm_queue:
                         mic_data = self.bot.mic_pcm_queue.popleft()
-                        # Scale down slightly before mixing to prevent 16-bit PCM overflow clipping distortion
-                        mono_data = audioop.mul(mono_data, 2, 0.75)
-                        mic_data = audioop.mul(mic_data, 2, 0.85)
-                        mono_data = audioop.add(mono_data, mic_data, 2)
-                    except Exception:
-                        pass
-            
+                except Exception:
+                    pass
+                try:
+                    if getattr(self.bot, 'guitar_pcm_queue', None) and self.bot.guitar_pcm_queue:
+                        guitar_data = self.bot.guitar_pcm_queue.popleft()
+                except Exception:
+                    pass
+            if mic_data is not None or guitar_data is not None:
+                try:
+                    def _align(b):
+                        if len(b) > len(mono_data):
+                            return b[:len(mono_data)]
+                        if len(b) < len(mono_data):
+                            return b + b'\x00' * (len(mono_data) - len(b))
+                        return b
+                    # Scale down before mixing to prevent 16-bit overflow clipping
+                    mono_data = audioop.mul(mono_data, 2, 0.75)
+                    if mic_data is not None:
+                        mono_data = audioop.add(
+                            mono_data, audioop.mul(_align(mic_data), 2, 0.85), 2)
+                    if guitar_data is not None:
+                        mono_data = audioop.add(
+                            mono_data, audioop.mul(_align(guitar_data), 2, 0.85), 2)
+                except Exception:
+                    pass
+
             encoded = self.encoder.encode(bytearray(mono_data))
             self.game.network.send(target_channel, "n/a", encoded, reliable=False)
         except Exception:
@@ -546,6 +571,10 @@ class MapMusicBot:
         self.enabled = options.get("music_bot_enabled", True)
         self.broadcast_enabled = False  # Disabled by default (Private listening mode)
         self.broadcast_to_megaphone = False
+        # Line-in guitar raw PCM queue: the instrument input appends 20 ms
+        # mono16 frames while guitar mode is on and this broadcast is enabled;
+        # AudioStreamer mixes them into the outgoing stream.
+        self.guitar_pcm_queue = collections.deque(maxlen=10)
 
         # Personal Playlist & Favorites Manager (Stored locally on Client)
         from .playlist_manager import PlaylistManager

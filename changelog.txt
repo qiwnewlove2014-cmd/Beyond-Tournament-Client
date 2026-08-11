@@ -4,7 +4,7 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
-[v1.7.0] Client Stability — Map Loading & Instrument Crash Fix — 2026-08-11
+[v1.7.0] Client Stability, Key Bindings, Guitar Input & Instrument Fixes — 2026-08-11
 --------------------------------------------------------------------------------
 
 • Stability & Crash Fixes
@@ -12,6 +12,19 @@
 - **Piano Audio Now Runs on the Main Thread:** All remote piano events (note play, note stop, soft pedal, pitch bend, chorus, and the piano note preloader) now queue to the main audio thread before touching audio, mirroring the safe pattern already used by the drum kit.
 - **No More Instrument Memory Leaks Across Maps:** Switching maps now releases preloaded Piano and Drumset sample buffers. Previously, every map change kept the previous map's instrument buffers in memory, accumulating until the game crashed after long sessions.
 - **Safer Audio Error Handling:** Hardened the shared spatial audio path with exception guards around OpenAL source, filter, and effect calls so that a transient audio fault is recovered instead of crashing the client.
+
+• Keyboard Bindings & Settings
+- **Enter Now Means Enter:** The interact key is now bound to the main Enter key by default, and every place that shows a key name (the key binding menu, the drum key menu, and travel point hints) speaks friendly names like "enter" instead of "return", so the key you hear always matches the key you press.
+- **Main Enter vs Numpad Enter No Longer Swap:** Fixed a bug where a numpad Enter binding could be saved as the main Enter key, or fail to load at all; each Enter key now keeps its own binding through save and reload.
+- **Clear Drum Keys:** The Configure drum keys menu now has a "Clear drum keys" option that wipes every custom drum binding at once so you can set them up fresh, separate from "Restore default drum keys" which brings back the factory layout.
+
+• Live Music & Guitar Input
+- **Second Audio Input for Instruments:** Added a "Select instrument input device" setting right beside the microphone input. The instrument line-in gets its own capture device and can run at the same time as the voice mic, so you can talk while you play.
+- **Line-In Guitar & Bass (Press U):** Press U to toggle Guitar mode and plug your guitar or bass into the instrument input. The game pitch-detects what you play (low-note friendly for bass), converts it into notes, and plays them back at your position so you hear yourself instantly.
+- **Guitar Notes Broadcast Like Piano:** Detected notes are sent to the server, which validates each note, clamps velocity to 1-127, rate-limits spam (30 notes/second), and broadcasts them to everyone on the map through the same note pipeline the piano and drums use.
+- **Chord Strumming Heard Nearby:** Raw strum and chord audio (not just single notes) streams on the normal 3D voice channel, so players near the performer hear the full guitar sound with no broadcast toggle and no special permission.
+- **Guitar Mixes Into the Music Bot Broadcast:** While the music bot broadcast is enabled, guitar audio is mixed into the broadcast stream (megaphone or the 3D music bot channel) so the whole area hears the performance.
+- **USB Effects Pedal Support:** USB multi-effects pedals and amp modellers (Boss GT, Zoom G, Line 6 POD/Helix, Valeton, NUX, Mooer, Kemper, Axe-Fx, DigiTech, Vox, and more) are auto-detected when plugged in. Pedals that only expose stereo capture fall back to stereo input with automatic mono downmixing, and the instrument input menu lists likely guitar/pedal devices first, tagged "(guitar/pedal)".
 
 --------------------------------------------------------------------------------
 [v1.6.9] Drum Kit Selection & Natural Instrument Acoustics — 2026-08-10

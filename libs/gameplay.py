@@ -120,6 +120,8 @@ class Gameplay(state.State):
         # preserve it in enter() so those current-session packets are not lost.
         self.voice_channels = {}
         self.voice_chat = None
+        self.instrument_input = None
+        self.guitar_mode = False
         self.tracking_target = None
         self.tracking_clock = None
         self.facing_sound_clock = self.game.new_clock()
@@ -229,6 +231,7 @@ class Gameplay(state.State):
             kc.get("music_bot_toggle", pygame.K_m): self.music_bot_control,
             kc.get("music_bot_vol_down", pygame.K_F9): lambda mod: self.music_bot_volume(-10),
             kc.get("music_bot_vol_up", pygame.K_F10): lambda mod: self.music_bot_volume(10),
+            kc.get("guitar_play", pygame.K_u): self.toggle_guitar_mode,
             kc.get("raise_shield", pygame.K_s): self.start_raise_shield,
         }
         self.keys_released = {
@@ -1002,6 +1005,9 @@ class Gameplay(state.State):
         self.megaphone.update_megaphone_audio(0, None)
         self.wall_tone.update()
         self.compass_turn_cue.update()
+        if self.guitar_mode and self.instrument_input and not self.spectator_mode:
+            self._process_guitar_notes()
+            self._feed_guitar_monitor()
         if not self.spectator_mode:
             self.player.loop()
         elif not self.substates:
@@ -1425,6 +1431,11 @@ class Gameplay(state.State):
         buffer.export_buffers()
         if self.voice_chat:
             self.voice_chat.close()
+        if self.instrument_input:
+            self.instrument_input.close()
+        if getattr(self, "guitar_monitor", None):
+            self.guitar_monitor.close()
+            self.guitar_monitor = None
 
     def ping(self, mod):
         if not self.pingging:
@@ -2345,6 +2356,134 @@ class Gameplay(state.State):
     def run_check(self, mod):
         if self.can_run and not self.running: self.run_start(mod)
     
+
+    _GUITAR_SHARP_TO_FLAT = {
+        "C#": "Db", "D#": "Eb", "F#": "Gb", "G#": "Ab", "A#": "Bb",
+    }
+    _GUITAR_NOTE_ROOTS = set("ABCDEFG")
+
+    @classmethod
+    def _guitar_sample_for(cls, note_name):
+        """Map a detected note (e.g. "G#3") to a playable sample path.
+
+        The bundled samples use flat spelling (Ab3, not G#3) and cover
+        B0..A7, so out-of-range notes simply resolve to a missing file that
+        the audio manager skips silently.
+        """
+        if not isinstance(note_name, str) or len(note_name) < 2:
+            return None
+        root, octave = note_name[:-1], note_name[-1]
+        if root not in cls._GUITAR_NOTE_ROOTS and root not in cls._GUITAR_SHARP_TO_FLAT:
+            return None
+        if not octave.isdigit():
+            return None
+        flat = cls._GUITAR_SHARP_TO_FLAT.get(root, root)
+        return f"piano/Piano.mf.{flat}{octave}.ogg"
+
+    @staticmethod
+    def _guitar_volume(velocity):
+        """Map MIDI velocity 1-127 to the game's volume scale (60..300)."""
+        if velocity is None:
+            return 300
+        v = max(1, min(127, int(velocity)))
+        return max(60, min(300, round(60 + 240 * (v / 127) ** 1.35)))
+
+    def _play_local_guitar_note(self, note_name, velocity=None):
+        """Play the detected line-in note locally at the player's position.
+
+        This is the on-machine (monitor) event for the line-in guitar: it
+        lets the performer hear the notes the pitch detector is tracking
+        without broadcasting anything to other players.
+        """
+        sample = self._guitar_sample_for(note_name)
+        if not sample:
+            return
+        snd = self.game.audio_mngr.play_unbound(
+            sample,
+            self.player.x,
+            self.player.y,
+            self.player.z,
+            False,
+            volume=self._guitar_volume(velocity),
+            cat="miscelaneous",
+            reference_distance=3.0,
+            rolloff=1.0,
+            max_distance=25.0,
+        )
+        if snd and getattr(self, "map", None):
+            reverb = self.map.get_reverb_at(
+                self.player.x, self.player.y, self.player.z
+            )
+            if reverb and reverb.reverb:
+                s_list = snd if isinstance(snd, (list, tuple)) else [snd]
+                for s in s_list:
+                    if s and hasattr(s, "source") and s.source:
+                        with contextlib.suppress(Exception):
+                            self.game.audio_mngr.efx.send(s.source, 0, reverb.reverb)
+
+    def _feed_guitar_monitor(self):
+        """Play the raw strum/chord frames back at the player's position so
+        the performer hears their own playing (3D monitor)."""
+        raw_frames = self.instrument_input.drain_raw_frames()
+        if raw_frames and getattr(self, "guitar_monitor", None):
+            self.guitar_monitor.set_position(
+                self.player.x, self.player.y, self.player.z
+            )
+            for frame in raw_frames:
+                self.guitar_monitor.feed(frame)
+
+    def _process_guitar_notes(self):
+        """Broadcast the line-in notes detected since the last frame.
+
+        Mirrors the piano path: the performer hears their own note instantly
+        via local playback (client prediction), and the compact action packet
+        goes to the server which validates and broadcasts it to everyone on
+        the map (see the play_guitar_note handler on the server).
+        """
+        for note, velocity in self.instrument_input.drain_notes():
+            self._play_local_guitar_note(note, velocity)
+            packet = {"note": note}
+            if velocity is not None:
+                packet["velocity"] = max(1, min(127, int(velocity)))
+            self.game.network.send(
+                consts.CHANNEL_MAP, "play_guitar_note", packet
+            )
+
+    def toggle_guitar_mode(self, mod):
+        """Toggle the line-in guitar: capture pitch from the instrument input
+        device and broadcast detected notes like the piano."""
+        if self.guitar_mode:
+            self.guitar_mode = False
+            if self.instrument_input:
+                self.instrument_input.stop_recording()
+            if getattr(self, "guitar_monitor", None):
+                self.guitar_monitor.close()
+                self.guitar_monitor = None
+            speak("Guitar mode off")
+            return
+        if self.instrument_input is None:
+            from . import instrument_input
+            self.instrument_input = instrument_input.InstrumentInput(self.game)
+        if self.instrument_input.audio_input is None:
+            speak("Instrument input device unavailable.")
+            return
+
+        # If the instrument device is still the default and a USB guitar-like
+        # interface is plugged in, select it automatically so the player can
+        # just plug in and play.
+        from . import instrument_input as _instr
+        if options.get("audio_instrument_input_device", "system default") == "system default":
+            guitar_devices = _instr.detect_guitar_inputs()
+            if guitar_devices:
+                device = guitar_devices[0]
+                options.set("audio_instrument_input_device", device)
+                self.instrument_input.reopen(device)
+                speak(f"USB guitar or effects pedal detected: {device[14:]}")
+
+        self.instrument_input.start_recording()
+        self.guitar_mode = True
+        self.guitar_monitor = _instr.GuitarLocalMonitor(self.game.audio_mngr)
+        speak("Guitar mode on")
 
     def voice_chat_start(self, mod):
         """Start voice chat (Push-to-Talk)"""
