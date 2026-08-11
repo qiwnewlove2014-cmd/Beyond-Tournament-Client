@@ -10,6 +10,7 @@ from . import (
     menu,
     options,
     speech,
+    string_utils,
     updater,
 )
 from .key_config_screen import Key_config_screen
@@ -369,7 +370,7 @@ def keyconfig_menu(game, func_call, replace_call=None, parent=None, in_game=Fals
         func = functools.partial(replace_call, Key_config_screen(game, i, options_menu=on_bind_done))
         items.append(
             (
-                f"{i}: {pygame.key.name(game.keyconfig.get(i, default_keys.keys[i]))}",
+                f"{i}: {string_utils.friendly_key_name(game.keyconfig.get(i, default_keys.keys[i]))}",
                 func,
             )
         )
@@ -409,7 +410,7 @@ def drum_keyconfig_menu(
         primary = drum_keyconfig.binding_key(game.keyconfig, binding)
         alternate = drum_keyconfig.alternate_key(game.keyconfig, binding)
         alternate_name = (
-            pygame.key.name(alternate)
+            string_utils.friendly_key_name(alternate)
             if alternate is not None
             else "unassigned"
         )
@@ -424,7 +425,7 @@ def drum_keyconfig_menu(
             list_position=current_index,
         )
         items.append((
-            f"{binding.label}: primary {pygame.key.name(primary)}, "
+            f"{binding.label}: primary {string_utils.friendly_key_name(primary)}, "
             f"alternate {alternate_name}",
             open_pad_menu,
         ))
@@ -441,7 +442,20 @@ def drum_keyconfig_menu(
             restore_pos=len(drum_keyconfig.DRUM_BINDINGS),
         )
 
+    def clear_all():
+        drum_keyconfig.clear_all(game.keyconfig)
+        speech.speak("Drum keys cleared. Set new keys from the defaults.")
+        drum_keyconfig_menu(
+            game,
+            func_call,
+            replace_call=refresh_current,
+            parent=parent,
+            in_game=in_game,
+            restore_pos=len(drum_keyconfig.DRUM_BINDINGS) + 1,
+        )
+
     items.append(("Restore default drum keys.", reset_defaults))
+    items.append(("Clear drum keys.", clear_all))
     items.append(("Back", func_call))
     m.add_items(items)
     if restore_pos is not None and 0 <= restore_pos < len(m.items):
@@ -462,7 +476,7 @@ def drum_pad_keyconfig_menu(
     primary = drum_keyconfig.binding_key(game.keyconfig, binding)
     alternate = drum_keyconfig.alternate_key(game.keyconfig, binding)
     alternate_name = (
-        pygame.key.name(alternate)
+        string_utils.friendly_key_name(alternate)
         if alternate is not None
         else "unassigned"
     )
@@ -530,7 +544,7 @@ def drum_pad_keyconfig_menu(
 
     items = [
         (
-            f"Set primary key. Currently {pygame.key.name(primary)}.",
+            f"Set primary key. Currently {string_utils.friendly_key_name(primary)}.",
             functools.partial(
                 open_key_capture,
                 binding.function,

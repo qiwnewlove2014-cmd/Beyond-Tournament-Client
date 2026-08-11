@@ -49,7 +49,8 @@ class Key_config_screen(state.State):
                     continue
 
                 self.done = True
-                speak(pygame.key.name(event.key))
+                from .string_utils import friendly_key_name
+                speak(friendly_key_name(event.key))
                 self.game.keyconfig.set(event.key, self.func)
                 
                 self.game.direct_soundgroup.play("ui/keyconfig/end.ogg")

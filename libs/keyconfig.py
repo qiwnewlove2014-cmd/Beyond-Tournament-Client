@@ -4,6 +4,19 @@ import json
 from pygame import key
 from .speech import speak
 
+# pygame.key.key_code("enter") resolves to the numpad Enter key, but in this
+# game "enter" always means the main Enter (Return) key. Also, pygame can't
+# parse "kp_enter" back at all (save/load round-trip bug), so alias it too.
+KEY_NAME_ALIASES = {
+    "enter": key.key_code("return"),  # main Enter (Return)
+    "kp_enter": key.key_code("enter"),  # numpad Enter
+}
+
+
+def _key_code(name):
+    """Resolve a key name to a key constant, honoring our own aliases."""
+    return KEY_NAME_ALIASES.get(name.strip().lower()) or key.key_code(name.strip())
+
 
 class Keyconfig:
     def __init__(self, file="keyconfig.json"):
@@ -23,7 +36,7 @@ class Keyconfig:
                     bindings = data.get("bindings", {})
                     for func, key_name in bindings.items():
                         try:
-                            self.keys[func.strip()] = key.key_code(key_name.strip())
+                            self.keys[func.strip()] = _key_code(key_name)
                         except (AttributeError, ValueError):
                             speak(f"Invalid key string for {func}: {key_name}. Using default.")
                     return
@@ -31,14 +44,19 @@ class Keyconfig:
                 # Legacy key -> function files remain compatible.
                 for k, v in data.items():
                     try:
-                        self.keys[v.strip()] = key.key_code(k.strip())
+                        self.keys[v.strip()] = _key_code(k)
                     except ValueError:
                         speak(f"Invalid key string for {v}: {k}. Using default.")
 
     def save(self):
+        def key_name(code):
+            # pygame.key.name(K_KP_ENTER) is "enter", which would collide with
+            # the main Enter alias on load; write an unambiguous name instead.
+            return "kp_enter" if code == key.key_code("enter") else key.name(code)
+
         data = {
             "format": 2,
-            "bindings": {func: key.name(code) for func, code in self.keys.items()},
+            "bindings": {func: key_name(code) for func, code in self.keys.items()},
         }
         with open(self.file, "wb") as f:
             f.write(json.dumps(data, indent=4).encode("utf-8", "ignore"))

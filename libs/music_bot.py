@@ -18,6 +18,8 @@ import cyal
 import cyal.exceptions
 import pygame
 
+from .string_utils import friendly_key_name
+
 from . import options
 from .speech import speak
 from . import logger
@@ -1131,13 +1133,13 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._show_mode_menu()
 
-        toggle_key = pygame.key.name(
+        toggle_key = friendly_key_name(
             self.game.keyconfig.get("music_bot_toggle", pygame.K_m)
         )
-        volume_down_key = pygame.key.name(
+        volume_down_key = friendly_key_name(
             self.game.keyconfig.get("music_bot_vol_down", pygame.K_F9)
         )
-        volume_up_key = pygame.key.name(
+        volume_up_key = friendly_key_name(
             self.game.keyconfig.get("music_bot_vol_up", pygame.K_F10)
         )
 

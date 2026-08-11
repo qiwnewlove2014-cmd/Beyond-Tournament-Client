@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import pygame
 
+from .string_utils import friendly_key_name
+
 
 @dataclass(frozen=True, slots=True)
 class DrumBinding:
@@ -82,7 +84,7 @@ def key_to_pad(keyconfig):
 
 def validate_key(keyconfig, function, key_code):
     """Return an accessible error message or ``None`` when a bind is valid."""
-    key_name = pygame.key.name(key_code)
+    key_name = friendly_key_name(key_code)
     if key_code in RESERVED_DRUM_KEYS:
         return f"{key_name} is reserved for leaving drum mode. Choose another key."
 
@@ -99,6 +101,16 @@ def validate_key(keyconfig, function, key_code):
 
 def clear_alternate(keyconfig, binding, autosave=True):
     keyconfig.unset(binding.alternate_function, autosave=autosave)
+
+
+def clear_all(keyconfig):
+    """Remove every custom drum key binding (primaries and alternates) so the
+    player can rebind every pad from a clean slate. Primaries then fall back
+    to their defaults; alternates become unassigned."""
+    for binding in DRUM_BINDINGS:
+        keyconfig.unset(binding.function, autosave=False)
+        keyconfig.unset(binding.alternate_function, autosave=False)
+    keyconfig.save()
 
 
 def restore_defaults(keyconfig):

@@ -2335,7 +2335,7 @@ class Gameplay(state.State):
         if self.pa_test_mode:
             from libs import logger
             logger.log("PA Test Mode activated.")
-            key_name = pygame.key.name(self.kc.get("voice_chat", pygame.K_g)).upper()
+            key_name = string_utils.friendly_key_name(self.kc.get("voice_chat", pygame.K_g)).upper()
             speak(f"System: PA Test Mode activated. Press {key_name} to test speakers.")
         else:
             from libs import logger

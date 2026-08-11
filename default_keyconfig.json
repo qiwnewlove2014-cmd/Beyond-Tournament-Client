@@ -37,7 +37,7 @@
         "check_direction": "tab",
         "reset_pitch": "l",
         "reset_bank": ";",
-        "interact": "f",
+        "interact": "enter",
         "check_stats": "p",
         "open_main_menu": "backspace",
         "speak_zone": "v",
