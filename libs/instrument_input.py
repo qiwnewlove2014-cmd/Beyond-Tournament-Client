@@ -215,7 +215,7 @@ class InstrumentInput(threading.Thread):
                         music_bot.guitar_pcm_queue = collections.deque(maxlen=10)
                     music_bot.guitar_pcm_queue.append(raw)
 
-    def _feed_guitar_voice(self, raw):
+    def _feed_guitar_voice(self, raw, force_mega=False):
         """Stream the raw guitar audio out on the normal 3D voice channel.
 
         Uses the game's own voice compression (Opus, CHANNEL_VOICECHAT); the
@@ -231,8 +231,17 @@ class InstrumentInput(threading.Thread):
                     self.game, consts.CHANNEL_VOICECHAT)
             except Exception:
                 self._guitar_voice = None
+                
         if self._guitar_voice is not None:
-            self._guitar_voice.put(raw)
+            from . import consts
+            target_channel = consts.CHANNEL_MEGAPHONE if force_mega else consts.CHANNEL_VOICECHAT
+            if getattr(self._guitar_voice, 'channel', None) != target_channel:
+                if hasattr(self._guitar_voice, 'set_channel'):
+                    self._guitar_voice.set_channel(target_channel)
+                else:
+                    self._guitar_voice.channel = target_channel
+                    
+            self._guitar_voice.put(bytearray(raw))
 
     def drain_raw_frames(self):
         """Pop and return all raw mono16 frames captured since last call."""

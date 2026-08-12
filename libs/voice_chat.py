@@ -519,15 +519,22 @@ class VoiceChatRecord(threading.Thread):
                 # Accumulate for Opus encoder (requires 20ms / 1920 bytes)
                 accumulated_bytes.extend(chunk)
                 while len(accumulated_bytes) >= 1920:
-                    opus_buf = bytes(accumulated_bytes[:1920])
+                    chunk_bytes = accumulated_bytes[:1920]
                     accumulated_bytes = accumulated_bytes[1920:]
 
                     if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone and voice_using_mega:
                         if not hasattr(music_bot, 'mic_pcm_queue'):
                             music_bot.mic_pcm_queue = collections.deque(maxlen=10)
-                        music_bot.mic_pcm_queue.append(opus_buf)
+                        music_bot.mic_pcm_queue.append(bytes(chunk_bytes))
                     else:
-                        self.vc_compression.put(opus_buf)
+                        from . import consts
+                        target_channel = consts.CHANNEL_MEGAPHONE if voice_using_mega else consts.CHANNEL_VOICECHAT
+                        if getattr(self.vc_compression, 'channel', None) != target_channel:
+                            if hasattr(self.vc_compression, 'set_channel'):
+                                self.vc_compression.set_channel(target_channel)
+                            else:
+                                self.vc_compression.channel = target_channel
+                        self.vc_compression.put(bytearray(chunk_bytes))
 
     def voice_chat_finish(self):
         self.voice_chat_finish2()
@@ -553,7 +560,14 @@ class VoiceChatRecord(threading.Thread):
                 music_bot.mic_pcm_queue = collections.deque(maxlen=10)
             music_bot.mic_pcm_queue.append(bytes(buf))
         else:
-            self.vc_compression.put(buf)
+            from . import consts
+            target_channel = consts.CHANNEL_MEGAPHONE if voice_using_mega else consts.CHANNEL_VOICECHAT
+            if getattr(self.vc_compression, 'channel', None) != target_channel:
+                if hasattr(self.vc_compression, 'set_channel'):
+                    self.vc_compression.set_channel(target_channel)
+                else:
+                    self.vc_compression.channel = target_channel
+            self.vc_compression.put(bytearray(buf))
     
     def close(self):
         self.vc_compression.put(None)
