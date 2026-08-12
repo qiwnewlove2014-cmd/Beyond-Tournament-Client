@@ -4,6 +4,15 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.7.1] Voice Chat & Megaphone Routing — 2026-08-12
+--------------------------------------------------------------------------------
+
+• Voice Chat & Megaphone Routing
+- **Zero-Latency Megaphone Feedback:** Speaking into the PA/Megaphone system now routes your voice locally with absolute zero latency. You no longer have to wait for the network jitter buffer to hear your own voice, ensuring it instantly matches the responsiveness of playable instruments.
+- **Instrument Megaphone Broadcasting:** External instrument input (Guitar/Bass line-in) now seamlessly routes through the Megaphone speakers at zero latency whenever you have the Megaphone active, making live stage performances and announcements much easier to manage.
+- **Stereo Microphone Fallback:** The voice chat input device menu now fully supports Microphone Arrays and USB stereo microphones. Input devices that strictly require stereo capture will automatically fall back to stereo and be mixed down to mono in real time, preventing silent or failed microphone connections.
+
+--------------------------------------------------------------------------------
 [v1.7.0] Client Stability, Key Bindings, Guitar Input & Instrument Fixes — 2026-08-11
 --------------------------------------------------------------------------------
 
