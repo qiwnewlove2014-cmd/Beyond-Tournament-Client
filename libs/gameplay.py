@@ -529,11 +529,16 @@ class Gameplay(state.State):
             if velocity is None
             else self._drum_midi_velocity_volume(velocity)
         )
+        is_mega_owner = False
+        if hasattr(self, 'megaphone') and getattr(self.megaphone, 'lock_owner', None):
+            is_mega_owner = (self.megaphone.lock_owner == getattr(self.player, 'name', ''))
+            
         sound = self.game.audio_mngr.drums.play_hit(
             "local", pad,
             self.player.x, self.player.y, self.player.z,
             self.player.x, self.player.y, self.player.z,
             volume=volume,
+            via_megaphone=getattr(self, 'voice_chat_using_megaphone', False) or is_mega_owner
         )
         if sound and getattr(self, "map", None):
             reverb = self.map.get_reverb_at(
@@ -679,12 +684,16 @@ class Gameplay(state.State):
             if velocity is None
             else self._piano_midi_velocity_volume(velocity)
         )
+        is_mega_owner = False
+        if hasattr(self, 'megaphone') and getattr(self.megaphone, 'lock_owner', None):
+            is_mega_owner = (self.megaphone.lock_owner == getattr(self.player, 'name', ''))
+            
         snd = self.game.audio_mngr.piano.play_note(
             "local", note_name,
             self.player.x, self.player.y, self.player.z,
             self.player.x, self.player.y, self.player.z,
             volume=volume,
-            via_megaphone=getattr(self, 'voice_chat_using_megaphone', False)
+            via_megaphone=getattr(self, 'voice_chat_using_megaphone', False) or is_mega_owner
         )
         if snd and getattr(snd, "source", None) and getattr(self, "map", None):
             reverb = self.map.get_reverb_at(

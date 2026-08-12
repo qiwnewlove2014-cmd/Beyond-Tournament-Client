@@ -366,11 +366,7 @@ class DrumAudio:
         self._tag_sounds(primary, peer_id, pad)
         sounds = self._iter_sounds(primary)
 
-        should_route_pa = via_megaphone
-        if peer_id == "local":
-            music_bot = getattr(self.gameplay, "music_bot", None)
-            should_route_pa = bool(getattr(music_bot, "broadcast_to_megaphone", False))
-        if should_route_pa:
+        if via_megaphone:
             sounds.extend(self.route_to_megaphone_speakers(peer_id, pad, adjusted_volume, kit=kit))
 
         key = (peer_id, pad)
