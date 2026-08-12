@@ -684,6 +684,7 @@ class Gameplay(state.State):
             self.player.x, self.player.y, self.player.z,
             self.player.x, self.player.y, self.player.z,
             volume=volume,
+            via_megaphone=getattr(self, 'voice_chat_using_megaphone', False)
         )
         if snd and getattr(snd, "source", None) and getattr(self, "map", None):
             reverb = self.map.get_reverb_at(

@@ -847,11 +847,12 @@ class PianoAudio:
         except (TypeError, ValueError):
             volume = 300.0
         soft = data.get("piano_soft") if "piano_soft" in data else None
+        via_megaphone = data.get("via_megaphone", False)
         snd = self.play_note(
             peer_id=peer_id, note_name=note_name,
             x=x, y=y, z=z,
             listener_x=player.x, listener_y=player.y, listener_z=player.z,
-            volume=volume, occluded=occluded, soft=soft,
+            volume=volume, occluded=occluded, soft=soft, via_megaphone=via_megaphone
         )
         if snd and getattr(gameplay, "map", None):
             reverb = gameplay.map.get_reverb_at(x, y, z)
@@ -867,7 +868,7 @@ class PianoAudio:
             return
         self.stop_note(peer_id, note_name)
 
-    def play_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False, soft=None):
+    def play_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False, soft=None, via_megaphone=False):
         """Play a piano note with 3D stereo spreading (remote) or direct stereo (local).
         
         Automatically handles note re-triggering, occlusion filtering,
@@ -902,14 +903,12 @@ class PianoAudio:
                 self.stop_note(peer_id, note_name)
             self.active_piano_notes[piano_key] = snd
 
-        # Route through PA Megaphone speakers if performer is staff and broadcast to megaphone is active
-        try:
-            gp = self.gameplay
-            if gp and hasattr(gp, 'music_bot') and gp.music_bot:
-                if getattr(gp.music_bot, 'broadcast_to_megaphone', False):
-                    self.route_to_megaphone_speakers(peer_id, note_name, volume)
-        except Exception:
-            pass
+        # Route through PA Megaphone speakers if via_megaphone is true
+        if via_megaphone:
+            try:
+                self.route_to_megaphone_speakers(peer_id, note_name, volume)
+            except Exception:
+                pass
 
         return snd
 
