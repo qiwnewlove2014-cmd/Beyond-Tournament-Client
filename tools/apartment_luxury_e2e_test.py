@@ -87,6 +87,16 @@ def login_and_probe(host, port):
     connected = False
     last_change_send = 0.0
     while time.time() < deadline:
+        # Re-send change_map every 4s until the map actually switches.
+        # (Drop-prone on fresh sessions; must run on the main loop, not
+        # inside the receive handler, or it never fires when idle.)
+        if changed and time.time() - last_change_send >= 4.0:
+            last_change_send = time.time()
+            peer.send(consts.CHANNEL_MAP, _pkt({
+                "event": "change_map",
+                "data": {"value": "Apartment_Luxury"},
+            }))
+            print("[map] re-sent change_map")
         ev = net.service(10)
         if ev.type == enet.EVENT_TYPE_CONNECT and not sent:
             peer.send(consts.CHANNEL_MISC, _pkt({
@@ -155,14 +165,6 @@ def login_and_probe(host, port):
                 element_counts = Counter()
                 speaker_positions = []
                 travel_points = []
-                continue
-            elif changed and time.time() - last_change_send >= 4.0:
-                last_change_send = time.time()
-                peer.send(consts.CHANNEL_MAP, _pkt({
-                    "event": "change_map",
-                    "data": {"value": "Apartment_Luxury"},
-                }))
-                print("[map] re-sent change_map")
                 continue
 
             # Luxury map confirmed: speakers must sit at the map corners (5/95)
