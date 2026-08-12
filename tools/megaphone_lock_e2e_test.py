@@ -155,13 +155,14 @@ def main():
     print(f"[test] B received {got_b['n']} packets, A received {got_a['n']} "
           f"-> sender exclusion {'PASS' if excl_ok else 'FAIL'}")
 
-    # --- Phase 2: A stops; after ~3s the lock auto-releases ---
-    # Verify via megaphone_lock_state broadcast: owner A -> None within ~4s.
-    print("[test] phase 2: waiting for lock idle timeout (3s)")
-    time.sleep(4.5)
-    lock_released = (lock_states[-1] is None) if lock_states else False
+    # --- Phase 2: voice must NOT create a megaphone broadcast lock ---
+    # New multi-speaker behavior: everyone talks simultaneously and the client
+    # mixes with equal power, so A's voice should never set megaphone_broadcast_owner.
+    print("[test] phase 2: voice should not create a broadcast lock")
+    time.sleep(0.5)
+    lock_released = not lock_states
     print(f"[test] lock state transitions: {lock_states}")
-    print(f"[test] lock auto-released after idle -> {'PASS' if lock_released else 'FAIL'}")
+    print(f"[test] voice created no lock -> {'PASS' if lock_released else 'FAIL'}")
 
     # --- Phase 3: B broadcasts now; the lock must not drop B's packets ---
     print("[test] phase 3: B streams after lock release")
@@ -174,19 +175,10 @@ def main():
                 got_b2["n"] += 1
             time.sleep(0.005)
     th_b2 = threading.Thread(target=listener_b2, daemon=True)
-    th_b2.start()
-    for chunk in chunks[:20]:
-        opus = bytes(enc.encode(bytearray(chunk)))
-        peerB.send(CHANNEL_MEGAPHONE, enet.Packet(
-            opus, flags=enet.PACKET_FLAG_UNRELIABLE_FRAGMENT))
-        time.sleep(0.02)
-    time.sleep(0.5)
     # B gets its own packets back through the PA? No - sender exclusion means B
     # does NOT receive its own broadcast; A should receive B's broadcast.
+    # Start A's listener BEFORE B streams so packets are not missed.
     got_a2 = {"n": 0}
-    print(f"[test] B self-received after exclusion: {got_b2['n']} (expect 0) "
-          f"-> {'PASS' if got_b2['n'] == 0 else 'INFO'}")
-    # Check A receives B's stream
     def listener_a2():
         deadline = time.perf_counter() + 4
         while time.perf_counter() < deadline:
@@ -196,7 +188,15 @@ def main():
             time.sleep(0.005)
     th_a2 = threading.Thread(target=listener_a2, daemon=True)
     th_a2.start()
-    time.sleep(0.5)
+    th_b2.start()
+    for chunk in chunks[:20]:
+        opus = bytes(enc.encode(bytearray(chunk)))
+        peerB.send(CHANNEL_MEGAPHONE, enet.Packet(
+            opus, flags=enet.PACKET_FLAG_UNRELIABLE_FRAGMENT))
+        time.sleep(0.02)
+    time.sleep(0.8)
+    print(f"[test] B self-received after exclusion: {got_b2['n']} (expect 0) "
+          f"-> {'PASS' if got_b2['n'] == 0 else 'INFO'}")
     # A should receive B's broadcast (B is not A, so not excluded)
     print(f"[test] A received B's broadcast: {got_a2['n']} packets -> "
           f"{'PASS' if got_a2['n'] > 0 else 'FAIL'}")
