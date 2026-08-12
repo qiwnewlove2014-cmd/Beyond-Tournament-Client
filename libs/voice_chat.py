@@ -522,7 +522,7 @@ class VoiceChatRecord(threading.Thread):
                     chunk_bytes = accumulated_bytes[:1920]
                     accumulated_bytes = accumulated_bytes[1920:]
 
-                    if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone and voice_using_mega:
+                    if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone:
                         if not hasattr(music_bot, 'mic_pcm_queue'):
                             music_bot.mic_pcm_queue = collections.deque(maxlen=10)
                         music_bot.mic_pcm_queue.append(bytes(chunk_bytes))
@@ -555,7 +555,7 @@ class VoiceChatRecord(threading.Thread):
         gp = music_bot._find_gameplay() if music_bot else None
         voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
 
-        if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone and voice_using_mega:
+        if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone:
             if not hasattr(music_bot, 'mic_pcm_queue'):
                 music_bot.mic_pcm_queue = collections.deque(maxlen=10)
             music_bot.mic_pcm_queue.append(bytes(buf))
