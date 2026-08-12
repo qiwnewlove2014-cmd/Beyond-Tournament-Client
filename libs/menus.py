@@ -684,14 +684,27 @@ def set_input_device(game, device, func_call, parent, capture, in_game=False, ta
                 owner = parent.instrument_input = instrument_input.InstrumentInput(parent.game)
             owner.reopen(device)
         elif hasattr(parent, 'voice_chat') and parent.voice_chat:
-            current_name = parent.voice_chat.audio_input.name if getattr(parent.voice_chat, 'audio_input', None) else None
+            current_name = None
+            if getattr(parent.voice_chat, 'audio_input', None):
+                current_name = getattr(parent.voice_chat.audio_input, 'name', None)
+                if isinstance(current_name, bytes):
+                    current_name = current_name.decode('utf-8')
             if current_name != device:
                 if getattr(parent.voice_chat, 'audio_input', None):
                     del parent.voice_chat.audio_input
-                try:
-                    parent.voice_chat.audio_input = parent.voice_chat.capture_ext.open_device(name=device.encode(), sample_rate=48000, format=cyal.BufferFormat.MONO16)
-                except (cyal.exceptions.DeviceNotFoundError, TypeError):
-                    parent.voice_chat.audio_input = None
+                
+                parent.voice_chat.stereo = False
+                parent.voice_chat.audio_input = None
+                device_encoded = device.encode()
+                for fmt, is_stereo in ((cyal.BufferFormat.MONO16, False), (cyal.BufferFormat.STEREO16, True)):
+                    try:
+                        parent.voice_chat.audio_input = parent.voice_chat.capture_ext.open_device(name=device_encoded, sample_rate=48000, format=fmt)
+                        parent.voice_chat.stereo = is_stereo
+                        break
+                    except (cyal.exceptions.DeviceNotFoundError, TypeError):
+                        pass
+                
+                if not parent.voice_chat.audio_input:
                     speak(f"Failed to load audio device: {device}")
     func_call()
 

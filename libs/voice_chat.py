@@ -96,7 +96,7 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    PRE_BUFFER_FRAMES = 3       # Wait for 3 frames (60ms) before playing to ensure smooth audio without stutters
+    PRE_BUFFER_FRAMES = 1       # Fast 20ms pre-buffer for low-latency live speech
     MAX_BUFFER_FRAMES = 12      # Maximum frames in buffer (240ms) for network stability
     TARGET_BUFFER_FRAMES = 4    # Target buffer level (80ms latency)
     
@@ -308,9 +308,13 @@ class voice_chat_compression(threading.Thread):
                 
                 # === MEGAPHONE: Use Jitter Buffer for smooth playback ===
                 if channelID == consts.CHANNEL_MEGAPHONE:
+                    # Filter out network echo for local speaker (handled via direct zero-latency sidechain feed)
+                    local_name = getattr(getattr(gameplay, 'player', None), 'name', None)
+                    local_id = getattr(getattr(gameplay, 'player', None), 'id', None)
+                    if sender_id is not None and ((local_name and str(sender_id) == str(local_name)) or (local_id and str(sender_id) == str(local_id))):
+                        return
+
                     # Safety-net limiter before the mixer sums this sender with others.
-                    # threshold=0.5 leaves headroom for the equal-power sum at the mixer;
-                    # ratio=4.0 is moderate so individual voices aren't over-compressed.
                     limited_data = soft_limit_audio(bytes(data), threshold=0.5, ratio=4.0)
                     
                     # Single jitter buffer per sender — ensures all speakers play the same frame simultaneously
@@ -403,6 +407,45 @@ class voice_chat_compression(threading.Thread):
             if radio_source.state == cyal.SourceState.STOPPED or radio_source.state == cyal.SourceState.INITIAL: radio_source.play()
 
 
+def _feed_local_megaphone_direct(gameplay, raw_buf):
+    """Feed zero-latency local mic PCM directly to local Megaphone PA OpenAL sources."""
+    try:
+        if not (gameplay and hasattr(gameplay, 'megaphone') and gameplay.megaphone):
+            return
+        if not hasattr(gameplay.megaphone, 'get_megaphone_player_sources'):
+            return
+        local_id = getattr(getattr(gameplay, 'player', None), 'id', None) or getattr(getattr(gameplay, 'player', None), 'name', 'local')
+        sources = gameplay.megaphone.get_megaphone_player_sources(local_id)
+        if not sources:
+            return
+
+        # Ensure spatial gains are evaluated
+        if hasattr(gameplay.megaphone, 'update_megaphone_audio'):
+            try:
+                gameplay.megaphone.update_megaphone_audio()
+            except Exception:
+                pass
+
+        # Force local player's volume to instantly reach target volume to avoid fade-in delay
+        if hasattr(gameplay.megaphone, 'player_sources') and local_id in gameplay.megaphone.player_sources:
+            entry = gameplay.megaphone.player_sources[local_id]
+            for i in range(len(entry.get('currents_vol', []))):
+                if entry['currents_vol'][i] <= 0.05 and i < len(entry.get('targets_vol', [])):
+                    entry['currents_vol'][i] = entry['targets_vol'][i]
+
+        limited_data = soft_limit_audio(bytes(raw_buf), threshold=0.5, ratio=4.0)
+        for idx, src in enumerate(sources):
+            if src:
+                # Set gain directly just in case update_megaphone_audio hasn't run yet
+                if getattr(src, 'gain', 0.0) <= 0.05 and hasattr(gameplay.megaphone, 'player_sources') and local_id in gameplay.megaphone.player_sources:
+                    entry = gameplay.megaphone.player_sources[local_id]
+                    if idx < len(entry.get('targets_vol', [])):
+                        src.gain = entry['targets_vol'][idx]
+                _queue_packet_to_source(gameplay, idx, src, limited_data)
+    except Exception:
+        pass
+
+
 class VoiceChatRecord(threading.Thread):
     def __init__(self, game, player):
         super().__init__(daemon=True)
@@ -411,9 +454,18 @@ class VoiceChatRecord(threading.Thread):
         self.capture_ext = cyal.CaptureExtension()
         device = options.get("audio_input_device", 'system default')
         if device == 'system default': device = self.capture_ext.default_device.decode('utf-8')
-        try: self.audio_input = self.capture_ext.open_device(name=device.encode(), sample_rate=48000)
-        except (cyal.exceptions.DeviceNotFoundError, TypeError): 
-            self.audio_input = None
+        self.stereo = False
+        self.audio_input = None
+        device_encoded = device.encode()
+        for fmt, is_stereo in ((cyal.BufferFormat.MONO16, False), (cyal.BufferFormat.STEREO16, True)):
+            try:
+                self.audio_input = self.capture_ext.open_device(name=device_encoded, sample_rate=48000, format=fmt)
+                self.stereo = is_stereo
+                break
+            except (cyal.exceptions.DeviceNotFoundError, TypeError):
+                pass
+        
+        if not self.audio_input:
             speak(f"Failed to load audio device: {device}")
         self.vc_compression = voice_chat_compression(self.game)
         self.recording = False
@@ -422,15 +474,40 @@ class VoiceChatRecord(threading.Thread):
     
 
     def run(self):
+        accumulated_bytes = bytearray()
         while self.running:
             time.sleep(0.0005)
-            if not self.recording: continue
-            if self.audio_input is None or not options.get("microphone", True) or not options.get("voice_chat", True): continue
+            if not self.recording:
+                accumulated_bytes.clear()
+                continue
+            if self.audio_input is None or not options.get("microphone", True) or not options.get("voice_chat", True):
+                accumulated_bytes.clear()
+                continue
             samples = self.audio_input.available_samples
-            if samples >= 960:
-                buf = bytearray(960 * 2)
-                self.audio_input.capture_samples(buf)
+            if samples >= 480:  # 10ms ultra-fast hardware capture
+                is_stereo = getattr(self, 'stereo', False)
+                chunk = bytearray(samples * (4 if is_stereo else 2))
+                self.audio_input.capture_samples(chunk)
                 
+                if is_stereo:
+                    import numpy as np
+                    mono_arr = np.frombuffer(chunk, dtype=np.int16).reshape(-1, 2).mean(axis=1).astype(np.int16)
+                    chunk = bytearray(mono_arr.tobytes())
+                
+                # Resolve gameplay directly
+                gp = getattr(self.player, 'gameplay', None)
+                if gp is None and hasattr(self.game, 'stack'):
+                    for st in reversed(self.game.stack):
+                        if hasattr(st, 'player') and hasattr(st, 'megaphone'):
+                            gp = st
+                            break
+                
+                voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
+
+                # Feed local sidechain immediately with 10ms chunk for zero-latency response
+                if voice_using_mega and gp:
+                    _feed_local_megaphone_direct(gp, chunk)
+
                 # Check if Music Bot is streaming to Megaphone
                 music_bot = None
                 if hasattr(self.game, 'stack'):
@@ -438,16 +515,19 @@ class VoiceChatRecord(threading.Thread):
                         if hasattr(st, 'music_bot') and st.music_bot:
                             music_bot = st.music_bot
                             break
-                
-                gp = music_bot._find_gameplay() if music_bot else None
-                voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
 
-                if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone and voice_using_mega:
-                    if not hasattr(music_bot, 'mic_pcm_queue'):
-                        music_bot.mic_pcm_queue = collections.deque(maxlen=10)
-                    music_bot.mic_pcm_queue.append(bytes(buf))
-                else:
-                    self.vc_compression.put(buf)
+                # Accumulate for Opus encoder (requires 20ms / 1920 bytes)
+                accumulated_bytes.extend(chunk)
+                while len(accumulated_bytes) >= 1920:
+                    opus_buf = bytes(accumulated_bytes[:1920])
+                    accumulated_bytes = accumulated_bytes[1920:]
+
+                    if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone and voice_using_mega:
+                        if not hasattr(music_bot, 'mic_pcm_queue'):
+                            music_bot.mic_pcm_queue = collections.deque(maxlen=10)
+                        music_bot.mic_pcm_queue.append(opus_buf)
+                    else:
+                        self.vc_compression.put(opus_buf)
 
     def voice_chat_finish(self):
         self.voice_chat_finish2()
@@ -855,8 +935,11 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
             _speaker_current_delays[sender_id].append(frames_delay)
             
-            # Add jitter buffer margin (120ms = 6 frames) to prevent micro-stutters during network drops
-            JITTER_MARGIN_FRAMES = 6
+            # Add jitter buffer margin (20ms = 1 frame for remote senders, 0 for local)
+            local_name = getattr(getattr(gameplay, 'player', None), 'name', None)
+            local_id = getattr(getattr(gameplay, 'player', None), 'id', None)
+            is_local = sender_id is not None and ((local_name and str(sender_id) == str(local_name)) or (local_id and str(sender_id) == str(local_id)))
+            JITTER_MARGIN_FRAMES = 0 if is_local else 1
             
             # Instantly push silence frames to restore perfect spatial stagger and jitter margin
             target_active = frames_delay + JITTER_MARGIN_FRAMES
@@ -873,7 +956,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                         for fade_obj in gameplay.megaphone.fading_sources:
                             if fade_obj['sid'] == sender_id and idx < len(fade_obj['sources']):
                                 f_src = fade_obj['sources'][idx]
-                                if f_src and getattr(f_src, "is_valid", lambda: False)():
+                                if f_src:
                                     _queue_packet_to_source(gameplay, idx, f_src, silence_packet)
                     
     _speaker_last_calc_time[sender_id] = now
@@ -892,7 +975,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                 if elapsed <= fade_obj['fade_duration']:
                     t = elapsed / fade_obj['fade_duration']
                     for idx, f_src in enumerate(fade_obj['sources']):
-                        if f_src and getattr(f_src, "is_valid", lambda: False)():
+                        if f_src:
                             start_vol = fade_obj['start_vols'][idx] if idx < len(fade_obj['start_vols']) else 1.0
                             f_src.gain = max(0.0, start_vol * (1.0 - t))
                             _queue_packet_to_source(gameplay, idx, f_src, packet)
@@ -932,15 +1015,10 @@ def tick_megaphone_delay(gameplay):
                                         t = elapsed / fade_obj['fade_duration']
                                         if idx < len(fade_obj['sources']):
                                             f_src = fade_obj['sources'][idx]
-                                            if f_src and getattr(f_src, "is_valid", lambda: False)():
+                                            if f_src:
                                                 start_vol = fade_obj['start_vols'][idx] if idx < len(fade_obj['start_vols']) else 1.0
                                                 f_src.gain = max(0.0, start_vol * (1.0 - t))
                                                 _queue_packet_to_source(gameplay, idx, f_src, play_packet, force_concert_mode=fade_obj['is_concert'])
                         
                 if has_delayed_audio:
                     _last_play_times[sender_id] = current_time
-
-
-
-
-

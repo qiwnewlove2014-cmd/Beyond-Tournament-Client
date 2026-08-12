@@ -227,10 +227,20 @@ class AudioStreamer(threading.Thread):
                 # Wait for a packet, with timeout so we check self.running regularly
                 data = self.network_queue.get(timeout=0.1)
             except queue.Empty:
-                continue
+                data = None
 
-            # Do not leak pre-pause PCM into the next broadcast segment.
+            # Do not leak pre-pause PCM into the next broadcast segment unless live input is present.
             if self.paused:
+                data = None
+
+            if data is None:
+                if self.bot and getattr(self.bot, 'broadcast_enabled', False):
+                    has_guitar = bool(getattr(self.bot, 'guitar_pcm_queue', None) and len(self.bot.guitar_pcm_queue) > 0)
+                    has_mic = bool(getattr(self.bot, 'mic_pcm_queue', None) and len(self.bot.mic_pcm_queue) > 0)
+                    if has_guitar or has_mic:
+                        data = b'\x00' * 3840
+
+            if data is None:
                 continue
 
             # High-resolution time pacing
@@ -519,6 +529,88 @@ class AudioStreamer(threading.Thread):
                 pass
 
 
+class LiveRelayStreamer(threading.Thread):
+    """Stand-alone streaming thread for live instrument (guitar/mic) PCM when no MP3 audio is playing."""
+    def __init__(self, game, bot):
+        super().__init__(daemon=True)
+        self.game = game
+        self.bot = bot
+        self.running = True
+        from pyogg import OpusEncoder
+        self.encoder = OpusEncoder()
+        self.encoder.set_application('audio')
+        self.encoder.set_channels(1)  # Opus network stream is MONO
+        self.encoder.set_sampling_frequency(48000)
+        self.last_send_time = None
+
+    def stop(self):
+        self.running = False
+
+    def run(self):
+        import audioop
+        from . import consts
+        while self.running and self.bot and getattr(self.bot, 'broadcast_enabled', False):
+            # If main AudioStreamer MP3 thread is active, let it handle the network stream
+            if self.bot.streamer and self.bot.streamer.is_alive():
+                break
+
+            guitar_data = None
+            mic_data = None
+            try:
+                if getattr(self.bot, 'guitar_pcm_queue', None) and self.bot.guitar_pcm_queue:
+                    guitar_data = self.bot.guitar_pcm_queue.popleft()
+            except Exception:
+                pass
+            try:
+                if getattr(self.bot, 'mic_pcm_queue', None) and self.bot.mic_pcm_queue:
+                    mic_data = self.bot.mic_pcm_queue.popleft()
+            except Exception:
+                pass
+
+            if guitar_data is None and mic_data is None:
+                time.sleep(0.010)
+                continue
+
+            # Base silent mono PCM buffer (20ms at 48kHz = 960 samples * 2 bytes = 1920 bytes)
+            mono_data = b'\x00' * 1920
+            try:
+                def _align(b, length=1920):
+                    if len(b) > length:
+                        return b[:length]
+                    if len(b) < length:
+                        return b + b'\x00' * (length - len(b))
+                    return b
+
+                if guitar_data is not None:
+                    mono_data = audioop.add(mono_data, audioop.mul(_align(guitar_data), 2, 0.85), 2)
+                if mic_data is not None:
+                    mono_data = audioop.add(mono_data, audioop.mul(_align(mic_data), 2, 0.85), 2)
+
+                current_volume_scale = (self.bot.volume / 100.0) * getattr(self.bot, 'duck_multiplier', 1.0)
+                if current_volume_scale != 1.0:
+                    mono_data = audioop.mul(mono_data, 2, current_volume_scale)
+
+                target_channel = consts.CHANNEL_MEGAPHONE if self.bot.broadcast_to_megaphone else consts.CHANNEL_MUSICBOT
+
+                # Rate-limit to 20ms pacing
+                now = time.perf_counter()
+                if self.last_send_time is not None:
+                    elapsed = now - self.last_send_time
+                    if elapsed < 0.020:
+                        sleep_time = 0.020 - elapsed
+                        if sleep_time > 0.001:
+                            time.sleep(sleep_time - 0.001)
+                        while time.perf_counter() - self.last_send_time < 0.020:
+                            pass
+                self.last_send_time = time.perf_counter()
+
+                encoded = self.encoder.encode(bytearray(mono_data))
+                if self.game and self.game.network:
+                    self.game.network.send(target_channel, "n/a", encoded, reliable=False)
+            except Exception:
+                time.sleep(0.010)
+
+
 class MapMusicBot:
     """Music Bot — searches YouTube and streams audio in real-time.
     Falls back to local files when YouTube is unavailable.
@@ -543,6 +635,7 @@ class MapMusicBot:
 
         # YouTube streamer thread
         self.streamer = None
+        self.live_relay_streamer = None
 
         # Main-thread playback generation. Background URL resolution captures a
         # generation but may never create audio after a newer play or Stop.
@@ -1638,6 +1731,9 @@ class MapMusicBot:
         # LERP towards target (10% step per frame ~300ms transition)
         self.duck_multiplier += (target_duck - self.duck_multiplier) * 0.1
         
+        # Ensure live instrument / mic relay streamer is active if needed
+        self._ensure_live_relay_streamer()
+
         # Apply updated gain to local stream source
         if self.stream_source and (self.playing or self.paused):
             try:
@@ -1666,6 +1762,28 @@ class MapMusicBot:
             self.mode = "idle"
             if not self._advance_track_queue():
                 speak("Track finished.")
+
+    def _ensure_live_relay_streamer(self):
+        """Ensure background live relay thread runs when broadcast is enabled and live input exists without an active MP3 stream."""
+        if not self.broadcast_enabled:
+            if getattr(self, 'live_relay_streamer', None):
+                self.live_relay_streamer.stop()
+                self.live_relay_streamer = None
+            return
+
+        if self.streamer and self.streamer.is_alive():
+            if getattr(self, 'live_relay_streamer', None):
+                self.live_relay_streamer.stop()
+                self.live_relay_streamer = None
+            return
+
+        has_guitar = bool(getattr(self, 'guitar_pcm_queue', None) and len(self.guitar_pcm_queue) > 0)
+        has_mic = bool(getattr(self, 'mic_pcm_queue', None) and len(self.mic_pcm_queue) > 0)
+
+        if has_guitar or has_mic:
+            if getattr(self, 'live_relay_streamer', None) is None or not self.live_relay_streamer.is_alive():
+                self.live_relay_streamer = LiveRelayStreamer(self.game, bot=self)
+                self.live_relay_streamer.start()
 
     def _sync_map_reverb(self):
         """Apply the map's reverb at the player's position to the music source.
@@ -1704,6 +1822,9 @@ class MapMusicBot:
 
     def destroy(self):
         self.stop()
+        if getattr(self, 'live_relay_streamer', None):
+            self.live_relay_streamer.stop()
+            self.live_relay_streamer = None
         try:
             self.soundgroup.destroy()
         except Exception:

@@ -184,7 +184,22 @@ class InstrumentInput(threading.Thread):
                     raw = bytes(buf)
                     buf16 = buf
                 self.frames.append(raw)  # raw monitor stream (strums/chords)
-                self._feed_guitar_voice(buf16)
+                
+                # Check for Megaphone routing
+                gp = None
+                if hasattr(self.game, 'stack'):
+                    for st in reversed(self.game.stack):
+                        if hasattr(st, 'player') and hasattr(st, 'megaphone'):
+                            gp = st
+                            break
+                voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
+
+                if voice_using_mega and gp:
+                    from . import voice_chat
+                    if hasattr(voice_chat, '_feed_local_megaphone_direct'):
+                        voice_chat._feed_local_megaphone_direct(gp, buf16)
+
+                self._feed_guitar_voice(buf16, force_mega=voice_using_mega)
                 frame = np.frombuffer(buf16, dtype=np.int16).astype(np.float32) / 32768.0
                 result = self.tracker.feed(frame)
                 if result is not None:
