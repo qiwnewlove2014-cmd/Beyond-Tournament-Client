@@ -194,7 +194,22 @@ class InstrumentInput(threading.Thread):
                             break
                 voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
 
-                if voice_using_mega and gp:
+                # Route the raw guitar audio into the music bot broadcast, but
+                # only while the music bot broadcast is enabled (the condition
+                # the performer asked for): the streamer mixes it in and sends
+                # it out 3D (music bot channel) or via the megaphone.
+                music_bot = self._find_music_bot()
+                route_to_bot = bool(music_bot and getattr(music_bot, "broadcast_enabled", False))
+                if route_to_bot:
+                    if not hasattr(music_bot, "guitar_pcm_queue"):
+                        music_bot.guitar_pcm_queue = collections.deque(maxlen=10)
+                    music_bot.guitar_pcm_queue.append(raw)
+
+                # Feed the raw guitar into the local PA sidechain only when it is
+                # NOT being mixed into the music bot broadcast (the streamer feeds
+                # the full mix locally itself) - otherwise the guitarist hears
+                # their own strum twice through the speakers.
+                if voice_using_mega and gp and not route_to_bot:
                     from . import voice_chat
                     if hasattr(voice_chat, '_feed_local_megaphone_direct'):
                         voice_chat._feed_local_megaphone_direct(gp, buf16)
@@ -204,16 +219,6 @@ class InstrumentInput(threading.Thread):
                 result = self.tracker.feed(frame)
                 if result is not None:
                     self.notes.append(result)
-
-                # Route the raw guitar audio into the music bot broadcast, but
-                # only while the music bot broadcast is enabled (the condition
-                # the performer asked for): the streamer mixes it in and sends
-                # it out 3D (music bot channel) or via the megaphone.
-                music_bot = self._find_music_bot()
-                if music_bot and getattr(music_bot, "broadcast_enabled", False):
-                    if not hasattr(music_bot, "guitar_pcm_queue"):
-                        music_bot.guitar_pcm_queue = collections.deque(maxlen=10)
-                    music_bot.guitar_pcm_queue.append(raw)
 
     def _feed_guitar_voice(self, raw, force_mega=False):
         """Stream the raw guitar audio out on the normal 3D voice channel.

@@ -2366,6 +2366,21 @@ class Gameplay(state.State):
             logger.log("PA Test Mode activated.")
             key_name = string_utils.friendly_key_name(self.kc.get("voice_chat", pygame.K_g)).upper()
             speak(f"System: PA Test Mode activated. Press {key_name} to test speakers.")
+            # PA Test Mode ON also routes a broadcasting music bot through the PA
+            # speakers, so the performer's music follows the O key both ways:
+            # O on -> music through the PA, O off -> back to the normal channel.
+            music_bot = getattr(self, 'music_bot', None)
+            if music_bot and getattr(music_bot, 'broadcast_enabled', False) and not getattr(music_bot, 'broadcast_to_megaphone', False):
+                music_bot.broadcast_to_megaphone = True
+                try:
+                    self.game.network.send(
+                        consts.CHANNEL_MISC,
+                        "megaphone_broadcast_lock",
+                        {"locked": True}
+                    )
+                except Exception:
+                    pass
+                speak("Music bot routed to the megaphone.")
         else:
             from libs import logger
             logger.log("PA Test Mode deactivated.")
@@ -2375,6 +2390,22 @@ class Gameplay(state.State):
                 if not hasattr(self, '_default_vc_compression'):
                     self._default_vc_compression = voice_chat.voice_chat_compression(self.game, consts.CHANNEL_VOICECHAT)
                 self.voice_chat.vc_compression = self._default_vc_compression
+            # The music bot's megaphone routing is an independent toggle; turning
+            # PA Test Mode off must revert it to the normal 3D channel, otherwise
+            # the music keeps blasting through the PA speakers when the player
+            # expects it to go back to the regular channel.
+            music_bot = getattr(self, 'music_bot', None)
+            if music_bot and getattr(music_bot, 'broadcast_to_megaphone', False):
+                music_bot.broadcast_to_megaphone = False
+                try:
+                    self.game.network.send(
+                        consts.CHANNEL_MISC,
+                        "megaphone_broadcast_lock",
+                        {"locked": False}
+                    )
+                except Exception:
+                    pass
+                speak("Music bot switched back to the normal channel.")
     
     
     def toggle_sonar_and_force_quit(self, mod):
@@ -2629,9 +2660,12 @@ class Gameplay(state.State):
                 self._default_vc_compression = voice_chat.voice_chat_compression(self.game, consts.CHANNEL_VOICECHAT)
             self.voice_chat.vc_compression = self._default_vc_compression
 
+        # Set the megaphone flag BEFORE recording starts so the mic capture
+        # thread reads the correct routing from its very first chunk (otherwise
+        # the first ~20ms of a PA session would leak onto the normal channel).
+        self.voice_chat_using_megaphone = use_megaphone
         self.voice_chat.audio_input.start()
         self.voice_chat.recording = True
-        self.voice_chat_using_megaphone = use_megaphone
         self.game.direct_soundgroup.play("ui/voxon.ogg", volume=20)
 
     def voice_chat_stop(self, mod):

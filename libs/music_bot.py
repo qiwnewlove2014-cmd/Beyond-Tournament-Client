@@ -327,6 +327,21 @@ class AudioStreamer(threading.Thread):
                 except Exception:
                     pass
 
+            # When routing through the megaphone, feed the mixed stream into the
+            # local PA sidechain (main thread) so the broadcaster hears their own
+            # music/instruments through the speakers with zero latency - the server
+            # no longer echoes the broadcast back to the sender.
+            if self.bot and self.bot.broadcast_to_megaphone:
+                try:
+                    gp = self.bot._find_gameplay()
+                    if gp is not None:
+                        from . import voice_chat
+                        if hasattr(voice_chat, '_feed_local_megaphone_direct'):
+                            local_pcm = bytes(mono_data)
+                            self.game.put(lambda: voice_chat._feed_local_megaphone_direct(gp, local_pcm))
+                except Exception:
+                    pass
+
             encoded = self.encoder.encode(bytearray(mono_data))
             self.game.network.send(target_channel, "n/a", encoded, reliable=False)
         except Exception:
@@ -591,6 +606,19 @@ class LiveRelayStreamer(threading.Thread):
                     mono_data = audioop.mul(mono_data, 2, current_volume_scale)
 
                 target_channel = consts.CHANNEL_MEGAPHONE if self.bot.broadcast_to_megaphone else consts.CHANNEL_MUSICBOT
+
+                # Local zero-latency PA monitoring (the server no longer echoes
+                # the megaphone broadcast back to the sender).
+                if self.bot.broadcast_to_megaphone:
+                    try:
+                        gp = self.bot._find_gameplay()
+                        if gp is not None:
+                            from . import voice_chat
+                            if hasattr(voice_chat, '_feed_local_megaphone_direct'):
+                                local_pcm = bytes(mono_data)
+                                self.game.put(lambda: voice_chat._feed_local_megaphone_direct(gp, local_pcm))
+                    except Exception:
+                        pass
 
                 # Rate-limit to 20ms pacing
                 now = time.perf_counter()

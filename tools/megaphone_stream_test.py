@@ -35,7 +35,7 @@ CHANNEL_MISC = 0
 CHANNEL_MAP = 4
 CHANNEL_PING = 5
 CHANNEL_MEGAPHONE = 30
-CLIENT_VERSION = "BT-1.7.0"
+CLIENT_VERSION = "BT-1.7.2"
 PASSWORD = "loadtest-pass"
 SR = 48000
 
@@ -85,7 +85,7 @@ def register(host, port, username):
                 data = json.loads(ev.packet.data)
             except Exception:
                 continue
-            if data.get("event") in ("create", "create_success", "login"):
+            if data.get("event") in ("create", "create_success", "create_done", "login"):
                 done = True
     net.flush()
     time.sleep(0.2)

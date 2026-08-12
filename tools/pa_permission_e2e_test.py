@@ -20,7 +20,7 @@ import time
 import enet
 
 CHANNEL_MISC = 0
-CLIENT_VERSION = "BT-1.7.0"
+CLIENT_VERSION = "BT-1.7.2"
 PASSWORD = "loadtest-pass"
 
 

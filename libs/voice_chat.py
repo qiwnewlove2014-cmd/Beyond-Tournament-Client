@@ -96,7 +96,7 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    PRE_BUFFER_FRAMES = 1       # Fast 20ms pre-buffer for low-latency live speech
+    PRE_BUFFER_FRAMES = 3       # Wait for 3 frames (60ms) before playing to ensure smooth audio without stutters
     MAX_BUFFER_FRAMES = 12      # Maximum frames in buffer (240ms) for network stability
     TARGET_BUFFER_FRAMES = 4    # Target buffer level (80ms latency)
     
@@ -504,10 +504,6 @@ class VoiceChatRecord(threading.Thread):
                 
                 voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
 
-                # Feed local sidechain immediately with 10ms chunk for zero-latency response
-                if voice_using_mega and gp:
-                    _feed_local_megaphone_direct(gp, chunk)
-
                 # Check if Music Bot is streaming to Megaphone
                 music_bot = None
                 if hasattr(self.game, 'stack'):
@@ -516,13 +512,32 @@ class VoiceChatRecord(threading.Thread):
                             music_bot = st.music_bot
                             break
 
+                # When the mic is routed into the music bot's broadcast mix, the
+                # mixed stream is fed to the local PA sidechain by the streamer
+                # (zero latency). Feeding the raw mic here as well would double
+                # the broadcaster's own voice through the speakers.
+                # Voice is only mixed into the music bot broadcast when the
+                # megaphone is ACTUALLY in use (PA Test Mode or the megaphone
+                # weapon): otherwise a music bot broadcasting to the PA would
+                # hijack the performer's normal voice chat and blast it through
+                # the speakers too.
+                route_to_bot = bool(
+                    music_bot and music_bot.playing
+                    and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone
+                    and voice_using_mega
+                )
+
+                # Feed local sidechain immediately with 10ms chunk for zero-latency response
+                if voice_using_mega and gp and not route_to_bot:
+                    _feed_local_megaphone_direct(gp, chunk)
+
                 # Accumulate for Opus encoder (requires 20ms / 1920 bytes)
                 accumulated_bytes.extend(chunk)
                 while len(accumulated_bytes) >= 1920:
                     chunk_bytes = accumulated_bytes[:1920]
                     accumulated_bytes = accumulated_bytes[1920:]
 
-                    if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone:
+                    if route_to_bot:
                         if not hasattr(music_bot, 'mic_pcm_queue'):
                             music_bot.mic_pcm_queue = collections.deque(maxlen=10)
                         music_bot.mic_pcm_queue.append(bytes(chunk_bytes))
@@ -551,17 +566,30 @@ class VoiceChatRecord(threading.Thread):
                 if hasattr(st, 'music_bot') and st.music_bot:
                     music_bot = st.music_bot
                     break
-        
-        gp = music_bot._find_gameplay() if music_bot else None
-        voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
 
-        if music_bot and music_bot.playing and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone:
+        # Voice is mixed into the music bot broadcast only when this recording
+        # session actually used the megaphone channel - otherwise a music bot
+        # broadcasting to the PA would hijack normal voice chat. The compression
+        # channel is the reliable per-session truth (PA Test Mode / megaphone
+        # weapon = 30, normal = 20).
+        route_to_bot = bool(
+            music_bot and music_bot.playing
+            and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone
+            and getattr(self.vc_compression, 'channel', None) == consts.CHANNEL_MEGAPHONE
+        )
+
+        if route_to_bot:
             if not hasattr(music_bot, 'mic_pcm_queue'):
                 music_bot.mic_pcm_queue = collections.deque(maxlen=10)
             music_bot.mic_pcm_queue.append(bytes(buf))
         else:
-            from . import consts
-            target_channel = consts.CHANNEL_MEGAPHONE if voice_using_mega else consts.CHANNEL_VOICECHAT
+            # Send the tail chunk on the same channel this recording session used
+            # (the compression's channel is already set to it by run()). Re-deriving
+            # it from the music bot / voice_chat_using_megaphone here is wrong: by
+            # the time finish2 runs (40ms after stop) the megaphone flag is already
+            # reset to False, so the last 20ms would leak onto CHANNEL_VOICECHAT and
+            # the megaphone compression would be permanently re-pointed at it.
+            target_channel = getattr(self.vc_compression, 'channel', None) or consts.CHANNEL_VOICECHAT
             if getattr(self.vc_compression, 'channel', None) != target_channel:
                 if hasattr(self.vc_compression, 'set_channel'):
                     self.vc_compression.set_channel(target_channel)
@@ -949,11 +977,11 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
             _speaker_current_delays[sender_id].append(frames_delay)
             
-            # Add jitter buffer margin (20ms = 1 frame for remote senders, 0 for local)
-            local_name = getattr(getattr(gameplay, 'player', None), 'name', None)
-            local_id = getattr(getattr(gameplay, 'player', None), 'id', None)
-            is_local = sender_id is not None and ((local_name and str(sender_id) == str(local_name)) or (local_id and str(sender_id) == str(local_id)))
-            JITTER_MARGIN_FRAMES = 0 if is_local else 1
+            # Add jitter buffer margin (120ms = 6 frames) to prevent micro-stutters
+            # during network drops.  A tiny margin (1 frame / 20ms, introduced by
+            # an earlier change) makes the PA audio break/crackle as soon as the
+            # network jitter exceeds 20ms.
+            JITTER_MARGIN_FRAMES = 6
             
             # Instantly push silence frames to restore perfect spatial stagger and jitter margin
             target_active = frames_delay + JITTER_MARGIN_FRAMES
