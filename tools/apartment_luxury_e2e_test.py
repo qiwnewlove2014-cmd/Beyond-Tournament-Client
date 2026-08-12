@@ -76,8 +76,9 @@ def login_and_probe(host, port):
     entity_kinds = Counter()
     deadline = time.time() + 45
 
-    waypoints = [(50, 35, 0), (50, 8, 0), (25, 8, 0), (75, 8, 0), (50, 27, 0), (50, 50, 30)]
+    waypoints = [(50, 35, 0), (50, 8, 0), (25, 8, 0), (75, 8, 0), (50, 27, 0), (50, 50, 30), (81, 18, 0), (81, 20, 1)]
     # lobby -> pool (50,8) -> beach (25,8) -> canal (75,8) -> fountain (50,27) -> sky garden (z=30)
+    # -> cafeteria (81,18) + hop onto a table top (81,20) at z=1
 
     changed = False
     connected = False
