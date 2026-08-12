@@ -4,6 +4,26 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.7.2] Voice Chat, Megaphone Routing & Hotfixes — 2026-08-12
+--------------------------------------------------------------------------------
+
+• Voice Chat & Megaphone Routing
+- **Zero-Latency Megaphone Feedback:** Speaking into the PA/Megaphone system now routes your voice locally with absolute zero latency. You no longer have to wait for the network jitter buffer to hear your own voice, ensuring it instantly matches the responsiveness of playable instruments.
+- **Instrument Megaphone Broadcasting:** External instrument input (Guitar/Bass line-in) now seamlessly routes through the Megaphone speakers at zero latency whenever you have the Megaphone active, making live stage performances and announcements much easier to manage.
+- **Stereo Microphone Fallback:** The voice chat input device menu now fully supports Microphone Arrays and USB stereo microphones. Input devices that strictly require stereo capture will automatically fall back to stereo and be mixed down to mono in real time, preventing silent or failed microphone connections.
+
+• Multi-Speaker Megaphone
+- **Several People Can Talk at Once:** The megaphone is no longer limited to one speaker at a time. Multiple staff members, PA Test Mode users, and megaphone holders can broadcast through the PA simultaneously - the client sums every active speaker with equal-power mixing (1/√N), so talking together no longer clips or drops anyone's voice.
+- **Voice Never Hijacks the PA:** The megaphone broadcast owner slot is reserved for the Music Bot only, so talking while someone is performing never yanks piano/drum PA routing away from them.
+
+• Bug Fixes & Stability
+- **Megaphone Voice Drop Fix:** Fixed a critical bug where the voice chat encoder would silently drop audio packets when speaking into the Megaphone, resulting in silent broadcasts.
+- **No More Crackling PA Audio:** Restored the megaphone jitter buffer margins (60ms pre-buffer + 120ms margin) that had been cut down to 20ms, which made the PA audio break/crackle as soon as the network jitter exceeded 20ms.
+- **Portable Announcements Restored:** Fixed an issue where the Music Bot's portable broadcast feature unintentionally muted microphones. Staff can once again make portable voice announcements anywhere on the map via the Music Bot menu.
+- **Local PA Echo Fix:** Fixed a bug where performers playing the Piano or Drumset via the Megaphone could not hear their own instruments echoing out of the PA speakers around them. Local performers now hear exactly what the audience hears.
+- **No More Doubled Music for the DJ:** The server no longer echoes a Music Bot broadcast back to its own performer, so the DJ no longer hears their music twice through comb filtering.
+
+--------------------------------------------------------------------------------
 [v1.7.1] Voice Chat & Megaphone Routing — 2026-08-12
 --------------------------------------------------------------------------------
 
