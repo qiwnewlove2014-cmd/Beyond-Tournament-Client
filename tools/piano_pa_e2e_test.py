@@ -1,8 +1,9 @@
 """E2E: piano/drums reach other players + via_megaphone when the megaphone
 broadcast lock is held ("Broadcast to Megaphone: ON" in the music bot).
 
-Also verifies the lock stays alive while the performer plays (piano events
-refresh the lock idle timestamp), then auto-releases after ~3s of silence.
+Also verifies the lock stays alive while the performer plays and that it is
+state-based: it is only released when the owner toggles it OFF (no idle
+timeout, so pausing to ESC/adjust volume does not revoke PA routing).
 
 Usage:
     python piano_pa_e2e_test.py --host 127.0.0.1 --port 13000
@@ -109,8 +110,8 @@ def main():
     netA.flush()
     time.sleep(0.4)
 
-    # A plays piano notes for ~4.5s (longer than the 3s idle timeout) - the
-    # lock must stay alive because piano events refresh the lock timestamp.
+    # A plays piano notes for ~4.5s - the lock must stay alive throughout
+    # the whole performance (piano events keep it refreshed).
     print("[test] A plays piano for 4.5s with broadcast lock ON")
     notes = ["C4", "E4", "G4", "C5", "D4", "F4", "A4", "B4"]
 
@@ -141,14 +142,27 @@ def main():
     print(f"[test] lock held after piano session: {lock_held_during} "
           f"(states so far: {lock_states})")
 
-    # A stops playing entirely; the lock must auto-release after ~3s.
-    print("[test] waiting 4s for idle timeout")
+    # A stops playing entirely. The lock is state-based (no idle timeout):
+    # it must STAY held after a pause so a performer who enables "Broadcast
+    # to Megaphone" and briefly stops (ESC out, adjust volume) keeps their
+    # PA routing - it is only released when A explicitly toggles it OFF.
+    print("[test] waiting 4s (lock must stay held during idle)")
     time.sleep(4.0)
-    lock_released = bool(lock_states) and lock_states[-1] is None
+    lock_held_after_idle = bool(lock_states) and lock_states[-1] == "meg_lock_a"
     print(f"[test] lock states: {lock_states}")
-    print(f"[test] lock auto-released after idle -> {'PASS' if lock_released else 'FAIL'}")
+    print(f"[test] lock still held after idle -> {'PASS' if lock_held_after_idle else 'FAIL'}")
 
-    all_ok = via_ok and lock_held_during and lock_released
+    # A explicitly turns "Broadcast to Megaphone" OFF -> lock releases.
+    peerA.send(CHANNEL_MISC, _pkt(json.dumps({
+        "event": "megaphone_broadcast_lock",
+        "data": {"locked": False},
+    }).encode()))
+    netA.flush()
+    time.sleep(0.4)
+    lock_released = bool(lock_states) and lock_states[-1] is None
+    print(f"[test] lock released after OFF -> {'PASS' if lock_released else 'FAIL'}")
+
+    all_ok = via_ok and lock_held_during and lock_held_after_idle and lock_released
     print("RESULT:", "PASS" if all_ok else "FAIL")
 
     try:
