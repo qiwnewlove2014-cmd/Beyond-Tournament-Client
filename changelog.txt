@@ -15,6 +15,7 @@
 • Multi-Speaker Megaphone
 - **Several People Can Talk at Once:** The megaphone is no longer limited to one speaker at a time. Multiple staff members, PA Test Mode users, and megaphone holders can broadcast through the PA simultaneously - the client sums every active speaker with equal-power mixing (1/√N), so talking together no longer clips or drops anyone's voice.
 - **Voice Never Hijacks the PA:** The megaphone broadcast owner slot is reserved for the Music Bot only, so talking while someone is performing never yanks piano/drum PA routing away from them.
+- **Guitar Notes Join the PA Jam Session:** Guitar/Bass notes now follow the same rule as Piano and Drumset - they route through the PA whenever the performer is actively using the megaphone (talked on it within the last 1.5s) or holds the Music Bot broadcast slot. Multiple guitarists can now perform through the PA at the same time instead of being limited to the single owner slot.
 
 • Bug Fixes & Stability
 - **Megaphone Voice Drop Fix:** Fixed a critical bug where the voice chat encoder would silently drop audio packets when speaking into the Megaphone, resulting in silent broadcasts.
