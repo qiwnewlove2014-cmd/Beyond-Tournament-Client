@@ -23,6 +23,7 @@
 - **Portable Announcements Restored:** Fixed an issue where the Music Bot's portable broadcast feature unintentionally muted microphones. Staff can once again make portable voice announcements anywhere on the map via the Music Bot menu.
 - **Local PA Echo Fix:** Fixed a bug where performers playing the Piano or Drumset via the Megaphone could not hear their own instruments echoing out of the PA speakers around them. Local performers now hear exactly what the audience hears.
 - **No More Doubled Music for the DJ:** The server no longer echoes a Music Bot broadcast back to its own performer, so the DJ no longer hears their music twice through comb filtering.
+- **O Key No Longer Forces Megaphone Routing:** Pressing O (PA Test Mode) previously auto-routed a broadcasting Music Bot to the PA and acquired the megaphone lock, even when the performer never enabled "Broadcast to Megaphone: ON". The O key now controls PA Test Mode (voice) only - "Broadcast to Megaphone" is an independent toggle owned by the Music Bot menu and is never forced ON or OFF by the O key.
 
 --------------------------------------------------------------------------------
 [v1.7.1] Voice Chat & Megaphone Routing — 2026-08-12
