@@ -76,9 +76,11 @@ def login_and_probe(host, port):
     entity_kinds = Counter()
     deadline = time.time() + 45
 
-    waypoints = [(50, 35, 0), (50, 15, 0), (15, 50, 0), (85, 50, 0), (50, 50, 0), (50, 50, 30)]
+    waypoints = [(50, 35, 0), (50, 8, 0), (25, 8, 0), (75, 8, 0), (50, 27, 0), (50, 50, 30)]
+    # lobby -> pool (50,8) -> beach (25,8) -> canal (75,8) -> fountain (50,27) -> sky garden (z=30)
 
     changed = False
+    connected = False
     while time.time() < deadline:
         ev = net.service(10)
         if ev.type == enet.EVENT_TYPE_CONNECT and not sent:
@@ -96,6 +98,8 @@ def login_and_probe(host, port):
             if not isinstance(data, dict):
                 continue
             evt = data.get("event")
+            if evt == "connected":
+                connected = True
             if evt == "spawn_entity":
                 ed = data.get("data", {}) or {}
                 name = str(ed.get("name") or ed.get("entity_name") or "")
@@ -131,8 +135,8 @@ def login_and_probe(host, port):
             elif evt == "speak" or evt == "chat":
                 chat_seen = True
 
-            # After first map arrives, request the luxury map (builder only)
-            if map_data is not None and not changed:
+            # After login completes and the first map arrives, request the luxury map
+            if connected and map_data is not None and not changed:
                 peer.send(consts.CHANNEL_MAP, _pkt({
                     "event": "change_map",
                     "data": {"value": "Apartment_Luxury"},
@@ -196,7 +200,7 @@ def main():
     ok = True
 
     required = ["platform", "zone", "reverb", "minigameTable",
-                "megaphoneSpeaker", "travel_point"]
+                "megaphoneSpeaker", "travel_point", "ambience", "soundSource", "music"]
     for r in required:
         if counts.get(r, 0) < 1:
             print(f"FAIL - missing element type: {r} (have {counts.get(r, 0)})")
