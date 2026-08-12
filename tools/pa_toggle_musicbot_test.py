@@ -1,6 +1,7 @@
-"""In-process test: O key toggle (PA Test Mode) must route a broadcasting
-music bot to the megaphone when PA turns ON and back to the normal channel
-when PA turns OFF (and release/acquire the megaphone lock accordingly).
+"""In-process test: the O key (PA Test Mode) must NOT route a broadcasting
+music bot to the megaphone. "Broadcast to Megaphone" is an independent
+toggle inside the Music Bot menu that the performer turns ON/OFF themselves
+- pressing O must not silently force it ON (or OFF).
 """
 import os
 import sys
@@ -63,38 +64,36 @@ def main():
     assert gp.music_bot.broadcast_to_megaphone is False
     assert gp.music_bot.broadcast_enabled is True
 
-    # --- press O (ON): PA on, music -> megaphone, lock acquired ---
+    # --- press O (ON): PA on, but music bot routing untouched ---
     gp._finish_pa_toggle()
     assert gp.pa_test_mode is True, "PA should be ON"
-    assert gp.music_bot.broadcast_to_megaphone is True, "music should route to megaphone"
-    assert (consts.CHANNEL_MISC, "megaphone_broadcast_lock", {"locked": True}) in gp.game.network.sent, \
-        "lock acquire should be sent"
-    print("PASS 1: O ON -> PA on + music routed to megaphone + lock acquired")
+    assert gp.music_bot.broadcast_to_megaphone is False, \
+        "O must NOT force broadcast_to_megaphone ON"
+    assert not any(ev == ("megaphone_broadcast_lock",) and d.get("locked") is True
+                   for _, ev, d in gp.game.network.sent if isinstance(d, dict)), \
+        "O ON must not acquire the megaphone lock on behalf of the music bot"
+    print("PASS 1: O ON -> PA on, music bot routing untouched (no forced megaphone)")
 
-    # --- press O again while still broadcasting (OFF): back to normal channel ---
+    # --- press O again (OFF): PA off, music bot still untouched ---
     gp._finish_pa_toggle()
     assert gp.pa_test_mode is False, "PA should be OFF"
-    assert gp.music_bot.broadcast_to_megaphone is False, "music should go back to normal channel"
-    assert (consts.CHANNEL_MISC, "megaphone_broadcast_lock", {"locked": False}) in gp.game.network.sent, \
-        "lock release should be sent"
-    print("PASS 2: O OFF -> PA off + music back to normal channel + lock released")
+    assert gp.music_bot.broadcast_to_megaphone is False, \
+        "O OFF must not touch broadcast_to_megaphone"
+    print("PASS 2: O OFF -> PA off, music bot routing still untouched")
 
-    # --- press O again (ON) but music bot NOT broadcasting -> no routing change ---
-    gp.music_bot.broadcast_enabled = False
-    gp.music_bot.broadcast_to_megaphone = False
+    # --- O must also not turn OFF a megaphone routing the performer set ---
+    gp.music_bot.broadcast_to_megaphone = True  # performer enabled it in the menu
     gp._finish_pa_toggle()
     assert gp.pa_test_mode is True
-    assert gp.music_bot.broadcast_to_megaphone is False, "non-broadcasting bot must not be routed"
-    print("PASS 3: O ON with broadcast disabled -> PA on but music untouched")
-
-    # --- O OFF with bot that was NOT routed -> no spurious lock release beyond state ---
-    gp.music_bot.broadcast_enabled = True
+    assert gp.music_bot.broadcast_to_megaphone is True, \
+        "O ON must not revoke a megaphone routing set by the performer"
     gp._finish_pa_toggle()
     assert gp.pa_test_mode is False
-    assert gp.music_bot.broadcast_to_megaphone is False
-    print("PASS 4: O OFF with clean bot -> stays on normal channel")
+    assert gp.music_bot.broadcast_to_megaphone is True, \
+        "O OFF must not revoke a megaphone routing set by the performer"
+    print("PASS 3: O toggling never touches a performer-set megaphone routing")
 
-    print("ALL PASS: O key toggles music bot routing both ways correctly")
+    print("ALL PASS: O key controls PA Test Mode only; music bot routing is menu-only")
 
 if __name__ == "__main__":
     main()
