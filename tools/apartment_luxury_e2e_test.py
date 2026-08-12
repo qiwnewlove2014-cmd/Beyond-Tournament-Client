@@ -77,13 +77,15 @@ def login_and_probe(host, port):
     deadline = time.time() + 45
 
     waypoints = [(50, 35, 0), (50, 8, 0), (25, 8, 0), (75, 8, 0), (50, 27, 0),
-                 (33, 33, 30), (67, 67, 30), (50, 50, 31),   # roof via NW/SE stair poles + sky garden
-                 (10, 38, 10), (15, 50, 10),                  # townhouse L roof via pole
-                 (92, 62, 10), (85, 50, 10),                  # townhouse R roof via pole
-                 (81, 18, 0), (81, 20, 1)]                     # cafeteria + table top z=1
+                 (34, 34, 5), (41, 34, 10), (34, 34, 15), (41, 34, 20),   # NW stairs: landing1 -> f1 -> landing2 -> f2
+                 (34, 34, 25), (41, 34, 30), (50, 50, 31),               # NW landing3 -> roof -> sky garden
+                 (10, 38, 5), (14, 38, 10), (15, 50, 10),                # townhouse L stairs -> roof
+                 (92, 62, 5), (88, 62, 10), (85, 50, 10),                # townhouse R stairs -> roof
+                 (81, 18, 0), (81, 20, 1)]                                # cafeteria + table top z=1
 
     changed = False
     connected = False
+    last_change_send = 0.0
     while time.time() < deadline:
         ev = net.service(10)
         if ev.type == enet.EVENT_TYPE_CONNECT and not sent:
@@ -138,19 +140,29 @@ def login_and_probe(host, port):
             elif evt == "speak" or evt == "chat":
                 chat_seen = True
 
-            # After login completes and the first map arrives, request the luxury map
+            # After login completes and the first map arrives, request the luxury map.
+            # Re-send every 4s until it actually switches (drop-prone on fresh sessions).
             if connected and map_data is not None and not changed:
                 peer.send(consts.CHANNEL_MAP, _pkt({
                     "event": "change_map",
                     "data": {"value": "Apartment_Luxury"},
                 }))
                 changed = True
+                last_change_send = time.time()
                 print("[map] requested change_map to Apartment_Luxury")
                 # wait for the luxury parse_map (speakers at map corners 5/50/95)
                 map_data = None
                 element_counts = Counter()
                 speaker_positions = []
                 travel_points = []
+                continue
+            elif changed and time.time() - last_change_send >= 4.0:
+                last_change_send = time.time()
+                peer.send(consts.CHANNEL_MAP, _pkt({
+                    "event": "change_map",
+                    "data": {"value": "Apartment_Luxury"},
+                }))
+                print("[map] re-sent change_map")
                 continue
 
             # Luxury map confirmed: speakers must sit at the map corners (5/95)
