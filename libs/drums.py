@@ -309,16 +309,51 @@ class DrumAudio:
             return []
         music_bot = getattr(gameplay, "music_bot", None)
         bot_volume = max(0.1, getattr(music_bot, "volume", 50) / 100.0) * 0.5
+        # Listener position for distance/occlusion math (same as the megaphone
+        # speaker system uses) so drums are shaped by walls and range exactly
+        # like voice/music instead of "converging to the middle".
+        try:
+            pobj = gameplay.camera.focus_object
+            player_pos = (float(pobj.x), float(pobj.y), float(pobj.z))
+        except Exception:
+            player_pos = None
+        import math as _m
         sounds = []
         for speaker in gameplay.megaphone.speaker_data:
             position = speaker.get("position")
             if position is None:
                 continue
-            volume = adjusted_volume * speaker.get("base_volume", 0.6) * bot_volume
+            spk_gain = 1.0
+            ref_dist = 15.0
+            max_dist = 100.0
+            if player_pos is not None:
+                d = _m.sqrt((player_pos[0]-position[0])**2 + (player_pos[1]-position[1])**2 + (player_pos[2]-position[2])**2)
+                hr = float(speaker.get("hearing_range", 0.0) or 0.0)
+                if hr > 0.0:
+                    ref_dist = hr * 0.2
+                    max_dist = hr
+                    if d >= hr:
+                        spk_gain = 0.0
+                    elif d >= hr * 0.8:
+                        fade_start = hr * 0.8
+                        spk_gain = 1.0 - (d - fade_start) / (hr - fade_start)
+                try:
+                    occ = gameplay.megaphone._check_speaker_occlusion(position, player_pos)
+                    if occ >= 1.0:
+                        spk_gain = 0.0
+                    elif occ > 0.0:
+                        spk_gain *= (1.0 - occ * 0.85)
+                except Exception:
+                    pass
+            volume = adjusted_volume * speaker.get("base_volume", 0.6) * bot_volume * max(0.0, spk_gain)
+            if volume <= 0.0:
+                continue
             try:
                 sound = self.am.play_unbound(
                     path, position[0], position[1], position[2],
                     volume=volume, cat="miscelaneous",
+                    reference_distance=ref_dist,
+                    max_distance=max_dist,
                     direct_filter=getattr(gameplay.megaphone, "lowpass_filter", None),
                 )
             except Exception:

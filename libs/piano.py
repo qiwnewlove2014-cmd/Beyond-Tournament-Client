@@ -758,8 +758,11 @@ class PianoAudio:
         if not isinstance(data, dict):
             return
         # Require either the dedicated play_piano_note fields or the play_unbound
-        # piano-note fields; accept both shapes.
-        has_note = isinstance(data.get("note"), str) or isinstance(data.get("piano_note"), str)
+        # piano/guitar-note fields; accept all shapes (guitar notes reuse the
+        # piano sample placeholder and are routed through the PA the same way).
+        has_note = (isinstance(data.get("note"), str)
+                    or isinstance(data.get("piano_note"), str)
+                    or isinstance(data.get("guitar_note"), str))
         if not has_note or data.get("peer_id") is None:
             return
         data = dict(data)
@@ -815,7 +818,7 @@ class PianoAudio:
             return
         try:
             peer_id = data["peer_id"]
-            note_name = data.get("note") or data.get("piano_note")
+            note_name = data.get("note") or data.get("piano_note") or data.get("guitar_note")
             x = float(data["x"]); y = float(data["y"]); z = float(data["z"])
         except (KeyError, TypeError, ValueError):
             return
@@ -933,17 +936,56 @@ class PianoAudio:
             bot_vol_raw = getattr(getattr(gp, 'music_bot', None), 'volume', 50) / 100.0 if getattr(gp, 'music_bot', None) else 0.5
             bot_vol = max(0.1, bot_vol_raw) * 0.5
             pedal_filter = self._get_pedal_filter(peer_id, "pa")
+            # Listener position for distance/occlusion math (same as the
+            # megaphone speaker system uses).
+            try:
+                pobj = gp.camera.focus_object
+                player_pos = (float(pobj.x), float(pobj.y), float(pobj.z))
+            except Exception:
+                player_pos = None
             for spk in gp.megaphone.speaker_data:
                 spk_pos = spk.get('position', None)
                 if spk_pos is None:
                     continue
                 sx, sy, sz = spk_pos[0], spk_pos[1], spk_pos[2]
-                mega_vol = base_volume * spk.get('base_volume', 0.6) * bot_vol
+                # Distance + wall occlusion must shape the volume exactly like
+                # the voice/music speakers, otherwise every cabinet sounds
+                # equally loud from anywhere ("sound converging to the middle")
+                # and walls do not dampen instruments the way they do speech.
+                spk_gain = 1.0
+                ref_dist = 15.0
+                max_dist = 100.0
+                if player_pos is not None:
+                    import math as _m
+                    d = _m.sqrt((player_pos[0]-sx)**2 + (player_pos[1]-sy)**2 + (player_pos[2]-sz)**2)
+                    hr = float(spk.get('hearing_range', 0.0) or 0.0)
+                    if hr > 0.0:
+                        ref_dist = hr * 0.2
+                        max_dist = hr
+                        if d >= hr:
+                            spk_gain = 0.0
+                        elif d >= hr * 0.8:
+                            fade_start = hr * 0.8
+                            spk_gain = 1.0 - (d - fade_start) / (hr - fade_start)
+                    # Wall occlusion: 0.0 clear, 1.0 fully blocked -> dampen
+                    try:
+                        occ = gp.megaphone._check_speaker_occlusion(spk_pos, player_pos)
+                        if occ >= 1.0:
+                            spk_gain = 0.0
+                        elif occ > 0.0:
+                            spk_gain *= (1.0 - occ * 0.85)
+                    except Exception:
+                        pass
+                mega_vol = base_volume * spk.get('base_volume', 0.6) * bot_vol * max(0.0, spk_gain)
+                if mega_vol <= 0.0:
+                    continue
                 mega_snd = self.am.play_unbound(
                     f"piano/Piano.mf.{note_name}.ogg",
                     sx, sy, sz,
                     volume=mega_vol,
                     cat="miscelaneous",
+                    reference_distance=ref_dist,
+                    max_distance=max_dist,
                     direct_filter=pedal_filter,
                 )
                 if mega_snd and hasattr(mega_snd, 'source') and mega_snd.source:

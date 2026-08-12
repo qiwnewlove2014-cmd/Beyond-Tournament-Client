@@ -445,7 +445,10 @@ class EventHandeler:
             # Piano notes go through the main-thread queue (piano_note field present).
             # OpenAL context is only current on the main thread, so we MUST NOT play
             # piano audio from this network-thread handler.
-            if data.get("piano_note"):
+            if data.get("piano_note") or data.get("guitar_note"):
+                # Guitar notes arrive via play_unbound with a guitar_note field
+                # (same piano-sample placeholder); route them through the piano
+                # queue so PA speakers / occlusion apply exactly like piano.
                 self.game.audio_mngr.piano.enqueue_remote_note(data)
                 return
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
