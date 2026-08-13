@@ -96,7 +96,11 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    PRE_BUFFER_FRAMES = 3       # Wait for 3 frames (60ms) before playing to ensure smooth audio without stutters
+    # Minimal pre-buffer: ONE 20ms frame so PA playback starts almost as fast
+    # as normal voice chat. Real network jitter is absorbed by the adaptive
+    # per-sender margin in queue_and_delay_frame (grows only when jitter is
+    # actually measured) instead of a fixed 120ms cushion on every stream.
+    PRE_BUFFER_FRAMES = 1       # Wait for 1 frame (20ms) before playing
     MAX_BUFFER_FRAMES = 12      # Maximum frames in buffer (240ms) for network stability
     TARGET_BUFFER_FRAMES = 4    # Target buffer level (80ms latency)
     
@@ -203,6 +207,49 @@ _speaker_delay_queues = {}
 _last_play_times = {}
 _last_packet_times = {}
 
+# Measured inter-arrival jitter (ms) per sender - fast-attack peak hold with
+# time-based decay (the standard adaptive-jitter-buffer approach). Drives the
+# adaptive PA margin: steady 20ms streams stay at the 20ms minimum, jittery
+# networks grow the margin just enough to avoid crackle, and a clean network
+# automatically returns to the minimum after a couple of seconds.
+_speaker_jitter_ms = {}
+_speaker_jitter_ts = {}
+
+def _measure_speaker_jitter(sender_id, prev_time, now_time):
+    """Update the jitter estimate (ms) for a sender and return it.
+
+    The estimate is the largest recently-seen excess over the 20ms frame
+    cadence (peak hold): the moment a packet arrives late, the estimate jumps
+    to that excess so the next resync sizes the margin correctly. It then
+    decays with a ~2s half-life, so an old spike is forgotten and the PA
+    returns to the minimum latency on its own.
+    """
+    global _speaker_jitter_ms, _speaker_jitter_ts
+    prev_est = _speaker_jitter_ms.get(sender_id, 0.0)
+    prev_ts = _speaker_jitter_ts.get(sender_id, now_time)
+    elapsed = max(0.0, now_time - prev_ts)
+    decayed = prev_est * (0.5 ** (elapsed / 2.0))
+    excess = 0.0
+    if prev_time:
+        interval_ms = (now_time - prev_time) * 1000.0
+        excess = max(0.0, interval_ms - 20.0)
+    est = max(decayed, min(excess, 200.0))
+    _speaker_jitter_ms[sender_id] = est
+    _speaker_jitter_ts[sender_id] = now_time
+    return est
+
+def _adaptive_margin_frames(sender_id):
+    """Map a sender's measured jitter to a silence-padding margin in 20ms frames.
+
+    Minimum 1 frame (20ms) for steady streams - the PA feels as immediate as
+    normal voice chat. Grows to at most 6 frames (120ms) for high-jitter
+    connections. Replaces the old fixed 120ms margin on every stream.
+    """
+    global _speaker_jitter_ms
+    jitter = _speaker_jitter_ms.get(sender_id, 0.0)
+    frames = 1 + int(jitter / 20.0)
+    return max(1, min(6, frames))
+
 def get_jitter_buffer(game, source_id):
     """Get or create jitter buffer for a specific audio source"""
     global _jitter_buffers
@@ -212,11 +259,13 @@ def get_jitter_buffer(game, source_id):
 
 def reset_jitter_buffers():
     """Reset all jitter buffers and delay queues"""
-    global _jitter_buffers, _speaker_delay_queues, _last_play_times, _last_packet_times
+    global _jitter_buffers, _speaker_delay_queues, _last_play_times, _last_packet_times, _speaker_jitter_ms, _speaker_jitter_ts
     _jitter_buffers = {}
     _speaker_delay_queues = {}
     _last_play_times = {}
     _last_packet_times = {}
+    _speaker_jitter_ms = {}
+    _speaker_jitter_ts = {}
 
 # Track active megaphone speakers for dynamic ducking
 _active_megaphone_speakers = 0
@@ -330,15 +379,23 @@ class voice_chat_compression(threading.Thread):
                     # Update last play time
                     global _last_play_times, _speaker_delay_queues, _last_packet_times
                     _last_play_times[sender_id] = time.time()
-                    # If this is a new sentence after a short pause (>180ms), clear delay queues to prevent stale audio stack-up
+                    # If this is a new sentence after a short pause (>180ms), clear
+                    # delay queues to prevent stale audio stack-up and reset the
+                    # jitter estimate so the fresh stream starts at the minimum
+                    # adaptive margin again.
                     current_time = time.time()
                     last_pkt_time = _last_packet_times.get(sender_id, 0.0)
                     _last_packet_times[sender_id] = current_time
                     if current_time - last_pkt_time > 0.18:
+                        global _speaker_jitter_ms, _speaker_jitter_ts
+                        _speaker_jitter_ms[sender_id] = 0.0
+                        _speaker_jitter_ts[sender_id] = current_time
                         for idx in range(len(sources)):
                             queue_key = (sender_id, idx)
                             if queue_key in _speaker_delay_queues:
                                 _speaker_delay_queues[queue_key].clear()
+                    else:
+                        _measure_speaker_jitter(sender_id, last_pkt_time, current_time)
                     
                     # Queue and delay the frame for each speaker
                     queue_and_delay_frame(gameplay, sender_id, sources, packet)
@@ -977,14 +1034,17 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
             _speaker_current_delays[sender_id].append(frames_delay)
             
-            # Add jitter buffer margin (120ms = 6 frames) to prevent micro-stutters
-            # during network drops.  A tiny margin (1 frame / 20ms, introduced by
-            # an earlier change) makes the PA audio break/crackle as soon as the
-            # network jitter exceeds 20ms.
-            JITTER_MARGIN_FRAMES = 6
+            # Adaptive jitter margin: start at the minimum (1 frame / 20ms) and
+            # grow toward the cap (6 frames / 120ms) only when this sender's
+            # packet arrival actually shows jitter (measured in recieve2). A
+            # steady stream - music bot, live guitar relay, or voice at the
+            # normal 20ms cadence - stays at 20ms so the PA feels as immediate
+            # as normal voice chat; jittery networks get just enough extra
+            # buffering to avoid crackle.
+            margin_frames = _adaptive_margin_frames(sender_id)
             
             # Instantly push silence frames to restore perfect spatial stagger and jitter margin
-            target_active = frames_delay + JITTER_MARGIN_FRAMES
+            target_active = frames_delay + margin_frames
             current_active = active_counts[idx]
             pad_frames = max(0, target_active - current_active)
 

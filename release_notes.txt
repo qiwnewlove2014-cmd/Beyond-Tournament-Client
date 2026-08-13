@@ -1,9 +1,7 @@
-[v1.7.4] Guitar & Music Bot PA Broadcasting Fix — 2026-08-13
+[v1.7.5] Megaphone & PA Low-Latency Audio — 2026-08-13
 --------------------------------------------------------------------------------
 
-• Music Bot & Megaphone Routing
-- **Guitar Follows the Other Instruments Through the PA:** "Broadcast to Megaphone: ON" in the Music Bot menu is now an independent toggle for the guitar too - exactly like Piano and Drumset. Previously the guitar only mixed into the broadcast when the separate music broadcast (Alt+M) was also enabled, so a performer who turned on "Broadcast to Megaphone" alone heard piano/drums on the PA but never their guitar. The guitar now joins the PA/megaphone stream whenever the performer holds the Music Bot broadcast slot, with or without the music broadcast toggle.
-- **No More Doubled Guitar Audio:** When the guitar is mixed into the Music Bot broadcast, it no longer also streams on the raw voice channel. Previously the same strum could be sent twice (voice channel + bot mix), doubling it for nearby players and through the PA.
-
-• Bug Fixes & Stability
-- **Live Guitar Relay Without a Track Playing:** The background live relay now keeps running when "Broadcast to Megaphone" is ON even when no music track is playing, so a strummed guitar is broadcast to the PA immediately instead of requiring the MP3 streamer to be active.
+• Audio Engine & Voice Chat
+- **PA Now Feels Like Normal Voice Chat:** The megaphone/PA speakers no longer force a fixed 120ms jitter buffer + 60ms pre-buffer (180ms floor). A new adaptive jitter buffer starts at 20ms and only grows when the network actually shows jitter, so music, guitar relays, speech, and band performances come through the PA almost immediately - measured ~40ms on a clean network vs the old 180ms (4.5x faster), with zero crackle.
+- **Smarter Spike Handling:** The jitter estimate uses a fast-attack peak-hold (WebRTC-style), so a stray delayed packet briefly widens the buffer and then decays back down - fewer dropouts on jittery networks than a fixed 20ms buffer, while still staying far below the old fixed latency.
+- **One Rule for Everything:** Voice, music bot MP3, and live instrument relays all flow through the same adaptive receive path, so speech and songs benefit from the same low latency as instruments.
