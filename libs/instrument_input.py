@@ -217,7 +217,7 @@ class InstrumentInput(threading.Thread):
                 if voice_using_mega and gp and not route_to_bot:
                     from . import voice_chat
                     if hasattr(voice_chat, '_feed_local_megaphone_direct'):
-                        voice_chat._feed_local_megaphone_direct(gp, buf16)
+                        voice_chat._feed_local_megaphone_direct(gp, buf16, producer='guitar')
 
                 # When the guitar rides the bot broadcast mix, let the streamer
                 # carry it (3D music bot channel or the megaphone/PA) - do NOT

@@ -4,9 +4,41 @@ import pygame
 from libs import options, consts, voice_chat
 from libs.logger import log
 
+def _smooth_occlusion_ratio(prev_ema, new_ratio):
+    """Per-speaker EMA blend for the wall-occlusion target.
+
+    valid_straight_path() returns a hard boolean per ray, so grazing a wall
+    edge flips the raw target 0<->1 on consecutive refreshes ('วุบว้าบ'
+    wobble). Fast attack when a wall appears (0.6/refresh -> ~300ms at 10Hz),
+    slower release when it clears (0.2/refresh -> ~500ms) — a glide instead
+    of an instant flip.
+    """
+    alpha = 0.6 if new_ratio > prev_ema else 0.2
+    return prev_ema + (new_ratio - prev_ema) * alpha
+
+
+def _behind_strength_from_dot(dot_horizontal, cone_outer):
+    """Smooth directional muffle strength for a speaker cone.
+
+    Replaces the old hard 0/1 flip at the speaker's perpendicular plane.
+    Full muffle when clearly behind (dot <= -2), clear when clearly in front
+    (dot >= +2). `direction` is normalized, so this is a ~2-unit transition
+    zone either side of the plane — crossing it no longer makes the sound jump.
+    """
+    if cone_outer >= 360:
+        return 0.0
+    return min(1.0, max(0.0, (2.0 - dot_horizontal) / 4.0))
+
+
 class MegaphoneManager:
     MAX_MEGAPHONE_PLAYERS = 8
-    INACTIVE_SOURCE_TIMEOUT = 5.0
+    # Long idle timeout (was 5s): music/voice with a quiet passage longer than
+    # 5 seconds used to have their OpenAL sources torn down and rebuilt, which
+    # reset gains to 0 (fade-in dip) and re-based the spatial delay from the
+    # listener's CURRENT position — that is what made the PA image 'merge and
+    # split' on its own during long sessions. 30s covers realistic quiet gaps;
+    # resource cleanup still happens, just not mid-song.
+    INACTIVE_SOURCE_TIMEOUT = 30.0
     SPATIAL_REFRESH_INTERVAL = 0.10
     SPATIAL_DEBUG_LOG_INTERVAL = 1.0
     
@@ -93,6 +125,7 @@ class MegaphoneManager:
         self.muffled_check_counter = 0  # Frame counter for optimization
         self._spatial_refresh_requested = False
         self._last_spatial_refresh_time = 0.0
+        self._last_spatial_refresh_pos = None  # Listener pos at last spatial refresh (real-time tracking)
         self._last_spatial_debug_time = 0.0
         self.last_megaphone_setup = 0  # Timestamp for debounce
         
@@ -846,7 +879,7 @@ class MegaphoneManager:
             if not isinstance(delay_cache_expires, dict):
                 voice_chat._speaker_delay_cache_expires = {}
                 delay_cache_expires = voice_chat._speaker_delay_cache_expires
-            delay_cache_expires[sender_id] = voice_chat.time.time() + 30.0
+            delay_cache_expires[sender_id] = voice_chat.time.time() + 60.0
         else:
             for cache_name in (
                 '_speaker_last_calc_time',
@@ -1080,16 +1113,40 @@ class MegaphoneManager:
         # Spatial parameters are movement-driven.  Sources remain anchored to
         # their cabinets; pausing or resuming a stream must not alter their
         # range/cone state.  Camera movement explicitly requests this refresh.
-        if hasattr(self, 'speaker_data') and hasattr(self, 'muffled_check_counter'):
+        if hasattr(self, 'speaker_data'):
             refresh_now = time.monotonic()
-            if (
+            # REAL-TIME SPATIAL TRACKING: recompute PA targets at the refresh
+            # interval whenever the listener MOVED (>= 0.5 units) — not only
+            # when camera movement explicitly requested it. The old request-only
+            # gate kept stale occlusion/volume targets while walking, then the
+            # per-frame LERP swept the change in with a lag that sounded like
+            # the PA 'swaying on its own'. At 10Hz the targets now track the
+            # listener continuously; the LERP below just glides between them.
+            # Explicit requests still force a refresh even while standing still.
+            try:
+                listener_pos = (self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
+            except AttributeError:
+                listener_pos = None
+            moved_since = 0.0
+            if listener_pos is not None:
+                last_refresh_pos = getattr(self, '_last_spatial_refresh_pos', None)
+                if last_refresh_pos is not None:
+                    moved_since = math.sqrt(
+                        (listener_pos[0] - last_refresh_pos[0]) ** 2 +
+                        (listener_pos[1] - last_refresh_pos[1]) ** 2 +
+                        (listener_pos[2] - last_refresh_pos[2]) ** 2
+                    )
+            do_refresh = (
                 self._spatial_refresh_requested
-                and refresh_now - self._last_spatial_refresh_time >= self.SPATIAL_REFRESH_INTERVAL
-            ):
+                or (listener_pos is not None and moved_since >= 0.5)
+            ) and (refresh_now - self._last_spatial_refresh_time >= self.SPATIAL_REFRESH_INTERVAL)
+            if do_refresh:
                 self.muffled_check_counter = 0
                 self._spatial_refresh_requested = False
                 self._last_spatial_refresh_time = refresh_now
-                player_pos = (self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
+                if listener_pos is not None:
+                    self._last_spatial_refresh_pos = listener_pos
+                player_pos = listener_pos if listener_pos is not None else (0.0, 0.0, 0.0)
                 global_vol = options.get("megaphone_volume", 100) / 100.0
                 is_underwater = getattr(self.camera.focus_object, 'in_water', False)
                 if refresh_now - self._last_spatial_debug_time >= self.SPATIAL_DEBUG_LOG_INTERVAL:
@@ -1130,13 +1187,20 @@ class MegaphoneManager:
                         else:
                             occlusion_ratio = self._check_speaker_occlusion(speaker_pos, player_pos)
 
+                        # SMOOTH OCCLUSION: blend the hard boolean through a
+                        # per-speaker EMA (fast attack / slower release) so a
+                        # wall edge graze glides instead of flip-flopping.
+                        prev_occ = data.get('occlusion_ema', occlusion_ratio)
+                        occlusion_ratio = _smooth_occlusion_ratio(prev_occ, occlusion_ratio)
+                        data['occlusion_ema'] = occlusion_ratio
+
                         # === DIRECTIONAL CHECK (Horizontal only) ===
                         dot_horizontal = (dx * data['direction'][0] +
                                          dy * data['direction'][1])
                         # OpenAL already applies the configured cone.  Keep this
                         # extra muffle only for a genuinely directional cone.
                         cone_outer = data.get('cone_settings', {}).get('outer', 360)
-                        behind_strength = 1.0 if cone_outer < 360 and dot_horizontal < 0 else 0.0
+                        behind_strength = _behind_strength_from_dot(dot_horizontal, cone_outer)
 
                         # Combine wall occlusion and behind-speaker into one smooth
                         # occlusion strength in [0,1]. Take the stronger of the two.

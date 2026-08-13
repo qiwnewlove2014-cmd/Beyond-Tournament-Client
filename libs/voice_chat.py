@@ -542,15 +542,34 @@ class voice_chat_compression(threading.Thread):
             if radio_source.state == cyal.SourceState.STOPPED or radio_source.state == cyal.SourceState.INITIAL: radio_source.play()
 
 
-def _feed_local_megaphone_direct(gameplay, raw_buf):
-    """Feed zero-latency local mic PCM directly to local Megaphone PA OpenAL sources."""
+
+
+
+def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
+    """Feed zero-latency local mic/music/instrument PCM to the local Megaphone PA.
+
+    Every local producer (music bot, mic, guitar, ...) gets its OWN per-player
+    source set, keyed '<player>:<producer>'. Simultaneous local streams therefore
+    play as SEPARATE OpenAL sources that OpenAL mixes together, instead of
+    sharing one queue where 20ms slices interleaved: the shared queue received
+    30ms of audio per 20ms (music 20 + mic 10), so the delay kept climbing
+    while talking and both streams played stretched/squeezed with clicks at
+    slice boundaries. Separate sources keep each stream on its own cadence —
+    no interleaving, no queue growth, and zero added latency (each feed is
+    queued immediately, exactly like the original direct path).
+
+    producer: a tag identifying the caller ('mic', 'music', 'guitar', ...).
+    """
     try:
         if not (gameplay and hasattr(gameplay, 'megaphone') and gameplay.megaphone):
             return
         if not hasattr(gameplay.megaphone, 'get_megaphone_player_sources'):
             return
         local_id = getattr(getattr(gameplay, 'player', None), 'id', None) or getattr(getattr(gameplay, 'player', None), 'name', 'local')
-        sources = gameplay.megaphone.get_megaphone_player_sources(local_id)
+        # Separate source set per producer so concurrent local streams mix in
+        # OpenAL instead of interleaving frames into one queue.
+        local_key = f"{local_id}:{producer}"
+        sources = gameplay.megaphone.get_megaphone_player_sources(local_key)
         if not sources:
             return
 
@@ -562,18 +581,19 @@ def _feed_local_megaphone_direct(gameplay, raw_buf):
                 pass
 
         # Force local player's volume to instantly reach target volume to avoid fade-in delay
-        if hasattr(gameplay.megaphone, 'player_sources') and local_id in gameplay.megaphone.player_sources:
-            entry = gameplay.megaphone.player_sources[local_id]
+        if hasattr(gameplay.megaphone, 'player_sources') and local_key in gameplay.megaphone.player_sources:
+            entry = gameplay.megaphone.player_sources[local_key]
             for i in range(len(entry.get('currents_vol', []))):
                 if entry['currents_vol'][i] <= 0.05 and i < len(entry.get('targets_vol', [])):
                     entry['currents_vol'][i] = entry['targets_vol'][i]
 
-        limited_data = soft_limit_audio(bytes(raw_buf), threshold=0.85, ratio=8.0, state_key="local_pa")
+        # Per-producer smoothed limiter state (each stream limits independently).
+        limited_data = soft_limit_audio(bytes(raw_buf), threshold=0.85, ratio=8.0, state_key=f"local_pa:{producer}")
         for idx, src in enumerate(sources):
             if src:
                 # Set gain directly just in case update_megaphone_audio hasn't run yet
-                if getattr(src, 'gain', 0.0) <= 0.05 and hasattr(gameplay.megaphone, 'player_sources') and local_id in gameplay.megaphone.player_sources:
-                    entry = gameplay.megaphone.player_sources[local_id]
+                if getattr(src, 'gain', 0.0) <= 0.05 and hasattr(gameplay.megaphone, 'player_sources') and local_key in gameplay.megaphone.player_sources:
+                    entry = gameplay.megaphone.player_sources[local_key]
                     if idx < len(entry.get('targets_vol', [])):
                         src.gain = entry['targets_vol'][idx]
                 _queue_packet_to_source(gameplay, idx, src, limited_data)
@@ -664,7 +684,7 @@ class VoiceChatRecord(threading.Thread):
 
                 # Feed local sidechain immediately with 10ms chunk for zero-latency response
                 if voice_using_mega and gp and not route_to_bot:
-                    _feed_local_megaphone_direct(gp, chunk)
+                    _feed_local_megaphone_direct(gp, chunk, producer='mic')
 
                 # Accumulate for Opus encoder (requires 20ms / 1920 bytes)
                 accumulated_bytes.extend(chunk)
@@ -982,6 +1002,23 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
             pass
 
 
+def _pad_frames_for_resync(target_active, current_active, needs_initial_delay, any_starved):
+    """How many silence frames to pad for one speaker this packet.
+
+    GRADUAL DELAY TRACKING: a movement-only resync (the stream is already
+    playing, nothing starved) pads at most ONE silence frame per 20ms packet,
+    so the propagation delay follows a walking listener in real time instead of
+    inserting the whole difference at once — the old code slammed in a
+    100-300ms silence chunk at every 1.5-unit step, which read as 'the sound
+    sways/jumps on its own'. Fresh streams and underrun recovery still pad
+    fully: nothing is playing yet, so there is no audio to interrupt.
+    """
+    pad_frames = max(0, target_active - current_active)
+    if pad_frames > 0 and not needs_initial_delay and not any_starved:
+        pad_frames = min(pad_frames, 1)
+    return pad_frames
+
+
 def queue_and_delay_frame(gameplay, sender_id, sources, packet):
 
     global _speaker_delay_queues
@@ -1133,7 +1170,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             # Instantly push silence frames to restore perfect spatial stagger and jitter margin
             target_active = frames_delay + margin_frames
             current_active = active_counts[idx]
-            pad_frames = max(0, target_active - current_active)
+            pad_frames = _pad_frames_for_resync(target_active, current_active, needs_initial_delay, any_starved)
 
             if pad_frames > 0:
                 # DE-CLICK: the first silence frame ramps from the last real

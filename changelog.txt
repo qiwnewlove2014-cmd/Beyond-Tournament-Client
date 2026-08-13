@@ -4,6 +4,16 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[unreleased] PA Spatial Tracking & Simultaneous Local Streams — 2026-08-13
+--------------------------------------------------------------------------------
+
+• Audio Engine & Voice Chat
+- **Real-Time Spatial Tracking:** The PA speaker volume/occlusion/cone targets are now recomputed continuously (10Hz) while the listener walks, instead of waiting for a camera-movement event, so the PA image follows you in real time without 'swaying on its own'. Occlusion now glides through a per-speaker EMA (fast attack / slow release) and the behind-speaker muffle ramps smoothly over a ~2-unit zone, so walking along walls or across a speaker's back no longer flips the filter instantly.
+- **Long Sessions Stay Put:** Idle PA sources are kept for 30s (was 5s) and the acoustic delay baseline for 60s, so a quiet music passage or a long pause no longer tears down and rebuilds the speakers mid-song - the PA image no longer 'merges and splits' on its own.
+- **Delay Tracks You Without Stuttering:** Propagation-delay resync now pads at most one silence frame per 20ms packet while walking (was: the whole difference at once - a 100-300ms hole), so the spatial stagger follows the listener smoothly instead of jumping.
+- **Music + Talk No Longer Interleave:** The music bot, local mic, and instruments each get their OWN PA source set ('player:music' / 'player:mic' / 'player:guitar'). Simultaneous local streams (singing over the music, talking while playing guitar) now mix inside OpenAL instead of sharing one queue where 20ms slices interleaved - that shared queue used to receive 30ms of audio per 20ms, so the delay kept climbing while talking and both streams sounded stretched/squeezed with clicks. Each stream now keeps its own cadence: no delay buildup, no squeezing, zero added latency, and the music alone sounds exactly like before.
+
+--------------------------------------------------------------------------------
 [v1.7.5] Megaphone & PA Low-Latency Audio — 2026-08-13
 --------------------------------------------------------------------------------
 
