@@ -1005,18 +1005,19 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
 def _pad_frames_for_resync(target_active, current_active, needs_initial_delay, any_starved):
     """How many silence frames to pad for one speaker this packet.
 
-    GRADUAL DELAY TRACKING: a movement-only resync (the stream is already
-    playing, nothing starved) pads at most ONE silence frame per 20ms packet,
-    so the propagation delay follows a walking listener in real time instead of
-    inserting the whole difference at once — the old code slammed in a
-    100-300ms silence chunk at every 1.5-unit step, which read as 'the sound
-    sways/jumps on its own'. Fresh streams and underrun recovery still pad
-    fully: nothing is playing yet, so there is no audio to interrupt.
+    NEVER inserts silence into an already-playing stream: even a single 20ms
+    silence frame is an audible skip in music/voice, and it used to happen on
+    EVERY movement resync (the listener walking triggered a 1-frame pad once
+    the delay target outgrew the queue). Movement now only re-bases the delay
+    REFERENCE (so the variable tracks the live position for the next recovery)
+    while the audio keeps playing uninterrupted - the queue drains naturally
+    when the delay target shrinks and catches up on the next underrun.
+    Fresh streams (nothing playing yet) and underrun recovery pad fully, which
+    is required to rebuild the buffer without interrupting anything.
     """
-    pad_frames = max(0, target_active - current_active)
-    if pad_frames > 0 and not needs_initial_delay and not any_starved:
-        pad_frames = min(pad_frames, 1)
-    return pad_frames
+    if not needs_initial_delay and not any_starved:
+        return 0
+    return max(0, target_active - current_active)
 
 
 def queue_and_delay_frame(gameplay, sender_id, sources, packet):

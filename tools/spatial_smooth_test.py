@@ -44,11 +44,14 @@ print("=" * 66)
 print("TEST 1: gradual delay tracking (_pad_frames_for_resync)")
 print("=" * 66)
 
-# Movement-only resync (stream playing, nothing starved): cap at 1 frame/packet
-check("movement, big deficit -> pads only 1",
-      vc._pad_frames_for_resync(10, 0, needs_initial_delay=False, any_starved=False) == 1)
-check("movement, small deficit -> pads only 1",
-      vc._pad_frames_for_resync(5, 3, needs_initial_delay=False, any_starved=False) == 1)
+# Movement-only resync (stream playing, nothing starved): NEVER pads - a
+# single 20ms silence frame in music/voice is an audible skip (the 'สะดุดนิดๆ'
+# every time the listener walked). Movement re-bases the delay reference but
+# the audio plays uninterrupted.
+check("movement, big deficit -> pads 0 (no skip)",
+      vc._pad_frames_for_resync(10, 0, needs_initial_delay=False, any_starved=False) == 0)
+check("movement, small deficit -> pads 0",
+      vc._pad_frames_for_resync(5, 3, needs_initial_delay=False, any_starved=False) == 0)
 check("movement, exact match -> pads 0",
       vc._pad_frames_for_resync(3, 3, needs_initial_delay=False, any_starved=False) == 0)
 check("movement, queue deeper than target -> pads 0",
@@ -64,16 +67,10 @@ check("fresh stream, partial -> full pad",
 check("starvation recovery -> full pad",
       vc._pad_frames_for_resync(6, 0, needs_initial_delay=False, any_starved=True) == 6)
 
-# Long walk: deficit closes at exactly 1 frame/packet, no burst
-deficit = 10
-pads = 0
-while deficit > 0:
-    p = vc._pad_frames_for_resync(deficit, 0, needs_initial_delay=False, any_starved=False)
-    assert p <= 1
-    deficit -= p
-    pads += 1
-check("long walk closes 10-frame deficit in 10 packets (no burst)", pads == 10)
-check("steady-state walk (deficit 0) pads nothing", pads >= 10 and True)
+# Long walk: the queue never pads, so the stream is 100% uninterrupted
+pads = sum(vc._pad_frames_for_resync(d, 0, needs_initial_delay=False, any_starved=False)
+           for d in range(10, 0, -1))
+check("long walk inserts ZERO silence frames (no skips)", pads == 0)
 
 # ---------------------------------------------------------------------------
 # 2. Smooth occlusion EMA
