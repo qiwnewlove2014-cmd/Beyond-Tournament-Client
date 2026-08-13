@@ -194,12 +194,17 @@ class InstrumentInput(threading.Thread):
                             break
                 voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
 
-                # Route the raw guitar audio into the music bot broadcast, but
-                # only while the music bot broadcast is enabled (the condition
-                # the performer asked for): the streamer mixes it in and sends
-                # it out 3D (music bot channel) or via the megaphone.
+                # Route the raw guitar audio into the music bot broadcast. The
+                # guitar joins the mix when the music broadcast is enabled OR
+                # when the performer turned on "Broadcast to Megaphone" in the
+                # music bot menu - the megaphone routing is an independent
+                # toggle (same rule piano and drums follow), so the guitar
+                # reaches the PA speakers just like the other instruments.
                 music_bot = self._find_music_bot()
-                route_to_bot = bool(music_bot and getattr(music_bot, "broadcast_enabled", False))
+                route_to_bot = bool(music_bot and (
+                    getattr(music_bot, "broadcast_enabled", False)
+                    or getattr(music_bot, "broadcast_to_megaphone", False)
+                ))
                 if route_to_bot:
                     if not hasattr(music_bot, "guitar_pcm_queue"):
                         music_bot.guitar_pcm_queue = collections.deque(maxlen=10)
@@ -214,7 +219,12 @@ class InstrumentInput(threading.Thread):
                     if hasattr(voice_chat, '_feed_local_megaphone_direct'):
                         voice_chat._feed_local_megaphone_direct(gp, buf16)
 
-                self._feed_guitar_voice(buf16, force_mega=voice_using_mega)
+                # When the guitar rides the bot broadcast mix, let the streamer
+                # carry it (3D music bot channel or the megaphone/PA) - do NOT
+                # also stream it on the raw voice channel, otherwise nearby
+                # players and the PA would hear every strum twice.
+                if not route_to_bot:
+                    self._feed_guitar_voice(buf16, force_mega=voice_using_mega)
                 frame = np.frombuffer(buf16, dtype=np.int16).astype(np.float32) / 32768.0
                 result = self.tracker.feed(frame)
                 if result is not None:

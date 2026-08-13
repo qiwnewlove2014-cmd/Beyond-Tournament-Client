@@ -234,7 +234,13 @@ class AudioStreamer(threading.Thread):
                 data = None
 
             if data is None:
-                if self.bot and getattr(self.bot, 'broadcast_enabled', False):
+                # Keep the live mix flowing while the music bot broadcast is on
+                # OR the performer enabled "Broadcast to Megaphone" (an
+                # independent toggle, like piano/drums).
+                if self.bot and (
+                    getattr(self.bot, 'broadcast_enabled', False)
+                    or getattr(self.bot, 'broadcast_to_megaphone', False)
+                ):
                     has_guitar = bool(getattr(self.bot, 'guitar_pcm_queue', None) and len(self.bot.guitar_pcm_queue) > 0)
                     has_mic = bool(getattr(self.bot, 'mic_pcm_queue', None) and len(self.bot.mic_pcm_queue) > 0)
                     if has_guitar or has_mic:
@@ -267,8 +273,13 @@ class AudioStreamer(threading.Thread):
             if not self.game or not self.game.network:
                 return
                 
-            # Check if broadcast is enabled
-            if self.bot and not self.bot.broadcast_enabled:
+            # Check if the stream is being broadcast: the music bot broadcast
+            # is on, OR the performer enabled "Broadcast to Megaphone" (the
+            # PA/megaphone routing is an independent toggle - exactly like
+            # piano/drums, so guitar and music reach the PA on their own).
+            if self.bot and not (
+                self.bot.broadcast_enabled or self.bot.broadcast_to_megaphone
+            ):
                 return
 
             # Downmix 16-bit stereo → 16-bit mono
@@ -564,7 +575,10 @@ class LiveRelayStreamer(threading.Thread):
     def run(self):
         import audioop
         from . import consts
-        while self.running and self.bot and getattr(self.bot, 'broadcast_enabled', False):
+        while self.running and self.bot and (
+            getattr(self.bot, 'broadcast_enabled', False)
+            or getattr(self.bot, 'broadcast_to_megaphone', False)
+        ):
             # If main AudioStreamer MP3 thread is active, let it handle the network stream
             if self.bot.streamer and self.bot.streamer.is_alive():
                 break
@@ -1793,7 +1807,7 @@ class MapMusicBot:
 
     def _ensure_live_relay_streamer(self):
         """Ensure background live relay thread runs when broadcast is enabled and live input exists without an active MP3 stream."""
-        if not self.broadcast_enabled:
+        if not (self.broadcast_enabled or self.broadcast_to_megaphone):
             if getattr(self, 'live_relay_streamer', None):
                 self.live_relay_streamer.stop()
                 self.live_relay_streamer = None
