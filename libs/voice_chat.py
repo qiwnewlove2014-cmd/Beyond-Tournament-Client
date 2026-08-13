@@ -268,6 +268,9 @@ _jitter_buffers = {}
 _speaker_delay_queues = {}
 _last_play_times = {}
 _last_packet_times = {}
+# Last packet arrival time per normal-voice channel (key "vc:<channelID>") for
+# the adaptive jitter margin in the shared-channel playback path.
+_voice_last_pkt = {}
 
 # Measured inter-arrival jitter (ms) per sender - fast-attack peak hold with
 # time-based decay (the standard adaptive-jitter-buffer approach). Drives the
@@ -396,11 +399,12 @@ def get_jitter_buffer(game, source_id):
 def reset_jitter_buffers():
     """Reset all jitter buffers and delay queues"""
     global _jitter_buffers, _speaker_delay_queues, _last_play_times, _last_packet_times, _speaker_jitter_ms, _speaker_jitter_ts
-    global _last_tail_sample, _just_padded, _limiter_gain_state
+    global _last_tail_sample, _just_padded, _limiter_gain_state, _voice_last_pkt
     _jitter_buffers = {}
     _speaker_delay_queues = {}
     _last_play_times = {}
     _last_packet_times = {}
+    _voice_last_pkt = {}
     _speaker_jitter_ms = {}
     _speaker_jitter_ts = {}
     _last_tail_sample = {}
@@ -553,7 +557,27 @@ class voice_chat_compression(threading.Thread):
                     queue_and_delay_frame(gameplay, sender_id, sources, packet)
                     return  # Megaphone handled, skip normal processing
                 
-                # === NORMAL VOICE CHAT: Direct playback (no jitter buffer needed) ===
+                # === NORMAL VOICE CHAT: Direct playback with an adaptive
+                # jitter margin (like the megaphone). The old fixed 100ms pad
+                # (5 x 20ms) made every cold-start burst - a guitarist's first
+                # strum after a pause, a new sentence - land 100ms late. The
+                # pad is now 1 + margin frames: 20ms minimum, growing only
+                # while the network actually shows jitter, decaying on its own.
+                vc_key = "vc:%s" % channelID
+                _now = time.time()
+                _last_pkt = _voice_last_pkt.get(vc_key, 0.0)
+                _voice_last_pkt[vc_key] = _now
+                if _last_pkt and _now - _last_pkt > 0.18:
+                    # Fresh burst after a silence gap: reset to the minimum
+                    # instead of counting the silence as jitter (otherwise a
+                    # guitarist's pause between strums would look like 300ms
+                    # of jitter and inflate the margin for the next burst).
+                    _speaker_jitter_ms[vc_key] = 0.0
+                    _speaker_jitter_ts[vc_key] = _now
+                elif _last_pkt:
+                    _measure_speaker_jitter(vc_key, _last_pkt, _now)
+                margin_frames = _adaptive_margin_frames(vc_key)
+
                 sources_to_play = []
                 for idx, src in enumerate(sources):
                     buf = None
@@ -573,10 +597,12 @@ class voice_chat_compression(threading.Thread):
                     
                     buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
                     try: 
-                        # Jitter Buffer Padding (100ms) to prevent micro-stutters
+                        # Adaptive jitter padding at cold start: 1 + margin
+                        # frames (20ms floor, up to 120ms under jitter) instead
+                        # of the old fixed 100ms.
                         if src.buffers_queued == 0:
                             silence_data = bytes(len(data))
-                            for _ in range(5):
+                            for _ in range(margin_frames):
                                 s_buf = self.game.audio_mngr.context.gen_buffer()
                                 s_buf.set_data(silence_data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
                                 src.queue_buffers(s_buf)
