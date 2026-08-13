@@ -358,7 +358,7 @@ class AudioStreamer(threading.Thread):
                         from . import voice_chat
                         if hasattr(voice_chat, '_feed_local_megaphone_direct'):
                             local_pcm = bytes(mono_data)
-                            self.game.put(lambda: voice_chat._feed_local_megaphone_direct(gp, local_pcm, producer='music'))
+                            voice_chat._feed_local_megaphone_direct(gp, local_pcm, producer='music')
                 except Exception:
                     pass
 
@@ -662,7 +662,7 @@ class LiveRelayStreamer(threading.Thread):
                             from . import voice_chat
                             if hasattr(voice_chat, '_feed_local_megaphone_direct'):
                                 local_pcm = bytes(mono_data)
-                                self.game.put(lambda: voice_chat._feed_local_megaphone_direct(gp, local_pcm, producer='music'))
+                                voice_chat._feed_local_megaphone_direct(gp, local_pcm, producer='music')
                     except Exception:
                         pass
 

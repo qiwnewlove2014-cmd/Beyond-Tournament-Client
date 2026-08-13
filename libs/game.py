@@ -399,13 +399,21 @@ class Game:
             self._recovery_in_progress = False
 
     def loop_function(self):
-            if not self.queue.empty():
-                value = self.get()
+            queue_limit = 500
+            while not self.queue.empty() and queue_limit > 0:
+                queue_limit -= 1
+                try:
+                    value = self.get()
+                except Exception:
+                    break
                 if value is None:
                     # another thread asked this thread to terminate, so lets break.
                     return False
                 elif callable(value):
-                    value()
+                    try:
+                        value()
+                    except Exception as e:
+                        print(f"Error in game queue callback: {e}")
                 elif isinstance(value, tuple):
                     # another thread asked to set a value on this class.
                     setattr(self, value[0], value[1])

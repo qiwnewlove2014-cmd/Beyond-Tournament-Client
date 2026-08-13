@@ -414,6 +414,40 @@ def reset_jitter_buffers():
 _last_tail_sample = {}
 _just_padded = {}
 
+# Shared OpenAL Buffer Pool to recycle buffers and eliminate allocations / memory leaks
+_shared_buffer_pool = []
+_MAX_BUFFER_POOL_SIZE = 256
+
+def _recycle_buffers(buffers):
+    """Return one or more processed OpenAL buffers back into the shared pool."""
+    if buffers is None:
+        return
+    global _shared_buffer_pool
+    try:
+        if isinstance(buffers, (list, tuple)):
+            for b in buffers:
+                if b is not None and len(_shared_buffer_pool) < _MAX_BUFFER_POOL_SIZE:
+                    _shared_buffer_pool.append(b)
+        else:
+            if len(_shared_buffer_pool) < _MAX_BUFFER_POOL_SIZE:
+                _shared_buffer_pool.append(buffers)
+    except Exception:
+        pass
+
+def _get_buffer_from_pool(audio_mngr):
+    """Retrieve an OpenAL buffer from the pool, or allocate a new one if empty."""
+    global _shared_buffer_pool
+    while _shared_buffer_pool:
+        buf = _shared_buffer_pool.pop()
+        if buf is not None:
+            return buf
+    try:
+        if audio_mngr and hasattr(audio_mngr, 'context') and audio_mngr.context:
+            return audio_mngr.context.gen_buffer()
+    except Exception:
+        pass
+    return None
+
 # Track active megaphone speakers for dynamic ducking
 _active_megaphone_speakers = 0
 _last_speaker_update = 0
@@ -533,6 +567,10 @@ class voice_chat_compression(threading.Thread):
                     last_pkt_time = _last_packet_times.get(sender_id, 0.0)
                     _last_packet_times[sender_id] = current_time
 
+                    if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'player_sources'):
+                        if sender_id in gameplay.megaphone.player_sources:
+                            gameplay.megaphone.player_sources[sender_id]['last_active'] = current_time
+
                     if current_time - last_pkt_time > 0.18:
                         global _speaker_jitter_ms, _speaker_jitter_ts, _limiter_gain_state, _last_tail_sample, _just_padded
                         _speaker_jitter_ms[sender_id] = 0.0
@@ -572,22 +610,22 @@ class voice_chat_compression(threading.Thread):
 
                 sources_to_play = []
                 for idx, src in enumerate(sources):
-                    buf = None
                     try:
                         while src.buffers_processed > 0:
                             result = src.unqueue_buffers()
-                            if result is not None:
-                                if isinstance(result, (list, tuple)):
-                                    buf = result[0]
-                                else:
-                                    buf = result
+                            _recycle_buffers(result)
                     except Exception:
                         pass
                     
-                    if buf is None: 
-                        buf = self.game.audio_mngr.context.gen_buffer()
+                    buf = _get_buffer_from_pool(self.game.audio_mngr)
+                    if buf is None:
+                        continue
                     
-                    buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                    try:
+                        buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                    except Exception:
+                        continue
+
                     try: 
                         # Adaptive jitter padding at cold start: 1 + margin
                         # frames (20ms floor, up to 120ms under jitter) instead
@@ -595,9 +633,10 @@ class voice_chat_compression(threading.Thread):
                         if src.buffers_queued == 0:
                             silence_data = bytes(len(data))
                             for _ in range(margin_frames):
-                                s_buf = self.game.audio_mngr.context.gen_buffer()
-                                s_buf.set_data(silence_data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
-                                src.queue_buffers(s_buf)
+                                s_buf = _get_buffer_from_pool(self.game.audio_mngr)
+                                if s_buf is not None:
+                                    s_buf.set_data(silence_data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                                    src.queue_buffers(s_buf)
                                 
                         src.queue_buffers(buf)
                     except cyal.exceptions.InvalidOperationError: 
@@ -616,21 +655,19 @@ class voice_chat_compression(threading.Thread):
             if channelID == consts.CHANNEL_MEGAPHONE: return
             
             if not gameplay.voice_channels[channelID].has_radio or not gameplay.player.has_radio: return
-            buffer = None
             try:
                 if radio_source.buffers_processed > 0:
                     result = radio_source.unqueue_buffers()
-                    if result is not None:
-                        if isinstance(result, (list, tuple)):
-                            buffer = result[0]
-                        else:
-                            buffer = result
+                    _recycle_buffers(result)
             except Exception:
                 pass
-            if buffer is None:
-                buffer = self.game.audio_mngr.context.gen_buffer()
-            buffer.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
-            radio_source.queue_buffers(buffer)
+            buffer = _get_buffer_from_pool(self.game.audio_mngr)
+            if buffer is not None:
+                try:
+                    buffer.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                    radio_source.queue_buffers(buffer)
+                except Exception:
+                    pass
             if radio_source.state == cyal.SourceState.STOPPED or radio_source.state == cyal.SourceState.INITIAL: radio_source.play()
 
 
@@ -665,35 +702,7 @@ def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
         if not sources:
             return
 
-        # Song/cover sync compensation: hold the local SONG monitor in a small
-        # FIFO so it plays 'one round trip' late, matching when a cover
-        # performer's instrument (which they played after hearing the song one
-        # leg late, then traveled back one more leg) reaches this listener.
-        # Other local producers (mic/guitar/instruments) stay instant - their
-        # players anchor to the delayed song themselves.
-        if producer in _COMP_PRODUCERS:
-            _ensure_rtt_sampler(gameplay.game)
-            comp_frames = _compensation_frames()
-            now = time.time()
-            last = _comp_last_feed.get(local_key, now)
-            _comp_last_feed[local_key] = now
-            if now - last > _COMP_GAP_RESET_S:
-                _comp_fifos.pop(local_key, None)
-            buf = _comp_fifos.get(local_key)
-            if buf is None:
-                buf = collections.deque(maxlen=comp_frames)
-                _comp_fifos[local_key] = buf
-            buf.append(bytes(raw_buf))
-            if len(buf) < comp_frames:
-                return  # still filling the compensation buffer
-            raw_buf = buf.popleft()
 
-        # Ensure spatial gains are evaluated
-        if hasattr(gameplay.megaphone, 'update_megaphone_audio'):
-            try:
-                gameplay.megaphone.update_megaphone_audio()
-            except Exception:
-                pass
 
         # Force local player's volume to instantly reach target volume to avoid fade-in delay
         if hasattr(gameplay.megaphone, 'player_sources') and local_key in gameplay.megaphone.player_sources:
@@ -1042,22 +1051,16 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
     except Exception:
         pass
 
-    buf = None
     try:
         while src.buffers_processed > 0:
             result = src.unqueue_buffers()
-            if result is not None:
-                if isinstance(result, (list, tuple)):
-                    if buf is None:
-                        buf = result[0]
-                else:
-                    if buf is None:
-                        buf = result
+            _recycle_buffers(result)
     except Exception:
         pass
     
-    if buf is None: 
-        buf = gameplay.game.audio_mngr.context.gen_buffer()
+    buf = _get_buffer_from_pool(gameplay.game.audio_mngr)
+    if buf is None:
+        return
     
     try:
         buf.set_data(play_packet, sample_rate=48000, format=cyal.BufferFormat.MONO16)
@@ -1067,6 +1070,17 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
     
     # Start playing if stopped
     if src.state == cyal.SourceState.STOPPED or src.state == cyal.SourceState.INITIAL:
+        # Pre-buffer cushion: Ensure at least 2 buffers (40ms) are queued
+        # before starting playback to prevent instant 20ms underrun jitter.
+        try:
+            if src.buffers_queued < 2:
+                cushion_buf = _get_buffer_from_pool(gameplay.game.audio_mngr)
+                if cushion_buf is not None:
+                    cushion_buf.set_data(b'\x00' * len(play_packet), sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                    src.queue_buffers(cushion_buf)
+        except Exception:
+            pass
+
         # Re-apply EFX effects before playing using the source's unique filter
         is_concert = getattr(gameplay, 'concert_spectator_mode', False)
         
@@ -1120,17 +1134,14 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
 def _pad_frames_for_resync(target_active, current_active, needs_initial_delay, any_starved):
     """How many silence frames to pad for one speaker this packet.
 
-    For initial stream setup, pad up to target_active to establish the initial
-    spatial stagger. For underrun recovery during streaming (any_starved), pad
-    uniformly up to the margin cushion so inter-speaker delay stagger never shifts,
-    preventing the PA stereo image from flipping between wide and merged.
+    Always pad up to target_active (frames_delay + margin) to preserve the exact
+    inter-speaker propagation delay stagger both on initial stream setup AND during
+    underrun recovery. This permanently prevents the stereo soundstage from collapsing
+    from wide stereo to merged mono.
     """
     if not needs_initial_delay and not any_starved:
         return 0
-    if needs_initial_delay:
-        return max(0, target_active - current_active)
-    # Underrun recovery: pad uniformly to margin cushion (2 frames / 40ms)
-    return max(0, 2 - current_active)
+    return max(0, target_active - current_active)
 
 
 def queue_and_delay_frame(gameplay, sender_id, sources, packet):

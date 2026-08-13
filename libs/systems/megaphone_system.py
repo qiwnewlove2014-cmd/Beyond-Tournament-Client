@@ -879,7 +879,7 @@ class MegaphoneManager:
             if not isinstance(delay_cache_expires, dict):
                 voice_chat._speaker_delay_cache_expires = {}
                 delay_cache_expires = voice_chat._speaker_delay_cache_expires
-            delay_cache_expires[sender_id] = voice_chat.time.time() + 60.0
+            delay_cache_expires[sender_id] = voice_chat.time.time() + 120.0
         else:
             for cache_name in (
                 '_speaker_last_calc_time',
@@ -1268,24 +1268,7 @@ class MegaphoneManager:
                         data['refl_target_gainhf'] = eq_treble * 0.12
                         data['refl_target_gainlf'] = min(1.0, eq_bass * 1.2)
 
-                        # Store targets on player cloned sources
-                        if hasattr(self, 'player_sources'):
-                            for player_entry in self.player_sources.values():
-                                if 'sources' in player_entry:
-                                    prim_idx = 2 * i
-                                    refl_idx = 2 * i + 1
-                                    
-                                    if prim_idx < len(player_entry['sources']):
-                                        player_entry['targets_vol'][prim_idx] = target_vol
-                                        player_entry['targets_gain'][prim_idx] = target_gain
-                                        player_entry['targets_gainhf'][prim_idx] = target_gainhf
-                                        player_entry['targets_gainlf'][prim_idx] = target_gainlf
-                                        
-                                    if refl_idx < len(player_entry['sources']):
-                                        player_entry['targets_vol'][refl_idx] = target_vol * 0.4
-                                        player_entry['targets_gain'][refl_idx] = eq_mid * 0.7
-                                        player_entry['targets_gainhf'][refl_idx] = eq_treble * 0.12
-                                        player_entry['targets_gainlf'][refl_idx] = min(1.0, eq_bass * 1.2)
+
                     except Exception:
                         pass
 
@@ -1303,7 +1286,7 @@ class MegaphoneManager:
             active_speaker_ids = set()
             if hasattr(self, 'player_sources'):
                 for sid, entry in self.player_sources.items():
-                    if now - entry.get('last_active', 0.0) < 0.4:
+                    if now - entry.get('last_active', 0.0) < 1.5:
                         active_speaker_ids.add(sid)
             n_active = len(active_speaker_ids)
             mix_gain = 1.0 / math.sqrt(n_active) if n_active > 0 else 1.0
@@ -1434,8 +1417,14 @@ class MegaphoneManager:
                                     src = player_entry['sources'][prim_idx]
                                     flt = player_entry['filters'][prim_idx] if prim_idx < len(player_entry['filters']) else None
 
+                                    # === FRAME-ACCURATE TARGET SYNC ===
+                                    # Pull authoritative target from physical template every
+                                    # frame so player sources never desync when standing still.
+                                    true_vol = data.get('target_vol', player_entry['targets_vol'][prim_idx])
+                                    player_entry['targets_vol'][prim_idx] = true_vol
+
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][prim_idx] * duck_mult * concert_fade_in_mult
+                                    t_vol = true_vol * duck_mult * concert_fade_in_mult
                                     c_vol = player_entry['currents_vol'][prim_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
@@ -1444,8 +1433,17 @@ class MegaphoneManager:
                                     elif c_vol != t_vol:
                                         player_entry['currents_vol'][prim_idx] = t_vol
                                         src.gain = t_vol
+                                    else:
+                                        # Always assert gain to prevent OpenAL state drift
+                                        src.gain = c_vol
 
                                     if flt is not None:
+                                        # Sync filter targets from physical template
+                                        player_entry['targets_gain'][prim_idx] = data.get('target_gain', player_entry['targets_gain'][prim_idx])
+                                        player_entry['targets_gainhf'][prim_idx] = data.get('target_gainhf', player_entry['targets_gainhf'][prim_idx])
+                                        if 'targets_gainlf' in player_entry:
+                                            player_entry['targets_gainlf'][prim_idx] = data.get('target_gainlf', player_entry.get('targets_gainlf', player_entry['targets_gainhf'])[prim_idx])
+
                                         # Filter GAIN
                                         t_g = player_entry['targets_gain'][prim_idx]
                                         c_g = player_entry['currents_gain'][prim_idx]
@@ -1501,8 +1499,16 @@ class MegaphoneManager:
                                     src = player_entry['sources'][refl_idx]
                                     flt = player_entry['filters'][refl_idx]
                                     
+                                    # Sync reflection targets from physical template
+                                    true_vol = data.get('refl_target_vol', player_entry['targets_vol'][refl_idx])
+                                    player_entry['targets_vol'][refl_idx] = true_vol
+                                    player_entry['targets_gain'][refl_idx] = data.get('refl_target_gain', player_entry['targets_gain'][refl_idx])
+                                    player_entry['targets_gainhf'][refl_idx] = data.get('refl_target_gainhf', player_entry['targets_gainhf'][refl_idx])
+                                    if 'targets_gainlf' in player_entry:
+                                        player_entry['targets_gainlf'][refl_idx] = data.get('refl_target_gainlf', player_entry.get('targets_gainlf', player_entry['targets_gainhf'])[refl_idx])
+
                                     # Volume
-                                    t_vol = player_entry['targets_vol'][refl_idx] * duck_mult * concert_fade_in_mult
+                                    t_vol = true_vol * duck_mult * concert_fade_in_mult
                                     c_vol = player_entry['currents_vol'][refl_idx]
                                     if abs(t_vol - c_vol) > 0.0001:
                                         new_vol = c_vol + (t_vol - c_vol) * smooth_factor
@@ -1511,6 +1517,9 @@ class MegaphoneManager:
                                     elif c_vol != t_vol:
                                         player_entry['currents_vol'][refl_idx] = t_vol
                                         src.gain = t_vol
+                                    else:
+                                        # Always assert gain to prevent OpenAL state drift
+                                        src.gain = c_vol
                                     
                                     # Filter GAIN
                                     t_g = player_entry['targets_gain'][refl_idx]
