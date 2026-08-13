@@ -1081,8 +1081,22 @@ class EventHandeler:
         self.gameplay.add_substate(megaphone_settings.megaphone_settings(self.game, self.gameplay))
 
     def megaphone_lock_state(self, data):
-        """Handle megaphone lock state broadcasts from server"""
+        """Handle megaphone lock state broadcasts from server.
+
+        ``owner`` is the single music-bot PA slot holder; ``owners`` is the
+        multi-owner instrument broadcast set (band / duo performances). The
+        server also sends this with ``music_taken`` when a performer toggles
+        "Broadcast to Megaphone" while someone else already holds the music slot.
+        """
         self.gameplay.megaphone.lock_owner = data.get("owner")
+        owners = data.get("owners")
+        if isinstance(owners, (list, tuple, set)):
+            self.gameplay.megaphone.lock_owners = set(owners)
+        if data.get("music_taken"):
+            speak(
+                "The music broadcast slot is taken by another performer. "
+                "Your instruments still broadcast to the megaphone."
+            )
 
     def request_scandir(self, data):
         """Scan client's local asset directory and return file/folder items to server"""

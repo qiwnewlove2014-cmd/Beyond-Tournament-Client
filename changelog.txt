@@ -7,6 +7,11 @@
 [v1.7.4] Guitar & Music Bot PA Broadcasting Fix — 2026-08-13
 --------------------------------------------------------------------------------
 
+• Multi-Performer Broadcasting (Band Mode)
+- **Play as a Band, Not a Single Slot:** "Broadcast to Megaphone" is no longer one slot per person. Any number of staff can hold it at the same time, so a pianist, a drummer, and guitarists can all perform through the PA speakers together (duo / band jams). Every performer in the broadcast set gets PA routing for their piano, drums, and guitar - and the same rule applies to instruments added in the future.
+- **Music Stays One Slot:** The MP3 stream keeps a single-owner slot, so two people's music never overlaps on the speakers. If you enable "Broadcast to Megaphone" while another performer already holds the music slot, the game announces it and your instruments still broadcast - your music stays private until the slot frees up, at which point it takes over automatically.
+- **Talk Alongside the Band:** Performers broadcasting to the PA can still use the megaphone weapon to talk; the voice no longer gets blocked by another performer's broadcast lock (audio is equal-power mixed, nothing is hijacked).
+
 • Music Bot & Megaphone Routing
 - **Guitar Follows the Other Instruments Through the PA:** "Broadcast to Megaphone: ON" in the Music Bot menu is now an independent toggle for the guitar too - exactly like Piano and Drumset. Previously the guitar only mixed into the broadcast when the separate music broadcast (Alt+M) was also enabled, so a performer who turned on "Broadcast to Megaphone" alone heard piano/drums on the PA but never their guitar. The guitar now joins the PA/megaphone stream whenever the performer holds the Music Bot broadcast slot, with or without the music broadcast toggle.
 - **No More Doubled Guitar Audio:** When the guitar is mixed into the Music Bot broadcast, it no longer also streams on the raw voice channel. Previously the same strum could be sent twice (voice channel + bot mix), doubling it for nearby players and through the PA.

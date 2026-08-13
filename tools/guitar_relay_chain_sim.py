@@ -252,5 +252,54 @@ if mega and streamer.encoder:
     check("mixed stream audible", rms > 0.005, f"rms={rms:.4f}")
 
 print()
+print("=" * 66)
+print("TEST 4: client parses the multi-owner megaphone lock state")
+print("=" * 66)
+from libs import event_handeler
+
+class FakeMega:
+    def __init__(self):
+        self.lock_owner = None
+        self.lock_owners = set()
+
+class FakeGP:
+    def __init__(self):
+        self.megaphone = FakeMega()
+
+class FakeHandler:
+    def __init__(self):
+        self.gameplay = FakeGP()
+
+h = FakeHandler()
+event_handeler.EventHandeler.megaphone_lock_state(h, {"owner": "Alice", "owners": ["Alice", "Bob"]})
+check("lock_owner parsed from payload", h.gameplay.megaphone.lock_owner == "Alice")
+check("lock_owners parsed into a set", h.gameplay.megaphone.lock_owners == {"Alice", "Bob"})
+event_handeler.EventHandeler.megaphone_lock_state(h, {"owner": None, "owners": []})
+check("state clears when everyone leaves",
+      h.gameplay.megaphone.lock_owner is None and h.gameplay.megaphone.lock_owners == set())
+
+print()
+print("=" * 66)
+print("TEST 5: music bot respects the single music slot")
+print("=" * 66)
+bot5 = types.SimpleNamespace()
+bot5._find_gameplay = lambda: types.SimpleNamespace(
+    megaphone=types.SimpleNamespace(lock_owner="Alice"),
+    player=types.SimpleNamespace(name="Bob"),
+)
+check("non-music owner is NOT the music owner", mb.MapMusicBot._is_music_owner(bot5) is False)
+bot5._find_gameplay = lambda: types.SimpleNamespace(
+    megaphone=types.SimpleNamespace(lock_owner="Alice"),
+    player=types.SimpleNamespace(name="Alice"),
+)
+check("music slot holder IS the music owner", mb.MapMusicBot._is_music_owner(bot5) is True)
+bot5._find_gameplay = lambda: types.SimpleNamespace(
+    megaphone=types.SimpleNamespace(lock_owner=None),
+    player=types.SimpleNamespace(name="Bob"),
+)
+check("no slot holder -> not music owner (MP3 stays private)",
+      mb.MapMusicBot._is_music_owner(bot5) is False)
+
+print()
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

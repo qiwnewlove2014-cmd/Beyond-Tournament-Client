@@ -523,15 +523,29 @@ class Gameplay(state.State):
         """Map MIDI velocity 1-127 to the drum kit's existing volume scale."""
         return DRUM_MIDI_PROFILE.volume(velocity)
 
+    def _is_megaphone_owner(self):
+        """True if this performer currently broadcasts to the PA.
+
+        True when the performer holds the single music-bot PA slot OR is a
+        member of the multi-owner instrument broadcast set, so several people
+        can perform piano/drums/guitar through the PA at the same time
+        (band / duo) instead of one lock slot per person.
+        """
+        mega = getattr(self, 'megaphone', None)
+        if not mega:
+            return False
+        name = getattr(self.player, 'name', '')
+        if getattr(mega, 'lock_owner', None) == name:
+            return True
+        return name in getattr(mega, 'lock_owners', set())
+
     def _play_local_drum_hit(self, pad, velocity=None):
         volume = (
             300
             if velocity is None
             else self._drum_midi_velocity_volume(velocity)
         )
-        is_mega_owner = False
-        if hasattr(self, 'megaphone') and getattr(self.megaphone, 'lock_owner', None):
-            is_mega_owner = (self.megaphone.lock_owner == getattr(self.player, 'name', ''))
+        is_mega_owner = self._is_megaphone_owner()
             
         sound = self.game.audio_mngr.drums.play_hit(
             "local", pad,
@@ -684,9 +698,7 @@ class Gameplay(state.State):
             if velocity is None
             else self._piano_midi_velocity_volume(velocity)
         )
-        is_mega_owner = False
-        if hasattr(self, 'megaphone') and getattr(self.megaphone, 'lock_owner', None):
-            is_mega_owner = (self.megaphone.lock_owner == getattr(self.player, 'name', ''))
+        is_mega_owner = self._is_megaphone_owner()
             
         snd = self.game.audio_mngr.piano.play_note(
             "local", note_name,
@@ -2614,9 +2626,15 @@ class Gameplay(state.State):
                  speak("System: No public address system available directly in this area.")
                  return
             
-            # Check if megaphone is locked by a staff broadcast
+            # Check if megaphone is locked by a staff broadcast. Only the
+            # single music-bot slot holder blocks talking - performers in the
+            # multi-owner instrument set can still use the megaphone weapon
+            # (voice never hijacks the PA; everyone's audio is equal-power
+            # mixed), so a band can keep broadcasting while talking.
             lock_owner = getattr(self.megaphone, 'lock_owner', None)
-            if lock_owner and lock_owner != getattr(self.player, 'name', ''):
+            player_name = getattr(self.player, 'name', '')
+            if (lock_owner and lock_owner != player_name
+                    and player_name not in getattr(self.megaphone, 'lock_owners', set())):
                  speak(f"System: Megaphone is currently locked for a staff broadcast by {lock_owner}.")
                  return
         

@@ -239,7 +239,11 @@ class MegaphoneManager:
         self.sources = []
         self.speaker_data = []
         self.player_sources = {}  # {sender_id: {'sources': [...], 'last_active': float}}
+        # Single music-bot PA slot holder (server megaphone_broadcast_owner).
         self.lock_owner = None
+        # Multi-owner instrument broadcast set - every name in here can route
+        # piano/drums/guitar through the PA at the same time (band / duo).
+        self.lock_owners = set()
         vc_sources = []
         
         initial_positions = []

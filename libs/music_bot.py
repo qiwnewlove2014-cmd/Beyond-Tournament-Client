@@ -233,6 +233,15 @@ class AudioStreamer(threading.Thread):
             if self.paused:
                 data = None
 
+            # Single music slot: when "Broadcast to Megaphone" is ON but another
+            # performer holds the music-bot PA slot, keep the MP3 private - only
+            # this performer's live instruments (guitar/mic) continue into the
+            # PA mix, so two people's music never overlaps on the speakers.
+            if (data is not None and self.bot
+                    and getattr(self.bot, 'broadcast_to_megaphone', False)
+                    and not self.bot._is_music_owner()):
+                data = None
+
             if data is None:
                 # Keep the live mix flowing while the music bot broadcast is on
                 # OR the performer enabled "Broadcast to Megaphone" (an
@@ -1383,6 +1392,19 @@ class MapMusicBot:
             if isinstance(st, gameplay.Gameplay):
                 return st
         return None
+
+    def _is_music_owner(self):
+        """True if this performer holds the single music-bot PA slot.
+
+        The server keeps the music slot single-owner (only one MP3 stream on
+        the PA at a time, so two people's music never overlaps); everyone else
+        with "Broadcast to Megaphone" still broadcasts their live instruments.
+        """
+        gp = self._find_gameplay()
+        if not gp or not getattr(gp, 'megaphone', None):
+            return False
+        name = getattr(getattr(gp, 'player', None), 'name', '')
+        return bool(name and getattr(gp.megaphone, 'lock_owner', None) == name)
 
     def _on_search_submit(self, query):
         """Called when user submits search query"""
