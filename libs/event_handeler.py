@@ -181,9 +181,18 @@ class EventHandeler:
 
     def ping(self, data):
         if self.gameplay:
-            speak(
-                f"The ping took {int((time.time() - self.gameplay.last_ping_time)*1000)}ms"
-            )
+            rtt_ms = int((time.time() - self.gameplay.last_ping_time) * 1000)
+            # Record the RTT for the song/cover sync compensation (auto sampler
+            # + manual F3 ping both feed it).
+            try:
+                from . import voice_chat
+                voice_chat._measured_rtt_ms = rtt_ms
+            except Exception:
+                pass
+            auto = getattr(self.gameplay, '_auto_ping_inflight', False)
+            self.gameplay._auto_ping_inflight = False
+            if not auto:
+                speak(f"The ping took {rtt_ms}ms")
             self.gameplay.pingging = False
 
     def _reset_instruments_for_map_change(self):

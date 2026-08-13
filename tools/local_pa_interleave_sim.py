@@ -167,11 +167,24 @@ print("=" * 66)
 music_frame = struct.pack('<%dh' % 960, *([6000] * 960))
 mic_chunk = struct.pack('<%dh' % 480, *([4000] * 480))
 
+import libs.voice_chat as vc_mod
+
+# Song/cover sync compensation: the local 'music' monitor is intentionally held
+# back by _compensation_frames() (2RTT + 40ms, default 2 frames at RTT 0) so a
+# remote cover performer lines up with the song. Reset it between scenarios; the
+# cadence checks below assert the STEADY STATE (1 in / 1 out) after the initial
+# fill, which is the property that matters (no drops, no growth).
+def _reset_comp():
+    vc_mod._comp_fifos.clear()
+    vc_mod._comp_last_feed.clear()
+    vc_mod._measured_rtt_ms = None  # -> 40ms floor -> 2 frames
+    return vc_mod._compensation_frames()
+
 # --- 2a. Music + mic simultaneously: TWO separate source sets ---
 gp = FakeGameplay()
 clock = _Clock()
-import libs.voice_chat as vc_mod
 vc_mod.time.time = clock
+comp_frames = _reset_comp()
 
 for step in range(50):  # 500ms
     clock.t = 1000.0 + step * 0.01
@@ -183,8 +196,10 @@ music_srcs = gp.megaphone.player_sources['local:music']['sources']
 mic_srcs = gp.megaphone.player_sources['local:mic']['sources']
 check("music and mic got SEPARATE source sets (no shared queue)",
       music_srcs is not mic_srcs)
-check("music stream kept its own cadence: 25 frames in 500ms (%d)" % music_srcs[0].buffers_queued,
-      music_srcs[0].buffers_queued == 25)
+expected_music = 25 - (comp_frames - 1)
+check("music stream kept its own cadence: %d of 25 frames (first %d held by sync comp) (%d)"
+      % (expected_music, comp_frames - 1, music_srcs[0].buffers_queued),
+      music_srcs[0].buffers_queued == expected_music)
 check("mic stream fed immediately: 50 chunks in 500ms (%d)" % mic_srcs[0].buffers_queued,
       mic_srcs[0].buffers_queued == 50)
 
@@ -197,36 +212,63 @@ for buf in music_srcs[0].queued_frames:
         break
 check("every music frame is full music (no interleaved voice slices)", music_ok)
 
-# --- 2b. Burst: 3 music frames inside one tick must all be queued (no drop) ---
+# Steady state after the fill: each extra feed emits exactly one frame.
+before = music_srcs[0].buffers_queued
+clock.t += 0.02
+vc_mod._feed_local_megaphone_direct(gp, music_frame, producer='music')
+check("steady state after fill: 1 feed -> 1 emitted (no backlog growth)",
+      music_srcs[0].buffers_queued == before + 1)
+
+# --- 2b. Burst: comp_frames+1 music frames inside one tick are retained in order ---
 gp2 = FakeGameplay()
 clock2 = _Clock()
 vc_mod.time.time = clock2
-for _ in range(3):
+comp_frames = _reset_comp()
+burst = comp_frames + 1
+for _ in range(burst):
     vc_mod._feed_local_megaphone_direct(gp2, music_frame, producer='music')
 m2 = gp2.megaphone.player_sources['local:music']['sources']
-check("burst of 3 in one tick: all 3 queued, none dropped (%d)" % m2[0].buffers_queued,
-      m2[0].buffers_queued == 3)
+# The FIFO holds the first comp_frames-1 feeds, then emits 1 per feed:
+# after 'burst' feeds exactly burst - comp_frames + 1 frames played.
+played = burst - comp_frames + 1
+check("burst held by the sync buffer (no drops, no early play) (%d)"
+      % m2[0].buffers_queued,
+      m2[0].buffers_queued == played)
+# One more feed -> the next burst frame plays (order preserved).
+vc_mod._feed_local_megaphone_direct(gp2, music_frame, producer='music')
+check("burst frames preserved: next feed emits the next one (no drops) (%d)"
+      % m2[0].buffers_queued,
+      m2[0].buffers_queued == played + 1)
 
 # --- 2c. Zero added latency: a mic chunk is queued on the SAME call ---
 gp3 = FakeGameplay()
 clock3 = _Clock()
 vc_mod.time.time = clock3
+_reset_comp()
 vc_mod._feed_local_megaphone_direct(gp3, mic_chunk, producer='mic')
 m3 = gp3.megaphone.player_sources['local:mic']['sources']
 check("voice is queued immediately (no window buffering delay)",
       m3[0].buffers_queued == 1)
 
-# --- 2d. Steady music-only: 1 frame per 20ms, no backlog accumulation ---
+# --- 2d. Steady music-only: 1 frame per 20ms after the fill, no growth ---
 gp4 = FakeGameplay()
 clock4 = _Clock()
 vc_mod.time.time = clock4
+comp_frames = _reset_comp()
 for step in range(50):
     clock4.t = 1000.0 + step * 0.01
     if step % 2 == 0:
         vc_mod._feed_local_megaphone_direct(gp4, music_frame, producer='music')
 m4 = gp4.megaphone.player_sources['local:music']['sources']
-check("steady music-only: 25 frames in 500ms (no drops, no growth) (%d)" % m4[0].buffers_queued,
-      m4[0].buffers_queued == 25)
+expected4 = 25 - (comp_frames - 1)
+check("steady music-only: %d of 25 frames (sync fill, then no drops/growth) (%d)"
+      % (expected4, m4[0].buffers_queued),
+      m4[0].buffers_queued == expected4)
+before4 = m4[0].buffers_queued
+clock4.t += 0.02
+vc_mod._feed_local_megaphone_direct(gp4, music_frame, producer='music')
+check("steady music-only continues 1-in/1-out (no backlog accumulation)",
+      m4[0].buffers_queued == before4 + 1)
 
 print()
 print(f"RESULT: {PASS} passed, {FAIL} failed")

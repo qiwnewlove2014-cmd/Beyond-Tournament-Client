@@ -312,6 +312,80 @@ def _adaptive_margin_frames(sender_id):
     frames = 1 + int(jitter / 20.0)
     return max(1, min(6, frames))
 
+
+# ============================================================================
+# SONG + LIVE COVER SYNC COMPENSATION
+# ============================================================================
+# A cover performer hears the song one network leg late, then their playing
+# travels a SECOND leg back to the song owner. At the owner's ears the remote
+# performance arrives behind the owner's own zero-latency local monitor:
+#
+#   Piano/drums are MIDI NOTE EVENTS (synthesized at the listener, no jitter
+#   buffer):   heard-song (RTT + 40ms jitter) + note travel (RTT) = 2RTT + 40ms
+#   Guitar/audio mixes ride the audio stream (jitter floor both ways):
+#              2 x (RTT + 40ms) = 2RTT + 80ms
+#
+# The fix delays the owner's LOCAL song monitor by the same amount so the song
+# and the remote band line up. 2RTT + 40ms targets the note-event instruments
+# (piano/drums - the common cover setup); audio-stream covers stay within one
+# jitter floor (40ms). Only the local 'music' producer is delayed: the owner's
+# own instruments stay on the instant path (their players anchor to the
+# delayed song themselves, and remote instruments line up automatically). Any
+# future producer can opt in by listing its tag here.
+_COMP_NOTE_FLOOR_MS = 40.0     # one 40ms receive-path floor (the song B hears)
+_COMP_MAX_FRAMES = 12          # 240ms cap on bad networks
+_COMP_GAP_RESET_S = 0.5        # clear the FIFO after a feed gap (pause/stop)
+_COMP_PRODUCERS = frozenset({"music"})
+_measured_rtt_ms = None        # latest ping RTT (auto sampler + F3 key)
+_rtt_sampler_started = False
+_comp_fifos = {}
+_comp_last_feed = {}
+
+
+def _compensation_frames():
+    """20ms frames to delay the local song monitor by (2RTT + 40ms).
+
+    Note-event instruments (piano/drums) reach the owner at 2RTT + 40ms
+    (song heard via the audio stream one leg, then the note travels one
+    round trip with no jitter buffer), so the local song monitor is held
+    back by exactly that. Audio-stream covers (guitar) arrive 40ms later
+    and stay within one jitter floor.
+    """
+    rtt = _measured_rtt_ms or 0.0
+    delay_ms = 2.0 * rtt + _COMP_NOTE_FLOOR_MS
+    return max(1, min(_COMP_MAX_FRAMES, int(round(delay_ms / 20.0))))
+
+
+def _ensure_rtt_sampler(game):
+    """Lazily start a background ping sampler so compensation adapts to the RTT."""
+    global _rtt_sampler_started
+    if _rtt_sampler_started:
+        return
+    _rtt_sampler_started = True
+
+    def _run():
+        while True:
+            time.sleep(5.0)
+            try:
+                if not hasattr(game, 'network'):
+                    continue
+                gp = None
+                if hasattr(game, 'stack') and game.stack:
+                    for st in reversed(game.stack):
+                        if hasattr(st, 'player') and hasattr(st, 'megaphone'):
+                            gp = st
+                            break
+                if gp is None or getattr(gp, 'pingging', False):
+                    continue
+                gp._auto_ping_inflight = True
+                gp.pingging = True
+                gp.last_ping_time = time.time()
+                game.network.send(consts.CHANNEL_PING, "ping", {})
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
 def get_jitter_buffer(game, source_id):
     """Get or create jitter buffer for a specific audio source"""
     global _jitter_buffers
@@ -572,6 +646,29 @@ def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
         sources = gameplay.megaphone.get_megaphone_player_sources(local_key)
         if not sources:
             return
+
+        # Song/cover sync compensation: hold the local SONG monitor in a small
+        # FIFO so it plays 'one round trip' late, matching when a cover
+        # performer's instrument (which they played after hearing the song one
+        # leg late, then traveled back one more leg) reaches this listener.
+        # Other local producers (mic/guitar/instruments) stay instant - their
+        # players anchor to the delayed song themselves.
+        if producer in _COMP_PRODUCERS:
+            _ensure_rtt_sampler(gameplay.game)
+            comp_frames = _compensation_frames()
+            now = time.time()
+            last = _comp_last_feed.get(local_key, now)
+            _comp_last_feed[local_key] = now
+            if now - last > _COMP_GAP_RESET_S:
+                _comp_fifos.pop(local_key, None)
+            buf = _comp_fifos.get(local_key)
+            if buf is None:
+                buf = collections.deque(maxlen=comp_frames)
+                _comp_fifos[local_key] = buf
+            buf.append(bytes(raw_buf))
+            if len(buf) < comp_frames:
+                return  # still filling the compensation buffer
+            raw_buf = buf.popleft()
 
         # Ensure spatial gains are evaluated
         if hasattr(gameplay.megaphone, 'update_megaphone_audio'):
