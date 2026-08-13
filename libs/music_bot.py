@@ -425,12 +425,22 @@ class AudioStreamer(threading.Thread):
 
         # === Pre-buffer phase: fill LOCAL buffers before starting playback ===
         pre_buffered = 0
+        _pre_leftover = b''
         for _ in range(self.PRE_BUFFER_COUNT):
             if not self.running:
                 break
-            data = self.process.stdout.read(self.BUFFER_SIZE)
-            if not data or len(data) < self.BUFFER_SIZE:
-                break
+            # Accumulate reads until we have a full BUFFER_SIZE chunk.
+            # A partial read does NOT mean EOF — it just means the pipe
+            # buffer had fewer bytes available (e.g. network stutter).
+            while len(_pre_leftover) < self.BUFFER_SIZE:
+                chunk = self.process.stdout.read(self.BUFFER_SIZE - len(_pre_leftover))
+                if not chunk:  # Empty bytes = ffmpeg closed the pipe (real EOF)
+                    break
+                _pre_leftover += chunk
+            if len(_pre_leftover) < self.BUFFER_SIZE:
+                break  # Real EOF during pre-buffer
+            data = _pre_leftover[:self.BUFFER_SIZE]
+            _pre_leftover = _pre_leftover[self.BUFFER_SIZE:]
             with self._lock:
                 if self._queue_local(data):
                     pre_buffered += 1
@@ -444,6 +454,7 @@ class AudioStreamer(threading.Thread):
 
         # === Streaming loop ===
         eof = False
+        _leftover = _pre_leftover  # Carry over any leftover bytes from pre-buffer
         while self.running:
             if self.paused:
                 time.sleep(0.05)
@@ -451,9 +462,21 @@ class AudioStreamer(threading.Thread):
 
             data = None
             if not eof:
-                data = self.process.stdout.read(self.BUFFER_SIZE)
-                if not data or len(data) < self.BUFFER_SIZE:
-                    eof = True
+                # Accumulate partial reads until we have a full frame.
+                # Only set eof when read() returns empty (ffmpeg closed pipe).
+                while len(_leftover) < self.BUFFER_SIZE:
+                    chunk = self.process.stdout.read(self.BUFFER_SIZE - len(_leftover))
+                    if not chunk:  # Real EOF: ffmpeg closed the pipe
+                        eof = True
+                        break
+                    _leftover += chunk
+                if len(_leftover) >= self.BUFFER_SIZE:
+                    data = _leftover[:self.BUFFER_SIZE]
+                    _leftover = _leftover[self.BUFFER_SIZE:]
+                elif _leftover and eof:
+                    # Flush remaining partial data at the very end
+                    data = _leftover
+                    _leftover = b''
 
             if not self.running:
                 break

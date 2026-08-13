@@ -158,11 +158,9 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    # Minimal pre-buffer: ONE 20ms frame so PA playback starts almost as fast
-    # as normal voice chat. Real network jitter is absorbed by the adaptive
-    # per-sender margin in queue_and_delay_frame (grows only when jitter is
-    # actually measured) instead of a fixed 120ms cushion on every stream.
-    PRE_BUFFER_FRAMES = 1       # Wait for 1 frame (20ms) before playing
+    # Smooth pre-buffer: TWO 20ms frames (40ms) to seamlessly absorb minor OS
+    # process switching and network jitter while remaining ultra-low latency.
+    PRE_BUFFER_FRAMES = 2       # Wait for 2 frames (40ms) before playing
     MAX_BUFFER_FRAMES = 12      # Maximum frames in buffer (240ms) for network stability
     TARGET_BUFFER_FRAMES = 4    # Target buffer level (80ms latency)
     
@@ -295,7 +293,7 @@ def _measure_speaker_jitter(sender_id, prev_time, now_time):
     elapsed = max(0.0, now_time - prev_ts)
     decayed = prev_est * (0.5 ** (elapsed / 2.0))
     excess = 0.0
-    if prev_time:
+    if prev_time and (now_time - prev_time) <= 0.18:
         interval_ms = (now_time - prev_time) * 1000.0
         excess = max(0.0, interval_ms - 20.0)
     est = max(decayed, min(excess, 200.0))
@@ -306,14 +304,14 @@ def _measure_speaker_jitter(sender_id, prev_time, now_time):
 def _adaptive_margin_frames(sender_id):
     """Map a sender's measured jitter to a silence-padding margin in 20ms frames.
 
-    Minimum 1 frame (20ms) for steady streams - the PA feels as immediate as
-    normal voice chat. Grows to at most 6 frames (120ms) for high-jitter
-    connections. Replaces the old fixed 120ms margin on every stream.
+    Minimum 2 frames (40ms) for smooth streams - absorbs minor OS and network
+    jitter seamlessly. Grows to at most 6 frames (120ms) for high-jitter
+    connections.
     """
     global _speaker_jitter_ms
     jitter = _speaker_jitter_ms.get(sender_id, 0.0)
-    frames = 1 + int(jitter / 20.0)
-    return max(1, min(6, frames))
+    frames = 2 + int(jitter / 20.0)
+    return max(2, min(6, frames))
 
 
 # ============================================================================
@@ -528,15 +526,13 @@ class voice_chat_compression(threading.Thread):
                         return  # Still pre-buffering, no speaker plays yet
 
                     # Update last play time
-                    global _last_play_times, _speaker_delay_queues, _last_packet_times
+                    global _last_play_times, _speaker_delay_queues, _last_packet_times, _dbg_mega_recv_time, _dbg_mega_recv_count
                     _last_play_times[sender_id] = time.time()
-                    # If this is a new sentence after a short pause (>180ms), clear
-                    # delay queues to prevent stale audio stack-up and reset the
-                    # jitter estimate so the fresh stream starts at the minimum
-                    # adaptive margin again.
+
                     current_time = time.time()
                     last_pkt_time = _last_packet_times.get(sender_id, 0.0)
                     _last_packet_times[sender_id] = current_time
+
                     if current_time - last_pkt_time > 0.18:
                         global _speaker_jitter_ms, _speaker_jitter_ts, _limiter_gain_state, _last_tail_sample, _just_padded
                         _speaker_jitter_ms[sender_id] = 0.0
@@ -546,10 +542,6 @@ class voice_chat_compression(threading.Thread):
                         _limiter_gain_state.pop(sender_id, None)
                         _last_tail_sample.pop(sender_id, None)
                         _just_padded.pop(sender_id, None)
-                        for idx in range(len(sources)):
-                            queue_key = (sender_id, idx)
-                            if queue_key in _speaker_delay_queues:
-                                _speaker_delay_queues[queue_key].clear()
                     else:
                         _measure_speaker_jitter(sender_id, last_pkt_time, current_time)
                     
@@ -1128,19 +1120,17 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
 def _pad_frames_for_resync(target_active, current_active, needs_initial_delay, any_starved):
     """How many silence frames to pad for one speaker this packet.
 
-    NEVER inserts silence into an already-playing stream: even a single 20ms
-    silence frame is an audible skip in music/voice, and it used to happen on
-    EVERY movement resync (the listener walking triggered a 1-frame pad once
-    the delay target outgrew the queue). The propagation-delay baseline is now
-    FROZEN at the stream's start position, so movement never re-bases it - the
-    PA image stays put while the queue drains naturally when the delay target
-    shrinks and catches up on the next underrun. Fresh streams (nothing playing
-    yet) and underrun recovery pad fully, which is required to rebuild the
-    buffer without interrupting anything.
+    For initial stream setup, pad up to target_active to establish the initial
+    spatial stagger. For underrun recovery during streaming (any_starved), pad
+    uniformly up to the margin cushion so inter-speaker delay stagger never shifts,
+    preventing the PA stereo image from flipping between wide and merged.
     """
     if not needs_initial_delay and not any_starved:
         return 0
-    return max(0, target_active - current_active)
+    if needs_initial_delay:
+        return max(0, target_active - current_active)
+    # Underrun recovery: pad uniformly to margin cushion (2 frames / 40ms)
+    return max(0, 2 - current_active)
 
 
 def queue_and_delay_frame(gameplay, sender_id, sources, packet):
@@ -1194,8 +1184,8 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
         try:
             while src.buffers_processed > 0:
                 result = src.unqueue_buffers()
-                if result is not None:
-                    gameplay.voice_chat_buffer_pool.append(result)
+                # Buffer recycling is handled by _queue_packet_to_source;
+                # here we only need to unqueue so active_counts is accurate.
         except:
             pass
         active_counts.append(src.buffers_queued)
