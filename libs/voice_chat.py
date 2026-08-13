@@ -18,64 +18,126 @@ import struct
 # Used by professional audio software to prevent distortion
 # ============================================================================
 
-def soft_limit_audio(audio_bytes, threshold=0.35, ratio=12.0):
+# Per-sender smoothed limiter gain (attack/release). The OLD limiter derived
+# its pre_scale from every packet's OWN peak, so adjacent 20ms packets got
+# different scaling -> gain steps at frame boundaries (audible 'kee-kee'
+# ticking on loud, continuous content like music and guitar). Now the gain
+# reduction is smoothed across packets: fast attack (~1 frame) when a peak
+# needs taming, slow release (~1s) back to unity, exactly like a hardware
+# limiter. No more 50Hz gain pumping.
+_limiter_gain_state = {}
+
+def soft_limit_audio(audio_bytes, threshold=0.85, ratio=8.0, state_key=None):
     """
-    Apply soft limiting to prevent clipping when multiple audio streams combine.
-    
+    Soft limiter with a smoothed per-stream gain.
+
+    Computes the gain this packet needs to keep its peak under control, but
+    applies it through a per-stream attack/release state so the scaling does
+    not jump between 20ms packets. This removes the frame-boundary gain steps
+    that caused a faint ticking/'kee-kee' noise on music and guitar, while
+    still preventing clipping when multiple streams combine.
+
     Args:
-        audio_bytes: Raw 16-bit PCM audio data
-        threshold: Level (0.0-1.0) above which limiting starts (0.35 = 35% of max)
-        ratio: Compression ratio above threshold (12.0 = 12:1 heavy compression)
-    
+        audio_bytes: Raw 16-bit PCM audio data (MONO16)
+        threshold: Level (0.0-1.0) above which limiting starts
+        ratio: Compression ratio above threshold
+        state_key: Per-sender key for the smoothed gain state. When None, the
+                   packet's own target gain is applied directly (stateless).
+
     Returns:
         Limited audio bytes
-    
-    ANTI-CLIPPING - AGGRESSIVE SETTINGS:
-    - Very low threshold (0.35): Start limiting very early 
-    - Very high ratio (12.0): Extreme compression to prevent any distortion
-    - Pre-scaling: Automatically reduce peaks before processing
     """
     try:
-        # Convert bytes to samples
         samples = list(struct.unpack(f'<{len(audio_bytes)//2}h', audio_bytes))
-        
         max_val = 32767
         threshold_val = int(max_val * threshold)
-        
-        # Apply soft limiting to each sample with additional peak normalization
-        limited = []
+
         peak = max(abs(s) for s in samples) if samples else 1
-        
-        # If peak is very high, apply additional pre-scaling.
-        # Threshold lowered to 0.75 to leave headroom before the mixer sums
-        # multiple senders together (prevents sum-clipping during talkover).
-        pre_scale = 1.0
-        if peak > max_val * 0.75:
-            pre_scale = (max_val * 0.7) / peak
-        
+
+        # Target gain for THIS packet: bring the peak down to
+        # threshold + 1/ratio of the excess (soft knee).
+        if peak > threshold_val:
+            over = peak - threshold_val
+            target_peak = threshold_val + over / ratio
+            target_gain = min(target_peak / peak, 1.0)
+        else:
+            target_gain = 1.0
+
+        if state_key is not None:
+            prev = _limiter_gain_state.get(state_key, 1.0)
+            if target_gain < prev:
+                # Fast attack toward the (lower) target.
+                gain = prev + (target_gain - prev) * 0.6
+            else:
+                # Slow release back to unity (~1s, no pumping).
+                gain = prev + (target_gain - prev) * 0.02
+            _limiter_gain_state[state_key] = gain
+        else:
+            gain = target_gain
+
+        # Apply the smoothed gain to every sample (uniform scaling, no
+        # per-sample knee steps that create harmonic distortion).
+        limited = []
         for sample in samples:
-            # Pre-scale to prevent extreme peaks
-            sample = int(sample * pre_scale)
-            
-            abs_sample = abs(sample)
-            if abs_sample > threshold_val:
-                # Calculate how much over threshold
-                over = abs_sample - threshold_val
-                # Compress the amount over threshold (stronger ratio)
-                compressed_over = over / ratio
-                # New sample value
-                new_abs = threshold_val + compressed_over
-                # Clamp to max
-                new_abs = min(new_abs, max_val)
-                # Restore sign
-                sample = int(new_abs) if sample > 0 else -int(new_abs)
-            limited.append(sample)
-        
-        # Convert back to bytes
+            v = int(sample * gain)
+            if v > max_val:
+                v = max_val
+            elif v < -max_val:
+                v = -max_val
+            limited.append(v)
         return struct.pack(f'<{len(limited)}h', *limited)
     except Exception:
         # If anything fails, return original
         return audio_bytes
+
+
+# ============================================================================
+# DE-CLICK HELPERS - short linear ramps so silence padding and source restarts
+# don't create step discontinuities (audible 'กี่ๆ' clicks)
+# ============================================================================
+
+# 2ms at 48kHz mono = 96 samples.
+FADE_SAMPLES = 96
+
+def _fade_in_packet(packet, samples=FADE_SAMPLES):
+    """Ramp the first `samples` samples of a MONO16 packet from 0 to full.
+
+    Used when a source (re)starts so the first buffer doesn't click.
+    """
+    n = len(packet) // 2
+    if n == 0:
+        return packet
+    samples = min(samples, n)
+    data = bytearray(packet)
+    for i in range(samples):
+        pos = i * 2
+        raw = struct.unpack_from('<h', data, pos)[0]
+        struct.pack_into('<h', data, pos, int(raw * (i / samples)))
+    return bytes(data)
+
+def _fade_out_from_tail(packet, tail_sample, samples=FADE_SAMPLES):
+    """Build a silence packet that ramps from `tail_sample` down to 0.
+
+    The first silence frame after real audio starts at the last real sample
+    value and fades to digital silence, so the audio->silence transition
+    doesn't click.
+    """
+    n = len(packet) // 2
+    if n == 0:
+        return packet
+    samples = min(samples, n)
+    data = bytearray(b'\x00' * len(packet))
+    for i in range(samples):
+        pos = i * 2
+        struct.pack_into('<h', data, pos, int(tail_sample * (1.0 - i / samples)))
+    return bytes(data)
+
+def _tail_sample(packet):
+    """Last MONO16 sample value of a packet (for de-click ramps)."""
+    n = len(packet) // 2
+    if n == 0:
+        return 0
+    return struct.unpack_from('<h', packet, (n - 1) * 2)[0]
 
 # ============================================================================
 # PROFESSIONAL JITTER BUFFER FOR MEGAPHONE
@@ -260,12 +322,21 @@ def get_jitter_buffer(game, source_id):
 def reset_jitter_buffers():
     """Reset all jitter buffers and delay queues"""
     global _jitter_buffers, _speaker_delay_queues, _last_play_times, _last_packet_times, _speaker_jitter_ms, _speaker_jitter_ts
+    global _last_tail_sample, _just_padded, _limiter_gain_state
     _jitter_buffers = {}
     _speaker_delay_queues = {}
     _last_play_times = {}
     _last_packet_times = {}
     _speaker_jitter_ms = {}
     _speaker_jitter_ts = {}
+    _last_tail_sample = {}
+    _just_padded = {}
+    _limiter_gain_state = {}
+
+# Last real-audio tail sample per sender (for de-click ramps) and a flag
+# marking that the sender's stream just resumed after silence padding.
+_last_tail_sample = {}
+_just_padded = {}
 
 # Track active megaphone speakers for dynamic ducking
 _active_megaphone_speakers = 0
@@ -364,7 +435,9 @@ class voice_chat_compression(threading.Thread):
                         return
 
                     # Safety-net limiter before the mixer sums this sender with others.
-                    limited_data = soft_limit_audio(bytes(data), threshold=0.5, ratio=4.0)
+                    # Per-sender smoothed gain: attack/release so the scaling
+                    # doesn't step between 20ms packets (no 'kee-kee' ticking).
+                    limited_data = soft_limit_audio(bytes(data), threshold=0.85, ratio=8.0, state_key=sender_id)
                     
                     # Single jitter buffer per sender — ensures all speakers play the same frame simultaneously
                     buffer_key = sender_id if sender_id is not None else "megaphone_shared"
@@ -387,9 +460,14 @@ class voice_chat_compression(threading.Thread):
                     last_pkt_time = _last_packet_times.get(sender_id, 0.0)
                     _last_packet_times[sender_id] = current_time
                     if current_time - last_pkt_time > 0.18:
-                        global _speaker_jitter_ms, _speaker_jitter_ts
+                        global _speaker_jitter_ms, _speaker_jitter_ts, _limiter_gain_state, _last_tail_sample, _just_padded
                         _speaker_jitter_ms[sender_id] = 0.0
                         _speaker_jitter_ts[sender_id] = current_time
+                        # Fresh transmission: reset smoothed limiter gain and
+                        # de-click state so playback starts clean.
+                        _limiter_gain_state.pop(sender_id, None)
+                        _last_tail_sample.pop(sender_id, None)
+                        _just_padded.pop(sender_id, None)
                         for idx in range(len(sources)):
                             queue_key = (sender_id, idx)
                             if queue_key in _speaker_delay_queues:
@@ -490,7 +568,7 @@ def _feed_local_megaphone_direct(gameplay, raw_buf):
                 if entry['currents_vol'][i] <= 0.05 and i < len(entry.get('targets_vol', [])):
                     entry['currents_vol'][i] = entry['targets_vol'][i]
 
-        limited_data = soft_limit_audio(bytes(raw_buf), threshold=0.5, ratio=4.0)
+        limited_data = soft_limit_audio(bytes(raw_buf), threshold=0.85, ratio=8.0, state_key="local_pa")
         for idx, src in enumerate(sources):
             if src:
                 # Set gain directly just in case update_megaphone_audio hasn't run yet
@@ -821,6 +899,14 @@ class MusicCompression(threading.Thread):
 
 
 def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=None):
+    # DE-CLICK: if this source is (re)starting, ramp the first samples up from
+    # zero so the restart doesn't pop (underrun recovery clicks).
+    try:
+        if src.state == cyal.SourceState.STOPPED or src.state == cyal.SourceState.INITIAL:
+            play_packet = _fade_in_packet(play_packet)
+    except Exception:
+        pass
+
     buf = None
     try:
         while src.buffers_processed > 0:
@@ -908,6 +994,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
         player_pos = (0.0, 0.0, 0.0)
         
     global _speaker_last_calc_time, _speaker_current_delays, _speaker_initial_delays, _speaker_last_calc_pos, _speaker_delay_cache_expires
+    global _last_tail_sample, _just_padded
     if '_speaker_last_calc_time' not in globals():
         _speaker_last_calc_time = {}
         _speaker_current_delays = {}
@@ -1049,8 +1136,14 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             pad_frames = max(0, target_active - current_active)
 
             if pad_frames > 0:
-                silence_packet = bytes(len(packet))
-                for _ in range(pad_frames):
+                # DE-CLICK: the first silence frame ramps from the last real
+                # audio sample down to zero instead of jumping straight to
+                # digital silence (which clicked at the audio->silence edge).
+                prev_tail = _last_tail_sample.get(sender_id, 0)
+                for p in range(pad_frames):
+                    silence_packet = bytes(len(packet))
+                    if p == 0:
+                        silence_packet = _fade_out_from_tail(silence_packet, prev_tail)
                     _queue_packet_to_source(gameplay, idx, src, silence_packet)
                     
                     # Also pad fading sources
@@ -1060,14 +1153,24 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                                 f_src = fade_obj['sources'][idx]
                                 if f_src:
                                     _queue_packet_to_source(gameplay, idx, f_src, silence_packet)
+                # Remember that this sender just came out of a silence gap so
+                # the next real packet can fade in instead of clicking.
+                _just_padded[sender_id] = True
                     
     _speaker_last_calc_time[sender_id] = now
     _speaker_last_calc_pos[sender_id] = player_pos
     
     # 4. Queue the actual audio packet to all sources
+    # DE-CLICK: if the stream just resumed after silence padding, ramp the
+    # first samples up from zero (silence->audio edge) to avoid a click.
+    packet_to_queue = packet
+    if _just_padded.pop(sender_id, False):
+        packet_to_queue = _fade_in_packet(packet)
     for idx, src in enumerate(sources):
         if src is not None:
-            _queue_packet_to_source(gameplay, idx, src, packet)
+            _queue_packet_to_source(gameplay, idx, src, packet_to_queue)
+    # Track the tail sample of the last real audio for the next de-click ramp.
+    _last_tail_sample[sender_id] = _tail_sample(packet_to_queue)
             
     # Process Crossfade for fading sources
     if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'fading_sources'):

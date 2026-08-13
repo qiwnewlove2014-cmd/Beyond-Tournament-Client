@@ -952,48 +952,50 @@ class MegaphoneManager:
             self.sources.clear()
 
     def update_megaphone_settings(self, volume, bass, mid, high):
-        """Called by megaphone_settings menu to update audio in real-time"""
-        # Updates global volume multiplier for all speakers
-        global_vol = volume / 100.0
-        
-        if hasattr(self, 'speaker_data'):
-            for data in self.speaker_data:
-                try:
-                    # Recalculate gain: Base (Map) * Global (Slider)
-                    new_gain = data['base_volume'] * global_vol
-                    data['source'].gain = new_gain
-                except Exception as e:
-                    print(f"[MEGAPHONE] Error updating volume: {e}")
+        """Apply the megaphone settings menu's Speaker Vol slider in real time.
 
-    def update_megaphone_settings(self, volume, bass, mid, high):
-        """Update megaphone audio settings in real-time"""
-        if not hasattr(self, 'sources'):
-            return
-        
-        # Recreate EQ effect with new values
-        new_eq_slot = self.game.audio_mngr.gen_effect(
-            "EQUALIZER",
-            ("low_gain", bass),
-            ("low_cutoff", 200.0),
-            ("mid1_gain", mid),
-            ("mid1_center", 1200.0),
-            ("mid1_width", 1.0),
-            ("high_gain", high),
-            ("high_cutoff", 4000.0)
-        )
-        
-        # Get original gains (4 Corner speakers)
-        original_gains = [0.6, 0.6, 0.6, 0.6]
-        
-        # Apply new settings to all megaphone sources
-        for i, src in enumerate(self.sources):
-            # Update volume (apply to gain) with bounds check
-            if i < len(original_gains):
-                src.gain = original_gains[i] * (volume / 100.0)
-            
-            # Update EQ
-            if hasattr(self.game.audio_mngr, 'efx') and new_eq_slot:
-                self.game.audio_mngr.efx.send(src, 0, new_eq_slot)
+        Fixes the old implementation that only touched the physical template
+        speakers (`self.sources`) and leaked a new EQ slot on every slider tick:
+        - Records the value in options so `global_vol` reads (and every new
+          player source created afterwards) pick up the new level.
+        - Updates the template speakers AND every active per-player clone
+          (`player_sources`) immediately, so lowering the slider is audible
+          right away even while standing still (no spatial refresh needed).
+        - EQ values from the menu are fixed (not adjustable) - the existing
+          eq_slot stays untouched, so no per-tick slot leak.
+        """
+        try:
+            old_vol = options.get("megaphone_volume", 100) / 100.0
+            options.set("megaphone_volume", volume)
+            new_vol = volume / 100.0
+            ratio = (new_vol / old_vol) if old_vol > 0 else new_vol
+
+            # 1. Physical template speakers (source of truth for clones)
+            if hasattr(self, 'speaker_data'):
+                for data in self.speaker_data:
+                    try:
+                        new_gain = data['base_volume'] * new_vol
+                        data['source'].gain = new_gain
+                    except Exception as e:
+                        print(f"[MEGAPHONE] Error updating volume: {e}")
+
+            # 2. Active per-player clones: scale their current AND target
+            #    volumes by the same ratio so the change is audible immediately
+            #    (the per-frame LERP keeps the transition smooth).
+            if hasattr(self, 'player_sources'):
+                for entry in self.player_sources.values():
+                    try:
+                        for i in range(len(entry.get('targets_vol', []))):
+                            entry['targets_vol'][i] *= ratio
+                            if i < len(entry.get('currents_vol', [])):
+                                entry['currents_vol'][i] *= ratio
+                        for src in entry.get('sources', []):
+                            if src is not None:
+                                src.gain *= ratio
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def open_megaphone_settings(self, mod):
         """Open megaphone settings menu (client-side only)"""
