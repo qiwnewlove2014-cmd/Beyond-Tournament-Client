@@ -1008,12 +1008,12 @@ def _pad_frames_for_resync(target_active, current_active, needs_initial_delay, a
     NEVER inserts silence into an already-playing stream: even a single 20ms
     silence frame is an audible skip in music/voice, and it used to happen on
     EVERY movement resync (the listener walking triggered a 1-frame pad once
-    the delay target outgrew the queue). Movement now only re-bases the delay
-    REFERENCE (so the variable tracks the live position for the next recovery)
-    while the audio keeps playing uninterrupted - the queue drains naturally
-    when the delay target shrinks and catches up on the next underrun.
-    Fresh streams (nothing playing yet) and underrun recovery pad fully, which
-    is required to rebuild the buffer without interrupting anything.
+    the delay target outgrew the queue). The propagation-delay baseline is now
+    FROZEN at the stream's start position, so movement never re-bases it - the
+    PA image stays put while the queue drains naturally when the delay target
+    shrinks and catches up on the next underrun. Fresh streams (nothing playing
+    yet) and underrun recovery pad fully, which is required to rebuild the
+    buffer without interrupting anything.
     """
     if not needs_initial_delay and not any_starved:
         return 0
@@ -1031,13 +1031,12 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
     except AttributeError:
         player_pos = (0.0, 0.0, 0.0)
         
-    global _speaker_last_calc_time, _speaker_current_delays, _speaker_initial_delays, _speaker_last_calc_pos, _speaker_delay_cache_expires
+    global _speaker_last_calc_time, _speaker_current_delays, _speaker_initial_delays, _speaker_delay_cache_expires
     global _last_tail_sample, _just_padded
     if '_speaker_last_calc_time' not in globals():
         _speaker_last_calc_time = {}
         _speaker_current_delays = {}
         _speaker_initial_delays = {}
-        _speaker_last_calc_pos = {}
         _speaker_delay_cache_expires = {}
 
     try:
@@ -1058,24 +1057,11 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             _speaker_last_calc_time,
             _speaker_current_delays,
             _speaker_initial_delays,
-            _speaker_last_calc_pos,
         ):
             cache.pop(cached_sender, None)
         _speaker_delay_cache_expires.pop(cached_sender, None)
     _speaker_delay_cache_expires.pop(sender_id, None)
 
-    # Movement-based resync: track how far the listener moved since the last
-    # delay calculation. If they walked >= 1.5 units, force a recalculation so the
-    # propagation delay tracks the live distance to each speaker instead of being
-    # frozen at the position when speech started.
-    last_calc_pos = _speaker_last_calc_pos.get(sender_id, player_pos)
-    moved_dist = math.sqrt(
-        (player_pos[0] - last_calc_pos[0]) ** 2 +
-        (player_pos[1] - last_calc_pos[1]) ** 2 +
-        (player_pos[2] - last_calc_pos[2]) ** 2
-    )
-    moved_enough = moved_dist >= 1.5
-    
     # 1. Unqueue all processed buffers and count active buffers to get the true playhead position
     active_counts = []
     for idx, src in enumerate(sources):
@@ -1102,14 +1088,23 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             
     has_initial_delays = sender_id in _speaker_initial_delays
     needs_initial_delay = not has_initial_delays
-    needs_resync = needs_initial_delay or any_starved or moved_enough
+    # The propagation-delay baseline is FROZEN at the stream's start position.
+    # Re-basing it on every walk step and re-padding at the next recovery made
+    # the inter-cabinet stagger flip between merged (same quantized 20ms frame)
+    # and separated (one frame apart) as the listener moved - the PA image kept
+    # 'แยกบ้าง รวมบ้าง' with no rhyme or reason. The listener's position is
+    # still tracked continuously by the spatial GAINS (volume/occlusion refresh
+    # + per-frame LERP); the delay stagger stays put so the image is
+    # deterministic. Fresh streams and underrun recovery still rebuild the
+    # stagger from the frozen baseline.
+    needs_resync = needs_initial_delay or any_starved
     
     # 3. A source that ran dry needs silence padding again, but it keeps the
     # existing propagation delay.  Recalculate that delay only for a fresh
-    # source or after the listener actually moved.
+    # source (pause/resume intentionally retains the old delay).
     if needs_resync:
         _speaker_current_delays[sender_id] = []
-        if needs_initial_delay or moved_enough:
+        if needs_initial_delay:
             _speaker_initial_delays[sender_id] = {}
         
         for idx, src in enumerate(sources):
@@ -1132,10 +1127,11 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                 _speaker_initial_delays[sender_id][idx] = 0.0
                 propagation_delay = 0.0
                 static_delay = 0.0
-            elif needs_initial_delay or moved_enough or idx not in _speaker_initial_delays[sender_id]:
-                # Recalculate propagation delay from the live position (speed of sound = 343 m/s).
-                # Triggered only for a fresh source or when the listener moved
-                # >= 1.5 units; pause/resume intentionally retains the old delay.
+            elif needs_initial_delay or idx not in _speaker_initial_delays[sender_id]:
+                # Recalculate propagation delay from the stream's ORIGIN position
+                # (speed of sound = 343 m/s). Computed once for a fresh source;
+                # pause/resume and listener movement intentionally retain it so
+                # the spatial stagger never jumps on its own.
                 if not is_reflection:
                     dx = player_pos[0] - speaker_pos[0]
                     dy = player_pos[1] - speaker_pos[1]
@@ -1196,7 +1192,6 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                 _just_padded[sender_id] = True
                     
     _speaker_last_calc_time[sender_id] = now
-    _speaker_last_calc_pos[sender_id] = player_pos
     
     # 4. Queue the actual audio packet to all sources
     # DE-CLICK: if the stream just resumed after silence padding, ramp the

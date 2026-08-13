@@ -4,6 +4,13 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[unreleased] Stable Stereo Image — 2026-08-13
+--------------------------------------------------------------------------------
+
+• Audio Engine & Voice Chat
+- **The PA Image No Longer Merges/Splits on Its Own:** The per-speaker propagation-delay baseline is now FROZEN at the stream's start position. Re-basing it on every walk step (and re-padding at the next recovery) made the inter-cabinet stagger flip between merged (same quantized 20ms frame) and separated (one frame apart) as the listener moved - standing between two loud cabinets, the image kept snapping between mono and stereo with no rhyme or reason. Movement now only affects the spatial GAINS (volume/occlusion refresh + per-frame LERP, still real-time); the delay stagger stays put, so the image is deterministic. Fresh streams and underrun recovery still rebuild the stagger from the frozen baseline, so it never jumps.
+
+--------------------------------------------------------------------------------
 [unreleased] PA Spatial Tracking & Simultaneous Local Streams — 2026-08-13
 --------------------------------------------------------------------------------
 
