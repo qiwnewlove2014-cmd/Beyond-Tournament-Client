@@ -4,6 +4,13 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[unreleased] Real-Time Audio: Unreliable Voice Packets — 2026-08-13
+--------------------------------------------------------------------------------
+
+• Audio Engine & Voice Chat
+- **No More Latency Spikes When the Network Drops a Packet:** Voice, music bot, and megaphone audio is now sent as UNRELIABLE ENet packets on both client and server. Previously every audio packet was RELIABLE: a single lost frame stalled the whole stream behind an ENet retransmission (head-of-line blocking), turning one dropped packet into a 150-200ms latency spike for every subsequent frame - audible as periodic stutters mid-song on any lossy link. Now a lost frame simply drops (a single 20ms hole that the adaptive jitter buffer absorbs or the de-click padding hides), while the stream keeps flowing at the 40ms floor. Data packets (game logic) are untouched and stay reliable.
+
+--------------------------------------------------------------------------------
 [unreleased] Stable Stereo Image — 2026-08-13
 --------------------------------------------------------------------------------
 

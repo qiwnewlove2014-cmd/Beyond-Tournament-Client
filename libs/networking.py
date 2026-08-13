@@ -109,6 +109,15 @@ class Client(threading.Thread):
             data = {}
         if channel < consts.CHANNEL_VOICECHAT: data = json.dumps({"event": event, "data": data}).encode()
         else: data = bytes(data)
+        # Audio channels (normal voice, music bot, megaphone; >= CHANNEL_VOICECHAT)
+        # are real-time: force UNRELIABLE so a lost packet drops cleanly and the
+        # stream keeps flowing. A reliable audio packet that gets lost stalls the
+        # whole queue behind an ENet retransmission (head-of-line blocking), which
+        # turns one dropped frame into a 100-500ms latency spike for every
+        # subsequent frame. The client jitter buffer already absorbs/drops old
+        # frames, so retransmitting audio is never useful.
+        if channel >= consts.CHANNEL_VOICECHAT:
+            reliable = False
         packet = enet.Packet(
             data,
             flags=(
