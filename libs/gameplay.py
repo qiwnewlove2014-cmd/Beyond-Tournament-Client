@@ -93,6 +93,9 @@ class Gameplay(state.State):
         self._vehicle_keys_down = set()
         self._vehicle_last_input = (0, 0)
         self._vehicle_horn_down = False
+        self._horse_wind_gain = 0.0
+        self._horse_sprint_duration = 0.0
+        self._last_horse_wind_time = time.monotonic()
         # Compatibility mirrors for code loaded alongside an older server.
         self.motorcycle_mode = False
         self.motorcycle_name = None
@@ -270,9 +273,65 @@ class Gameplay(state.State):
         self.motorcycle_mode = active and self.vehicle_type == "motorcycle"
         self.motorcycle_name = self.vehicle_name if self.motorcycle_mode else None
         if not active:
+            # Clean up horse wind audio immediately and completely upon dismount
+            self._horse_wind_gain = 0.0
+            self._horse_sprint_duration = 0.0
+            group = getattr(self.game, "direct_soundgroup", None)
+            if group:
+                wind_sound = group.labeled_sources.pop("horse_wind", None)
+                if wind_sound:
+                    wind_sound.destroy(force=True)
             return
         # Suppress any normal held-key movement that was active while mounting.
         self.running = False
+
+    def _update_horse_wind(self):
+        is_riding_horse = getattr(self, "vehicle_mode", False) and getattr(self, "vehicle_type", None) == "horse"
+        is_galloping = is_riding_horse and ("forward" in self._vehicle_keys_down) and ("sprint" in self._vehicle_keys_down)
+        
+        now = time.monotonic()
+        dt = min(0.1, max(0.0, now - getattr(self, "_last_horse_wind_time", now)))
+        self._last_horse_wind_time = now
+
+        if is_galloping:
+            self._horse_sprint_duration += dt
+        else:
+            self._horse_sprint_duration = 0.0
+
+        # Wind ONLY activates after sustaining gallop sprint through 2 strides (> 1.35 seconds)
+        if self._horse_sprint_duration >= 1.35:
+            # Over the next 1.6 seconds, smoothly creep target_gain from 0.0 up to 0.50
+            progress = min(1.0, (self._horse_sprint_duration - 1.35) / 1.6)
+            target_gain = progress * 0.50
+        else:
+            target_gain = 0.0
+
+        # Smooth 60fps interpolation (gentle creep in, clean fade out)
+        blend = min(1.0, dt * (1.6 if target_gain > self._horse_wind_gain else 4.0))
+        self._horse_wind_gain += (target_gain - self._horse_wind_gain) * blend
+
+        group = getattr(self.game, "direct_soundgroup", None)
+        if not group:
+            return
+
+        wind_sound = group.labeled_sources.get("horse_wind")
+        if self._horse_wind_gain > 0.01 and is_riding_horse:
+            if not wind_sound or not wind_sound.source:
+                wind_sound = group.play(
+                    "vehicles/motorcycle/wind.ogg",
+                    looping=True,
+                    id="horse_wind",
+                    cat="miscelaneous",
+                    volume=0,
+                )
+            if wind_sound and wind_sound.source:
+                master_cat = (group.parent.volume_categories.get("miscelaneous", [100])[0] / 100.0) if hasattr(group, "parent") else 1.0
+                wind_sound.source.gain = self._horse_wind_gain * master_cat
+                wind_sound.source.pitch = 0.85 + self._horse_wind_gain * 0.3
+        else:
+            if wind_sound:
+                group.labeled_sources.pop("horse_wind", None)
+                wind_sound.destroy(force=True)
 
     def set_motorcycle_session(self, data):
         session_data = dict(data or {})
@@ -284,6 +343,7 @@ class Gameplay(state.State):
         backward = {self.kc.get("move_backward", pygame.K_s), pygame.K_DOWN}
         left = {self.kc.get("turn_left", pygame.K_a), pygame.K_LEFT}
         right = {self.kc.get("turn_right", pygame.K_d), pygame.K_RIGHT}
+        sprint = {self.kc.get("sprint", pygame.K_LSHIFT), pygame.K_LSHIFT, pygame.K_RSHIFT}
         if key in forward:
             return "forward"
         if key in backward:
@@ -292,12 +352,15 @@ class Gameplay(state.State):
             return "left"
         if key in right:
             return "right"
+        if key in sprint:
+            return "sprint"
         return None
 
     def _send_vehicle_input(self):
         throttle = int("forward" in self._vehicle_keys_down) - int("backward" in self._vehicle_keys_down)
         steer = int("right" in self._vehicle_keys_down) - int("left" in self._vehicle_keys_down)
-        current = (throttle, steer)
+        sprint = bool("sprint" in self._vehicle_keys_down)
+        current = (throttle, steer, sprint)
         if current == self._vehicle_last_input or not self.vehicle_name:
             return
         self._vehicle_last_input = current
@@ -305,13 +368,14 @@ class Gameplay(state.State):
         self.game.network.send(
             consts.CHANNEL_MOVEMENT,
             event,
-            {"name": self.vehicle_name, "throttle": throttle, "steer": steer},
+            {"name": self.vehicle_name, "throttle": throttle, "steer": steer, "sprint": sprint},
         )
 
     def _handle_vehicle_control_event(self, event):
         if event.type not in (pygame.KEYDOWN, pygame.KEYUP):
             return False
-        if event.key == pygame.K_SPACE:
+        horn_keys = {pygame.K_SPACE, self.kc.get("horn", pygame.K_h)}
+        if event.key in horn_keys:
             if event.type == pygame.KEYDOWN and not self._vehicle_horn_down:
                 self._vehicle_horn_down = True
                 if self.vehicle_name:
@@ -1024,6 +1088,7 @@ class Gameplay(state.State):
             self.megaphone.update_megaphone_settings(volume, bass, mid, high)
 
     def update(self, events):
+        self._update_horse_wind()
         self.megaphone.update_megaphone_audio(0, None)
         self.wall_tone.update()
         self.compass_turn_cue.update()
