@@ -3,6 +3,26 @@
 • for the Beyond Tournament project (Server & Client core).
 • ============================================================
 
+[v1.7.7] Natural World Map Animals & Spatial Audio Polish — 2026-08-14
+--------------------------------------------------------------------------------
+
+• Audio Engine & Voice Chat
+- **Natural Distance Fade for Entity Sounds:** Footsteps and vocal calls from horses, boars, zombies, and other players now fade out smoothly with distance and reach true silence at about 40 steps, instead of staying faintly audible from far away and then cutting off abruptly.
+- **Horse Hoofbeat Range:** Horse walk/run hoof sounds are now only heard within 40 steps, so a horse moving inside a distant stable no longer echoes across the whole map.
+
+• Monster & Boss Entities
+- **Calmer Animal Vocalizations:** World Map animals now space out their cries randomly between 30 seconds and 1 minute instead of calling every few seconds, and each animal rolls its own staggered first call so a herd never cries at the same time.
+- **Animals Stay Inside Pens:** World Map animals can no longer slip through fence corners or leap over pen walls while wandering or fleeing, so horses and boars stay inside their stables.
+- **Natural Animal Behaviour:** World Map animals walk, run, rest, and graze at their own randomized pace, stay close to where they were released, and sprint away when spooked.
+
+• Staff & Builder Tools
+- **Round Up Animals (/penall):** New staff command rounds up every horse and boar on the World Map into its Animal Pen zone(s). Aliases include /roundup, /herd, /corral, and /catchall; available to Builder staff and above.
+- **Invisible Animal Pen Zones:** Builders can place an invisible "Animal Pen" zone from the Builder menu — animals standing inside survive server restarts and monster-clearing commands.
+- **World Map Spawn Rules:** Only horses can be spawned on World Maps by non-Developers; all other spawn commands (bosses, boar, piano, drumset, motorcycle) require Developer there, while matches keep the normal permissions.
+- **Flexible Instrument Placement:** Pianos and drum sets now place within 2 steps of the builder and never overlap each other.
+
+--------------------------------------------------------------------------------
+
 --------------------------------------------------------------------------------
 [v1.7.6] Wild Animals, Legendary Bosses & High-Round Scaling — 2026-08-14
 --------------------------------------------------------------------------------
