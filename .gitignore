@@ -153,3 +153,11 @@ oalinst$.exe
 *.zip
 Beyond Tournament/
 Beyond Tournament*/
+
+# Release / runtime binaries (copied into the package by build.bat)
+*.dll
+*.mhr
+*.dylib
+ffmpeg.exe
+oalinst.exe
+nuitka-crash-report.xml
