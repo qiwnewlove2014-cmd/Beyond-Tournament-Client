@@ -4,6 +4,23 @@
 • ============================================================
 
 --------------------------------------------------------------------------------
+[v1.7.6] Wild Animals, Legendary Bosses & High-Round Scaling — 2026-08-14
+--------------------------------------------------------------------------------
+
+• Monster & Boss Entities
+- **Wild Boar Encounters:** Added wild boars as roaming animals on the World Map and dynamic wild mobs in Zombie matches with custom spatial footsteps and charge attacks.
+- **New Boss - Ares (God of War):** Introduced Ares as a formidable legendary boss entity featuring heavy sword strikes, high-volume spatial audio, InstaKill resistance, and a 360-degree Thunderstorm ultimate ability.
+- **Rebalanced Boss Entry Thresholds:** High-level bosses now begin appearing at higher round thresholds (Jupiter at Round 15+, Minotaur at Round 18+, Dragon at Round 22+, Ares at Round 25+) using pure probabilistic percentage rolls instead of fixed round numbers, keeping early rounds accessible while preserving high-round intensity.
+- **Dynamic High-Round Rewards:** Defeating boss rounds in higher waves now awards dynamically scaled bonus points based on round depth, alongside multi-powerup reward drops including Max Ammo, Double Points, Instakill, and Nuke.
+- **Chat History Reward Notifications:** Fixed reward announcements when clearing boss rounds so that reward messages are saved into the match chat history buffer for easy review.
+
+• Mountable Vehicles & Controls
+- **Rider Movement & Footstep Fix:** Corrected horse walk footstep audio playback when moving forward so walking cleanly triggers walk sound effects instead of sprint audio.
+
+• Staff & Builder Tools
+- **Staff Commands & Documentation:** Added dedicated staff commands for spawning wild boars (`/spawnboar`) and Ares (`/spawnares`), along with a comprehensive staff command manual for animal and monster management.
+
+--------------------------------------------------------------------------------
 [v1.7.5] Megaphone & PA Low-Latency Audio — 2026-08-13
 --------------------------------------------------------------------------------
 
