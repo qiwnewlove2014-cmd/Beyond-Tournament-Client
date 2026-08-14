@@ -1,0 +1,327 @@
+Beyond Tournament — Player Patch Notes
+====================================================================
+Every update, summarized for players. Complex system internals and
+staff-only tools are left out — the full technical record lives in
+changelog.txt.
+
+[v1.7.7] Natural World Map Animals & Spatial Audio Polish — 2026-08-14
+--------------------------------------------------------------------------------
+- Footsteps and animal sounds now fade out with distance and go fully silent at about 40 steps — no more hearing hoofbeats from across the map.
+- Horses and boars on the World Map call out much less often (randomly every 30 seconds to 1 minute) and stagger their first call, so a herd never cries all at once.
+- World Map animals behave more naturally: they walk, run, rest and graze at their own random pace and stay close to where they were released.
+- Animals can no longer slip through fence corners or jump over pen walls, so they stay inside their stables.
+
+[v1.7.6] Wild Animals, Legendary Bosses & High-Round Scaling — 2026-08-14
+--------------------------------------------------------------------------------
+- Wild boars roam the World Map and also appear as wild mobs in Zombie matches, with charge attacks.
+- New legendary boss: Ares (God of War) — heavy sword strikes, InstaKill resistance and a 360-degree Thunderstorm ultimate.
+- Bosses appear at higher rounds now: Jupiter at Round 15+, Minotaur at Round 18+, Dragon at Round 22+, Ares at Round 25+.
+- Legendary bosses now spawn only in dedicated boss rounds with clear roars and announcements — no more surprise mixed-wave bosses.
+- Clearing boss rounds in high waves awards bonus points scaled to round depth, plus drops like Max Ammo, Double Points and Instakill.
+- Bosses and mountable beasts are immune to Nuke instant kills, and Nuke drops are filtered out during boss rounds.
+- Reward messages from clearing boss rounds are now saved to the match chat history.
+- Fixed horse walk footsteps so walking triggers walk sounds instead of sprint audio.
+
+[v1.7.5] Real-Time Audio & World Map Mountable Horses — 2026-08-14
+--------------------------------------------------------------------------------
+- Ride horses! Mount, ride and steer standard horses and giant warhorses across the World Map with your interact key (F or Enter).
+- Galloping has smooth multi-tier acceleration up to a full cavalry charge.
+- High-speed galloping builds a realistic wind-rush sound that fades when you slow down.
+- Riders hear a clean, unified hoofbeat rhythm; nearby players hear the full 4-hoof spatial sound.
+- Trigger horse whinnies and alert calls on demand with your horn/action key.
+- World Map animals wander, graze and rest naturally without targeting players.
+- Band mode: any number of performers can broadcast their instruments through the PA at the same time — piano, drums and guitar can all jam together.
+- The single music-bot slot stays exclusive, so two songs never play on top of each other.
+- PA speakers and voice chat now respond almost instantly (down from ~180ms to ~40ms latency on clean networks).
+- Singing over the music or talking while playing no longer glitches or squeezes the audio — each stream mixes cleanly.
+- Live cover sync: when a band plays along with the song owner's track, the music lines up in time at the owner's ears.
+- Fewer audio stutters on lossy connections.
+- Giant Warhorse added as a new horse boss entity.
+
+[v1.7.4] Guitar & Music Bot PA Broadcasting Fix — 2026-08-13
+--------------------------------------------------------------------------------
+- "Broadcast to Megaphone" now works for the guitar exactly like piano and drums — the toggle alone sends your guitar to the PA.
+- Fixed doubled guitar audio (strums no longer play twice for nearby players and through the PA).
+- The guitar relay keeps running even when no music track is playing, so a strum broadcasts immediately.
+
+[v1.7.3] Minor Update & Version Sync — 2026-08-13
+--------------------------------------------------------------------------------
+- New boss: HorseBeast — horse-themed boss with proactive melee/ranged evasion, sprint bursts and its own neigh, snort, charge and death voice banks.
+- Walk and gallop now use separate footstep banks, so running sounds like real galloping instead of stacked clips.
+
+[v1.7.2] Voice Chat, Megaphone Routing & Hotfixes — 2026-08-12
+--------------------------------------------------------------------------------
+- Speaking into the PA/Megaphone now routes your voice back to yourself with zero latency — you hear yourself instantly.
+- Instrument input (guitar/bass line-in) routes through the Megaphone at zero latency for live stage performances.
+- Microphone arrays and USB stereo mics are supported; devices that require stereo capture automatically fall back and mix down to mono.
+- Fixed a critical bug where the voice encoder silently dropped packets while speaking into the Megaphone (silent broadcasts).
+- Staff can make portable voice announcements anywhere on the map again.
+- Performers now hear their own piano/drums echoing from the PA exactly like the audience hears.
+- Several people can talk through the PA at the same time without clipping or being dropped.
+- Talking no longer steals PA routing from a performing pianist/drummer — instruments keep reaching the PA mid-announcement.
+- Multiple guitarists can jam through the PA at the same time.
+- Pausing briefly (ESC, adjusting volume, chatting) no longer silently drops your PA routing — it only releases when you toggle off, leave the map or disconnect.
+
+[v1.7.0] Multi-Map World Hub, Travel Points, Key Bindings, Guitar Input & Stability Fixes — 2026-08-11
+--------------------------------------------------------------------------------
+- Fixed frequent client crashes when entering, changing or building maps that contain Pianos and Drumsets.
+- Fixed instrument memory leaks across map changes — long sessions no longer accumulate until a crash.
+- Server capacity raised to 128 simultaneous players.
+- Multi-map world hub: maps can be linked with travel points into a shared world.
+- Travel points no longer teleport you automatically — stand in one and press your interact key to travel.
+- Travel points show up in the zone check (V).
+- The interact key is now the main Enter key by default, and menus show friendly names ("enter" instead of "return").
+- New "Clear drum keys" option wipes every custom drum binding at once.
+- New "Select instrument input device" setting: your instrument line-in gets its own capture device beside the mic, so you can talk while you play.
+- Guitar & bass input (press U): plug in, the game pitch-detects what you play and plays it back at your position instantly.
+- Guitar notes broadcast to everyone on the map through the same validated note pipeline as piano and drums.
+- Chords and strumming stream on the 3D voice channel, so players nearby hear the full guitar sound.
+- Guitar mixes into the Music Bot broadcast when enabled.
+- USB effects pedals and amp modellers (Boss GT, Zoom G, Line 6, Valeton, NUX, Mooer, Kemper, etc.) are auto-detected when plugged in.
+
+[v1.6.9] Drum Kit Selection & Natural Instrument Acoustics — 2026-08-10
+--------------------------------------------------------------------------------
+- Drumsets can use different sound kits — a new "Salamander" acoustic kit is available alongside the default.
+- Piano and drums fade out smoothly with distance, reaching true silence at about 50 steps instead of staying faintly audible and cutting off abruptly.
+
+[v1.6.8] Playable Drumset & Extensible MIDI Instruments — 2026-08-10
+--------------------------------------------------------------------------------
+- Playable 17-piece drum kit: kick, snare, rim, hi-hats, four toms, crashes, china, splash, ride, ride bell and cowbell.
+- Custom drum key bindings with primary + alternate keys, spoken conflict warnings and safe exit-key protection.
+- Percussion responds instantly for the performer, with natural rolls, cymbal tails and realistic hi-hat choking.
+- Nearby listeners hear balanced 3D drums with reverb, wall occlusion and distance tuning.
+- MIDI keyboards and electronic drum kits are auto-detected, with General MIDI percussion plus a compact C4–E5 layout covering all 17 pads.
+
+[v1.6.7] Classic Puppet Zombie & Builder Surface Expansion — 2026-08-09
+--------------------------------------------------------------------------------
+- Drive a motorcycle on the main map: start/stop the engine, accelerate, steer, reverse and honk, with movement, collision, wind and environmental audio.
+- Classic Puppet Zombies silently infiltrate Zombie Mode waves from Round 7 (replacing a couple of ordinary zombies), with their own sounds and stronger health and melee.
+- Mechanical-keyboard typing feedback: five varied key-press sounds plus distinct Space, Enter and Backspace cues while typing.
+- Typing sounds can be toggled in the Options menu (on by default) and follow the current room's reverb.
+- Typing sounds stay silent in password fields and ignore Ctrl/Alt shortcuts for privacy.
+
+[v1.6.6] Persistent Builder Instruments — 2026-08-08
+--------------------------------------------------------------------------------
+- Press Tab in Piano Mode to toggle a smooth Chorus effect, synced for the performer and nearby listeners (including through the PA).
+
+[v1.6.5] Piano Expression & MIDI Support — 2026-08-08
+--------------------------------------------------------------------------------
+- MIDI keyboards plug-and-play with native C1–B6 note input.
+- MIDI velocity controls piano volume in real time, synced for performers and listeners.
+- MIDI Sustain, Soft Pedal and full-resolution pitch bend supported.
+- Hold Up/Down arrows to bend sounding notes by a whole tone, then release to return.
+- Hold Left Control for a real-time soft pedal (muffled tone).
+- Left/Right arrows select octaves 1–6, with unavailable edge rows disabled instead of repeating notes.
+
+[v1.6.4] Piano Megaphone Broadcast Fix — 2026-08-08
+--------------------------------------------------------------------------------
+- Fixed piano notes never reaching other players through the PA speakers during a broadcast — notes now route through every PA speaker with smooth fade-out on release.
+- "Broadcast to Megaphone" works independently of music playback.
+
+[v1.6.3] Piano Hotfix & Tuning — 2026-08-07
+--------------------------------------------------------------------------------
+- Real-time key transposition: F1 down, F2 up, F3 reset to C, with clear speech announcements.
+- Sustain pedal moved to the Spacebar; fixed staccato notes for remote listeners.
+- Piano performances automatically absorb the room's reverb for realistic acoustics.
+- Piano notes behind walls are lowpass-filtered for realistic occlusion.
+- Keyboard layout expanded to 4 non-overlapping octaves, from deep bass to high treble.
+
+[v1.6.2] Piano Patch — 2026-08-06
+--------------------------------------------------------------------------------
+- Playable, network-synced piano with a responsive multi-octave keyboard layout.
+- Dynamic acoustics: rich, wide stereo up close, naturally transitioning to 3D directional audio as you walk away.
+
+[v1.6.1] Client Security Patch 1 — 2026-08-06
+--------------------------------------------------------------------------------
+- If the game freezes for over 15 seconds, a watchdog automatically collects crash info, speaks a warning, and restarts the game to the login screen.
+- The auto-updater no longer prompts "You are up to date" during startup — checking manually still reports the version.
+
+[v1.6.0] Music Bot Broadcast Fix — 2026-08-05
+--------------------------------------------------------------------------------
+- Fixed the Music Bot broadcast going permanently silent after minor network fluctuations — it now recovers and resumes smoothly.
+- Music Bot broadcasts now extend up to 50 tiles and fade smoothly to silence.
+- Rebuilt ambient sound fading and wall occlusion: no more popping/stuttering when moving through sound zones, no indoor sounds leaking through walls, and smooth fades between floors.
+- Auto-updater and login failure notifications (like version mismatches) now open a navigable in-game menu you can review with the arrow keys.
+
+[v1.5.9] Navigation Audio, Music Controls & Staff AI Cleanup — 2026-08-02
+--------------------------------------------------------------------------------
+- Personal music feed: a shuffled Favorites feed, with Ctrl+[ and Ctrl+] to skip songs.
+- Music Bot controls (volume mixer, music bot toggle, volume up/down) are now rebindable in the key bindings menu.
+- In-game feedback center: "Send feedback or report a bug" in the main menu, with Bug Report, Suggestion and General Feedback categories plus a history/reply interface.
+- Optional 3D wall proximity tone that rises in pitch as you approach a wall (checks up to 5 tiles ahead).
+- Tab now reports your 16-way compass direction with a spatial cue.
+- Optional turn cue that moves left/right with your real turning angle.
+- Four persistent turning-speed levels, adjustable in Options.
+- Custom online/offline sounds: upload your own connect/disconnect sounds (Options → Configure custom online and offline sounds). Files must be OGG Vorbis mono/stereo at 44,100 or 48,000 Hz, 0.25–10 seconds, no larger than 512 KB.
+
+[v1.5.8] Dragon Boss Encounter & Version Sync — 2026-08-01
+--------------------------------------------------------------------------------
+- Dragon boss: 20,000 HP, custom footsteps and roars, melee attacks, Ring of Fire and long-range aerial strikes. Guaranteed at Round 12, then follows the normal boss cooldown rules.
+
+[v1.5.7] Boss Round System & Version Sync — 2026-08-01
+--------------------------------------------------------------------------------
+- Jupiter boss: when a special round triggers (every 3 rounds, 25% chance), there's a 50% chance it becomes a Boss Jupiter round — 2x HP, faster, wider/stronger explosion; defeating it drops a powerup and heals all players.
+
+[v1.5.6] System Interaction & Administration Patch — 2026-07-30
+--------------------------------------------------------------------------------
+- Fixed players leaving permanent visual ghost/clone entities behind when disconnecting or switching maps.
+
+[v1.5.5] Jupiter Boss Infiltration & Tactical AI Engine Patch — 2026-07-28
+--------------------------------------------------------------------------------
+- Jupiter mini-boss appears in standard Zombie Mode rounds from Round 5+ (10,000 base HP, 3D arrival roar).
+- From Round 16+, Jupiter can sneak into normal zombie swarms without a text announcement — a dangerous surprise.
+- Below 50% HP Jupiter roars and summons 2 minions, repeating every 25 seconds while critical.
+- Deploy up to 4 armed zombie helpers at once (starting inventory increased to 4).
+- At critical health Jupiter enters a survival phase with a defensive aura, high-speed evasion and full InstaKill immunity.
+- Jupiter's ultimate is now mobile: it keeps running and chasing at full speed while raining 360-degree lightning.
+- New Phantom Dash 3-hit combo; the basic melee is now a 360-degree AoE sweep.
+- Ultimates have a 6-second cooldown window for fair counter-play.
+- Heavy melee hits stagger bosses, which then sprint back 6–8 tiles.
+- Bosses observe players for 3 seconds on arrival before attacking.
+- The boss punishes reloading with a straight-line sprint and dodges sustained gunfire with sharp zigzags.
+- Below 30% HP the boss becomes erratic and unpredictable.
+- Fixed melee wallbuy messages — you now hear "You already have this weapon" instead of the grab sound.
+- Distinct grab sound when restocking ammo from a wallbuy.
+- Dedicated boss special rounds (35% chance every 4+ rounds) with victory rewards: 1,000 bonus points + Max Ammo + Double Points.
+
+[v1.5.4] PA Speaker Auto-Load, Downed Shield Lock & Melee Balance Patch — 2026-07-27
+--------------------------------------------------------------------------------
+- Shields now have configurable barrier widths and curved defense arcs up to 360 degrees.
+- Downed players can't raise shields until revived.
+- Round sound themes rotate every round with weighted balancing — no repeating themes in a row.
+
+[v1.5.3] Comprehensive Shield Infrastructure & Zombie AI Update — 2026-07-25
+--------------------------------------------------------------------------------
+- 5 shield tiers from Oak Wood to Iron; holding the defense stance mitigates damage based on block percentage and durability.
+- Shake off pursuing zombies by leading them past other players in multiplayer.
+- Solo matches focus all zombies on you; multiplayer applies soft density caps.
+- Fixed zombies standing still after attacking a stationary target.
+
+[v1.5.2] PA Speaker Acoustic Filter & Wall Occlusion Patch — 2026-07-23
+--------------------------------------------------------------------------------
+- Restored accurate wall occlusion across all PA speakers, with boosted low-end bass for occluded speakers.
+
+[v1.5.1] Core Version Alignment & Server Sync — 2026-07-22
+--------------------------------------------------------------------------------
+- Under-the-hood update: version alignment for protocol compatibility — no player-facing changes.
+
+[v1.5.0] Sound Engine & Fall Damage Audio Fix — 2026-07-21
+--------------------------------------------------------------------------------
+- Removed the death sting that played on every ordinary fall/landing.
+
+[v1.4.9] Preloaded Sound Cache & Reload Audio Sync — 2026-07-20
+--------------------------------------------------------------------------------
+- Under-the-hood update: UI sounds are pre-loaded at startup for faster playback — no player-facing changes.
+
+[v1.4.8] Arcade Minigame Substate & Menu Key Unlocking — 2026-07-19
+--------------------------------------------------------------------------------
+- Restored Backspace key navigation during active minigames.
+
+[v1.4.7] Megaphone Talkover Level Balancing Patch — 2026-07-17
+--------------------------------------------------------------------------------
+- Fixed megaphone talkover clipping by replacing ducking with equal-power sum-safe mixing.
+
+[v1.4.6] Moderation Tones & Broadcast Security — 2026-07-15
+--------------------------------------------------------------------------------
+- Global server announcements now use a distinct notification tone.
+
+[v1.4.5] Arcade Multiplayer Retention & Turn Validation — 2026-07-13
+--------------------------------------------------------------------------------
+- Multiplayer arcade matches now stay in multiplayer mode across rounds.
+
+[v1.4.4] Weapon Editor Recoil Tuning & Wizard Patch — 2026-07-11
+--------------------------------------------------------------------------------
+- Under-the-hood update: custom recoil configuration added to the weapon editor (admin tooling) — no player-facing changes.
+
+[v1.4.3] Opus Audio Stream Optimization & Controls Sync — 2026-07-09
+--------------------------------------------------------------------------------
+- Fixed audio clipping between microphone voice chat and the Music Bot.
+
+[v1.4.2] AppData Playlist Profile Migration — 2026-07-07
+--------------------------------------------------------------------------------
+- Under-the-hood update: personal playlists moved to %APPDATA%/Beyond Tournament/ — no player-facing changes.
+
+[v1.4.1] Builder Multi-Level Navigation Stack — 2026-07-05
+--------------------------------------------------------------------------------
+- Under-the-hood update: builder menu back-navigation reworked (builder tooling) — no player-facing changes.
+
+[v1.4.0] Seamless Auto-Updater & Audio Progress Sync — 2026-07-02
+--------------------------------------------------------------------------------
+- Introduced the integrated automatic game updater.
+
+[v1.3.9] Auto-Updater Background Batch Pipeline — 2026-06-30
+--------------------------------------------------------------------------------
+- Under-the-hood update: updates install via a background batch script after closing the game.
+
+[v1.3.8] Stealth Anti-Cheat Security Audit & Staff Alerts — 2026-06-27
+--------------------------------------------------------------------------------
+- Under-the-hood update: enhanced server-side security monitoring — no player-facing changes.
+
+[v1.3.7] Audio Engine Gain Mapping & Limiter Fixes — 2026-06-24
+--------------------------------------------------------------------------------
+- Under-the-hood update: corrected master listener gain mapping — no player-facing changes.
+
+[v1.3.6] User Profile AppData Migration Pipeline — 2026-06-20
+--------------------------------------------------------------------------------
+- Under-the-hood update: user profiles and playlists moved to %APPDATA%/Beyond Tournament/ — no player-facing changes.
+
+[v1.3.5] Concert Audio Crossfading & Stream Reclamation — 2026-06-17
+--------------------------------------------------------------------------------
+- Concert spectator mode transitions now crossfade smoothly over 1.5 seconds.
+
+[v1.3.4] Stealth Anti-Cheat Monitoring & Staff Audit — 2026-06-14
+--------------------------------------------------------------------------------
+- Under-the-hood update: enhanced server-side security monitoring — no player-facing changes.
+
+[v1.3.3] Megaphone Broadcast Ownership Locks — 2026-06-10
+--------------------------------------------------------------------------------
+- Under-the-hood update: server-enforced broadcast ownership for the megaphone — no player-facing changes.
+
+[v1.3.2] Audio Stream Buffer Memory Optimizations — 2026-06-07
+--------------------------------------------------------------------------------
+- Under-the-hood update: optimized streaming audio buffer memory — no player-facing changes.
+
+[v1.3.1] Standalone Client Build Tool Fallbacks — 2026-06-04
+--------------------------------------------------------------------------------
+- Under-the-hood update: build tool fallbacks for distributed builds — no player-facing changes.
+
+[v1.3.0] Beyond Tournament v1.3 Foundation Core Release — 2026-06-01
+--------------------------------------------------------------------------------
+- Under-the-hood update: v1.3 core network protocol and server event handlers — no player-facing changes.
+
+[v0.9.0] The Spectator & 2v2 Update — 2026-05-22
+--------------------------------------------------------------------------------
+- Full 2v2 support for both Multiplayer and Solo (Co-op) modes, with dynamic lobby limits (4 players for 2v2) and serves alternating between teammates every 4 total points.
+- Announcer system expanded with dynamic, escalating hype commentary for 2v2 tournaments.
+- Spectator Mode for active public Pong matches, including a Sideline Camera at the arena's East/West edge with perfect 3D stereo separation.
+- The server tells spectators which team is on their left/right based on their camera angle.
+- Goal sounds in spectator mode are boosted to 250% volume for maximum hype.
+- Main menu reorganized into: Zombie Game, Minigame, Spectate a Match, and View the Leaderboard.
+
+[v0.8.0] The Advanced AI Update — 2026-04-28
+--------------------------------------------------------------------------------
+- 6 AI difficulty levels (Beginner to Nightmare); Nightmare predicts ~99% of ball trajectories.
+- Higher-level AI throws unpredictable, sharp-angled swings to break your rhythm.
+- AI targets human opponents over other AI in 2v2 mode.
+- Rage-quit protection: an AI instantly takes over a disconnected player's paddle; the match only ends if zero humans remain.
+- Competition Mode (first to 7, 11 or 21 points) and Training Mode (no score limit, with a constant-speed toggle).
+
+[v0.7.0] The Physics & Sound Update — 2026-04-05
+--------------------------------------------------------------------------------
+- Rewritten ball steering — responsive left/right control with a speed-proportional angle cap.
+- Paddle sounds scale in pitch with distance from center; a 3-stage cinematic power-switch sequence; persistent 3D rolling ball sound.
+
+[v0.5.0] The Arcade Table Foundations — 2026-03-08
+--------------------------------------------------------------------------------
+- Arcade tables rebranded; fixed players spawning inside walls or falling through floors; no more invisible collision platforms polluting maps; exiting an arcade game returns you to your previous session.
+
+[v0.3.0] The Builder Tools Update — 2026-02-12
+--------------------------------------------------------------------------------
+- Under-the-hood update: builder snap logic, paste and door-editing fixes (builder tooling) — no player-facing changes.
+
+[v0.1.0] The Alpha Launch — 2026-01-15
+--------------------------------------------------------------------------------
+- Initial prototype: networking, movement, chat, the core Pong minigame and early spatial voice chat. The journey begins here!
+
+====================================================================
+Full technical changelog: see changelog.txt
