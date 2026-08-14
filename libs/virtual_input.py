@@ -136,6 +136,32 @@ class Virtual_input:
             # A changing or unloaded map must never block text entry.
             return direct
 
+    def _send_typing_tick(self):
+        """Notify the server of a keypress so nearby players hear a 3D typing
+        tick from this character. Throttled so fast typists do not flood the
+        network with events."""
+        if not self.game.network:
+            return
+        if self.hidden:
+            return
+        if not self.typing:
+            return
+        # Slash commands and messages starting with "/" never broadcast ticks
+        # (mirrors the existing set_typing rule).
+        if self.current_string[:1] == "/":
+            return
+        if not hasattr(self, "_last_typing_tick"):
+            self._last_typing_tick = 0.0
+        now = time.time()
+        if now - self._last_typing_tick < 0.05:
+            return
+        self._last_typing_tick = now
+        try:
+            self.game.network.send(consts.CHANNEL_SOUND, "typing_sound", {})
+        except Exception:
+            # Typing must stay usable even if the tick send fails.
+            pass
+
     def move_in_string(self, value):
         """Parameters:
         value (int): The value by which the cursor will be moved
@@ -194,6 +220,7 @@ class Virtual_input:
                 )
             self.typing = True
             self.typing_clock.restart()
+        self._send_typing_tick()
         self.selection = self.get_character()
         self.start_selection = self._cursor - 1
         self.end_selection = self._cursor
@@ -222,6 +249,7 @@ class Virtual_input:
                 )
             self.typing = True
             self.typing_clock.restart()
+        self._send_typing_tick()
         self.selection = self.get_character()
         self.start_selection = self._cursor - 1
         self.end_selection = self._cursor

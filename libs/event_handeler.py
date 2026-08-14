@@ -697,6 +697,52 @@ class EventHandeler:
         if options.get("typing") == True:
             speak(data["message"], False)
 
+    def typing_sound(self, data):
+        """Play a 3D typing tick at the position of the player who is typing.
+
+        The server relays keypress ticks to nearby players with the typer's
+        name and position; we play a short key sound spatialized at that spot
+        so it sounds like it comes from their character. Respects the
+        "Keyboard typing sounds" option - turning it off mutes these ticks
+        just like it mutes the local typing sounds.
+        """
+        if options.get("keyboard_typing_sounds", True) != True:
+            return
+        if not (data or {}).get("name"):
+            return
+        name = data["name"]
+        entity = self.gameplay.map.entities.get(name)
+        if not entity:
+            return
+        try:
+            snd = self.game.audio_mngr.play_unbound(
+                f"keyboard/press_key{random.randint(1, 5)}.ogg",
+                entity.x,
+                entity.y,
+                entity.z,
+                False,
+                volume=50,
+                cat="ui",
+                reference_distance=3.0,
+                rolloff=1.0,
+                max_distance=30.0,
+            )
+            # Blend the tick with the room acoustics where the LISTENER is
+            # standing: reverby inside a reverb zone, dry outside of it. The
+            # listener's own environment shapes what they hear, so walking out
+            # of a room makes the ticks dry again.
+            if snd and getattr(self, "gameplay", None) and self.gameplay.map:
+                reverb = self.gameplay.map.get_reverb_at(
+                    self.gameplay.player.x,
+                    self.gameplay.player.y,
+                    self.gameplay.player.z,
+                )
+                if reverb and reverb.reverb and hasattr(snd, "source") and snd.source:
+                    with contextlib.suppress(Exception):
+                        self.game.audio_mngr.efx.send(snd.source, 0, reverb.reverb)
+        except Exception:
+            pass
+
     def copy(self, data):
         pyperclip.copy(data["data"])
         speak(data.get("message", "Coppied"))
