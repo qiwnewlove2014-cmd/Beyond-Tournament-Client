@@ -6,16 +6,28 @@
 [v1.7.7] Natural World Map Animals & Spatial Audio Polish — 2026-08-14
 --------------------------------------------------------------------------------
 
+• Interactive Music Jukebox
+- **Multiplayer Jukebox System:** Added interactive Music Jukebox map elements allowing players to search online music, queue songs, and listen together in public areas across the map.
+- **Continuous Mid-Song Playback & Time Synchronization:** Jukebox tracks now record exact playback timestamps so players connecting mid-song or rejoining the map sync seamlessly to the current second of the track.
+- **Persistent Queue & Disconnect Survival:** Jukebox playback and song queues live continuously on the world map; songs and queued tracks keep playing smoothly even if the player who requested them disconnects.
+- **Song Skipping & Staff Controls:** Added options for players to skip their own active songs, and staff controls to instantly clear the queue and halt playback.
+- **Permanent Track Resolution:** Upgraded song queue storage to maintain permanent video references, eliminating expired stream errors during long playback sessions.
+- **Seamless Map Reload Preservation:** Actively playing jukeboxes now preserve audio playback smoothly across Builder map updates and in-place reloads without restarting from the beginning.
+
 • Audio Engine & Voice Chat
+- **Instant Environmental Reverb Synchronization:** Fixed environmental reverb detachment during map reloads so voice chat, music streams, sound effects, and jukeboxes immediately acquire full room reverberation without requiring players to reconnect or leave the map.
 - **Natural Distance Fade for Entity Sounds:** Footsteps and vocal calls from horses, boars, zombies, and other players now fade out smoothly with distance and reach true silence at about 40 steps, instead of staying faintly audible from far away and then cutting off abruptly.
 - **Horse Hoofbeat Range:** Horse walk/run hoof sounds are now only heard within 40 steps, so a horse moving inside a distant stable no longer echoes across the whole map.
 
 • Monster & Boss Entities
+- **Ares Tactical Arc Strafe:** Ares now executes sweeping diagonal arc strides and circular combat flanking around players in Zombie matches, creating an intense, mobile boss encounter.
 - **Calmer Animal Vocalizations:** World Map animals now space out their cries randomly between 30 seconds and 1 minute instead of calling every few seconds, and each animal rolls its own staggered first call so a herd never cries at the same time.
 - **Animals Stay Inside Pens:** World Map animals can no longer slip through fence corners or leap over pen walls while wandering or fleeing, so horses and boars stay inside their stables.
 - **Natural Animal Behaviour:** World Map animals walk, run, rest, and graze at their own randomized pace, stay close to where they were released, and sprint away when spooked.
+- **Universal Pen Density Safeguards:** Added automatic animal density safety caps across all world maps to prevent excessive entity accumulation in animal pens, ensuring smooth server performance and instant login times.
 
 • Staff & Builder Tools
+- **Jukebox Placement in Builder Menu:** Added the Music Jukebox tool to the Builder menu with customizable naming and coordinates.
 - **Round Up Animals (/penall):** New staff command rounds up every horse and boar on the World Map into its Animal Pen zone(s). Aliases include /roundup, /herd, /corral, and /catchall; available to Builder staff and above.
 - **Invisible Animal Pen Zones:** Builders can place an invisible "Animal Pen" zone from the Builder menu — animals standing inside survive server restarts and monster-clearing commands.
 - **World Map Spawn Rules:** Only horses can be spawned on World Maps by non-Developers; all other spawn commands (bosses, boar, piano, drumset, motorcycle) require Developer there, while matches keep the normal permissions.
