@@ -451,6 +451,28 @@ class TestReloadSurvival(unittest.TestCase):
             self.assertIn("box", player.players)
             self.assertEqual(player._pending_map_change, set())
 
+    def test_stale_reload_mark_cannot_claim_newer_play(self):
+        """Cross-channel ordering may deliver play before the queued map mark."""
+        from unittest import mock
+        with mock.patch("libs.music_bot.AudioStreamer"):
+            player = jukebox.JukeboxPlayer(_SyncPutGame())
+            self._play(player)
+            stale_serial = player.control_serial
+            self._play(player)  # newer play control wins before stale mark runs
+            self.assertFalse(player.mark_pending_map_change(stale_serial))
+            self.assertEqual(player._pending_map_change, set())
+            self.assertIn("box", player.players)
+
+    def test_stale_stop_cannot_stop_newer_playback_generation(self):
+        from unittest import mock
+        with mock.patch("libs.music_bot.AudioStreamer"):
+            player = jukebox.JukeboxPlayer(_SyncPutGame())
+            self._play(player, playback=22)
+            self.assertFalse(player.stop("box", playback_id=21))
+            self.assertIn("box", player.players)
+            self.assertTrue(player.stop("box", playback_id=22))
+            self.assertNotIn("box", player.players)
+
     def test_unconfirmed_song_is_stopped_after_reload(self):
         from unittest import mock
         import time

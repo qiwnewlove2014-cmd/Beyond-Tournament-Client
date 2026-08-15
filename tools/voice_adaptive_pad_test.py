@@ -6,9 +6,9 @@ burst after a gap, landed a full 100ms late even on a clean LAN. This test
 proves the new per-channel adaptive margin (the same fast-attack / decay math
 the megaphone uses):
 
-  - clean steady stream  -> 1 frame pad (20ms) instead of 5 (100ms)
-  - a jitter spike       -> the margin grows (1 + jitter/20 frames)
-  - a >180ms silence gap -> the next burst resets to the 20ms minimum
+  - clean steady stream  -> 2 frame pad (40ms) instead of 5 (100ms)
+  - a jitter spike       -> the margin grows (2 + jitter/20 frames)
+  - a >180ms silence gap -> the next burst resets to the 40ms minimum
     (a pause between strums must NOT look like jitter)
 
 Run:  python tools/voice_adaptive_pad_test.py
@@ -136,25 +136,25 @@ def feed(comp, src, gameplay, t):
 
 
 print("=" * 66)
-print("TEST 1: clean steady stream -> 1-frame (20ms) pad, not 5 (100ms)")
+print("TEST 1: clean steady stream -> 2-frame (40ms) pad, not 5 (100ms)")
 print("=" * 66)
 reset_state()
 src = FakeSrc()
 gameplay = FakeGameplay(src)
 comp = make_compression()
 feed(comp, src, gameplay, 0.000)
-# First packet is a cold start: 1 silence + 1 data
-check("cold start pads 1 silence frame (was 5 = 100ms)",
-      silence_count(src) == 1, f"silence={silence_count(src)}")
+# First packet is a cold start: 2 silence + 1 data
+check("cold start pads 2 silence frames (was 5 = 100ms)",
+      silence_count(src) == 2, f"silence={silence_count(src)}")
 check("first data frame queued after the pad", data_count(src) == 1)
 # Steady 20ms stream: no further padding, frames queue 1:1
 for i in range(1, 6):
     feed(comp, src, gameplay, i * 0.020)
 check("5 more feeds -> 5 data frames, no extra silence",
-      data_count(src) == 6 and silence_count(src) == 1,
+      data_count(src) == 6 and silence_count(src) == 2,
       f"data={data_count(src)} silence={silence_count(src)}")
-check("margin stays 1 frame (20ms) on a clean network",
-      vc._adaptive_margin_frames("vc:20") == 1,
+check("margin stays 2 frames (40ms) on a clean network",
+      vc._adaptive_margin_frames("vc:20") == 2,
       f"margin={vc._adaptive_margin_frames('vc:20')}")
 
 print()
@@ -171,20 +171,20 @@ feed(comp, src, gameplay, 0.020)   # steady
 feed(comp, src, gameplay, 0.080)
 check("jitter estimate jumped to ~40ms", vc._speaker_jitter_ms["vc:20"] >= 39.5,
       f"jitter={vc._speaker_jitter_ms.get('vc:20')}")
-check("margin grew to 1 + 40/20 = 3 frames",
-      vc._adaptive_margin_frames("vc:20") == 3,
+check("margin grew to 2 + 40/20 = 4 frames",
+      vc._adaptive_margin_frames("vc:20") == 4,
       f"margin={vc._adaptive_margin_frames('vc:20')}")
 # A cold start during the jittery period (interval still 60ms, < 180ms so it
 # is NOT a fresh transmission) re-pads with the grown margin:
 src2 = FakeSrc()
 gameplay2 = FakeGameplay(src2)
 feed(comp, src2, gameplay2, 0.140)
-check("next cold burst pads 3 frames (60ms) to absorb the jitter",
-      silence_count(src2) == 3, f"silence={silence_count(src2)}")
+check("next cold burst pads 4 frames (80ms) to absorb the jitter",
+      silence_count(src2) == 4, f"silence={silence_count(src2)}")
 
 print()
 print("=" * 66)
-print("TEST 3: a >180ms gap resets to the 20ms minimum (strum pause != jitter)")
+print("TEST 3: a >180ms gap resets to the 40ms minimum (strum pause != jitter)")
 print("=" * 66)
 reset_state()
 src = FakeSrc()
@@ -192,26 +192,26 @@ gameplay = FakeGameplay(src)
 comp = make_compression()
 feed(comp, src, gameplay, 0.000)
 feed(comp, src, gameplay, 0.020)
-feed(comp, src, gameplay, 0.100)   # spike -> margin 4
-check("margin is 4 before the gap", vc._adaptive_margin_frames("vc:20") == 4)
+feed(comp, src, gameplay, 0.100)   # 60ms excess -> margin 5
+check("margin is 5 before the gap", vc._adaptive_margin_frames("vc:20") == 5)
 # Silence for 300ms (the guitarist pauses between strums), then a new burst:
 src2 = FakeSrc()
 gameplay2 = FakeGameplay(src2)
 feed(comp, src2, gameplay2, 0.400)
-check("after a gap the margin resets to 1 frame (20ms)",
-      vc._adaptive_margin_frames("vc:20") == 1,
+check("after a gap the margin resets to 2 frames (40ms)",
+      vc._adaptive_margin_frames("vc:20") == 2,
       f"margin={vc._adaptive_margin_frames('vc:20')}")
-check("new burst pads exactly 1 silence frame",
-      silence_count(src2) == 1, f"silence={silence_count(src2)}")
+check("new burst pads exactly 2 silence frames",
+      silence_count(src2) == 2, f"silence={silence_count(src2)}")
 
 print()
 print("=" * 66)
 print("BEFORE / AFTER (cold-start pad per burst, clean LAN)")
 print("=" * 66)
 print("  OLD fixed: 5 x 20ms = 100ms  (every strum burst / new sentence)")
-print("  NEW clean: 1 x 20ms =  20ms  (-80ms, same as the megaphone floor)")
-print("  NEW under jitter: margin grows (e.g. 40ms spike -> 3 x 20ms = 60ms)")
-print("  NEW after pause: back to 20ms (a pause never counts as jitter)")
+print("  NEW clean: 2 x 20ms =  40ms  (-60ms, stable music/voice floor)")
+print("  NEW under jitter: margin grows (e.g. 40ms spike -> 4 x 20ms = 80ms)")
+print("  NEW after pause: back to 40ms (a pause never counts as jitter)")
 print()
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

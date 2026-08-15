@@ -158,12 +158,9 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    # Smooth pre-buffer: FOUR 20ms frames (80ms) before first playback.  The
-    # old 2-frame (40ms) buffer underran on steady streams like the music bot
-    # broadcast (its sender cadence drifts a fraction of a ms per frame, which
-    # drains the buffer after a few seconds -> a small 'chop' in the PA).  80ms
-    # absorbs that drift; PA latency this small is inaudible for listeners.
-    PRE_BUFFER_FRAMES = 4       # Wait for 4 frames (80ms) before playing
+    # Stable v1.6 pre-buffer. Together with the six-frame PA source reserve
+    # below, this covers a normal ENet retransmission without chopping music.
+    PRE_BUFFER_FRAMES = 3       # Wait for 3 frames (60ms) before playing
     # After an underrun, re-buffer a couple of frames before resuming instead
     # of streaming one frame at a time (which sounds like repeated tiny chops
     # on continuous music).
@@ -257,14 +254,36 @@ class MegaphoneJitterBuffer:
             self.last_pop_time = current_time
             return self.packet_queue.popleft()
     
-    def should_output(self):
+    def should_output(self, current_time_ms=None):
         """
         Check if we should output a frame (fixed 20ms intervals).
         This ensures consistent playback regardless of when packets arrive.
+
+        Advance the deadline by the frame duration instead of replacing it
+        with the sampled time. A polling loop normally wakes a little late on
+        Windows; replacing the deadline on every wake accumulates that
+        lateness until the PA source underruns. A genuinely long stall resets
+        the deadline so we never burst several catch-up frames at once.
         """
-        current_time = time.time() * 1000
-        if current_time - self.last_output_time >= self.FRAME_DURATION_MS:
+        # A monotonic clock cannot jump when Windows synchronizes wall time.
+        # Tests may inject a deterministic timestamp.
+        current_time = (
+            time.perf_counter() * 1000
+            if current_time_ms is None else float(current_time_ms)
+        )
+        if self.last_output_time <= 0:
             self.last_output_time = current_time
+            return True
+
+        lateness = current_time - self.last_output_time
+        if lateness >= self.FRAME_DURATION_MS:
+            if lateness >= self.FRAME_DURATION_MS * 2:
+                # The worker was suspended for at least one whole frame. Start
+                # a fresh cadence rather than draining queued audio in a burst.
+                self.last_output_time = current_time
+            else:
+                # Preserve the 50 Hz average despite normal scheduler jitter.
+                self.last_output_time += self.FRAME_DURATION_MS
             return True
         return False
     
@@ -279,6 +298,7 @@ class MegaphoneJitterBuffer:
             self.is_playing = False
             self._underrun = False
             self.frames_received = 0
+            self.last_output_time = 0.0
 
 # Per-source jitter buffers (one per megaphone speaker)
 _jitter_buffers = {}
@@ -331,6 +351,18 @@ def _adaptive_margin_frames(sender_id):
     jitter = _speaker_jitter_ms.get(sender_id, 0.0)
     frames = 2 + int(jitter / 20.0)
     return max(2, min(6, frames))
+
+
+def _megaphone_margin_frames(sender_id):
+    """Return the stable v1.6 PA reserve (six 20 ms frames).
+
+    The channel-30 legacy packet carries only ``sender_id + opus``. It has no
+    sequence number or timestamp for packet-loss concealment, so the reliable
+    server-to-listener leg may pause briefly for retransmission. Keeping six
+    decoded-frame slots at the OpenAL sources absorbs that pause without
+    synthesizing silence. Normal voice channels retain their adaptive margin.
+    """
+    return 6
 
 
 # ============================================================================
@@ -467,6 +499,15 @@ def _get_buffer_from_pool(audio_mngr):
         pass
     return None
 
+
+def _reclaim_source_buffers(src):
+    """Unqueue processed OpenAL buffers and return them to the shared pool."""
+    try:
+        while src.buffers_processed > 0:
+            _recycle_buffers(src.unqueue_buffers())
+    except Exception:
+        pass
+
 # Track active megaphone speakers for dynamic ducking
 _active_megaphone_speakers = 0
 _last_speaker_update = 0
@@ -499,6 +540,11 @@ class voice_chat_compression(threading.Thread):
             self.decoder = OpusDecoder()
             self.decoder.set_channels(1)
             self.decoder.set_sampling_frequency(48000)
+            # One channel carries several independent Opus senders. This audio
+            # worker owns their decoder and clock-driven playout state.
+            self._megaphone_decoders = {}
+            self._megaphone_playouts = {}
+            self.running = True
             self.start()
             logger.log(f"VoiceChatCompression initialized for channel {self.channel}")
         except Exception as e:
@@ -509,37 +555,99 @@ class voice_chat_compression(threading.Thread):
         logger.log(f"VoiceChatCompression switched to channel {self.channel}")
 
     def put(self, value):
-        self.queue.put_nowait(value)
+        if getattr(self, 'running', True):
+            self.queue.put_nowait(value)
+
+    def close(self):
+        self.running = False
+        self.queue.put_nowait(None)
+
+    def _megaphone_decoder(self, sender_id):
+        key = sender_id if sender_id is not None else "megaphone_shared"
+        decoder = self._megaphone_decoders.get(key)
+        if decoder is None:
+            decoder = OpusDecoder()
+            decoder.set_channels(1)
+            decoder.set_sampling_frequency(48000)
+            self._megaphone_decoders[key] = decoder
+        return decoder
+
+    def _drain_megaphone_playout(self, now_ms=None, now_monotonic=None):
+        """Drain PA frames at 20 ms cadence independently of packet arrivals."""
+        if not self._megaphone_playouts:
+            return
+        clock_ms = time.perf_counter() * 1000 if now_ms is None else float(now_ms)
+        mono_now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        stale = []
+        for sender_id, stream in list(self._megaphone_playouts.items()):
+            gameplay = stream['gameplay']
+            player_sources = getattr(
+                getattr(gameplay, 'megaphone', None), 'player_sources', {}
+            )
+            if (mono_now - stream['last_packet_monotonic'] > 1.0
+                    or sender_id not in player_sources):
+                stream['jitter_buffer'].reset()
+                stale.append(sender_id)
+                continue
+            jb = stream['jitter_buffer']
+            if not jb.should_output(clock_ms):
+                continue
+            # Do not invent silence for a packet that merely arrived a little
+            # late. The legacy PA payload has no sequence/timestamp, so that
+            # guess can mute good music frames. The server's reliable listener
+            # leg and this real-frame reserve now provide the v1.6 behaviour.
+            packet = jb.get_packet()
+            if packet is None:
+                continue
+            try:
+                if gameplay.player.dead:
+                    continue
+                with self.game.audio_mngr.context.batch():
+                    queue_and_delay_frame(
+                        gameplay, sender_id, stream['sources'], packet
+                    )
+                _last_play_times[sender_id] = time.time()
+            except Exception as exc:
+                logger.log_exception(
+                    exc, f"megaphone playout sender={sender_id!r}"
+                )
+        for sender_id in stale:
+            self._megaphone_playouts.pop(sender_id, None)
+            self._megaphone_decoders.pop(sender_id, None)
     
     def run(self):
         logger.log(f"VoiceChatCompression thread started: {self.channel}")
-        while True:
+        while getattr(self, 'running', True):
             try:
                 time.sleep(0.002)
-                if self.queue.empty(): continue
-                value = self.queue.get_nowait()
-                if value is None: 
-                    logger.log(f"VoiceChatCompression stopping: {self.channel}")
-                    break
-                if callable(value):
-                    value()
-                if isinstance(value, bytearray):
-                    # Apply Mic Gain
-                    mic_gain = options.get("megaphone_mic_volume", 100)
-                    if mic_gain != 100:
-                        try:
-                            value = audioop.mul(bytes(value), 2, mic_gain / 100.0)
-                        except Exception as e:
-                            logger.log(f"[Voice] Error applying gain: {e}")
-    
-                    buf = self.encoder.encode(value)
-                    self.game.network.send(
-                        self.channel,
-                        "n/a",
-                        buf
-                    )
+                if not self.queue.empty():
+                    value = self.queue.get_nowait()
+                    if value is None:
+                        logger.log(f"VoiceChatCompression stopping: {self.channel}")
+                        break
+                    if callable(value):
+                        value()
+                    if isinstance(value, bytearray):
+                        # Apply Mic Gain
+                        mic_gain = options.get("megaphone_mic_volume", 100)
+                        if mic_gain != 100:
+                            try:
+                                value = audioop.mul(bytes(value), 2, mic_gain / 100.0)
+                            except Exception as e:
+                                logger.log(f"[Voice] Error applying gain: {e}")
+
+                        buf = self.encoder.encode(value)
+                        self.game.network.send(
+                            self.channel,
+                            "n/a",
+                            buf
+                        )
+                self._drain_megaphone_playout()
             except Exception as e:
                 logger.log_exception(e, f"voice_chat_compression.run (Channel {self.channel})")
+        self.running = False
+        self._megaphone_playouts.clear()
+        self._megaphone_decoders.clear()
 
 
 
@@ -548,7 +656,11 @@ class voice_chat_compression(threading.Thread):
 
     def recieve2(self, data, vc_source, radio_source, channelID, gameplay, sender_id=None):
         buffer = None
-        data = bytearray(self.decoder.decode(bytearray(data)))
+        decoder = (
+            self._megaphone_decoder(sender_id)
+            if channelID == consts.CHANNEL_MEGAPHONE else self.decoder
+        )
+        data = bytearray(decoder.decode(bytearray(data)))
         
         with self.game.audio_mngr.context.batch():
             if not gameplay.player.dead:
@@ -604,17 +716,16 @@ class voice_chat_compression(threading.Thread):
                     # absorbed by the pre-buffer. Popping on arrival made the PA
                     # cadence track network jitter — the intermittent "ติดๆขัดๆ"
                     # chop heard on music broadcasts.
-                    if not jb.should_output():
-                        return
-                    packet = jb.get_packet()
-                    if packet is None:
-                        return  # Still pre-buffering, no speaker plays yet
-
-                    # Update last play time
-                    _last_play_times[sender_id] = time.time()
-
-                    # Queue and delay the frame for each speaker
-                    queue_and_delay_frame(gameplay, sender_id, sources, packet)
+                    # Refresh the route only. The audio worker drains this
+                    # jitter buffer independently every 20ms, even when ENet
+                    # delivered these packets in a burst and no new packet is
+                    # arriving at the next playout deadline.
+                    self._megaphone_playouts[sender_id] = {
+                        'gameplay': gameplay,
+                        'sources': sources,
+                        'jitter_buffer': jb,
+                        'last_packet_monotonic': time.monotonic(),
+                    }
                     return  # Megaphone handled, skip normal processing
                 
                 # === NORMAL VOICE CHAT: Direct playback with an adaptive
@@ -1081,12 +1192,7 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
     except Exception:
         pass
 
-    try:
-        while src.buffers_processed > 0:
-            result = src.unqueue_buffers()
-            _recycle_buffers(result)
-    except Exception:
-        pass
+    _reclaim_source_buffers(src)
     
     buf = _get_buffer_from_pool(gameplay.game.audio_mngr)
     if buf is None:
@@ -1222,13 +1328,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
         if src is None:
             active_counts.append(0)
             continue
-        try:
-            while src.buffers_processed > 0:
-                result = src.unqueue_buffers()
-                # Buffer recycling is handled by _queue_packet_to_source;
-                # here we only need to unqueue so active_counts is accurate.
-        except:
-            pass
+        _reclaim_source_buffers(src)
         active_counts.append(src.buffers_queued)
 
     # 2. Detect sources that ran dry.  A pause/resume can make every source run
@@ -1309,14 +1409,10 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
             _speaker_current_delays[sender_id].append(frames_delay)
             
-            # Adaptive jitter margin: start at the minimum (1 frame / 20ms) and
-            # grow toward the cap (6 frames / 120ms) only when this sender's
-            # packet arrival actually shows jitter (measured in recieve2). A
-            # steady stream - music bot, live guitar relay, or voice at the
-            # normal 20ms cadence - stays at 20ms so the PA feels as immediate
-            # as normal voice chat; jittery networks get just enough extra
-            # buffering to avoid crackle.
-            margin_frames = _adaptive_margin_frames(sender_id)
+            # Stable v1.6 PA reserve. The reliable listener leg can deliver a
+            # short burst after retransmission; this fixed 120ms source cushion
+            # keeps OpenAL playing through it. Do not use this for normal voice.
+            margin_frames = _megaphone_margin_frames(sender_id)
             
             # Instantly push silence frames to restore perfect spatial stagger and jitter margin
             target_active = frames_delay + margin_frames

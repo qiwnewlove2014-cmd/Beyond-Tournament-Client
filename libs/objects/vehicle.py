@@ -418,7 +418,7 @@ class Vehicle(Entity):
     def detach_environment_effects(self):
         """Detach map-owned EFX sends before their pooled slot is released."""
         self._detach_wind_reverb()
-        self.soundgroup.apply_effect(None, 0)
+        super().detach_environment_effects()
 
     def move(self, x, y, z, play_sound=True, mode="walk"):
         previous_surface = self.surface

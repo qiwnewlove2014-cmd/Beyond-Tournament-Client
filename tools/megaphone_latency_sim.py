@@ -5,9 +5,9 @@ Discrete-event model of the exact pipeline a listener experiences:
   arrival -> MegaphoneJitterBuffer (pre-buffer) -> queue_and_delay_frame
            -> silence padding (frames_delay + adaptive margin) -> OpenAL source
 
-The margin is driven by the REAL production helpers from libs/voice_chat
-(_measure_speaker_jitter / _adaptive_margin_frames), so the numbers reflect
-the actual shipped logic, not a copy.
+The PA margin is read from the REAL production helper in libs/voice_chat
+(_megaphone_margin_frames), so the restored result reflects shipped logic,
+not a copied constant. Adaptive-margin checks remain for normal voice.
 
 Metrics per run:
   - first-heard latency: ms from the first packet arriving to the moment the
@@ -16,9 +16,9 @@ Metrics per run:
     (audible crackle / drop).
 
 Configs compared:
-  OLD      pre=3, fixed margin=6  -> the current 180ms floor
-  NEW      pre=1, adaptive margin -> 40ms floor on steady streams
-  MIN      pre=1, fixed margin=1  -> the earlier 20ms attempt (crackles)
+  OLD      pre=3, fixed margin=6
+  RESTORED production v1.6 pre-buffer + fixed PA margin
+  MIN      pre=1, fixed margin=1 (the earlier crackly experiment)
 
 Run:  python tools/megaphone_latency_sim.py
 """
@@ -187,10 +187,11 @@ patterns = {
 
 print()
 print("Floor latency math (0m distance, no propagation delay):")
-print(f"  OLD: pre={vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES}x20ms + fixed 6x20ms "
-      f"= {(vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES + 6) * FRAME_MS:.0f}ms minimum")
-print(f"  NEW: pre={vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES}x20ms + adaptive "
-      f"(steady 1x20ms) = {(vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES + 1) * FRAME_MS:.0f}ms minimum")
+print(f"  OLD: pre=3x20ms + fixed 6x20ms = {9 * FRAME_MS:.0f}ms minimum")
+steady_margin = vc._megaphone_margin_frames("steady_floor")
+print(f"  RESTORED: pre={vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES}x20ms + fixed "
+      f"({steady_margin}x20ms) = "
+      f"{(vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES + steady_margin) * FRAME_MS:.0f}ms minimum")
 
 print()
 print("Propagation delay (distance / 343 m/s, per speaker, kept):")
@@ -201,10 +202,14 @@ for name, pat in patterns.items():
     print()
     print(f"--- {name} ---")
     old_lat, old_starv = run(pat, 3, "fixed:6")
-    new_lat, new_starv = run(pat, 1, "adaptive")
+    new_lat, new_starv = run(
+        pat,
+        vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES,
+        f"fixed:{vc._megaphone_margin_frames('production')}",
+    )
     min_lat, min_starv = run(pat, 1, "fixed:1")
     table_row("OLD (fixed 120ms)", old_lat, old_starv)
-    table_row("NEW (adaptive)", new_lat, new_starv)
+    table_row("RESTORED (v1.6)", new_lat, new_starv)
     table_row("MIN (fixed 20ms)", min_lat, min_starv)
     print(f"  (measured peak jitter: {last_est():.1f} ms)")
 
@@ -226,35 +231,42 @@ def check(name, ok, detail=""):
         print(f"  FAIL - {name} {detail}")
 
 
-# steady stream: new config must be at least 3x faster than old
+# Production intentionally matches the stable v1.6 PA latency budget.
 steady_old, _ = run(arrivals_steady(4.0), 3, "fixed:6")
-steady_new, _ = run(arrivals_steady(4.0), 1, "adaptive")
-check("steady: NEW >=3x faster than OLD",
-      steady_old is not None and steady_new is not None and steady_new <= steady_old / 3.0,
-      f"OLD {steady_old:.0f}ms -> NEW {steady_new:.0f}ms")
-check("steady: NEW latency <= 60ms (40ms floor + slack)",
-      steady_new is not None and steady_new <= 60.0, f"{steady_new:.0f}ms")
+steady_new, _ = run(
+    arrivals_steady(4.0),
+    vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES,
+    f"fixed:{vc._megaphone_margin_frames('production')}",
+)
+check("steady: RESTORED matches v1.6 latency",
+      steady_old is not None and steady_new == steady_old,
+      f"v1.6 {steady_old:.0f}ms -> RESTORED {steady_new:.0f}ms")
 
-# spikey: adaptive must stay fast while cracking less than the fixed-20ms
-# attempt (the config that previously failed and got reverted to 120ms)
-j_spike, j_starv_spike = run(arrivals_spikey(10.0, 60.0, 2000, 1), 1, "adaptive")
+# Spikey delivery: restored PA must starve less than the fixed-20ms attempt.
+j_spike, j_starv_spike = run(
+    arrivals_spikey(10.0, 60.0, 2000, 1),
+    vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES,
+    f"fixed:{vc._megaphone_margin_frames('production')}",
+)
 m_spike, m_starv_spike = run(arrivals_spikey(10.0, 60.0, 2000, 1), 1, "fixed:1")
-check("spikey: adaptive starves LESS than fixed 20ms",
+check("spikey: restored PA starves LESS than fixed 20ms",
       j_starv_spike <= m_starv_spike,
-      f"adaptive {j_starv_spike} vs fixed20 {m_starv_spike}")
-check("spikey: adaptive latency still < old fixed 120ms",
-      j_spike is not None and j_spike < 180.0, f"{j_spike:.0f}ms")
+      f"restored {j_starv_spike} vs fixed20 {m_starv_spike}")
+check("spikey: restored latency stays within v1.6 budget",
+      j_spike is not None and j_spike <= 180.0, f"{j_spike:.0f}ms")
 
 # unit checks on the real margin math
 vc._speaker_jitter_ms["u"] = 0.0
-check("adaptive margin = 1 frame at 0ms jitter",
-      vc._adaptive_margin_frames("u") == 1)
+check("adaptive margin = 2 frames at 0ms jitter",
+      vc._adaptive_margin_frames("u") == 2)
 vc._speaker_jitter_ms["u"] = 45.0
-check("adaptive margin = 3 frames at 45ms jitter",
-      vc._adaptive_margin_frames("u") == 3)
+check("adaptive margin = 4 frames at 45ms jitter",
+      vc._adaptive_margin_frames("u") == 4)
 vc._speaker_jitter_ms["u"] = 500.0
 check("adaptive margin capped at 6 frames",
       vc._adaptive_margin_frames("u") == 6)
+check("PA margin fixed at v1.6 six-frame reserve",
+      vc._megaphone_margin_frames("u") == 6)
 
 print()
 print(f"RESULT: {passed} passed, {failed} failed")

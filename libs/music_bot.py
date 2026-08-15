@@ -2312,6 +2312,17 @@ class MapMusicBot:
         except Exception:
             pass
 
+    def _detach_map_reverb(self):
+        """Detach the old map slot without interrupting the active stream."""
+        if not self.stream_source or self._current_reverb_slot is None:
+            self._current_reverb_slot = None
+            return
+        try:
+            self.game.audio_mngr.efx.send(self.stream_source, 0, None)
+        except Exception:
+            pass
+        self._current_reverb_slot = None
+
     def destroy(self):
         self.stop()
         if getattr(self, 'live_relay_streamer', None):

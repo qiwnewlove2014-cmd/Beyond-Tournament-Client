@@ -116,6 +116,22 @@ class Map:
 
     def destroy(self, destroy_entities=True):
         # audio.set_global_reverb(None)
+        def destroy_map_audio(obj):
+            """Dispose a map-owned looping sound synchronously during reload."""
+            destroy = getattr(obj, "destroy", None)
+            if callable(destroy):
+                destroy()
+                return
+            sound = getattr(obj, "sound", None)
+            obj.sound = None
+            obj.playing = False
+            if sound:
+                with contextlib.suppress(Exception):
+                    sound.muted = True
+                    if getattr(sound, "source", None) is not None:
+                        sound.source.gain = 0.0
+                with contextlib.suppress(Exception):
+                    sound.destroy()
         # Map-owned effect slots must not be released while a specialized
         # entity still has an auxiliary send attached to them.
         for entity_obj in self.entities.values():
@@ -123,6 +139,22 @@ class Map:
             if callable(detach_effects):
                 with contextlib.suppress(Exception):
                     detach_effects()
+        # Map-owned sources may still have sends attached to map reverb slots.
+        # Destroy those sources before returning the slots to AudioManager;
+        # releasing a live slot first can silence unrelated sources when the
+        # pool immediately lends the same slot to the rebuilt map.
+        for i in self.ambience_list.copy():
+            destroy_map_audio(i)
+        self.ambience_list.clear()
+        for i in self.pannable_list.copy():
+            i.destroy()
+        self.pannable_list.clear()
+        for i in self.source_list.copy():
+            i.destroy()
+        self.source_list.clear()
+        for i in self.music_list.copy():
+            destroy_map_audio(i)
+        self.music_list.clear()
         for i in self.reverb_list.copy():
             i.destroy()
         if destroy_entities:
@@ -139,18 +171,6 @@ class Map:
         self.minigame_table_list.clear()
         self.travel_point_list.clear()
         self.jukebox_list.clear()
-        for i in self.ambience_list.copy():
-            i.leave(destroy=True)
-        self.ambience_list.clear()
-        for i in self.pannable_list.copy():
-            i.destroy()
-        self.pannable_list.clear()
-        for i in self.source_list.copy():
-            i.destroy()
-        self.source_list.clear()
-        for i in self.music_list.copy():
-            i.leave(destroy=True)
-        self.music_list.clear()
         self.megaphone_speakers.clear()
 
     def get_ambiences_at(self, x, y, z):
@@ -657,9 +677,21 @@ class Map:
         vehicle_type=None,
         sound_profile=None,
         vehicle_audio=None,
+        preserve_existing=False,
     ):
-        if self.entities.get(name):
-            self.entities[name].destroy()
+        existing = self.entities.get(name)
+        incoming_vehicle = entity_type in ("motorcycle", "vehicle")
+        if existing is not None and preserve_existing:
+            existing_vehicle = bool(getattr(existing, "is_vehicle", False))
+            if existing_vehicle == incoming_vehicle:
+                # An in-place map reload re-sends authoritative positions for
+                # objects that survived server-side.  Keep their OpenAL voice,
+                # music, engine and decoder sources alive instead of replacing
+                # the whole entity and cutting continuous audio mid-stream.
+                existing.move(x, y, z, play_sound=False)
+                return existing
+        if existing is not None:
+            existing.destroy()
         if entity_type in ("motorcycle", "vehicle"):
             spawned = vehicle.Vehicle(
                 self.game,
@@ -890,7 +922,6 @@ class Ambience(BaseMapObj):
         else:
             if self.sound and destroy:
                 self.sound.destroy()
-
 
 class Tile(BaseMapObj):
     """An internal tile class. You do not need to create any objects with this type externally"""

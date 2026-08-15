@@ -195,26 +195,67 @@ class EventHandeler:
                 speak(f"The ping took {rtt_ms}ms")
             self.gameplay.pingging = False
 
-    def _reset_instruments_for_map_change(self):
-        """Queue piano/drum cleanup onto the main thread during a map change.
+    def _queue_map_audio_event(self, callback, data):
+        """Serialize map/OpenAL mutations onto the game/audio owner thread.
 
-        parse_map/update_map run on the network thread; the reset methods touch
-        OpenAL (stop sources, detach EFX sends) which is only safe on the main
-        thread where the context is current. The reset_for_map_change variants
-        preserve the gameplay back-reference because Gameplay keeps running on
-        the new map.
+        ENet receives map packets on its network thread.  Map parsing creates and
+        destroys OpenAL sources, buffers, filters and EFX slots, so doing it in
+        the packet callback is undefined on OpenAL Soft and used to make reloads
+        fail nondeterministically.  Every map lifecycle event uses this helper,
+        preserving the order in which CHANNEL_MAP packets were received.
         """
+        payload = dict(data) if isinstance(data, dict) else data
+        self.game.put(lambda callback=callback, payload=payload: callback(payload))
+
+    def _reset_instruments_for_map_change(self):
+        """Reset piano/drums on the game thread before rebuilding map audio."""
         audio_mngr = getattr(self.game, 'audio_mngr', None)
         if audio_mngr is None:
             return
-        def _do_reset():
-            if hasattr(audio_mngr, 'piano') and audio_mngr.piano is not None:
-                audio_mngr.piano.reset_for_map_change()
-            if hasattr(audio_mngr, 'drums') and audio_mngr.drums is not None:
-                audio_mngr.drums.reset_for_map_change()
-        self.game.put(_do_reset)
+        if hasattr(audio_mngr, 'piano') and audio_mngr.piano is not None:
+            audio_mngr.piano.reset_for_map_change()
+        if hasattr(audio_mngr, 'drums') and audio_mngr.drums is not None:
+            audio_mngr.drums.reset_for_map_change()
+
+    def _begin_map_audio_reload(self):
+        """Detach long-lived sources before the map returns its reverb slots."""
+        gp = self.gameplay
+        player = getattr(gp, 'player', None)
+        detach = getattr(player, 'detach_environment_effects', None)
+        if callable(detach):
+            with contextlib.suppress(Exception):
+                detach()
+        jukebox_player = getattr(gp, 'jukebox_player', None)
+        detach = getattr(jukebox_player, 'detach_reverb', None)
+        if callable(detach):
+            with contextlib.suppress(Exception):
+                detach()
+        music_bot = getattr(gp, 'music_bot', None)
+        detach = getattr(music_bot, '_detach_map_reverb', None)
+        if callable(detach):
+            with contextlib.suppress(Exception):
+                detach()
+        megaphone = getattr(gp, 'megaphone', None)
+        detach = getattr(megaphone, 'detach_map_reverb', None)
+        if callable(detach):
+            with contextlib.suppress(Exception):
+                detach()
+
+    def _finish_map_audio_reload(self):
+        """Bind preserved streams to reverb slots from the rebuilt map."""
+        gp = self.gameplay
+        jukebox_player = getattr(gp, 'jukebox_player', None)
+        if jukebox_player and hasattr(jukebox_player, 'sync_reverb'):
+            jukebox_player.sync_reverb()
+        music_bot = getattr(gp, 'music_bot', None)
+        if music_bot and hasattr(music_bot, '_sync_map_reverb'):
+            music_bot._sync_map_reverb()
 
     def parse_map(self, data):
+        self._queue_map_audio_event(self._apply_parse_map, data)
+
+    def _apply_parse_map(self, data):
+        self._begin_map_audio_reload()
         self.game.automations.clear()
         self.game.audio_mngr.apply_filter(
             None, exclude=self.game.exclude_water, clear=True
@@ -252,8 +293,13 @@ class EventHandeler:
         # === Load Music Bot playlist for this map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
             self.gameplay.music_bot.load_map_music(data["data"])
+        self._finish_map_audio_reload()
 
     def update_map(self, data):
+        self._queue_map_audio_event(self._apply_update_map, data)
+
+    def _apply_update_map(self, data):
+        self._begin_map_audio_reload()
         for a in self.game.automations.copy():
             if a.cancelable:
                 self.game.automations.pop(self.game.automations.index(a))
@@ -280,10 +326,6 @@ class EventHandeler:
         for ent in self.gameplay.map.entities.values():
             if hasattr(ent, 'sync_reverb'):
                 ent.sync_reverb()
-        # Re-sync Reverb on active Jukebox streams
-        jb_player = getattr(self.gameplay, 'jukebox_player', None)
-        if jb_player and hasattr(jb_player, 'sync_reverb'):
-            jb_player.sync_reverb()
         # A map reload rebuilds elements but the jukebox queue keeps playing on
         # the server — ask it to re-send the state + play events so the song
         # resumes here instead of going silent after every reload.
@@ -293,9 +335,12 @@ class EventHandeler:
         # === Reload Music Bot playlist for updated map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
             self.gameplay.music_bot.load_map_music(data["data"])
-            self.gameplay.music_bot._sync_map_reverb()
+        self._finish_map_audio_reload()
 
     def rebuild_elements(self, data):
+        self._queue_map_audio_event(self._apply_rebuild_elements, data)
+
+    def _apply_rebuild_elements(self, data):
         elements = data["elements"]
         map = self.gameplay.map
         has_megaphone = False
@@ -327,20 +372,12 @@ class EventHandeler:
                 self.gameplay.music_bot._sync_map_reverb()
 
     def spawn_entity(self, data):
+        self._queue_map_audio_event(self._apply_spawn_entity, data)
+
+    def _apply_spawn_entity(self, data):
         from .logger import log, log_exception
         if not isinstance(data, dict) or not data.get("name"):
             log("[ENTITY] Ignored spawn_entity packet without a valid name")
-            return
-        if (
-            data.get("type") in ("motorcycle", "vehicle")
-            and not data.get("_vehicle_main_thread")
-            and not data.get("_motorcycle_main_thread")
-        ):
-            spawn_data = dict(data)
-            spawn_data["_vehicle_main_thread"] = True
-            self.game.put(
-                lambda spawn_data=spawn_data: self.spawn_entity(spawn_data)
-            )
             return
         raw_x = data.get("x")
         raw_y = data.get("y")
@@ -362,6 +399,7 @@ class EventHandeler:
                 vehicle_type=data.get("vehicle_type"),
                 sound_profile=data.get("sound_profile"),
                 vehicle_audio=data.get("vehicle_audio"),
+                preserve_existing=data.get("map_resync") is True,
             )
         except Exception as e:
             log_exception(e, f"spawn_entity name={data['name']!r}")
@@ -394,13 +432,14 @@ class EventHandeler:
             if not hasattr(self.gameplay, 'voice_channels'):
                 self.gameplay.voice_channels = {}
             self.gameplay.voice_channels[data["voice_channel"]] = entity
-        if data.get("player", False):
+        if data.get("player", False) and not getattr(entity, "player", False):
             entity.player = True
             
         if data["name"] == "ball":
             entity.soundgroup.play("Pong/rolling.ogg", looping=True, id="ball_roll", cat="miscelaneous")
             
-        if data.get("beacon", False) and options.get("beacons"):
+        if (data.get("beacon", False) and options.get("beacons")
+                and getattr(entity, "beacon", None) is None):
             try: 
                 entity.beacon = entity.play_sound(
                 "ui/beacon.ogg", looping=True, cat="players"
@@ -435,17 +474,11 @@ class EventHandeler:
                 pass
 
     def remove_entity(self, data):
+        self._queue_map_audio_event(self._apply_remove_entity, data)
+
+    def _apply_remove_entity(self, data):
         target_name = data.get("name")
         target_entity = self.gameplay.map.entities.get(target_name)
-        if (getattr(target_entity, "is_vehicle", False) and
-                not data.get("_vehicle_main_thread") and
-                not data.get("_motorcycle_main_thread")):
-            remove_data = dict(data)
-            remove_data["_vehicle_main_thread"] = True
-            self.game.put(
-                lambda remove_data=remove_data: self.remove_entity(remove_data)
-            )
-            return
         if target_name is not None:
             piano = self.game.audio_mngr.piano
             if (
@@ -1223,10 +1256,19 @@ class EventHandeler:
         server also sends this with ``music_taken`` when a performer toggles
         "Broadcast to Megaphone" while someone else already holds the music slot.
         """
-        self.gameplay.megaphone.lock_owner = data.get("owner")
+        if not isinstance(data, dict):
+            return
+        # CHANNEL_MISC can beat Gameplay.enter() across ENet channels. Preserve
+        # the authoritative snapshot until MegaphoneManager exists instead of
+        # raising AttributeError and permanently losing PA ownership state.
+        self.gameplay._pending_megaphone_lock_state = dict(data)
+        megaphone = getattr(self.gameplay, "megaphone", None)
+        if megaphone is None:
+            return
+        megaphone.lock_owner = data.get("owner")
         owners = data.get("owners")
         if isinstance(owners, (list, tuple, set)):
-            self.gameplay.megaphone.lock_owners = set(owners)
+            megaphone.lock_owners = set(owners)
         if data.get("music_taken"):
             speak(
                 "The music broadcast slot is taken by another performer. "
@@ -1256,7 +1298,10 @@ class EventHandeler:
         player = getattr(gp, "jukebox_player", None)
         if player is not None:
             cleanup_serial = player.control_serial
-            self.game.put(lambda: player.mark_pending_map_change(cleanup_serial))
+            # parse_map itself is now serialized on the game thread, so mark
+            # immediately. Queuing a second callback let jukebox_play overtake
+            # this mark across ENet channels and made the stale sweep stop it.
+            player.mark_pending_map_change(cleanup_serial)
         gp.jukebox_state = {"jukeboxes": {}}
 
     def jukebox_state(self, data):
@@ -1333,7 +1378,12 @@ class EventHandeler:
             return
         player = self._jukebox_player()
         if player is not None:
-            self.game.put(lambda: player.stop(jid))
+            playback_id = (data or {}).get("playback_id")
+            self.game.put(
+                lambda jid=jid, playback_id=playback_id: (
+                    player.stop(jid, playback_id=playback_id)
+                )
+            )
 
     def jukebox_hint(self, data):
         """Walk-in hint near a jukebox. Rendered here so it can name the

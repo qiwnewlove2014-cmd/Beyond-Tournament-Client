@@ -1,5 +1,6 @@
 import math
 import time
+import threading
 import pygame
 from libs import options, consts, voice_chat
 from libs.logger import log
@@ -216,27 +217,42 @@ class MegaphoneManager:
              try:
                  old_channel = self.voice_channels[consts.CHANNEL_MEGAPHONE]
                  if hasattr(old_channel, 'vc_compression') and old_channel.vc_compression:
-                     # Force stop the thread
-                     old_channel.vc_compression.running = False
-                     # We can't easily join() here without blocking UI
+                     # Stop through the worker API so a map rebuild cannot
+                     # leave another 2ms audio/planning loop alive forever.
+                     close = getattr(old_channel.vc_compression, 'close', None)
+                     if callable(close):
+                         close()
+                         # The loop sleeps only 2ms. A bounded join prevents it
+                         # from touching sources while this rebuild deletes them.
+                         if (old_channel.vc_compression is not threading.current_thread()
+                                 and old_channel.vc_compression.is_alive()):
+                             old_channel.vc_compression.join(timeout=0.05)
+                     else:
+                         old_channel.vc_compression.put(None)
              except Exception as e:
                  print(f"Error cleaning up old megaphone thread: {e}")
 
-        # Return per-speaker EFX reverb slots to pool + cleanup reflection sources
-        # This MUST happen before clearing the lists to prevent OpenAL resource exhaustion
-        if hasattr(self, 'speaker_data'):
-            for data in self.speaker_data:
-                # Return per-speaker reverb slot to pool
-                if data.get('reverb_slot'):
-                    self.game.audio_mngr.release_effect_slot(data['reverb_slot'])
-                # Delete ground reflection source
-                if data.get('reflection_source'):
-                    try:
-                        data['reflection_source'].stop()
-                        data['reflection_source'].buffer = None
-                        data['reflection_source'].delete()
-                    except Exception:
-                        pass
+        # Keep the old descriptors until EVERY source has detached its sends.
+        # Returning a slot first lets the pool reassign it while old speaker,
+        # reflection, or per-player sources still reference it.
+        old_speaker_data = list(getattr(self, 'speaker_data', []))
+        for data in old_speaker_data:
+            # Delete ground reflection source after detaching all its sends.
+            if data.get('reflection_source'):
+                if hasattr(self.game.audio_mngr, 'efx'):
+                    for send_idx in range(4):
+                        try:
+                            self.game.audio_mngr.efx.send(
+                                data['reflection_source'], send_idx, None
+                            )
+                        except Exception:
+                            pass
+                try:
+                    data['reflection_source'].stop()
+                    data['reflection_source'].buffer = None
+                    data['reflection_source'].delete()
+                except Exception:
+                    pass
 
         # Cleanup existing sources if any
         if hasattr(self, 'sources'):
@@ -268,6 +284,19 @@ class MegaphoneManager:
         if hasattr(self, 'player_sources'):
             for sid in list(self.player_sources.keys()):
                 self._remove_megaphone_player(sid)
+
+        # Sources are now detached/deleted, so filters and pooled slots are safe
+        # to recycle for the rebuilt speaker set.
+        for data in old_speaker_data:
+            for filter_key in ('filter', 'refl_filter'):
+                filter_obj = data.get(filter_key)
+                if filter_obj:
+                    try:
+                        filter_obj.delete()
+                    except Exception:
+                        pass
+            if data.get('reverb_slot'):
+                self.game.audio_mngr.release_effect_slot(data['reverb_slot'])
 
         self.sources = []
         self.speaker_data = []
@@ -1039,6 +1068,26 @@ class MegaphoneManager:
         from . import megaphone_settings
         self.add_substate(megaphone_settings.megaphone_settings(self.game, self))
 
+
+    def detach_map_reverb(self):
+        """Detach send 3 before an in-place map reload releases that slot."""
+        if not hasattr(self.game.audio_mngr, 'efx'):
+            return
+        sources = []
+        for data in getattr(self, 'speaker_data', []):
+            sources.extend((data.get('source'), data.get('reflection_source')))
+        for entry in getattr(self, 'player_sources', {}).values():
+            sources.extend(entry.get('sources', []))
+        for source in sources:
+            if source is not None:
+                try:
+                    self.game.audio_mngr.efx.send(source, 3, None)
+                except Exception:
+                    pass
+        # Force update_megaphone_audio() to bind the new map's slot even when
+        # the next zone has the same logical bounds as the old one.
+        self.current_player_reverb_slot = 'UNINIT'
+        self.gameplay.current_player_reverb_slot = None
 
     def update_megaphone_audio(self, distance, listener_pos):
         # Tick megaphone delay queues to flush remaining audio when a player finishes speaking

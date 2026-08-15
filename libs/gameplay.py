@@ -1024,6 +1024,12 @@ class Gameplay(state.State):
         # Do not reset voice_channels here. CHANNEL_MAP spawn packets may have
         # populated it before CHANNEL_MISC connected was delivered.
         self.megaphone = MegaphoneManager(self)
+        pending_lock = getattr(self, '_pending_megaphone_lock_state', None)
+        if isinstance(pending_lock, dict):
+            self.megaphone.lock_owner = pending_lock.get('owner')
+            owners = pending_lock.get('owners')
+            if isinstance(owners, (list, tuple, set)):
+                self.megaphone.lock_owners = set(owners)
         
         # === MAP MUSIC BOT ===
         self.music_bot = music_bot.MapMusicBot(self.game)

@@ -393,12 +393,20 @@ class JukeboxPlayer:
             f"at ({x}, {y}, {z}) offset={start_offset:.1f}s url={url[:60]!r}"
         )
 
-    def stop(self, jukebox_id):
+    def stop(self, jukebox_id, playback_id=None):
         """Stop the song for one jukebox and free its audio source."""
         with self._lock:
+            existing = self.players.get(jukebox_id)
+            if existing is not None and playback_id is not None:
+                try:
+                    expected_key = ("id", int(playback_id))
+                except (TypeError, ValueError):
+                    return False
+                if existing.get("playback_key") != expected_key:
+                    return False
             player = self.players.pop(jukebox_id, None)
         if not player:
-            return
+            return False
         log_line(f"[Jukebox] stop({jukebox_id}) title={player.get('title')!r}")
         streamer = player.get("streamer")
         relay_key = player.get("relay_key")
@@ -439,6 +447,7 @@ class JukeboxPlayer:
                     source.delete()
                 except Exception:
                     pass
+        return True
 
     def stop_all(self):
         """Stop every jukebox (map change / disconnect)."""
@@ -465,11 +474,16 @@ class JukeboxPlayer:
         """
         import threading as _threading
         with self._lock:
+            # This mark is queued from CHANNEL_MAP. A newer jukebox_play may
+            # already have reached the game queue through another ENet channel;
+            # never let the stale reload mark claim that newly confirmed stream.
+            if self._control_serial != serial:
+                return False
             pending = set(self.players.keys())
             self._pending_map_change = pending
             self._pending_map_change_serial = serial
         if not pending:
-            return
+            return True
 
         def sweep():
             time.sleep(2.0)
@@ -493,6 +507,7 @@ class JukeboxPlayer:
                 self.game.put(do_stop)
 
         _threading.Thread(target=sweep, daemon=True).start()
+        return True
 
     def receive_relay_packet(self, data):
         """Parse and enqueue a compact relay frame; safe under the network lock."""
@@ -535,6 +550,24 @@ class JukeboxPlayer:
                     audio.efx.send(src_r, 0, reverb)
                 except Exception:
                     pass
+
+    def detach_reverb(self):
+        """Detach active streams before map reverb slots return to the pool."""
+        audio = getattr(self.game, "audio_mngr", None)
+        if audio is None or not hasattr(audio, "efx"):
+            return
+        with self._lock:
+            sources = [
+                source
+                for player in self.players.values()
+                for source in (player.get("source"), player.get("secondary_source"))
+                if source is not None
+            ]
+        for source in sources:
+            try:
+                audio.efx.send(source, 0, None)
+            except Exception:
+                pass
 
 
 def _current_state(gp):

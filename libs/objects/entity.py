@@ -1,5 +1,6 @@
 import os
 import time
+import contextlib
 from random import randint as random
 from .. import options
 from .. import voice_chat
@@ -140,6 +141,17 @@ class Entity(Object):
                         self.game.audio_mngr.efx.send(self.music_source, 0, reverb.reverb, filter=flt)
         except Exception as e:
             log(f"[ENTITY.AUDIO] Reverb sync skipped for {self.name!r}: {e}")
+
+    def detach_environment_effects(self):
+        """Detach map-owned EFX sends before a map reload releases its slots."""
+        with contextlib.suppress(Exception):
+            self.soundgroup.apply_effect(None, 0)
+        if self.player:
+            for source_name in ("vc_source", "music_source"):
+                source = getattr(self, source_name, None)
+                if source is not None:
+                    with contextlib.suppress(Exception):
+                        self.game.audio_mngr.efx.send(source, 0, None, filter=None)
 
     def move(self, x, y, z, play_sound=True, mode="walk"):
         x = float(x) if x is not None else (float(self.x) if self.x is not None else 0.0)
