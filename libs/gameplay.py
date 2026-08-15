@@ -1470,7 +1470,7 @@ class Gameplay(state.State):
 
     def buffer_cycle_l(self, mod=0):
         if mod & pygame.KMOD_CTRL:
-            if hasattr(self, 'music_bot') and self.music_bot:
+            if hasattr(self, 'music_bot') and self.music_bot and self._can_use_music_bot():
                 self.music_bot.previous_feed_track()
             return
         if mod & pygame.KMOD_SHIFT:
@@ -1479,7 +1479,7 @@ class Gameplay(state.State):
 
     def buffer_cycle_r(self, mod=0):
         if mod & pygame.KMOD_CTRL:
-            if hasattr(self, 'music_bot') and self.music_bot:
+            if hasattr(self, 'music_bot') and self.music_bot and self._can_use_music_bot():
                 self.music_bot.next_feed_track()
             return
         if mod & pygame.KMOD_SHIFT:
@@ -2190,6 +2190,14 @@ class Gameplay(state.State):
             options.set("volume_music", self.music_volume)
         speak(f"music volume: {str(self.music_volume)} percent. ")
 
+    def _can_use_music_bot(self):
+        """Music Bot is staff-only now that the Jukebox serves regular players."""
+        return (
+            getattr(self, "is_staff", False)
+            or getattr(self, "is_builder", False)
+            or getattr(self, "is_technician", False)
+        )
+
     def music_bot_control(self, mod):
         """Music Bot controls using the configured Music Bot key:
         Key              = Open YouTube search
@@ -2199,6 +2207,9 @@ class Gameplay(state.State):
         Alt+Key          = Toggle broadcast (mute to others)
         """
         if not hasattr(self, 'music_bot') or not self.music_bot:
+            return
+        if not self._can_use_music_bot():
+            # Regular players use the Jukebox instead — stay silent.
             return
         
         if mod & pygame.KMOD_CTRL and mod & pygame.KMOD_SHIFT:
@@ -2227,6 +2238,8 @@ class Gameplay(state.State):
     def music_bot_volume(self, delta):
         """Adjust Music Bot volume through the configured volume keys."""
         if not hasattr(self, 'music_bot') or not self.music_bot:
+            return
+        if not self._can_use_music_bot():
             return
         new_vol = max(0, min(100, self.music_bot.volume + delta))
         self.music_bot.set_volume(new_vol)
