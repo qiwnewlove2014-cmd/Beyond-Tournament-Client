@@ -3,6 +3,33 @@
 • for the Beyond Tournament project (Server & Client core).
 • ============================================================
 
+[v1.7.8] Long-Haul Truck, Hold Horn & Brake Pedal — 2026-08-15
+--------------------------------------------------------------------------------
+
+• Vehicles & Vehicle Audio
+- **Drivable Long-Haul Truck (/spawntruck):** New heavy, slow truck (aliases /truck, /lorry, /bigtruck) spawns on the main map; the backward key is now the brake pedal — the truck no longer reverses.
+- **Long-Body Engine Audio:** The truck engine renders from 4 spatial sources (front + rear axles) across the 5-tile body; the rear pair trails the driven path so the rumble follows the wheels around corners like a real trailer, with start/stop sounds from the cab.
+- **Auto-Idling Demo Engine:** /spawntruck starts the engine idling with no rider and the spawn packet itself carries the running-engine state (no packet race), so builders can audition the engine layout before mounting.
+- **Hold-to-Honk Horn:** Space (or H) honks a looping horn — a quick tap beeps briefly, holding keeps honking. The truck horn uses a new sample, and everyone nearby hears it in 3D.
+- **Brake Pedal & Pitch Fall:** Holding Down brakes with a looping brake sound whose pitch drops from high to low as the truck slows.
+- **Burnout (Gas + Brake):** Holding Up and Down together keeps the truck stationary while the engine revs at the free-wheel level it had when the burnout started (brake sound mixed in) — release Down to accelerate away from the same level.
+- **Get Out Without Stalling:** Shift+interact (Shift+Enter / Shift+F) gets out of any vehicle — truck or motorcycle — while leaving the engine idling; Enter now also triggers interact — mount/dismount vehicles, open jukeboxes, use travel points.
+- **Vehicle Input Race Fix:** Removed the server input rate-limit that could drop a quick burnout release and leave the truck stuck revving.
+- **Livestock Truck (/spawntruck2):** New cabin-interior truck (aliases /livestocktruck, /animaltruck) spawns on the main map with a demo-idling engine. It starts only from the in-cab command menu: the engine runs on demo idle or a manual start — not automatically on mount.
+- **In-Cab Command Menu (truck2):** Mounting the livestock truck opens a command menu (arrow keys) with Start Engine / Stop Engine / Get Out; Start/Stop drive a new `vehicle_command` packet handled by the vehicle. The menu uses the truck's own UI blip (truck_command.ogg) so the main game's menu sounds never play inside the cabin.
+- **Manual Engine Switch:** `engineCommand` start/stop toggles the truck2 engine and broadcasts state to the whole map; dismounting clears the manual switch.
+- **Cabin Audio Context Fade (truck2):** Climbing in/out of the livestock truck crossfades the sound mix over ~0.6s instead of snapping — exterior engine fades down, stereo cabin loops fade up on enter, and back on exit (no instant cut).
+- **Exterior Drive Muted Inside the Cab (truck2):** The driver hears only the muffled exterior idle through the walls — the full exterior DRIVE loop is reserved for outside listeners (new `interiorExtDriveScale` setting, 0 for truck2).
+- **Engine Loop Rev Pitch (truck2):** Both idle loops now pitch up with road speed (0.9 → 1.15) — the exterior loop (truck_idle_ext.ogg) for outside listeners and the cabin loop (truck_idle_int.ogg) for the driver, so the engine audibly revs in both perspectives.
+- **Boarding vs Spawn Sounds (truck2):** `truck_spawn.ogg` is now the boarding sound — the server plays it 3D at the truck when a rider climbs in. Spawning announces the engine start instead: `truck_start_ext.ogg` at the truck.
+- **No Auto-Start — Every Vehicle Starts Manually:** Removed auto-start for all vehicles (motorcycle, truck, truck2). Spawned vehicles arrive with the engine off and mounting never starts it — the rider opens the in-cab Vehicle Command menu (now available on every vehicle, not just truck2) and presses Start Engine. Before starting, the cabin is silent.
+- **Engine Rev Pitch on All Loops:** Both the idle and drive loops (exterior + interior) now pitch up together with road speed, and the volume ramp was flattened — accelerating is heard as a pitch rise (engine revving) instead of just getting louder.
+
+• Audio Assets
+- **Truck Sound Pack:** Engine/start/stop/crash/terrain/wind sounds from the MIT-licensed “Truck (MIT) Arcade Car Physics” pack (© 2018 Saarg) plus new horn and brake samples (see data/vehicles/truck_mit_arcade_car_physics/CREDITS.md).
+- **Livestock Truck Sound Pack:** Split exterior/interior engine loops (mono 3D exterior + stereo cabin), start/stop one-shots, spawn/unspawn thunks and the command-menu blip (see data/vehicles/truck2/CREDITS.md).
+
+
 [v1.7.7] Natural World Map Animals & Spatial Audio Polish — 2026-08-14
 --------------------------------------------------------------------------------
 

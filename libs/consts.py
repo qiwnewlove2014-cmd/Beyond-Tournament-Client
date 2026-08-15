@@ -26,4 +26,4 @@ CHANNEL_MUSICBOT = 22
 SOUNDSPREPEND="/data/"
 
 # Update this variable to force clients to update their game
-CLIENT_VERSION = "BT-1.7.7"
+CLIENT_VERSION = "BT-1.7.8"

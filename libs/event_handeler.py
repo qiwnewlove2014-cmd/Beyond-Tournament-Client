@@ -370,6 +370,25 @@ class EventHandeler:
             # A resync can replace an entity with the same name.  Never leave the
             # spectator camera bound to the just-destroyed entity/audio sources.
             self.gameplay.camera.set_focus_object(entity)
+        # Vehicles: apply the engine state carried by the spawn packet itself.
+        # The server sets demo engines (e.g. /spawntruck auto-idle) before the
+        # object is broadcast, so relying only on a later vehicle_state packet
+        # would silently lose the engine when that packet races the spawn.
+        if getattr(entity, "is_vehicle", False):
+            entity.apply_state(
+                data.get("vehicle_speed", 0.0),
+                data.get("engine_on", False),
+                data.get("rider", ""),
+                data.get("vehicle_facing", data.get("angle", 0.0)),
+                False,
+                brake_on=data.get("brake_on", False),
+                horn_on=data.get("horn_on", False),
+                revving=data.get("revving", False),
+            )
+        # Fresh truck2 placements announce themselves with the ENGINE START
+        # (truck_start_ext.ogg) — apply_state's engine-on branch plays it at
+        # the truck. The boarding sound (truck_spawn.ogg) is played by the
+        # server when a rider climbs in, not here.
         log(f"[ENTITY] Spawned {data['name']!r} at ({x}, {y}, {z})")
         if data.get("voice_channel", None) != None:
             if not hasattr(self.gameplay, 'voice_channels'):
@@ -448,6 +467,17 @@ class EventHandeler:
             for k in keys_to_remove:
                 del self.gameplay.voice_channels[k]
         if hasattr(self.gameplay, 'map') and self.gameplay.map:
+            # Truck2 despawn announces itself at the truck (3D) before removal.
+            if getattr(target_entity, "interior_audio", False):
+                try:
+                    target_entity.play_sound(
+                        target_entity._sound("truck_unspawn.ogg"),
+                        id="truck_unspawn",
+                        cat="miscelaneous",
+                        volume=85,
+                    )
+                except Exception:
+                    pass
             self.gameplay.map.remove_entity(data["name"])
 
     def play_sound(self, data):
@@ -692,6 +722,10 @@ class EventHandeler:
             data.get("engine_on", False),
             data.get("rider", ""),
             data.get("vehicle_facing", data.get("angle", 0.0)),
+            False,
+            brake_on=data.get("brake_on", False),
+            horn_on=data.get("horn_on", False),
+            revving=data.get("revving", False),
         )
 
     def _apply_vehicle_state(self, data):
@@ -704,6 +738,9 @@ class EventHandeler:
             data.get("rider", ""),
             data.get("vehicle_facing", 0.0),
             bool(data.get("_initial_spawn", False)),
+            brake_on=data.get("brake_on", False),
+            horn_on=data.get("horn_on", False),
+            revving=data.get("revving", False),
         )
 
     def vehicle_state(self, data):

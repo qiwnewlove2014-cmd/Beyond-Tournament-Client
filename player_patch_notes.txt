@@ -4,6 +4,16 @@ Every update, summarized for players. Complex system internals and
 staff-only tools are left out — the full technical record lives in
 changelog.txt.
 
+[v1.7.8] Long-Haul Truck, Hold Horn & Brake Pedal — 2026-08-15
+--------------------------------------------------------------------------------
+- The new long-haul truck is here! Staff can spawn it with /spawntruck — driving it sounds like the engine rumbles along the whole length of the body, not from a single point.
+- The engine auto-idles on spawn — walk around the truck and audition the engine before you even mount up.
+- The horn works both short and long: a quick tap beeps once, holding it keeps honking (new horn sample).
+- Press Down to brake — the brake squeal starts high-pitched and drops lower as the truck slows (the truck no longer reverses).
+- Burnout! Hold Up and Down together — the truck stays put while the engine revs at the free-wheel level it had, with the brake sound mixed in. Release Down and accelerate away from the same level.
+- Get out without stalling: Shift+Enter (or Shift+F) leaves the engine idling when you get off — perfect for hopping out to listen to the engine or run an errand and come back. Works on both the truck and the motorcycle.
+- Enter now works as an interact key too (mount/dismount vehicles, open jukeboxes, use travel points), just like F.
+
 [v1.7.7] Natural World Map Animals & Spatial Audio Polish — 2026-08-14
 --------------------------------------------------------------------------------
 - Footsteps and animal sounds now fade out with distance and go fully silent at about 40 steps — no more hearing hoofbeats from across the map.

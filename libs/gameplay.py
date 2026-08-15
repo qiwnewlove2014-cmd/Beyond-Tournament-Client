@@ -94,7 +94,7 @@ class Gameplay(state.State):
         self.vehicle_name = None
         self.vehicle_type = None
         self._vehicle_keys_down = set()
-        self._vehicle_last_input = (0, 0)
+        self._vehicle_last_input = (0, 0, False, False)
         self._vehicle_horn_down = False
         self._horse_wind_gain = 0.0
         self._horse_sprint_duration = 0.0
@@ -222,6 +222,11 @@ class Gameplay(state.State):
                 "mute_current_buffer", pygame.K_BACKSLASH
             ): lambda mod: buffer.toggle_mute(),
             kc.get("interact", pygame.K_f): self.interact,
+            # Enter also interacts (mount/dismount vehicles, jukeboxes, travel
+            # points). Shift+Enter is the vehicle variant that leaves the
+            # engine running when getting out.
+            pygame.K_RETURN: self.interact,
+            pygame.K_KP_ENTER: self.interact,
             kc.get("open_main_menu", pygame.K_BACKSPACE): lambda mod: (
                 self.chat2("/mainmenu") if not self.substates else None
             ),
@@ -271,7 +276,7 @@ class Gameplay(state.State):
         self.vehicle_name = str(data.get("name", "")) if active else None
         self.vehicle_type = str(data.get("vehicle_type", "vehicle")) if active else None
         self._vehicle_keys_down.clear()
-        self._vehicle_last_input = (0, 0)
+        self._vehicle_last_input = (0, 0, False, False)
         self._vehicle_horn_down = False
         self.motorcycle_mode = active and self.vehicle_type == "motorcycle"
         self.motorcycle_name = self.vehicle_name if self.motorcycle_mode else None
@@ -284,9 +289,65 @@ class Gameplay(state.State):
                 wind_sound = group.labeled_sources.pop("horse_wind", None)
                 if wind_sound:
                     wind_sound.destroy(force=True)
+            self._close_truck_command_menu()
             return
         # Suppress any normal held-key movement that was active while mounting.
         self.running = False
+        # The command menu is for engine vehicles only — horses send the same
+        # vehicle_session packet but have no engine to start.
+        if active and self.vehicle_type in ("motorcycle", "truck", "truck2"):
+            self._open_truck_command_menu()
+
+    def _open_truck_command_menu(self):
+        """In-cab command menu for every drivable vehicle.
+
+        No vehicle auto-starts anymore — the rider starts the engine from this
+        menu. Arrow keys navigate; every UI sound is the vehicle's own
+        command blip (truck_command.ogg, shared) so the main game's menu
+        sounds never play inside the cabin.
+        """
+        if getattr(self, "_truck_command_menu", None) is not None:
+            return
+        if not (self.vehicle_mode and self.vehicle_name):
+            return
+        sound = "vehicles/truck2/truck_command.ogg"
+        title = "Vehicle Command"
+        m = menu.Menu(
+            self.game,
+            title,
+            parrent=self,
+            wrapping=True,
+        )
+        m.set_sounds(click=sound, enter=sound, open=sound, close=sound)
+        m.add_items(
+            [
+                ("Start Engine", partial(self._truck_command_action, "start")),
+                ("Stop Engine", partial(self._truck_command_action, "stop")),
+                ("Get Out", partial(self._truck_command_action, "get_out")),
+                ("Close Menu", self._close_truck_command_menu),
+            ]
+        )
+        self._truck_command_menu = m
+        self.add_substate(m)
+
+    def _close_truck_command_menu(self):
+        m = getattr(self, "_truck_command_menu", None)
+        if m is None:
+            return
+        self._truck_command_menu = None
+        if self.substates and self.substates[-1] is m:
+            self.pop_last_substate()
+
+    def _truck_command_action(self, command):
+        if command == "get_out":
+            self.interact(0)
+        elif self.game.network and self.vehicle_name:
+            self.game.network.send(
+                consts.CHANNEL_MISC,
+                "vehicle_command",
+                {"name": self.vehicle_name, "command": command},
+            )
+        self._close_truck_command_menu()
 
     def _update_horse_wind(self):
         is_riding_horse = getattr(self, "vehicle_mode", False) and getattr(self, "vehicle_type", None) == "horse"
@@ -363,7 +424,11 @@ class Gameplay(state.State):
         throttle = int("forward" in self._vehicle_keys_down) - int("backward" in self._vehicle_keys_down)
         steer = int("right" in self._vehicle_keys_down) - int("left" in self._vehicle_keys_down)
         sprint = bool("sprint" in self._vehicle_keys_down)
-        current = (throttle, steer, sprint)
+        # The backward key doubles as the brake pedal (truck): the server uses
+        # it to sound the brake loop and to distinguish burnout (gas + brake)
+        # from neutral, since the net throttle is 0 in both cases.
+        brake = "backward" in self._vehicle_keys_down
+        current = (throttle, steer, sprint, brake)
         if current == self._vehicle_last_input or not self.vehicle_name:
             return
         self._vehicle_last_input = current
@@ -371,7 +436,7 @@ class Gameplay(state.State):
         self.game.network.send(
             consts.CHANNEL_MOVEMENT,
             event,
-            {"name": self.vehicle_name, "throttle": throttle, "steer": steer, "sprint": sprint},
+            {"name": self.vehicle_name, "throttle": throttle, "steer": steer, "sprint": sprint, "brake": brake},
         )
 
     def _handle_vehicle_control_event(self, event):
@@ -388,8 +453,19 @@ class Gameplay(state.State):
                         horn_event,
                         {"name": self.vehicle_name},
                     )
-            elif event.type == pygame.KEYUP:
+            elif event.type == pygame.KEYUP and self._vehicle_horn_down:
                 self._vehicle_horn_down = False
+                if self.vehicle_name:
+                    horn_release_event = (
+                        "motorcycle_horn_release"
+                        if self.vehicle_type == "motorcycle"
+                        else "vehicle_horn_release"
+                    )
+                    self.game.network.send(
+                        consts.CHANNEL_MOVEMENT,
+                        horn_release_event,
+                        {"name": self.vehicle_name},
+                    )
             return True
         role = self._vehicle_key_role(event.key)
         if role is None:
@@ -2319,6 +2395,9 @@ class Gameplay(state.State):
     def interact(self, mod):
         # 📌 Send selected slot for wallbuy weapon placement
         selected_slot = getattr(self, 'selected_weapon_slot', -1)
+        # Shift+interact: get out of a vehicle but keep its engine idling.
+        # Harmless for every other interact target (jukeboxes, warps, ...).
+        keep_engine = bool(mod & pygame.KMOD_SHIFT)
         self.game.network.send(
             consts.CHANNEL_MISC,
             "interact",
@@ -2326,6 +2405,7 @@ class Gameplay(state.State):
                 "angle": self.player.hfacing, 
                 "pitch": self.player.vfacing,
                 "selected_slot": selected_slot,
+                "keep_engine": keep_engine,
             },
         )
 
