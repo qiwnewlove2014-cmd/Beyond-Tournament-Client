@@ -223,7 +223,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         lambda: None,
     )
     if server_config.is_production_build():
-        endpoint_items = [("Server: Official server, managed automatically", lambda: None)]
+        endpoint_items = []
     else:
         endpoint_items = [
             (f"Server hostname: {options.get('host', consts.DEFAULT_HOST)}", lambda: configure_host(game, func_call, replace_call)),

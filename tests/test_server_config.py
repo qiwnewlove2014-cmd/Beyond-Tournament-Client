@@ -202,7 +202,7 @@ class EndpointOptionsMenuTests(unittest.TestCase):
 
     def test_production_menu_hides_hostname_and_port(self):
         labels = self._menu_labels(production=True)
-        self.assertIn("Server: Official server, managed automatically", labels)
+        self.assertFalse(any("server" in label.lower() for label in labels))
         self.assertFalse(any("hostname" in label.lower() for label in labels))
         self.assertFalse(any("server port" in label.lower() for label in labels))
 
