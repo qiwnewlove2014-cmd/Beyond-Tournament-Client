@@ -87,6 +87,9 @@ class Gameplay(state.State):
         self.drum_mode = False      # True when playing a drumset
         self._drum_pressed_keys = set()
         self._midi_lease = None
+        # 🎵 Music jukebox: server-side queue playback anchored at jukebox elements.
+        self.jukebox_player = None
+        self.jukebox_state = {"jukeboxes": {}}
         self.vehicle_mode = False
         self.vehicle_name = None
         self.vehicle_type = None
@@ -1018,6 +1021,9 @@ class Gameplay(state.State):
         if hasattr(self, 'music_bot') and self.music_bot:
             self.music_bot.destroy()
             self.music_bot = None
+        if getattr(self, 'jukebox_player', None):
+            self.jukebox_player.stop_all()
+            self.jukebox_player = None
         # Clear PianoAudio gameplay reference to prevent stale refs
         if hasattr(self.game, 'audio_mngr') and self.game.audio_mngr and hasattr(self.game.audio_mngr, 'piano'):
             self.game.audio_mngr.piano.reset()

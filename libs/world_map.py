@@ -42,6 +42,9 @@ class Map:
         self.perk_machine_list = []
         self.minigame_table_list = []
         self.travel_point_list = []
+        # 🎵 Music jukeboxes (persistent map elements). Positions are used to
+        # anchor jukebox audio in 3D space.
+        self.jukebox_list = []
 
     def valid_straight_path(self, position1, position2):
         x1, y1, z1 = position1
@@ -135,6 +138,7 @@ class Map:
         self.perk_machine_list.clear()
         self.minigame_table_list.clear()
         self.travel_point_list.clear()
+        self.jukebox_list.clear()
         for i in self.ambience_list.copy():
             i.leave(destroy=True)
         self.ambience_list.clear()
@@ -531,6 +535,36 @@ class Map:
         for tp in self.travel_point_list:
             if tp.in_bound(x, y, z):
                 return tp
+        return None
+
+    def spawn_jukebox(
+        self,
+        minx=0,
+        maxx=0,
+        miny=0,
+        maxy=0,
+        minz=0,
+        maxz=0,
+        id="",
+        **kwargs,
+    ):
+        """Spawns a jukebox element (position used to anchor its audio)."""
+        obj = JukeboxZone(id, minx, maxx, miny, maxy, minz, maxz)
+        index = -1
+        for i, element in enumerate(self.jukebox_list):
+            if element.id == id:
+                index = i
+                break
+        if index > -1:
+            self.jukebox_list[index] = obj
+        else:
+            self.jukebox_list.append(obj)
+
+    def get_jukebox(self, jukebox_id):
+        """Returns the jukebox element with the given id, or None."""
+        for jb in self.jukebox_list:
+            if jb.id == jukebox_id:
+                return jb
         return None
 
     def spawn_perkMachine(
@@ -1258,3 +1292,21 @@ class SoundSource(BaseMapObj):
         with contextlib.suppress(Exception):
             if self.sound:
                 self.sound.destroy()
+
+class JukeboxZone(BaseMapObj):
+    """A music jukebox element. Stores the position its audio is anchored to."""
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "jukebox")
+        self.label = "Music Jukebox"
+
+    @property
+    def center(self):
+        try:
+            return (
+                (float(self.minx) + float(self.maxx)) / 2.0,
+                (float(self.miny) + float(self.maxy)) / 2.0,
+                (float(self.minz) + float(self.maxz)) / 2.0,
+            )
+        except Exception:
+            return (0.0, 0.0, 0.0)

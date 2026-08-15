@@ -80,7 +80,10 @@ class YouTubeSearcher:
             return []
 
         ydl_opts = {
-            'format': 'bestaudio/best',
+            # Progressive 360p media is more reliable on current YouTube CDNs
+            # than audio-only DASH URLs (which intermittently return 403 to
+            # fresh clients). Video is discarded by ffmpeg either way.
+            'format': 'best[acodec!=none][vcodec!=none][height<=360]/bestaudio/best',
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
@@ -93,11 +96,19 @@ class YouTubeSearcher:
                 for e in entries:
                     if not e:
                         continue
+                    video_id = e.get('id', '')
+                    webpage_url = e.get('webpage_url', '')
+                    if not webpage_url and video_id:
+                        webpage_url = f"https://www.youtube.com/watch?v={video_id}"
                     results.append({
                         'title': e.get('title', 'Unknown'),
                         'duration': e.get('duration', 0),
-                        'webpage_url': e.get('webpage_url', ''),
+                        'webpage_url': webpage_url,
                         'url': e.get('url', ''),  # direct audio stream URL
+                        # A googlevideo URL can be authorized for the exact
+                        # request headers returned by yt-dlp. Keep them paired
+                        # so ffmpeg is not rejected with HTTP 403.
+                        'http_headers': dict(e.get('http_headers') or {}),
                     })
                 return results
         except Exception as ex:
@@ -105,24 +116,40 @@ class YouTubeSearcher:
             return []
 
     @staticmethod
-    def get_stream_url(webpage_url):
-        """Get direct audio stream URL from a YouTube video URL"""
+    def get_stream_info(webpage_url):
+        """Resolve a YouTube page to its paired stream URL and HTTP headers."""
         try:
             import yt_dlp
         except ImportError:
             return None
         ydl_opts = {
-            'format': 'bestaudio/best',
+            # Progressive 360p first (see search()): audio-only DASH URLs from
+            # googlevideo intermittently 403 on fresh resolution, which made
+            # "Could not load track." appear even though pressing Ctrl+M again
+            # eventually worked (each retry resolved a new URL).
+            'format': 'best[acodec!=none][vcodec!=none][height<=360]/bestaudio/best',
             'quiet': True,
             'no_warnings': True,
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(webpage_url, download=False)
-                return info.get('url')
+                stream_url = info.get('url')
+                if not stream_url:
+                    return None
+                return {
+                    'url': stream_url,
+                    'http_headers': dict(info.get('http_headers') or {}),
+                }
         except Exception as ex:
-            logger.log_exception(ex, "YouTubeSearcher.get_stream_url")
+            logger.log_exception(ex, "YouTubeSearcher.get_stream_info")
             return None
+
+    @staticmethod
+    def get_stream_url(webpage_url):
+        """Compatibility helper for callers that only need the direct URL."""
+        info = YouTubeSearcher.get_stream_info(webpage_url)
+        return info.get('url') if info else None
 
 
 class AudioStreamer(threading.Thread):
@@ -142,16 +169,46 @@ class AudioStreamer(threading.Thread):
     NUM_BUFFERS = 32      # Total buffers in pool
     PRE_BUFFER_COUNT = 10 # Buffers to fill before starting local playback
 
-    def __init__(self, game, audio_url, source, volume=50, bot=None):
+    def __init__(self, game, audio_url, source, volume=50, bot=None, channels=2,
+                 spatial_pair=None, start_offset=0.0, http_headers=None,
+                 start_offset_received_at=None, canonical_url=None):
         super().__init__(daemon=True)
         self.game = game
         self.bot = bot
         self.audio_url = audio_url
+        # The stable YouTube page URL (if known). When a freshly resolved
+        # googlevideo URL 403s at startup, re-resolving THIS url yields a new
+        # signed URL+headers — retrying the same stale URL never helps.
+        self.canonical_url = canonical_url
         self.source = source  # cyal OpenAL source
         self.volume = volume
+        self.start_offset = float(start_offset or 0.0)
+        self.start_offset_received_at = start_offset_received_at
+        self.http_headers = dict(http_headers or {})
+        # Spatial stereo pair (jukeboxes): two MONO sources placed at the same
+        # spot minus/plus a small offset, fed with the LEFT and RIGHT channels
+        # of a STEREO decode. Two positioned mono sources produce a real stereo
+        # image when you stand close, which naturally collapses toward mono at
+        # distance — exactly how piano/drum sounds are anchored in the world.
+        # `spatial_pair` is (src_l, src_r, reference_distance, max_distance).
+        self.spatial_pair = spatial_pair
+        if self.spatial_pair:
+            self.spatial_src_l, self.spatial_src_r = spatial_pair[0], spatial_pair[1]
+            self.spatial_ref = float(spatial_pair[2])
+            self.spatial_max = float(spatial_pair[3])
+            self.spatial_base_gain = max(0.0, min(1.0, volume / 100.0))
+            self.channels = 2  # decode interleaved stereo, split per channel
+        else:
+            self.channels = int(channels)
+        self.BUFFER_SIZE = self.SAMPLES_PER_BUFFER * self.channels * 2
         self.running = True
         self.paused = False
         self._lock = threading.Lock()
+        self._cleanup_lock = threading.Lock()
+        self._cleaned_up = False
+        self.ready_event = threading.Event()
+        self.failure_reason = None
+        self.completed_normally = False
         self.process = None
         self._buffer_pool = []       # Reusable buffer objects
         self._pause_buffer = deque() # Store data read while paused
@@ -167,43 +224,151 @@ class AudioStreamer(threading.Thread):
         self.network_queue = queue.Queue(maxsize=50)
         self.sender_thread = None
 
+    def _all_sources(self):
+        """All OpenAL sources this stream feeds (1 normal, 2 for spatial pairs)."""
+        if self.spatial_pair:
+            return (self.spatial_src_l, self.spatial_src_r)
+        return (self.source,)
+
+    def _play_all(self):
+        for src in self._all_sources():
+            try:
+                src.play()
+            except Exception:
+                pass
+
+    def _all_playing(self):
+        for src in self._all_sources():
+            try:
+                if src.state != cyal.SourceState.PLAYING:
+                    return False
+            except Exception:
+                return False
+        return True
+
+    def _buffers_queued(self):
+        total = 0
+        for src in self._all_sources():
+            try:
+                total += src.buffers_queued
+            except Exception:
+                pass
+        return total
+
+    @staticmethod
+    def _split_stereo_16(data):
+        """Split interleaved s16le stereo bytes into (left, right) mono bytes."""
+        import array
+        samples = array.array('h')
+        samples.frombytes(data)
+        return samples[0::2].tobytes(), samples[1::2].tobytes()
+
+    def _update_spatial_gain(self):
+        """Linear distance fade for spatial pairs (same behavior as drums' 3D
+        stereo): full volume inside the reference distance, linearly down to
+        true silence at max_distance, computed from the listener's position."""
+        try:
+            audio = getattr(self.game, "audio_mngr", None)
+            pos = getattr(audio, "position", None)
+            if pos is None:
+                return
+            span = max(0.0001, self.spatial_max - self.spatial_ref)
+            for src in (self.spatial_src_l, self.spatial_src_r):
+                p = src.position
+                dx = pos[0] - p[0]
+                dy = pos[1] - p[1]
+                dz = pos[2] - p[2]
+                dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+                if dist <= self.spatial_ref:
+                    g = 1.0
+                elif dist >= self.spatial_max:
+                    g = 0.0
+                else:
+                    g = 1.0 - (dist - self.spatial_ref) / span
+                # Jukebox songs use their own mixer category ("jukebox"), so
+                # lowering the music-bot/map-music slider does not silence them.
+                music_gain = audio.volume_categories.get("jukebox", [100])[0] / 100.0
+                src.gain = self.spatial_base_gain * music_gain * g
+        except Exception:
+            pass
+
+    def set_volume(self, volume):
+        """Update playback volume in real time."""
+        self.volume = volume
+        self.spatial_base_gain = max(0.0, min(1.0, volume / 100.0))
+        if self.spatial_pair:
+            self._update_spatial_gain()
+        elif self.source:
+            try:
+                self.source.gain = max(0.0, min(1.0, volume / 100.0))
+            except Exception:
+                pass
+
     def _init_buffer_pool(self):
         """Pre-allocate OpenAL buffers for reuse"""
         for _ in range(self.NUM_BUFFERS):
             try:
                 buf = self.game.audio_mngr.context.gen_buffer()
                 self._buffer_pool.append(buf)
+            except cyal.exceptions.InvalidOperationError:
+                # The project audio backend can surface one stale OpenAL error
+                # before succeeding; other buffer loaders use the same retry.
+                try:
+                    buf = self.game.audio_mngr.context.gen_buffer()
+                    self._buffer_pool.append(buf)
+                except Exception as ex:
+                    logger.log_exception(ex, "AudioStreamer._init_buffer_pool retry")
+                    break
             except Exception:
                 break
 
+    @staticmethod
+    def _ffmpeg_header_block(headers):
+        """Build an injection-safe CRLF header block for ffmpeg's input."""
+        lines = []
+        token_chars = "!#$%&'*+-.^_`|~"
+        for raw_name, raw_value in (headers or {}).items():
+            name = str(raw_name).strip()
+            value = str(raw_value).strip()
+            if not name or not value:
+                continue
+            if any(ch in name or ch in value for ch in ('\r', '\n')):
+                continue
+            if not all(ch.isalnum() or ch in token_chars for ch in name):
+                continue
+            lines.append(f"{name}: {value}\r\n")
+        return "".join(lines)
+
     def _get_buffer(self):
-        """Get a buffer from the pool, or reclaim a processed one"""
+        """Get a reclaimed buffer without growing the OpenAL pool.
+
+        Streaming must apply backpressure when every pre-allocated buffer is in
+        flight.  Allocating another hardware buffer here lets a fast decoder
+        queue an entire song and can exhaust the shared audio device.
+        """
         self._reclaim_processed()
-        
+
         if self._buffer_pool:
             return self._buffer_pool.pop(0)
-            
-        try:
-            return self.game.audio_mngr.context.gen_buffer()
-        except Exception:
-            return None
+        return None
 
     def _reclaim_processed(self):
         """Return processed buffers to pool for reuse.
         
         CRITICAL: cyal's unqueue_buffers() returns a SINGLE Buffer object by default,
-        not a list. Handle both cases robustly.
+        not a list. Handle both cases robustly. Spatial pairs drain both sources.
         """
         try:
-            while self.source.buffers_processed > 0:
-                result = self.source.unqueue_buffers()
-                if result is not None:
-                    try:
-                        for buf in result:
-                            self._buffer_pool.append(buf)
-                    except TypeError:
-                        # Not iterable — single buffer object (cyal default)
-                        self._buffer_pool.append(result)
+            for src in self._all_sources():
+                while src.buffers_processed > 0:
+                    result = src.unqueue_buffers()
+                    if result is not None:
+                        try:
+                            for buf in result:
+                                self._buffer_pool.append(buf)
+                        except TypeError:
+                            # Not iterable — single buffer object (cyal default)
+                            self._buffer_pool.append(result)
         except Exception:
             pass
 
@@ -286,7 +451,10 @@ class AudioStreamer(threading.Thread):
             # is on, OR the performer enabled "Broadcast to Megaphone" (the
             # PA/megaphone routing is an independent toggle - exactly like
             # piano/drums, so guitar and music reach the PA on their own).
-            if self.bot and not (
+            # A stream WITHOUT a bot (jukebox playback, bot=None) NEVER sends:
+            # otherwise the jukebox audio would be re-broadcast to the whole map
+            # as the player's own music bot stream (double audio everywhere).
+            if not self.bot or not (
                 self.bot.broadcast_enabled or self.bot.broadcast_to_megaphone
             ):
                 return
@@ -370,87 +538,259 @@ class AudioStreamer(threading.Thread):
 
 
     def _queue_local(self, data):
-        """Queue a chunk of STEREO PCM data to the LOCAL OpenAL source."""
+        """Queue a chunk of PCM data to the LOCAL OpenAL source(s)."""
+        if self.spatial_pair:
+            return self._queue_local_spatial(data)
         self._reclaim_processed()
         buf = self._get_buffer()
         if buf is None:
             return False
         try:
-            # Local playback is always STEREO for highest quality
-            buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.STEREO16)
+            # Local playback is STEREO for the personal music bot (highest
+            # quality); MONO for plain jukebox streams.
+            if self.channels == 1:
+                buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+            else:
+                buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.STEREO16)
             self.source.queue_buffers(buf)
             return True
         except Exception:
             return False
 
+    def _queue_local_spatial(self, data):
+        """Queue a STEREO chunk split into L/R MONO buffers on the two positioned
+        sources (jukebox stereo-spatial playback, same as drums)."""
+        self._reclaim_processed()
+        buf_l = self._get_buffer()
+        if buf_l is None:
+            return False
+        buf_r = self._get_buffer()
+        if buf_r is None:
+            # The left buffer has not been queued yet, so return it to the
+            # shared pool and retry this PCM frame on the next iteration.
+            self._buffer_pool.append(buf_l)
+            return False
+        try:
+            left, right = self._split_stereo_16(data)
+            buf_l.set_data(left, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+            buf_r.set_data(right, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+            self.spatial_src_l.queue_buffers(buf_l)
+            self.spatial_src_r.queue_buffers(buf_r)
+            return True
+        except Exception:
+            return False
+
+    def _read_prebuffer(self):
+        """Read and queue the startup buffer for the current ffmpeg process."""
+        pre_buffered = 0
+        leftover = b''
+        deadline = time.time() + 12.0
+        while (self.running and pre_buffered < self.PRE_BUFFER_COUNT
+               and time.time() < deadline):
+            if self.process.poll() is not None and not leftover:
+                break
+            try:
+                needed = self.BUFFER_SIZE - len(leftover)
+                chunk = self.process.stdout.read(needed)
+                if chunk:
+                    leftover += chunk
+                elif self.process.poll() is not None:
+                    break
+                else:
+                    time.sleep(0.02)
+            except Exception:
+                time.sleep(0.02)
+
+            while (len(leftover) >= self.BUFFER_SIZE
+                   and pre_buffered < self.PRE_BUFFER_COUNT):
+                data = leftover[:self.BUFFER_SIZE]
+                leftover = leftover[self.BUFFER_SIZE:]
+                with self._lock:
+                    if self._queue_local(data):
+                        pre_buffered += 1
+        return pre_buffered, leftover
+
     def run(self):
         if not FFMPEG_PATH:
             print("[MusicBot] ffmpeg not found!")
             speak("ffmpeg not found.")
+            self.failure_reason = "ffmpeg not found"
+            self.running = False
+            self._cleanup()
             return
 
-        cmd = [FFMPEG_PATH]
-        if self.audio_url.startswith(("http://", "https://")):
+        # Resolve the stream URL. When the caller hands us a canonical YouTube
+        # page URL, resolve it now (and again on retry) so the signed stream URL
+        # is always fresh — a stale googlevideo URL 403s forever.
+        canonical_url = self.canonical_url
+        target_url = self.audio_url
+        input_headers = dict(self.http_headers)
+        if "youtube.com" in target_url or "youtu.be" in target_url:
+            canonical_url = target_url
+        if canonical_url and ("youtube.com" in canonical_url or "youtu.be" in canonical_url):
+            fresh = YouTubeSearcher.get_stream_info(canonical_url)
+            if fresh:
+                target_url = fresh['url']
+                input_headers = fresh.get('http_headers') or {}
+
+        def _build_cmd():
+            cmd = [FFMPEG_PATH]
+            if (target_url.startswith(("http://", "https://"))
+                    and "googlevideo.com" not in target_url.lower()):
+                cmd.extend([
+                    '-reconnect', '1',
+                    '-reconnect_streamed', '1',
+                    '-reconnect_on_http_error', '403,429,5xx',
+                    '-reconnect_delay_max', '5',
+                    '-reconnect_delay_total_max', '12',
+                ])
+            user_agent = next(
+                (str(value).strip() for name, value in input_headers.items()
+                 if str(name).lower() == 'user-agent'),
+                '',
+            )
+            if user_agent and '\r' not in user_agent and '\n' not in user_agent:
+                # ffmpeg has a dedicated option for User-Agent. Using it avoids
+                # a built-in Lavf agent overriding the yt-dlp authorization UA.
+                cmd.extend(['-user_agent', user_agent])
+            header_block = self._ffmpeg_header_block({
+                name: value for name, value in input_headers.items()
+                if str(name).lower() != 'user-agent'
+            })
+            if header_block:
+                cmd.extend(['-headers', header_block])
+            effective_offset = getattr(self, "start_offset", 0.0)
+            # Only compensate the client's resolve delay when RESUMING mid-song
+            # (start_offset > 0). A fresh song must start at 0: adding the
+            # yt-dlp resolve time here made the jukebox skip past the intro
+            # every time the direct fallback was used.
+            if self.start_offset_received_at is not None and effective_offset > 0.0:
+                effective_offset += max(0.0, time.monotonic() - self.start_offset_received_at)
+            # Input authorization must precede seek. YouTube's signed range
+            # request can return 403 when -ss is placed before these headers.
+            if effective_offset > 0.5:
+                cmd.extend(['-ss', f"{effective_offset:.2f}"])
             cmd.extend([
-                '-reconnect', '1',
-                '-reconnect_streamed', '1',
-                '-reconnect_delay_max', '5'
+                '-re',  # Read/decode at media rate; network and OpenAL consume 20 ms frames.
+                '-i', target_url,
+                '-f', 's16le',
+                '-ar', '48000',
+                '-ac', str(self.channels),
+                '-loglevel', 'error',
+                'pipe:1'
             ])
-        cmd.extend([
-            '-re',                # Decode at exactly 1x real-time (perfect clock sync)
-            '-i', self.audio_url,
-            '-f', 's16le',
-            '-ar', '48000',
-            '-ac', '2',           # STEREO output for local high-fidelity playback
-            '-loglevel', 'error',
-            'pipe:1'
-        ])
+            return cmd
 
         try:
-            self.process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-            )
+            cmd = _build_cmd()
         except Exception as ex:
-            logger.log_exception(ex, "AudioStreamer.run Popen")
-            speak("ffmpeg launch error.")
+            logger.log_exception(ex, "AudioStreamer.run command")
+            self.failure_reason = "playback command error"
+            self.running = False
+            self._cleanup()
             return
 
         # Initialize buffer pool
         self._init_buffer_pool()
 
-        # Start background network sender thread
-        self.sender_thread = threading.Thread(target=self._network_sender_loop, daemon=True)
-        self.sender_thread.start()
+        # Start background network sender thread ONLY when this stream actually
+        # broadcasts (bot attached). Jukebox players (bot=None) play locally only
+        # and must never re-broadcast the song as their own music bot stream.
+        if self.bot:
+            self.sender_thread = threading.Thread(target=self._network_sender_loop, daemon=True)
+            self.sender_thread.start()
 
         # === Pre-buffer phase: fill LOCAL buffers before starting playback ===
+        # Some fresh googlevideo URLs briefly return 403 while their CDN edge
+        # authorization propagates. Retry — first with the same URL+headers, then
+        # with a freshly RE-RESOLVED URL (a stale signed URL 403s forever no
+        # matter how many times the identical command is retried). All work stays
+        # on this worker thread.
         pre_buffered = 0
         _pre_leftover = b''
-        for _ in range(self.PRE_BUFFER_COUNT):
-            if not self.running:
-                break
-            # Accumulate reads until we have a full BUFFER_SIZE chunk.
-            # A partial read does NOT mean EOF — it just means the pipe
-            # buffer had fewer bytes available (e.g. network stutter).
-            while len(_pre_leftover) < self.BUFFER_SIZE:
-                chunk = self.process.stdout.read(self.BUFFER_SIZE - len(_pre_leftover))
-                if not chunk:  # Empty bytes = ffmpeg closed the pipe (real EOF)
-                    break
-                _pre_leftover += chunk
-            if len(_pre_leftover) < self.BUFFER_SIZE:
-                break  # Real EOF during pre-buffer
-            data = _pre_leftover[:self.BUFFER_SIZE]
-            _pre_leftover = _pre_leftover[self.BUFFER_SIZE:]
-            with self._lock:
-                if self._queue_local(data):
-                    pre_buffered += 1
-
-        # Start local playback after pre-buffering
-        if pre_buffered > 0:
+        error_detail = ""
+        for attempt in range(4):
             try:
-                self.source.play()
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                )
+            except Exception as ex:
+                logger.log_exception(ex, "AudioStreamer.run Popen")
+                self.failure_reason = "playback launch error"
+                break
+
+            pre_buffered, _pre_leftover = self._read_prebuffer()
+            if pre_buffered > 0 or not self.running:
+                break
+
+            try:
+                if self.process.poll() is not None:
+                    error_detail = self.process.stderr.read(4096).decode(
+                        'utf-8', 'replace'
+                    ).strip()
+            except Exception:
+                error_detail = ""
+
+            try:
+                self.process.kill()
+                self.process.wait(timeout=2)
             except Exception:
                 pass
+            self.process = None
+
+            retryable = any(tok in error_detail for tok in ("403", "429", "503", "connection", "timeout", "reset"))
+            if not retryable or attempt >= 3:
+                break
+            if attempt >= 1 and canonical_url and ("youtube.com" in canonical_url or "youtu.be" in canonical_url):
+                # The exact URL+headers already failed once — grab a fresh
+                # signed stream URL instead of re-running the same command.
+                fresh = YouTubeSearcher.get_stream_info(canonical_url)
+                if fresh and fresh.get('url'):
+                    target_url = fresh['url']
+                    input_headers = fresh.get('http_headers') or {}
+                    try:
+                        cmd = _build_cmd()
+                    except Exception:
+                        pass
+            time.sleep(1.0 + attempt)
+
+        if pre_buffered == 0 and not self.running:
+            # Intentional cancellation (map change, newer playback generation,
+            # or stop) is not a load failure and must stay silent.
+            self._cleanup()
+            return
+
+        if pre_buffered == 0:
+            if self.failure_reason is None:
+                self.failure_reason = "stream produced no audio"
+            error_summary = ""
+            if error_detail:
+                error_summary = next(
+                    (line.strip() for line in reversed(error_detail.splitlines())
+                     if line.strip()),
+                    "",
+                )
+            logger.log(
+                "[AudioStreamer] stream produced no audio (channels="
+                f"{self.channels}, url={self.audio_url[:80]!r}, "
+                f"ffmpeg={error_summary[-240:]!r})"
+            )
+            if self.bot is None:
+                speak("The jukebox song could not be loaded. Try another song.")
+            self.running = False
+            self._cleanup()
+            return
+
+        # Start local playback after pre-buffering (spatial pairs also need
+        # their distance fade computed before the first audible sample).
+        if pre_buffered > 0:
+            if self.spatial_pair:
+                self._update_spatial_gain()
+            self._play_all()
+            self.ready_event.set()
 
         # === Streaming loop ===
         eof = False
@@ -496,6 +836,11 @@ class AudioStreamer(threading.Thread):
                     # [FIX]: Always reclaim processed buffers so buffers_queued drops to 0 at EOF
                     self._reclaim_processed()
 
+                    # Keep the spatial pair's distance fade up to date as the
+                    # listener walks (cheap: two distance checks per frame).
+                    if self.spatial_pair:
+                        self._update_spatial_gain()
+
                     # Drain pause buffer into OpenAL
                     while self._pause_buffer:
                         chunk = self._pause_buffer[0]
@@ -505,12 +850,12 @@ class AudioStreamer(threading.Thread):
                             break  # No available OpenAL buffers, wait
 
                     # Restart if source stopped and we have buffers queued (only if new buffers are queued and not EOF)
-                    if not eof and self.source.state != cyal.SourceState.PLAYING and self.source.buffers_queued > 0:
-                        self.source.play()
+                    if not eof and not self._all_playing() and self._buffers_queued() > 0:
+                        self._play_all()
                 except Exception:
                     pass
 
-            if eof and not self._pause_buffer and self.source.buffers_queued == 0:
+            if eof and not self._pause_buffer and self._buffers_queued() == 0:
                 break
                 
             # Sleep a bit to prevent busy-waiting ONLY if we didn't read any data
@@ -524,21 +869,38 @@ class AudioStreamer(threading.Thread):
         if self.running:
             try:
                 # Keep checking and unqueuing until all queued buffers are processed
-                while self.source.buffers_queued > 0 and self.running:
+                while self._buffers_queued() > 0 and self.running:
                     with self._lock:
                         self._reclaim_processed()
+                        if self.spatial_pair:
+                            self._update_spatial_gain()
                     # If we are paused at the very end, wait here until resumed
-                    if not self.paused and self.source.state != cyal.SourceState.PLAYING and self.source.buffers_queued > 0:
-                        self.source.play()
+                    if not self.paused and not self._all_playing() and self._buffers_queued() > 0:
+                        self._play_all()
                     time.sleep(0.05)
             except Exception:
                 pass
+
+        if self.running:
+            self.completed_normally = True
 
         # Cleanup
         self._cleanup()
 
     def _cleanup(self):
         """Clean up ffmpeg process and buffers"""
+        with self._cleanup_lock:
+            if self._cleaned_up:
+                return
+            self._cleaned_up = True
+        self.running = False
+        if getattr(self, "ytdlp_process", None):
+            try:
+                self.ytdlp_process.kill()
+                self.ytdlp_process.wait(timeout=2)
+            except Exception:
+                pass
+            self.ytdlp_process = None
         if self.process:
             try:
                 self.process.kill()
@@ -546,13 +908,16 @@ class AudioStreamer(threading.Thread):
             except Exception:
                 pass
             self.process = None
-        # Drain remaining buffers
-        try:
-            self.source.stop()
-            while self.source.buffers_processed > 0:
-                self.source.unqueue_buffers()
-        except Exception:
-            pass
+        # Drain remaining buffers (both sources for spatial pairs)
+        for src in self._all_sources():
+            try:
+                src.stop()
+                drain_limit = 64
+                while src.buffers_processed > 0 and drain_limit > 0:
+                    src.unqueue_buffers()
+                    drain_limit -= 1
+            except Exception:
+                pass
         self._buffer_pool.clear()
         self._pause_buffer.clear()
         # Drain the network queue to free references
@@ -710,6 +1075,7 @@ class MapMusicBot:
         # YouTube streamer thread
         self.streamer = None
         self.live_relay_streamer = None
+        self._stream_announced = False
 
         # Main-thread playback generation. Background URL resolution captures a
         # generation but may never create audio after a newer play or Stop.
@@ -811,10 +1177,14 @@ class MapMusicBot:
         if self.stream_source:
             try:
                 self.stream_source.stop()
-                while self.stream_source.buffers_processed > 0:
+                drain_limit = 64
+                while self.stream_source.buffers_processed > 0 and drain_limit > 0:
                     self.stream_source.unqueue_buffers()
-                while self.stream_source.buffers_queued > 0:
+                    drain_limit -= 1
+                drain_limit = 64
+                while self.stream_source.buffers_queued > 0 and drain_limit > 0:
                     self.stream_source.unqueue_buffers()
+                    drain_limit -= 1
                 self.stream_source.delete()
             except Exception:
                 pass
@@ -1202,14 +1572,16 @@ class MapMusicBot:
                 self.is_loading_stream = True
 
                 def do_play():
-                    stream_url = YouTubeSearcher.get_stream_url(target)
-                    if not stream_url:
+                    stream_info = YouTubeSearcher.get_stream_info(target)
+                    if not stream_info:
                         if self._is_current_playback_generation(playback_generation):
                             speak("Failed to get audio stream.")
                             self.is_loading_stream = False
                         return
                     self.game.put(lambda: self._start_youtube_stream(
-                        stream_url, title, playback_generation
+                        stream_info['url'], title, playback_generation,
+                        http_headers=stream_info.get('http_headers'),
+                        canonical_url=target,
                     ))
 
                 threading.Thread(target=do_play, daemon=True).start()
@@ -1525,6 +1897,7 @@ class MapMusicBot:
         title = result.get('title', 'Unknown')
         webpage_url = result.get('webpage_url', '')
         direct_url = result.get('url', '')
+        http_headers = result.get('http_headers') or {}
         target = webpage_url or direct_url
 
         from . import menu as menu_mod, menus
@@ -1533,7 +1906,9 @@ class MapMusicBot:
 
         def play_now():
             gp.pop_last_substate()
-            self._start_youtube_stream_from_search(title, webpage_url, direct_url)
+            self._start_youtube_stream_from_search(
+                title, webpage_url, direct_url, http_headers
+            )
 
         def save_fav():
             gp.pop_last_substate()
@@ -1556,7 +1931,8 @@ class MapMusicBot:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _start_youtube_stream_from_search(self, title, webpage_url, direct_url):
+    def _start_youtube_stream_from_search(self, title, webpage_url, direct_url,
+                                          http_headers=None):
         from .speech import speak
         if self.is_loading_stream:
             speak("Please wait, already loading a track.")
@@ -1586,23 +1962,35 @@ class MapMusicBot:
         # Get stream URL in background
         def do_play():
             import threading
-            url = direct_url
-            if not url:
-                url = YouTubeSearcher.get_stream_url(webpage_url)
-            if not url:
+            # Resolve again at selection time so URL and authorization headers
+            # are fresh. Search result direct URLs are only a fallback for
+            # providers that do not expose a canonical webpage URL.
+            stream_info = (
+                YouTubeSearcher.get_stream_info(webpage_url)
+                if webpage_url else None
+            )
+            if not stream_info and direct_url:
+                stream_info = {
+                    'url': direct_url,
+                    'http_headers': dict(http_headers or {}),
+                }
+            if not stream_info:
                 if self._is_current_playback_generation(playback_generation):
                     speak("Failed to get audio stream.")
                     self.is_loading_stream = False
                 return
             # Start streaming on main thread
             self.game.put(lambda: self._start_youtube_stream(
-                url, title, playback_generation
+                stream_info['url'], title, playback_generation,
+                http_headers=stream_info.get('http_headers'),
+                canonical_url=webpage_url or target,
             ))
 
         t = threading.Thread(target=do_play, daemon=True)
         t.start()
 
-    def _start_youtube_stream(self, audio_url, title, playback_generation=None):
+    def _start_youtube_stream(self, audio_url, title, playback_generation=None,
+                              http_headers=None, canonical_url=None):
         """Start streaming from YouTube audio URL"""
         if (playback_generation is not None
                 and not self._is_current_playback_generation(playback_generation)):
@@ -1613,14 +2001,18 @@ class MapMusicBot:
             speak("Audio error.")
             return
 
-        self.streamer = AudioStreamer(self.game, audio_url, self.stream_source, self.volume, bot=self)
+        self.streamer = AudioStreamer(
+            self.game, audio_url, self.stream_source, self.volume, bot=self,
+            http_headers=http_headers,
+            canonical_url=canonical_url,
+        )
         self.streamer.start()
 
         self.mode = "youtube"
         self.playing = True
         self.paused = False
         self.current_title = title
-        speak(f"Now playing: {title}")
+        self._stream_announced = False
 
     def has_last_track(self):
         """Check if any track has been played and is available for replay"""
@@ -1721,6 +2113,7 @@ class MapMusicBot:
         self.playing = False
         self.paused = False
         self.mode = "idle"
+        self._stream_announced = False
         self._current_reverb_slot = None
         if clear_queue:
             self._clear_track_queue()
@@ -1836,6 +2229,14 @@ class MapMusicBot:
         if not self.playing or self.paused:
             return
 
+        # Announce playback only after ffmpeg produced PCM and OpenAL accepted
+        # the pre-buffer. This prevents the misleading sequence
+        # "Now playing" -> "Track finished" when stream startup actually failed.
+        if (self.streamer and self.streamer.ready_event.is_set()
+                and not self._stream_announced):
+            self._stream_announced = True
+            speak(f"Now playing: {self.current_title}")
+
         if self.mode == "local" and self.current_local_sound:
             try:
                 if self.current_local_sound.source.state == cyal.SourceState.STOPPED:
@@ -1844,11 +2245,16 @@ class MapMusicBot:
             except Exception:
                 pass
         elif self.streamer and not self.streamer.is_alive():
-            # Stream finished
+            # Keep startup failures distinct from a real end-of-track.
+            finished_streamer = self.streamer
+            self.streamer = None
             self.playing = False
             self.mode = "idle"
             if not self._advance_track_queue():
-                speak("Track finished.")
+                if finished_streamer.failure_reason:
+                    speak("Could not load track.")
+                else:
+                    speak("Track finished.")
 
     def _ensure_live_relay_streamer(self):
         """Ensure background live relay thread runs when broadcast is enabled and live input exists without an active MP3 stream."""
@@ -1882,13 +2288,12 @@ class MapMusicBot:
             return
         try:
             gp = self._find_gameplay()
-            if not gp or not hasattr(gp, 'player') or not gp.player:
-                return
-            if not hasattr(gp, 'world_map') or not gp.world_map:
+            map_obj = getattr(gp, 'map', None) or getattr(gp, 'world_map', None)
+            if not map_obj:
                 return
 
             player = gp.player
-            reverb = gp.world_map.get_reverb_at(player.x, player.y, player.z)
+            reverb = map_obj.get_reverb_at(player.x, player.y, player.z)
 
             if reverb and reverb.reverb:
                 # Apply map's reverb to the music via aux send 0

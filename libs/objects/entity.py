@@ -57,34 +57,49 @@ class Entity(Object):
         self._player = value
         if value:
             self.soundgroup.filterable = True
-            try: self.vc_source, self.radio_source, self.music_source = self.game.audio_mngr.context.gen_sources(3)
-            except cyal.exceptions.InvalidOperationError as e:
-                print(e)
-                self.vc_source, self.radio_source, self.music_source = self.game.audio_mngr.context.gen_sources(3) 
+            try:
+                self.vc_source, self.radio_source, self.music_source = self.game.audio_mngr.context.gen_sources(3)
+            except Exception as e:
+                print(f"[Entity] Warning: Could not allocate OpenAL sources for entity '{self.name}': {e}")
+                self.vc_source = None
+                self.radio_source = None
+                self.music_source = None
             ex = float(self.x) if self.x is not None else 0.0
             ey = float(self.y) if self.y is not None else 0.0
             ez = float(self.z) if self.z is not None else 0.0
-            self.vc_source.position = (ex, ey, ez)
-            self.vc_source.reference_distance = 1.7  # Boost volume to ~20% at 8 meters
-            self.music_source.position = (ex, ey, ez)
-            self.music_source.rolloff_factor = 0.5
-            self.music_source.reference_distance = 5.0
-            self.music_source.max_distance = 50.0
-            self.radio_source.position = (0,0,0)
-            self.radio_source.relative = True
-            self.radio_source.gain=0.7
-            self.eq_slot = self.soundgroup.parent.gen_effect(
-                "EQUALIZER",
-                ("low_gain", 0.126),
-                ("low_cutoff", 800.0),
-                ("high_gain", 0.126),
-                ("high_cutoff", 4000.0)
-            )
-            self.distortion_slot = self.soundgroup.parent.gen_effect(
-                "DISTORTION",
-                ("edge", 0.5),
-                ("gain", 0.2)
-            )
+            if self.vc_source:
+                self.vc_source.position = (ex, ey, ez)
+                self.vc_source.reference_distance = 1.7  # Boost volume to ~20% at 8 meters
+            if self.music_source:
+                self.music_source.position = (ex, ey, ez)
+                self.music_source.rolloff_factor = 0.5
+                self.music_source.reference_distance = 5.0
+                self.music_source.max_distance = 50.0
+            if self.radio_source:
+                self.radio_source.position = (0,0,0)
+                self.radio_source.relative = True
+                self.radio_source.gain=0.7
+            try:
+                self.eq_slot = self.soundgroup.parent.gen_effect(
+                    "EQUALIZER",
+                    ("low_gain", 0.126),
+                    ("low_cutoff", 800.0),
+                    ("high_gain", 0.126),
+                    ("high_cutoff", 4000.0),
+                    ("mid1_gain", 1.0),
+                    ("mid2_gain", 1.0),
+                )
+                self.distortion_slot = self.soundgroup.parent.gen_effect(
+                    "DISTORTION",
+                    ("edge", 0.2),
+                    ("gain", 0.5),
+                    ("lowpass_cutoff", 8000.0),
+                    ("eqcenter", 3000.0),
+                    ("eqbandwidth", 1000.0),
+                )
+            except Exception:
+                self.eq_slot = None
+                self.distortion_slot = None
             try:
                 if self.distortion_slot is not None: self.distortion_slot.target = self.eq_slot
             except Exception as e:
@@ -102,8 +117,29 @@ class Entity(Object):
                 except Exception:
                     pass
 
-
-
+    def sync_reverb(self):
+        """Re-syncs environment Reverb EFX for this entity at current position."""
+        if not getattr(self, "map", None):
+            return
+        try:
+            reverb = self.map.get_reverb_at(self.x, self.y, self.z)
+            if reverb is None:
+                self.soundgroup.apply_effect(None, 0)
+                if self.player:
+                    if getattr(self, "vc_source", None):
+                        self.game.audio_mngr.efx.send(self.vc_source, 0, None, filter=None)
+                    if getattr(self, "music_source", None):
+                        self.game.audio_mngr.efx.send(self.music_source, 0, None, filter=None)
+            elif reverb and reverb.reverb:
+                self.soundgroup.apply_effect(reverb.reverb, 0)
+                if self.player:
+                    flt = self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None
+                    if getattr(self, "vc_source", None):
+                        self.game.audio_mngr.efx.send(self.vc_source, 0, reverb.reverb, filter=flt)
+                    if getattr(self, "music_source", None):
+                        self.game.audio_mngr.efx.send(self.music_source, 0, reverb.reverb, filter=flt)
+        except Exception as e:
+            log(f"[ENTITY.AUDIO] Reverb sync skipped for {self.name!r}: {e}")
 
     def move(self, x, y, z, play_sound=True, mode="walk"):
         x = float(x) if x is not None else (float(self.x) if self.x is not None else 0.0)
@@ -114,20 +150,7 @@ class Entity(Object):
         self.z = z
         if callable(self.on_move):
             self.on_move(x, y, z)
-        try:
-            reverb = self.map.get_reverb_at(self.x, self.y, self.z)
-            if reverb is None:
-                self.soundgroup.apply_effect(None, 0)
-                if self.player:
-                    self.game.audio_mngr.efx.send(self.vc_source, 0, None, filter=None)
-                    self.game.audio_mngr.efx.send(self.music_source, 0, None, filter=None)
-            if reverb and reverb.reverb:
-                self.soundgroup.apply_effect(reverb.reverb, 0) 
-                if self.player: 
-                    self.game.audio_mngr.efx.send(self.vc_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
-                    self.game.audio_mngr.efx.send(self.music_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
-        except (cyal.exceptions.InvalidAlValueError, cyal.exceptions.InvalidOperationError) as e:
-            log(f"[ENTITY.AUDIO] Reverb update skipped for {self.name!r}: {e}")
+        self.sync_reverb()
         if self.player:
             try:
                 self.vc_source.position = (self.x, self.y, self.z)

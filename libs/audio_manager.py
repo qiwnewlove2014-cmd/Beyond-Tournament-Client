@@ -61,6 +61,9 @@ class AudioManager():
             "weapons": [options.get("volume_weapons", 100), weakref.WeakSet()],
             "ui": [options.get("volume_ui", 100), weakref.WeakSet()],
             "music": [options.get("volume_music", 100), weakref.WeakSet()],
+            # Music jukebox songs get their OWN mixer slider (separate from the
+            # personal music bot / map music, which stay under "music").
+            "jukebox": [options.get("volume_jukebox", 100), weakref.WeakSet()],
             "ambience": [options.get("volume_ambience", 100), weakref.WeakSet()],
             "sound_source": [options.get("volume_sound_source", 100), weakref.WeakSet()],
             "miscelaneous": [options.get("volume_miscelaneous", 100), weakref.WeakSet()]

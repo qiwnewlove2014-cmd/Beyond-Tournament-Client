@@ -84,8 +84,13 @@ def log(message):
     timestamp = time.strftime("%H:%M:%S")
     formatted = f"[{timestamp}] {message}"
 
-    # Print to console (for immediate feedback)
-    print(formatted)
+    # Print to console (for immediate feedback). Console encodings (e.g. Thai
+    # cp874) cannot render every character (emoji in YouTube titles etc.) —
+    # fall back to ASCII so a log line can never crash the main thread.
+    try:
+        print(formatted)
+    except UnicodeEncodeError:
+        print(formatted.encode("ascii", "replace").decode("ascii"))
 
     # Append to the persistent handle, flushing synchronously.
     handle = _LOG_HANDLE

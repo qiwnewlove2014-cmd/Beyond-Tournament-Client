@@ -158,9 +158,16 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    # Smooth pre-buffer: TWO 20ms frames (40ms) to seamlessly absorb minor OS
-    # process switching and network jitter while remaining ultra-low latency.
-    PRE_BUFFER_FRAMES = 2       # Wait for 2 frames (40ms) before playing
+    # Smooth pre-buffer: FOUR 20ms frames (80ms) before first playback.  The
+    # old 2-frame (40ms) buffer underran on steady streams like the music bot
+    # broadcast (its sender cadence drifts a fraction of a ms per frame, which
+    # drains the buffer after a few seconds -> a small 'chop' in the PA).  80ms
+    # absorbs that drift; PA latency this small is inaudible for listeners.
+    PRE_BUFFER_FRAMES = 4       # Wait for 4 frames (80ms) before playing
+    # After an underrun, re-buffer a couple of frames before resuming instead
+    # of streaming one frame at a time (which sounds like repeated tiny chops
+    # on continuous music).
+    RESUME_FRAMES = 2           # Re-buffer 2 frames (40ms) after an underrun
     MAX_BUFFER_FRAMES = 12      # Maximum frames in buffer (240ms) for network stability
     TARGET_BUFFER_FRAMES = 4    # Target buffer level (80ms latency)
     
@@ -173,6 +180,7 @@ class MegaphoneJitterBuffer:
         
         # Playback state
         self.is_playing = False
+        self._underrun = False
         self.frames_received = 0
         self.last_pop_time = 0.0
         
@@ -218,6 +226,7 @@ class MegaphoneJitterBuffer:
                 if latest_packet is not None:
                     self.packet_queue.append(latest_packet)
                 self.is_playing = False
+                self._underrun = False
                 self.frames_received = 1 if latest_packet is not None else 0
                 self.last_output_time = 0.0
             
@@ -228,16 +237,25 @@ class MegaphoneJitterBuffer:
                     logger.log(f"[JitterBuffer] Started playback after {self.frames_received} frames")
                 else:
                     return None  # Still pre-buffering
-            
-            # Get next packet
-            if len(self.packet_queue) > 0:
-                self.packets_played += 1
-                self.last_pop_time = current_time
-                return self.packet_queue.popleft()
-            else:
-                # Minor underrun: Do NOT reset is_playing immediately.
-                # Allow the next incoming packet to play without waiting for a full pre-buffer cycle.
+
+            # Minor underrun: the queue ran dry while playing. Mark it so the
+            # stream re-buffers a couple of frames before resuming, instead of
+            # playing one lonely frame then chopping again (the 'ติดๆขัด' heard
+            # on continuous music broadcasts). The first frames are held back
+            # until RESUME_FRAMES accumulate, then playback picks up smoothly.
+            if len(self.packet_queue) == 0:
+                self._underrun = True
                 return None
+            if self._underrun:
+                if len(self.packet_queue) < self.RESUME_FRAMES:
+                    return None  # keep buffering for a smooth resume
+                self._underrun = False
+                logger.log(f"[JitterBuffer] Resumed playback after {len(self.packet_queue)} frames")
+
+            # Get next packet
+            self.packets_played += 1
+            self.last_pop_time = current_time
+            return self.packet_queue.popleft()
     
     def should_output(self):
         """
@@ -259,6 +277,7 @@ class MegaphoneJitterBuffer:
         with self.lock:
             self.packet_queue.clear()
             self.is_playing = False
+            self._underrun = False
             self.frames_received = 0
 
 # Per-source jitter buffers (one per megaphone speaker)
@@ -553,16 +572,11 @@ class voice_chat_compression(threading.Thread):
                     buffer_key = sender_id if sender_id is not None else "megaphone_shared"
                     jb = get_jitter_buffer(self.game, buffer_key)
                     jb.add_packet(limited_data)
-                    
-                    # Get the next frame ONCE for all speakers
-                    packet = jb.get_packet()
-                    if packet is None:
-                        return  # Still pre-buffering, no speaker plays yet
 
-                    # Update last play time
-                    global _last_play_times, _speaker_delay_queues, _last_packet_times, _dbg_mega_recv_time, _dbg_mega_recv_count
-                    _last_play_times[sender_id] = time.time()
-
+                    # Arrival bookkeeping runs for EVERY packet (even ones that
+                    # stay buffered): the jitter estimate and "fresh burst"
+                    # detection must see the real arrival cadence.
+                    global _last_play_times, _speaker_delay_queues, _last_packet_times
                     current_time = time.time()
                     last_pkt_time = _last_packet_times.get(sender_id, 0.0)
                     _last_packet_times[sender_id] = current_time
@@ -582,7 +596,23 @@ class voice_chat_compression(threading.Thread):
                         _just_padded.pop(sender_id, None)
                     else:
                         _measure_speaker_jitter(sender_id, last_pkt_time, current_time)
-                    
+
+                    # CLOCK-DRIVEN OUTPUT: hand a frame to the speakers at most
+                    # once per 20ms wall-clock (should_output), NOT once per
+                    # packet arrival. A network burst leaves the extras buffered
+                    # to play out at the steady cadence; a late packet is
+                    # absorbed by the pre-buffer. Popping on arrival made the PA
+                    # cadence track network jitter — the intermittent "ติดๆขัดๆ"
+                    # chop heard on music broadcasts.
+                    if not jb.should_output():
+                        return
+                    packet = jb.get_packet()
+                    if packet is None:
+                        return  # Still pre-buffering, no speaker plays yet
+
+                    # Update last play time
+                    _last_play_times[sender_id] = time.time()
+
                     # Queue and delay the frame for each speaker
                     queue_and_delay_frame(gameplay, sender_id, sources, packet)
                     return  # Megaphone handled, skip normal processing

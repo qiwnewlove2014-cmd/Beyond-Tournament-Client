@@ -227,6 +227,8 @@ class EventHandeler:
         # map so memory does not accumulate. Must run on the main thread because
         # reset() touches OpenAL sources/filters.
         self._reset_instruments_for_map_change()
+        # Stop any jukebox audio still playing from the previous map.
+        self._stop_jukebox_players_for_map_change()
         self.gameplay.parser.load(data["data"])
         raw_x = data.get("x")
         raw_y = data.get("y")
@@ -237,6 +239,15 @@ class EventHandeler:
         self.gameplay.player.move(x, y, z, play_sound=False)
         # Setup megaphone speakers after map data is loaded (with safety check)
         if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
+            # A full parse may be a different map. Replace the old cached PA
+            # ownership with the authoritative snapshot carried on the same
+            # ordered map packet. In-place update_map rebuilds deliberately
+            # preserve its already-replicated state.
+            self.gameplay.megaphone.lock_owner = data.get("megaphone_lock_owner")
+            owners = data.get("megaphone_lock_owners")
+            self.gameplay.megaphone.lock_owners = (
+                set(owners) if isinstance(owners, (list, tuple, set)) else set()
+            )
             self.gameplay.megaphone.setup_megaphone_speakers(force=True)
         # === Load Music Bot playlist for this map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
@@ -252,6 +263,8 @@ class EventHandeler:
         # Same instrument cleanup as parse_map: a builder edit reloads the map
         # and would otherwise keep stale buffers around.
         self._reset_instruments_for_map_change()
+        # Jukebox audio is preserved across in-place map reloads (update_map)
+        # so playback continues seamlessly without interruption.
         self.gameplay.player.in_water = False
         self.game.ignore_others_water = False
         self.game.exclude_water.clear()
@@ -263,25 +276,55 @@ class EventHandeler:
         self.gameplay.player.move(
             self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
         )
+        # Re-sync Reverb EFX on all preserved remote entities (voice chat, soundgroups)
+        for ent in self.gameplay.map.entities.values():
+            if hasattr(ent, 'sync_reverb'):
+                ent.sync_reverb()
+        # Re-sync Reverb on active Jukebox streams
+        jb_player = getattr(self.gameplay, 'jukebox_player', None)
+        if jb_player and hasattr(jb_player, 'sync_reverb'):
+            jb_player.sync_reverb()
+        # A map reload rebuilds elements but the jukebox queue keeps playing on
+        # the server — ask it to re-send the state + play events so the song
+        # resumes here instead of going silent after every reload.
+        self.game.network.send(consts.CHANNEL_MISC, "jukebox_resync")
         if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
             self.gameplay.megaphone.setup_megaphone_speakers(force=True)
         # === Reload Music Bot playlist for updated map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
             self.gameplay.music_bot.load_map_music(data["data"])
+            self.gameplay.music_bot._sync_map_reverb()
 
     def rebuild_elements(self, data):
         elements = data["elements"]
         map = self.gameplay.map
         has_megaphone = False
+        has_reverb = False
         for element in elements:
             type = element["type"]
             id = element["data"]["id"]
             if type == "megaphoneSpeaker":
                 has_megaphone = True
+            elif type == "reverb":
+                has_reverb = True
             if hasattr(map, f"spawn_{type}"):
                 getattr(map, f"spawn_{type}")(**element["data"])
         if has_megaphone:
             self.gameplay.megaphone.setup_megaphone_speakers(force=True)
+        if has_reverb:
+            if hasattr(self.gameplay, 'player') and self.gameplay.player:
+                self.gameplay.player.move(
+                    self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
+                )
+            if map and hasattr(map, 'entities'):
+                for ent in map.entities.values():
+                    if hasattr(ent, 'sync_reverb'):
+                        ent.sync_reverb()
+            jb_player = getattr(self.gameplay, 'jukebox_player', None)
+            if jb_player and hasattr(jb_player, 'sync_reverb'):
+                jb_player.sync_reverb()
+            if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
+                self.gameplay.music_bot._sync_map_reverb()
 
     def spawn_entity(self, data):
         from .logger import log, log_exception
@@ -1152,6 +1195,121 @@ class EventHandeler:
                 "The music broadcast slot is taken by another performer. "
                 "Your instruments still broadcast to the megaphone."
             )
+
+    # ═══════════════ Music Jukebox events ═══════════════
+
+    def _jukebox_player(self):
+        """Lazily create the jukebox audio player on gameplay."""
+        gp = self.gameplay
+        player = getattr(gp, "jukebox_player", None)
+        if player is None:
+            from . import jukebox
+            player = gp.jukebox_player = jukebox.JukeboxPlayer(self.game)
+        return player
+
+    def _stop_jukebox_players_for_map_change(self):
+        """Mark jukebox audio for post-reload confirmation (map change / reload).
+
+        Songs still playing get a jukebox_play from the server right after the
+        reload, which keeps them playing seamlessly.  Only players that are NOT
+        re-confirmed (song ended / jukebox gone / different map) get stopped a
+        short while later — so repeated reloads no longer tear down and rebuild
+        the stream (which made the song disappear after a few reloads)."""
+        gp = self.gameplay
+        player = getattr(gp, "jukebox_player", None)
+        if player is not None:
+            cleanup_serial = player.control_serial
+            self.game.put(lambda: player.mark_pending_map_change(cleanup_serial))
+        gp.jukebox_state = {"jukeboxes": {}}
+
+    def jukebox_state(self, data):
+        """Server sync of jukebox playback state (map join)."""
+        self.gameplay.jukebox_state = data if isinstance(data, dict) else {"jukeboxes": {}}
+
+    def jukebox_open(self, data):
+        """Player pressed interact near a jukebox — cache state and open the menu."""
+        self.gameplay.jukebox_state = data if isinstance(data, dict) else {"jukeboxes": {}}
+        gp = self.gameplay
+        if gp:
+            from . import jukebox
+            self.game.put(lambda: jukebox.open_jukebox_menu(self.game, gp))
+
+    def jukebox_queue_update(self, data):
+        """Queue changed on the server — refresh the cached state."""
+        gp = self.gameplay
+        if not isinstance(data, dict):
+            return
+        state = getattr(gp, "jukebox_state", None)
+        if not isinstance(state, dict):
+            state = gp.jukebox_state = {"jukeboxes": {}}
+        jid = data.get("id")
+        if jid:
+            boxes = state.setdefault("jukeboxes", {})
+            box = boxes.setdefault(jid, {"id": jid})
+            box["current"] = data.get("current")
+            box["queue"] = data.get("queue", [])
+
+    def jukebox_play(self, data):
+        """A jukebox started playing a song — play it at the jukebox position."""
+        if not isinstance(data, dict) or not data.get("id"):
+            return
+        jid = data["id"]
+        x = data.get("x")
+        y = data.get("y")
+        z = data.get("z")
+        if x is None or y is None or z is None:
+            # Fall back to the position from the parsed map element.
+            jb = None
+            if self.gameplay.map is not None:
+                jb = self.gameplay.map.get_jukebox(jid)
+            if jb is not None:
+                x, y, z = jb.center
+            else:
+                return
+        player = self._jukebox_player()
+        start_offset = float(data.get("start_offset") or 0.0)
+        if player is not None:
+            self.game.put(lambda: player.play(
+                jid, x, y, z,
+                data.get("title", ""),
+                data.get("url", ""),
+                int(data.get("duration") or 0),
+                start_offset=start_offset,
+                playback_id=data.get("playback_id"),
+                transport=data.get("transport", "direct"),
+                relay_id=data.get("relay_id"),
+                stream_epoch=data.get("stream_epoch"),
+                http_headers=data.get("http_headers"),
+            ))
+
+    def process_jukebox_relay(self, data):
+        """Bounded relay enqueue only; Opus decode/OpenAL run off the network thread."""
+        gp = self.gameplay
+        player = getattr(gp, "jukebox_player", None) if gp is not None else None
+        if player is not None:
+            player.receive_relay_packet(data)
+
+    def jukebox_stop(self, data):
+        """A jukebox stopped playing — silence its audio source."""
+        jid = (data or {}).get("id")
+        if not jid:
+            return
+        player = self._jukebox_player()
+        if player is not None:
+            self.game.put(lambda: player.stop(jid))
+
+    def jukebox_hint(self, data):
+        """Walk-in hint near a jukebox. Rendered here so it can name the
+        player's actual (rebindable) interact key."""
+        import pygame
+        from .string_utils import friendly_key_name
+        key = friendly_key_name(
+            self.game.keyconfig.get("interact", pygame.K_f)
+        ).upper()
+        speak(
+            f"You are near a music jukebox. "
+            f"Press {key} to open it and queue a song."
+        )
 
     def request_scandir(self, data):
         """Scan client's local asset directory and return file/folder items to server"""

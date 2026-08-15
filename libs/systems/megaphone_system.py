@@ -272,11 +272,14 @@ class MegaphoneManager:
         self.sources = []
         self.speaker_data = []
         self.player_sources = {}  # {sender_id: {'sources': [...], 'last_active': float}}
-        # Single music-bot PA slot holder (server megaphone_broadcast_owner).
-        self.lock_owner = None
-        # Multi-owner instrument broadcast set - every name in here can route
-        # piano/drums/guitar through the PA at the same time (band / duo).
-        self.lock_owners = set()
+        # These are cached replicas of server-owned broadcast state, not audio
+        # resources. Rebuilding speaker sources during update_map must preserve
+        # them; clearing the owner here makes Music Bot discard every PCM frame
+        # until another lock packet happens to arrive.
+        if not hasattr(self, 'lock_owner'):
+            self.lock_owner = None
+        if not hasattr(self, 'lock_owners'):
+            self.lock_owners = set()
         vc_sources = []
         
         initial_positions = []

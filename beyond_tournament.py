@@ -1,9 +1,32 @@
 import pygame
 import os
+import ctypes
+import sys
 import cyal.listener
 from libs import yt_dlp_deps
 
 active_game = None
+
+
+def _set_windows_timer_resolution(period_ms=1):
+    """Raise the Windows multimedia timer resolution for accurate sleep()s.
+
+    Python's time.sleep() on Windows is only accurate to the system timer
+    quantum (~15.6ms by default), which wrecks the ~20ms audio send pacing
+    used by the music bot and voice chat (sends land on 15.6/31.2ms
+    boundaries instead of every 20ms, causing intermittent PA stutter).
+    timeBeginPeriod(1) drops the quantum to 1ms for this process.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        winmm = ctypes.windll.winmm
+        winmm.timeBeginPeriod(period_ms)
+        # Best-effort restore on process exit.
+        import atexit
+        atexit.register(winmm.timeEndPeriod, period_ms)
+    except Exception:
+        pass
 
 # Ensure the working directory is the script's own directory,
 # so relative paths (data/, libs/, etc.) work regardless of how
@@ -28,6 +51,13 @@ def main():
     from libs.version import version, note
 
     pygame.init()
+
+    # Raise the Windows timer resolution to 1ms for the whole process.  The
+    # default ~15.6ms quantum makes time.sleep() in the 20ms audio send loops
+    # (music bot / voice chat) land on 15.6/31.2ms boundaries, which makes PA
+    # streaming "sometimes smooth, sometimes stuttery". timeBeginPeriod(1)
+    # makes those sleeps accurate so the real-time audio cadence stays steady.
+    _set_windows_timer_resolution()
     
     from libs import anti_cheat
     anti_cheat.start_speedhack_watchdog()

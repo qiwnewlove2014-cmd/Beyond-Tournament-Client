@@ -86,6 +86,8 @@ class Client(threading.Thread):
         try:
             if channelID == consts.CHANNEL_MUSICBOT:
                 return self.event_handeler.process_music_data(data)
+            elif channelID == consts.CHANNEL_JUKEBOX_RELAY:
+                return self.event_handeler.process_jukebox_relay(data)
             elif channelID < consts.CHANNEL_VOICECHAT:
                 event_name = data.get("event")
                 if not event_name:
