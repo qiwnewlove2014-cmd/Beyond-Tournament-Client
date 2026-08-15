@@ -465,8 +465,21 @@ class Entity(Object):
         raise NotImplementedError
 
     def water_check(self):
+        # The camera owns the focused player's hearing: it plays the swim
+        # sounds (cat="self") and animates the world/voice filter. This entity
+        # must not also play the same splash or fight over the same vc_source,
+        # or the transition sounds doubled and the filter wobbled.
+        is_focus = False
+        try:
+            if hasattr(self.game, "gameplay"):
+                cam = getattr(self.game.gameplay, "camera", None)
+                if cam is not None and getattr(cam, "focus_object", None) is self:
+                    is_focus = True
+        except Exception:
+            pass
+
         # Helper to generate the automation callback with a specific filter
-        def create_water_automation(filter_obj):
+        def create_water_automation(filter_obj, is_focus):
             def automation_water(value):
                 # Check if filter was created successfully
                 if filter_obj is None:
@@ -474,14 +487,25 @@ class Entity(Object):
                 filter_obj.set("GAINHF", value)
                 self.soundgroup.apply_filter(filter_obj, replace=True)
                 if self.player:
-                    if filter_obj is not None: 
-                        self.vc_source.direct_filter = filter_obj
-                        self.music_source.direct_filter = filter_obj
-                    else: 
-                        try: del self.vc_source.direct_filter
-                        except: pass
-                        try: del self.music_source.direct_filter
-                        except: pass
+                    if filter_obj is not None:
+                        # The camera animates the focused player's voice source
+                        # (world filter); touching it here too makes two
+                        # automations fight over the same source each tick.
+                        if not is_focus and self.vc_source is not None:
+                            self.vc_source.direct_filter = filter_obj
+                        if self.music_source is not None:
+                            self.music_source.direct_filter = filter_obj
+                    else:
+                        try:
+                            if self.vc_source is not None:
+                                del self.vc_source.direct_filter
+                        except Exception:
+                            pass
+                        try:
+                            if self.music_source is not None:
+                                del self.music_source.direct_filter
+                        except Exception:
+                            pass
             return automation_water
         
         def cancel_active_automation():
@@ -499,7 +523,11 @@ class Entity(Object):
             return self.water_filter
 
         if not self.in_water and self.map.get_tile_at(self.x, self.y, self.z) == "underwater":
-            self.game.audio_mngr.play_unbound("foley/swim/start/", self.x, self.y, self.z)
+            # Non-focused entities splash in 3D for everyone nearby; the camera
+            # already plays the focused player's own splash (cat="self"), so
+            # playing the unbound one too doubles the sound.
+            if not is_focus:
+                self.game.audio_mngr.play_unbound("foley/swim/start/", self.x, self.y, self.z)
             self.in_water = True
             self.game.exclude_water.append(self.soundgroup)
             muffling = self.water_muffling
@@ -518,13 +546,14 @@ class Entity(Object):
                 task = self.game.automate(
                     None, None,
                     muffling, 500,
-                    step_callback = create_water_automation(filter_obj), start_value=1.0,
+                    step_callback = create_water_automation(filter_obj, is_focus), start_value=1.0,
                     callback=on_complete
                 )
                 self._water_automation = task
 
         if self.in_water and self.map.get_tile_at(self.x, self.y, self.z) != "underwater":
-            self.game.audio_mngr.play_unbound("foley/swim/end/", self.x, self.y, self.z)
+            if not is_focus:
+                self.game.audio_mngr.play_unbound("foley/swim/end/", self.x, self.y, self.z)
             muffling = self.water_muffling
             
             # Cancel any existing water automation first
@@ -541,7 +570,7 @@ class Entity(Object):
                 task = self.game.automate(
                     None, None,
                     1.0, 500,
-                    step_callback = create_water_automation(filter_obj), start_value=muffling,
+                    step_callback = create_water_automation(filter_obj, is_focus), start_value=muffling,
                     callback=on_complete
                 )
                 self._water_automation = task
@@ -560,8 +589,13 @@ class Entity(Object):
                 filter_obj.set("GAINHF", muffling)
                 self.soundgroup.apply_filter(filter_obj, replace=True)
                 if self.player:
-                    self.vc_source.direct_filter = filter_obj
-                    self.music_source.direct_filter = filter_obj
+                    # Same split as the enter/exit automation: the camera owns
+                    # the focused player's voice source, and sources may be
+                    # None if OpenAL allocation failed.
+                    if not is_focus and self.vc_source is not None:
+                        self.vc_source.direct_filter = filter_obj
+                    if self.music_source is not None:
+                        self.music_source.direct_filter = filter_obj
             self.recorded_depth = round(self.depth,3)
 
     @property 

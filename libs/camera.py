@@ -21,6 +21,12 @@ class Camera:
         self.x = 0.0
         self.y = 0.0
         self.z = 0.0
+        # Water filter state: the running automation task (only one may animate
+        # the shared filter at a time, otherwise two tasks fight over GAINHF
+        # and the sound wobbles) and the last GAINHF we applied so a new task
+        # can ramp from the current value instead of jumping.
+        self._water_automation = None
+        self._water_gainhf = 1.0
         # Sideline spectator camera (Pong). "follow" = locked to focus object (first
         # person); "east"/"west" = parked at the field edge so both teams are heard
         # in stereo (left/right).
@@ -142,13 +148,45 @@ class Camera:
             type="LOWPASS"
         )
         
+        def muffling_at(d):
+            # Same depth->GAINHF curve as Entity.water_muffling, so the world
+            # (this filter) and the player's own sounds (Entity's filter) un-
+            # muffle at the same rate instead of one clearing before the other.
+            return 0.02 + 0.48 * max(0.0, min(1.0, d))
+
+        def cancel_water_task():
+            if self._water_automation is not None:
+                if self._water_automation in self.game.automations:
+                    try:
+                        self.game.automations.remove(self._water_automation)
+                    except ValueError:
+                        pass
+                self._water_automation = None
+
         def automation_water(value):
+            # Track the last applied value so the next task can ramp from the
+            # current position instead of snapping back to an old start point.
+            self._water_gainhf = value
+            if filter is None:
+                return
             filter.set("GAINHF", value)
             self.game.audio_mngr.apply_filter(filter, self.game.exclude_water, replace=True)
             if hasattr(self.focus_object, "vc_source") and self.focus_object.vc_source:
                 self.focus_object.vc_source.direct_filter = filter
-        
-        
+
+        def start_water_task(target, duration, start_value):
+            # Only one water task may run at a time: two automations animating
+            # the same shared filter (or the same vc_source) fight over GAINHF
+            # every 20ms tick, which is what made the sound bend/wobble while
+            # diving. Cancel any running task before starting a new one.
+            cancel_water_task()
+            task = self.game.automate(
+                None, None,
+                target, duration,
+                step_callback=automation_water, start_value=start_value,
+            )
+            self._water_automation = task
+
         if not self.focus_object.in_water and self.focus_object.map.get_tile_at(self.focus_object.x, self.focus_object.y, self.focus_object.z) == "underwater":
             self.focus_object.play_sound("foley/swim/start/", cat="self")
             self.focus_object.in_water = True
@@ -156,30 +194,16 @@ class Camera:
             self.focus_object.drown_clock.restart()
             self.game.ignore_others_water = True
             self.focus_object.drown_clock.restart()
-            muffling = 0.05 * self.focus_object.depth
-            self.game.automate(
-                None, None,
-                muffling, 500,
-                step_callback = automation_water, start_value=1.0
-            )
+            start_water_task(muffling_at(self.focus_object.depth), 500, self._water_gainhf)
         if self.focus_object.in_water and self.focus_object.map.get_tile_at(self.focus_object.x, self.focus_object.y, self.focus_object.z) != "underwater":
             self.focus_object.play_sound("foley/swim/end/", cat="self")
-            muffling = 0.05 * self.focus_object.depth
-            self.game.automate(
-                None, None,
-                1.0, 500,
-                step_callback = automation_water, start_value=muffling
-            )
+            start_water_task(1.0, 500, self._water_gainhf)
             self.focus_object.in_water=False
             self.focus_object.drownable = False
             self.game.ignore_others_water = False
         if round(self.focus_object.depth, 3) != round(self.focus_object.recorded_depth,3) and self.focus_object.in_water:
-            muffling = 0.05 * round(self.focus_object.depth,3)
-            self.game.automate(
-                None, None,
-                muffling, 50,
-                step_callback = automation_water, start_value=0.05*round(self.focus_object.recorded_depth,3)
-            )
+            muffling = muffling_at(round(self.focus_object.depth,3))
+            start_water_task(muffling, 100, self._water_gainhf)
             self.focus_object.recorded_depth = round(self.focus_object.depth,3)
 
 
