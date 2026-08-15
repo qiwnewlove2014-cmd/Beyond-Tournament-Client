@@ -1,14 +1,21 @@
 @echo off
+if not exist "build_server_config.json" if not defined BT_SERVER_HOST (
+    copy /Y "build_server_config.example.json" "build_server_config.json" >nul
+    echo ERROR: build_server_config.json was created. Open it, enter the official hostname, and run build.bat again.
+    exit /b 1
+)
+echo packing data...
+python tools\pack_data.py
+if errorlevel 1 exit /b 1
+echo building...
+python -m nuitka --assume-yes-for-downloads --quiet --standalone --low-memory --python-flag=no_site --user-plugin=CyalPlugin.py --enable-plugin=tk-inter --windows-disable-console --windows-force-stderr=%program%Beyond_Tournament.log --windows-force-stdout=%program%Beyond_Tournament.log --include-package-data=certifi --nofollow-import-to=yt_dlp --no-deployment-flag=excluded-module-usage beyond_tournament.py
+if errorlevel 1 exit /b 1
 if exist "Beyond Tournament\" (
     rmdir /s /q "Beyond Tournament"
     )
 if not exist "Beyond Tournament\" (
     md "Beyond Tournament"
     )
-echo packing data...
-python tools\pack_data.py
-echo building...
-python -m nuitka --assume-yes-for-downloads --quiet --standalone --low-memory --python-flag=no_site --user-plugin=CyalPlugin.py --enable-plugin=tk-inter --windows-disable-console --windows-force-stderr=%program%Beyond_Tournament.log --windows-force-stdout=%program%Beyond_Tournament.log --include-package-data=certifi --nofollow-import-to=yt_dlp --no-deployment-flag=excluded-module-usage beyond_tournament.py
 xcopy /S /Q  dlls_windows\* "Beyond Tournament\"
 copy *.mhr "Beyond Tournament\"
 copy default_keyconfig.json "Beyond Tournament\"

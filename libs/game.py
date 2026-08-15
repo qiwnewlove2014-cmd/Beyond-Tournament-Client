@@ -28,6 +28,7 @@ from . import (
     speech,
     updater,
     presence_sounds,
+    server_config,
     path_utils,
     automation,
     instance_manager,
@@ -189,6 +190,22 @@ class Game:
         """returns a tuple to toggle {key} with the title as {text}. the tuple is accepted by Menu as a menu item only."""
         return (lambda: self.toggle_state(text, key, default=default), lambda: self.toggle(key, default=default))
 
+    def _new_network_client(self):
+        host, port = server_config.get_server_endpoint()
+        return networking.Client(
+            self,
+            host,
+            port,
+            event_handeler.EventHandeler,
+        )
+
+    def _connection_failure_message(self, error):
+        if isinstance(error, server_config.ServerConfigError):
+            return str(error)
+        if server_config.is_production_build():
+            return "Failed to connect to the official server."
+        return "Failed to connect. \r\n{error}".format(error=error)
+
     def login_with(self, username, password):
         options.set("username", username)
         options.set("password", password)
@@ -207,16 +224,11 @@ class Game:
             menus.no_account(self)
             return speak("No credentials menu", False)
         try:
-            self.network = networking.Client(
-                self,
-                options.get("host", "127.0.0.1"),
-                options.get("port", 13000),
-                event_handeler.EventHandeler,
-            )
-        except OSError as e:
+            self.network = self._new_network_client()
+        except (OSError, server_config.ServerConfigError) as e:
             self.pop()
             menus.main_menu(self)
-            speak("Failed to connect. \r\n{error}".format(error=e))
+            speak(self._connection_failure_message(e))
             return
         speak("Connecting to the server. Please wait...")
         self.replace(self.login2)
@@ -305,16 +317,11 @@ class Game:
             self.network.put(None)
             self.network.join()
         try:
-            self.network = networking.Client(
-                self,
-                options.get("host", "127.0.0.1"),
-                options.get("port", 13000),
-                event_handeler.EventHandeler,
-            )
-        except OSError as e:
+            self.network = self._new_network_client()
+        except (OSError, server_config.ServerConfigError) as e:
             self.pop()
             menus.main_menu(self)
-            speak("Failed to connect. \r\n{error}".format(error=e))
+            speak(self._connection_failure_message(e))
             self.pop()
             return
         self.replace(self.creating)
@@ -546,14 +553,9 @@ class Game:
             self.reconnect_clock.restart()
             speak("Connecting to the server. Please wait...", False)
             try:
-                self.network = networking.Client(
-                    self,
-                    options.get("host", "127.0.0.1"),
-                    options.get("port", 13000),
-                    event_handeler.EventHandeler,
-                )
+                self.network = self._new_network_client()
                 self.replace(self.login2)
-            except OSError:
+            except (OSError, server_config.ServerConfigError):
                 pass
 
     def cancel(self, message="Canceled."):

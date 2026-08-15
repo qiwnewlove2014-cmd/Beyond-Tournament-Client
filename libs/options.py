@@ -1,11 +1,10 @@
 import json
 import os
-import sys
 
 from cryptography.fernet import Fernet
 import appdirs
 
-from . import consts
+from . import consts, server_config
 
 config_dirs = appdirs.AppDirs("Beyond Tournament")
 # defaults.
@@ -36,28 +35,52 @@ def initialize():
 
 def load():
     try:
+        endpoint_options_found = False
         with open(f"{config_dirs.user_config_dir}/settings.json", "rb") as f:
             global prefs
             loaded_prefs = json.loads(fernet.decrypt(f.read()).decode())
             for key, value in loaded_prefs.items():
+                if (
+                    server_config.is_production_build()
+                    and key in server_config.ENDPOINT_OPTION_KEYS
+                ):
+                    endpoint_options_found = True
+                    continue
                 prefs[key] = value
+        if endpoint_options_found:
+            save()
     except FileNotFoundError:
         # settings file not found, create one with the default settings.
         save()
 
 
 def save():
+    saved_prefs = prefs
+    if server_config.is_production_build():
+        saved_prefs = {
+            key: value
+            for key, value in prefs.items()
+            if key not in server_config.ENDPOINT_OPTION_KEYS
+        }
     with open(f"{config_dirs.user_config_dir}/settings.json", "wb") as f:
-        f.write(fernet.encrypt(json.dumps(prefs).encode()))
+        f.write(fernet.encrypt(json.dumps(saved_prefs).encode()))
 
 
 def get(key, default=None):
-    if key == "host" and "local" in sys.argv:
-        return "127.0.0.1"
+    if (
+        server_config.is_production_build()
+        and key in server_config.ENDPOINT_OPTION_KEYS
+    ):
+        return default
     return prefs.get(key, default)
 
 
 def set(key, value, autosave=True):
+    if (
+        server_config.is_production_build()
+        and key in server_config.ENDPOINT_OPTION_KEYS
+    ):
+        return
     prefs[key] = value
     if autosave:
         save()

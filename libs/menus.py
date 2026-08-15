@@ -9,6 +9,7 @@ from . import (
     keyconfig,
     menu,
     options,
+    server_config,
     speech,
     string_utils,
     updater,
@@ -221,9 +222,14 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         m.turning_sensitivity_item_text,
         lambda: None,
     )
-    items=[
-        (f"Server hostname: {options.get('host', consts.DEFAULT_HOST)}", lambda: configure_host(game, func_call, replace_call)),
-        (f"Server port: {options.get('port', consts.DEFAULT_PORT)}", lambda: configure_port(game, func_call, replace_call)),
+    if server_config.is_production_build():
+        endpoint_items = [("Server: Official server, managed automatically", lambda: None)]
+    else:
+        endpoint_items = [
+            (f"Server hostname: {options.get('host', consts.DEFAULT_HOST)}", lambda: configure_host(game, func_call, replace_call)),
+            (f"Server port: {options.get('port', consts.DEFAULT_PORT)}", lambda: configure_port(game, func_call, replace_call)),
+        ]
+    items = endpoint_items + [
         (f"Select output device - currently set to {options.get('audio_device', '==============system default')[14:]}", lambda: output_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent)),
         (f"Select input device - currently set to {options.get('audio_input_device', '==============system default')[14:]}", lambda: input_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
         (f"Select instrument input device - currently set to {options.get('audio_instrument_input_device', '==============system default')[14:]}", lambda: input_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game, target="instrument")),
