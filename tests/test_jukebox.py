@@ -447,7 +447,7 @@ class TestReloadSurvival(unittest.TestCase):
             player.mark_pending_map_change(player.control_serial)
             # Server re-broadcasts the same song -> play() clears the mark.
             self._play(player)
-            time.sleep(2.3)  # let the grace-period sweep run
+            time.sleep(player.MAP_RELOAD_CONFIRM_TIMEOUT + 0.3)  # let the grace-period sweep run
             self.assertIn("box", player.players)
             self.assertEqual(player._pending_map_change, set())
 
@@ -480,7 +480,7 @@ class TestReloadSurvival(unittest.TestCase):
             player = jukebox.JukeboxPlayer(_SyncPutGame())
             self._play(player)
             player.mark_pending_map_change(player.control_serial)
-            time.sleep(2.3)  # no play() ever re-confirms it -> swept
+            time.sleep(player.MAP_RELOAD_CONFIRM_TIMEOUT + 0.3)  # no play() ever re-confirms it -> swept
             self.assertNotIn("box", player.players)
 
     def test_newer_reload_supersedes_older_sweep(self):
@@ -495,7 +495,7 @@ class TestReloadSurvival(unittest.TestCase):
             player.mark_pending_map_change(2)   # second (newer) reload
             self._play(player, "box")
             self._play(player, "box2", playback=2)
-            time.sleep(2.3)
+            time.sleep(player.MAP_RELOAD_CONFIRM_TIMEOUT + 0.3)
             # Both were re-confirmed under the newest mark -> still playing.
             self.assertIn("box", player.players)
             self.assertIn("box2", player.players)
@@ -524,6 +524,31 @@ class TestReloadSurvival(unittest.TestCase):
             )
         _, kwargs = streamer_cls.call_args
         self.assertEqual(kwargs.get("http_headers"), headers)
+
+    def test_dead_relay_requests_authoritative_resync(self):
+        """A receiver that died silently is removed before state re-sync."""
+        import time
+        from types import SimpleNamespace
+
+        sent = []
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        player.players["box"] = {
+            "source": None,
+            "secondary_source": None,
+            "streamer": SimpleNamespace(is_alive=lambda: False),
+            "transport": "relay",
+            "created_at": time.monotonic() - 20,
+        }
+
+        player.update()
+
+        self.assertNotIn("box", player.players)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1], "jukebox_resync")
 
     def test_relay_receiver_thread_starts_and_stops_cleanly(self):
         """Regression: JukeboxRelayReceiver used to set `self._started = False`,

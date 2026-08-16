@@ -57,12 +57,14 @@ def alternate_key(keyconfig, binding):
 def assigned_slots(keyconfig):
     """Yield function, accessible label, key, and pad for each assigned slot."""
     for binding in DRUM_BINDINGS:
-        yield (
-            binding.function,
-            f"{binding.label} primary",
-            binding_key(keyconfig, binding),
-            binding.pad,
-        )
+        primary = binding_key(keyconfig, binding)
+        if primary is not None:
+            yield (
+                binding.function,
+                f"{binding.label} primary",
+                primary,
+                binding.pad,
+            )
         alternate = alternate_key(keyconfig, binding)
         if alternate is not None:
             yield (
@@ -104,11 +106,15 @@ def clear_alternate(keyconfig, binding, autosave=True):
 
 
 def clear_all(keyconfig):
-    """Remove every custom drum key binding (primaries and alternates) so the
-    player can rebind every pad from a clean slate. Primaries then fall back
-    to their defaults; alternates become unassigned."""
+    """Explicitly unassign every drum slot so the player can rebind freely.
+
+    A missing primary means "use its default", so clearing custom values was
+    not enough: default keys stayed reserved and blocked every new assignment.
+    Store ``None`` for primaries to distinguish an intentional clear from a
+    first-run/default configuration.  Restore defaults replaces these markers.
+    """
     for binding in DRUM_BINDINGS:
-        keyconfig.unset(binding.function, autosave=False)
+        keyconfig.set(None, binding.function, autosave=False)
         keyconfig.unset(binding.alternate_function, autosave=False)
     keyconfig.save()
 

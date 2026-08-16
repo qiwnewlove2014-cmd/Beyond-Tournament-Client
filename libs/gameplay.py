@@ -682,6 +682,16 @@ class Gameplay(state.State):
             return True
         return name in getattr(mega, 'lock_owners', set())
 
+    def _attach_music_timeline(self, packet):
+        """Attach the current audible Music Bot frame when one is available."""
+        try:
+            marker = self.music_bot.performance_timeline_marker()
+        except Exception:
+            marker = None
+        if marker:
+            packet["music_sync"] = marker
+        return packet
+
     def _play_local_drum_hit(self, pad, velocity=None):
         volume = (
             300
@@ -709,6 +719,7 @@ class Gameplay(state.State):
             packet = {"pad": pad}
             if velocity is not None:
                 packet["velocity"] = max(1, min(127, int(velocity)))
+            self._attach_music_timeline(packet)
             self.game.network.send(
                 consts.CHANNEL_MAP, "play_drum_hit", packet
             )
@@ -861,6 +872,7 @@ class Gameplay(state.State):
         packet = {"note": note_name}
         if velocity is not None:
             packet["velocity"] = max(1, min(127, int(velocity)))
+        self._attach_music_timeline(packet)
         self.game.network.send(
             consts.CHANNEL_MAP, "play_piano_note", packet
         )
@@ -868,8 +880,9 @@ class Gameplay(state.State):
     def _stop_local_piano_note(self, note_name):
         self.game.audio_mngr.piano.stop_note("local", note_name)
         if self.game.network:
+            packet = self._attach_music_timeline({"note": note_name})
             self.game.network.send(
-                consts.CHANNEL_MAP, "stop_piano_note", {"note": note_name}
+                consts.CHANNEL_MAP, "stop_piano_note", packet
             )
 
     def _start_piano_midi(self):
@@ -1222,6 +1235,13 @@ class Gameplay(state.State):
         # === Music Bot loop (auto-advance tracks) ===
         if hasattr(self, 'music_bot') and self.music_bot:
             self.music_bot.loop()
+
+        # Detect a stopped/stalled jukebox receiver and ask the server for the
+        # authoritative playback state plus relay warm-up frames.  This is
+        # deliberately main-thread work: it only performs throttled network
+        # recovery and never touches OpenAL from the gameplay loop.
+        if getattr(self, 'jukebox_player', None):
+            self.jukebox_player.update()
         
         # === Tracking beacon & facing sound update ===
         if getattr(self, "tracking_target", None) is not None:
@@ -1414,7 +1434,10 @@ class Gameplay(state.State):
                         sustained = getattr(self, '_piano_sustained_notes', [])
                         for sn in sustained:
                             self.game.audio_mngr.piano.stop_note("local", sn)
-                            self.game.network.send(consts.CHANNEL_MAP, "stop_piano_note", {"note": sn})
+                            packet = self._attach_music_timeline({"note": sn})
+                            self.game.network.send(
+                                consts.CHANNEL_MAP, "stop_piano_note", packet
+                            )
                         self._piano_sustained_notes = []
                         if not self._piano_midi_sustain:
                             self._release_piano_midi_sustain()
@@ -2484,7 +2507,30 @@ class Gameplay(state.State):
             def on_exit():
                 self.pop_last_substate()
                 self.reload_keyconfig()
+                self._recover_streaming_audio_after_options()
             menus.options_menu(self.game, on_exit, replace_call=self.add_substate, parent=self, in_game=True)
+
+    def _recover_streaming_audio_after_options(self):
+        """Promptly recover long-running streams after closing an in-game menu.
+
+        Options no longer creates a competing menu-music source in gameplay,
+        but an output driver can still have stopped a buffered source while the
+        menu was open.  The music bot can resume its existing queued buffers;
+        the authoritative jukebox resync also supplies relay warm-up packets.
+        Neither action recreates a song nor changes its queue position.
+        """
+        music = getattr(self, "music_bot", None)
+        if music is not None:
+            try:
+                music.recover_output()
+            except Exception:
+                pass
+        jukebox = getattr(self, "jukebox_player", None)
+        if jukebox is not None:
+            try:
+                jukebox.request_resync("options closed")
+            except Exception:
+                pass
     
     def handle_o_key(self, mod):
         """Handle O key: PA Test Mode (no modifier) or Options Menu (ALT+O)"""
@@ -2672,6 +2718,7 @@ class Gameplay(state.State):
             packet = {"note": note}
             if velocity is not None:
                 packet["velocity"] = max(1, min(127, int(velocity)))
+            self._attach_music_timeline(packet)
             self.game.network.send(
                 consts.CHANNEL_MAP, "play_guitar_note", packet
             )

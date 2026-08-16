@@ -91,24 +91,31 @@ class Menu(state.State):
         while True:
             path = self._preview_decode_queue.get()
             if path is None:
-                # Sentinel: stop the worker.
-                self._preview_decode_queue.task_done()
+                # Sentinel: stop the worker. Guard against a queue whose
+                # unfinished-count is already negative (legacy double-task_done
+                # bug) so the worker can still exit cleanly.
+                try:
+                    self._preview_decode_queue.task_done()
+                except ValueError:
+                    pass
                 return
             try:
                 # Drop if a newer preview was already requested while we waited.
+                # NOTE: task_done() is called ONLY in the finally block below.
+                # Calling it here and then `continue` would run finally too,
+                # producing a double task_done() per item and driving the
+                # queue's unfinished count negative (which later killed the
+                # worker on the sentinel path — see crash report 2f7f69cc).
                 with self._preview_lock:
                     if path != self._preview_latest_path:
-                        self._preview_decode_queue.task_done()
                         continue
                 # Reuse the shared buffer cache; this only decodes on a cache miss.
                 buffer = self.game.audio_mngr.load_buffer(path)
                 if buffer is None:
-                    self._preview_decode_queue.task_done()
                     continue
                 # Drop again right before handing back, in case the user kept moving.
                 with self._preview_lock:
                     if path != self._preview_latest_path:
-                        self._preview_decode_queue.task_done()
                         continue
                 # Hand the buffer object back directly (not the path) so the main
                 # thread doesn't have to re-resolve/re-lookup and can't lose it to

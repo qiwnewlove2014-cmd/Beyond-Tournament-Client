@@ -277,7 +277,13 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
     items.append(("Back", lambda: func_call()))
     m.add_items(items)
     m.turning_sensitivity_item_index = m.items.index(turning_sensitivity_item)
-    m.set_music("music/10.ogg")  # Continue main menu music
+    # Opening Options from gameplay must not start the main-menu music.  It
+    # allocates another direct OpenAL source while map music / jukebox relay
+    # sources are already streaming, which can make constrained audio devices
+    # evict or stall an existing stream.  Menu music remains appropriate while
+    # browsing from the title screens.
+    if not in_game:
+        m.set_music("music/10.ogg")
     if replace_call is None: game.replace(m)
     else: replace_call(m)
 
@@ -414,6 +420,11 @@ def drum_keyconfig_menu(
     for binding in drum_keyconfig.DRUM_BINDINGS:
         current_index = len(items)
         primary = drum_keyconfig.binding_key(game.keyconfig, binding)
+        primary_name = (
+            string_utils.friendly_key_name(primary)
+            if primary is not None
+            else "unassigned"
+        )
         alternate = drum_keyconfig.alternate_key(game.keyconfig, binding)
         alternate_name = (
             string_utils.friendly_key_name(alternate)
@@ -431,7 +442,7 @@ def drum_keyconfig_menu(
             list_position=current_index,
         )
         items.append((
-            f"{binding.label}: primary {string_utils.friendly_key_name(primary)}, "
+            f"{binding.label}: primary {primary_name}, "
             f"alternate {alternate_name}",
             open_pad_menu,
         ))
@@ -450,7 +461,7 @@ def drum_keyconfig_menu(
 
     def clear_all():
         drum_keyconfig.clear_all(game.keyconfig)
-        speech.speak("Drum keys cleared. Set new keys from the defaults.")
+        speech.speak("Drum keys cleared. Set new primary or alternate keys now.")
         drum_keyconfig_menu(
             game,
             func_call,
@@ -480,6 +491,11 @@ def drum_pad_keyconfig_menu(
 ):
     """Configure both playable key slots for one drum pad."""
     primary = drum_keyconfig.binding_key(game.keyconfig, binding)
+    primary_name = (
+        string_utils.friendly_key_name(primary)
+        if primary is not None
+        else "unassigned"
+    )
     alternate = drum_keyconfig.alternate_key(game.keyconfig, binding)
     alternate_name = (
         string_utils.friendly_key_name(alternate)
@@ -550,7 +566,7 @@ def drum_pad_keyconfig_menu(
 
     items = [
         (
-            f"Set primary key. Currently {string_utils.friendly_key_name(primary)}.",
+            f"Set primary key. Currently {primary_name}.",
             functools.partial(
                 open_key_capture,
                 binding.function,

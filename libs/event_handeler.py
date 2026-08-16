@@ -48,6 +48,11 @@ class EventHandeler:
         
         self.game.available_languages = data.get("available_languages", {})
         self.game.current_language = data.get("current_language", "th")
+        # Capability negotiation keeps this client safe with a same-version
+        # server that predates the versioned music timeline channel.
+        self.game.music_timeline_supported = bool(
+            data.get("music_timeline_v1", False)
+        )
         self.game.presence_sounds.configure(data)
 
         # Store staff status for PA Test Mode (with safe fallback)
@@ -147,15 +152,26 @@ class EventHandeler:
         name the player's actual (rebindable) interact key."""
         import pygame
         from .string_utils import friendly_key_name
-        map_name = (data or {}).get("map", "")
+        payload = data or {}
+        map_name = payload.get("map", "")
         if not map_name:
             return
         key = friendly_key_name(
             self.game.keyconfig.get("interact", pygame.K_f)
         ).upper()
+        action_key = f"Shift plus {key}"
+        if payload.get("created", False):
+            speak(
+                f"Travel point created at ({payload.get('x', 0)}, "
+                f"{payload.get('y', 0)}, {payload.get('z', 0)}) to "
+                f"{map_name} ({payload.get('target_x', 0)}, "
+                f"{payload.get('target_y', 0)}, {payload.get('target_z', 0)}). "
+                f"Players who step into it can press {action_key} to travel."
+            )
+            return
         speak(
             f"You are at a travel point to {map_name}. "
-            f"Press {key} to travel."
+            f"Press {action_key} to travel."
         )
 
     def online(self, data):
@@ -293,6 +309,10 @@ class EventHandeler:
         # === Load Music Bot playlist for this map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
             self.gameplay.music_bot.load_map_music(data["data"])
+        # A complete map parse can also be emitted for Reload Map Data.  The
+        # jukebox relay continues server-side, so request the authoritative
+        # state immediately instead of waiting for a later map-sync packet.
+        self.game.network.send(consts.CHANNEL_MISC, "jukebox_resync")
         self._finish_map_audio_reload()
 
     def update_map(self, data):
@@ -306,11 +326,12 @@ class EventHandeler:
         self.game.audio_mngr.apply_filter(
             None, exclude=self.game.exclude_water, clear=True
         )
-        # Same instrument cleanup as parse_map: a builder edit reloads the map
-        # and would otherwise keep stale buffers around.
-        self._reset_instruments_for_map_change()
-        # Jukebox audio is preserved across in-place map reloads (update_map)
-        # so playback continues seamlessly without interruption.
+        # This is an in-place map reload, not a map transition.  Do not reset
+        # Piano/Drums here: reset_for_map_change() stops every live local and
+        # remote voice, which made all instruments go silent when a builder
+        # pressed "Reload Map Data".  Full parse_map still resets them when a
+        # player actually changes maps.
+        # Jukebox audio is likewise preserved across update_map reloads.
         self.gameplay.player.in_water = False
         self.game.ignore_others_water = False
         self.game.exclude_water.clear()
@@ -564,7 +585,11 @@ class EventHandeler:
                 # Guitar notes arrive via play_unbound with a guitar_note field
                 # (same piano-sample placeholder); route them through the piano
                 # queue so PA speakers / occlusion apply exactly like piano.
-                self.game.audio_mngr.piano.enqueue_remote_note(data)
+                if not self._schedule_music_synced(
+                    data,
+                    lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+                ):
+                    self.game.audio_mngr.piano.enqueue_remote_note(data)
                 return
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
             facing = getattr(self.gameplay.player, 'facing', 0.0)
@@ -604,11 +629,19 @@ class EventHandeler:
         current on the main thread. enqueue_remote_note validates and copies the
         packet; PianoAudio.update() drains and plays on the main thread.
         """
-        self.game.audio_mngr.piano.enqueue_remote_note(data)
+        if not self._schedule_music_synced(
+            data,
+            lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+        ):
+            self.game.audio_mngr.piano.enqueue_remote_note(data)
 
     def stop_piano_note(self, data):
         """Queue a remote piano note-off for main-thread processing."""
-        self.game.audio_mngr.piano.enqueue_remote_stop(data)
+        if not self._schedule_music_synced(
+            data,
+            lambda data=data: self.game.audio_mngr.piano.enqueue_remote_stop(data),
+        ):
+            self.game.audio_mngr.piano.enqueue_remote_stop(data)
 
     def set_piano_soft_pedal(self, data):
         """Apply the server-replicated realtime pedal state for one performer."""
@@ -691,7 +724,11 @@ class EventHandeler:
 
     def play_drum_hit(self, data):
         """Queue a validated remote one-shot for main-thread audio playback."""
-        self.game.audio_mngr.drums.enqueue_remote_hit(data)
+        if not self._schedule_music_synced(
+            data,
+            lambda data=data: self.game.audio_mngr.drums.enqueue_remote_hit(data),
+        ):
+            self.game.audio_mngr.drums.enqueue_remote_hit(data)
 
     def set_game_mode(self, data):
         """Receive game mode from server (e.g. 'pong' or 'normal') and update game state."""
@@ -1182,6 +1219,41 @@ class EventHandeler:
 
 
 
+    def _schedule_music_synced(self, data, callback):
+        """Schedule an instrument action on its performer's audible music clock.
+
+        Old servers/clients omit ``music_sync`` and keep the historical
+        immediate path.  A malformed marker also falls back immediately so a
+        note can never disappear merely because synchronization metadata was
+        damaged or arrived during a mixed-version rollout.
+        """
+        marker = data.get("music_sync") if isinstance(data, dict) else None
+        if not isinstance(marker, dict) or marker.get("version") != 1:
+            return False
+        channel_id = marker.get("voice_channel")
+        epoch = marker.get("epoch")
+        frame_seq = marker.get("frame_seq")
+        if not all(isinstance(value, int) and not isinstance(value, bool)
+                   for value in (channel_id, epoch, frame_seq)):
+            return False
+        if not (0 <= channel_id <= 255 and 0 <= epoch <= 0xFFFFFFFF
+                and 0 <= frame_seq <= 0xFFFFFFFF):
+            return False
+        entity = getattr(self.gameplay, "voice_channels", {}).get(channel_id)
+        if entity is None:
+            return False
+        compression = getattr(entity, "music_compression", None)
+        if compression is None and getattr(entity, "music_source", None) is not None:
+            # The reliable sound event may cross the raw music channel and
+            # arrive first. Create the coordinator now so the note waits for
+            # its matching audio epoch instead of leaking through early.
+            from .voice_chat import MusicCompression
+            compression = MusicCompression(self.game)
+            entity.music_compression = compression
+        if compression is None:
+            return False
+        return bool(compression.schedule_timeline_event(epoch, frame_seq, callback))
+
     def process_voice_data(self, data, channelID):
         if not options.get("voice_chat", True): return
         if channelID == consts.CHANNEL_MEGAPHONE:
@@ -1223,6 +1295,34 @@ class EventHandeler:
                     entity.music_compression.recieve(opus_data, music_src, None, entity_channel_id, self.gameplay)
                 except Exception as e:
                     pass
+
+    def process_music_timeline_data(self, data):
+        # Relay: version(1), entity channel(1), epoch(4), frame seq(4), Opus.
+        if not isinstance(data, (bytes, bytearray, memoryview)) or len(data) < 11:
+            return
+        if data[0] != 1:
+            return
+        entity_channel_id = data[1]
+        epoch = int.from_bytes(data[2:6], "big")
+        frame_seq = int.from_bytes(data[6:10], "big")
+        opus_data = data[10:]
+        if not (1 <= len(opus_data) <= 1275):
+            return
+
+        entity = getattr(self.gameplay, "voice_channels", {}).get(entity_channel_id)
+        if entity is None:
+            return
+        music_src = getattr(entity, "music_source", None)
+        if music_src is None:
+            return
+        if not getattr(entity, "music_compression", None):
+            from .voice_chat import MusicCompression
+            entity.music_compression = MusicCompression(self.game)
+        entity._music_last_recv = time.time()
+        entity.music_compression.recieve_timeline(
+            bytes(opus_data), music_src, None, entity_channel_id,
+            self.gameplay, epoch, frame_seq,
+        )
 
     def has_radio(self, data):
         if not hasattr(self.gameplay, 'voice_channels') or not isinstance(self.gameplay.voice_channels, dict):
@@ -1384,6 +1484,25 @@ class EventHandeler:
                     player.stop(jid, playback_id=playback_id)
                 )
             )
+
+    def staff_permissions(self, data):
+        """Apply a server-authoritative staff permission refresh in-session.
+
+        Login supplies the same values in ``connected``.  Rank changes made by
+        /set, /trust, or an edited staff file must not require an offline/login
+        cycle before client-gated staff controls become available.
+        """
+        if not isinstance(data, dict):
+            return
+        gp = self.gameplay
+        if gp is None:
+            return
+        gp.is_staff = bool(data.get("is_staff", False))
+        gp.is_builder = bool(data.get("is_builder", False))
+        gp.is_technician = bool(data.get("is_technician", False))
+        gp.can_broadcast_megaphone = bool(
+            data.get("can_broadcast_megaphone", False)
+        )
 
     def jukebox_hint(self, data):
         """Walk-in hint near a jukebox. Rendered here so it can name the

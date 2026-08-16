@@ -12,6 +12,7 @@ import subprocess
 import time
 import contextlib
 import queue
+import struct
 from collections import deque
 
 import cyal
@@ -223,6 +224,15 @@ class AudioStreamer(threading.Thread):
         # reaches each PA cabinet at a different time.
         self.network_queue = queue.Queue(maxsize=50)
         self.sender_thread = None
+        # Versioned performance timeline. The delayed PCM deque mirrors the
+        # ten OpenAL pre-buffer frames, so normal Music Broadcast packets leave
+        # at the same media position the performer is hearing locally. PA uses
+        # its proven legacy path and is deliberately not changed here.
+        self._timeline_lock = threading.Lock()
+        self._timeline_epoch = random.getrandbits(32) or 1
+        self._timeline_next_seq = 0
+        self._timeline_last_sent_seq = None
+        self._timeline_delay = deque()
 
     def _all_sources(self):
         """All OpenAL sources this stream feeds (1 normal, 2 for spatial pairs)."""
@@ -372,16 +382,57 @@ class AudioStreamer(threading.Thread):
         except Exception:
             pass
 
-    def _send_to_network(self, data):
+    def _claim_timeline_marker(self):
+        with self._timeline_lock:
+            seq = self._timeline_next_seq
+            self._timeline_next_seq = (seq + 1) & 0xFFFFFFFF
+            return self._timeline_epoch, seq
+
+    def performance_timeline_marker(self):
+        """Return the last normal-broadcast frame aligned to local playback."""
+        if not self.ready_event.is_set() or not self.running:
+            return None
+        with self._timeline_lock:
+            seq = self._timeline_last_sent_seq
+            if seq is None:
+                return None
+            return {
+                "version": 1,
+                "epoch": self._timeline_epoch,
+                "frame_seq": seq,
+            }
+
+    def _send_to_network(self, data, timeline_epoch=None, timeline_seq=None):
         """Queue raw PCM chunk to be sent to the network by the sender thread."""
+        item = (data, timeline_epoch, timeline_seq)
         try:
-            self.network_queue.put_nowait(data)
+            self.network_queue.put_nowait(item)
         except queue.Full:
             try:
                 self.network_queue.get_nowait()
-                self.network_queue.put_nowait(data)
+                self.network_queue.put_nowait(item)
             except queue.Empty:
                 pass
+
+    def _route_aligned_network_frame(self, decoded_frame=None):
+        """Advance the normal-broadcast delay line by one media frame.
+
+        Normal Music Broadcast sends the oldest pre-buffered frame, matching
+        the performer's OpenAL playhead. Megaphone keeps sending the current
+        decoded frame so the just-verified PA transport remains untouched.
+        """
+        if not self.bot:
+            return
+        if decoded_frame is not None:
+            self._timeline_delay.append(bytes(decoded_frame))
+        aligned = self._timeline_delay.popleft() if self._timeline_delay else None
+        if getattr(self.bot, 'broadcast_to_megaphone', False):
+            if decoded_frame is not None:
+                self._send_to_network(decoded_frame)
+            return
+        if aligned is not None:
+            epoch, seq = self._claim_timeline_marker()
+            self._send_to_network(aligned, epoch, seq)
 
     def _network_sender_loop(self):
         """Paced network sending loop running in a separate thread.
@@ -390,9 +441,14 @@ class AudioStreamer(threading.Thread):
         while self.running:
             try:
                 # Wait for a packet, with timeout so we check self.running regularly
-                data = self.network_queue.get(timeout=0.1)
+                item = self.network_queue.get(timeout=0.1)
+                if isinstance(item, tuple) and len(item) == 3:
+                    data, timeline_epoch, timeline_seq = item
+                else:
+                    data, timeline_epoch, timeline_seq = item, None, None
             except queue.Empty:
                 data = None
+                timeline_epoch = timeline_seq = None
 
             # Do not leak pre-pause PCM into the next broadcast segment unless live input is present.
             if self.paused:
@@ -419,6 +475,8 @@ class AudioStreamer(threading.Thread):
                     has_mic = bool(getattr(self.bot, 'mic_pcm_queue', None) and len(self.bot.mic_pcm_queue) > 0)
                     if has_guitar or has_mic:
                         data = b'\x00' * 3840
+                        if not getattr(self.bot, 'broadcast_to_megaphone', False):
+                            timeline_epoch, timeline_seq = self._claim_timeline_marker()
 
             if data is None:
                 continue
@@ -439,9 +497,9 @@ class AudioStreamer(threading.Thread):
             # Set last_send_time before doing encoding/networking to prevent work time drift
             self.last_send_time = time.perf_counter()
 
-            self._send_to_network_actual(data)
+            self._send_to_network_actual(data, timeline_epoch, timeline_seq)
 
-    def _send_to_network_actual(self, data):
+    def _send_to_network_actual(self, data, timeline_epoch=None, timeline_seq=None):
         """Downmix Stereo to Mono, scale volume, encode as Opus, and send to network."""
         try:
             if not self.game or not self.game.network:
@@ -531,6 +589,16 @@ class AudioStreamer(threading.Thread):
                     pass
 
             encoded = self.encoder.encode(bytearray(mono_data))
+            if (target_channel == consts.CHANNEL_MUSICBOT
+                    and getattr(self.game, 'music_timeline_supported', False)
+                    and timeline_epoch is not None and timeline_seq is not None):
+                target_channel = consts.CHANNEL_MUSICBOT_TIMELINE
+                encoded = struct.pack(
+                    ">BII", 1, int(timeline_epoch) & 0xFFFFFFFF,
+                    int(timeline_seq) & 0xFFFFFFFF,
+                ) + bytes(encoded)
+                with self._timeline_lock:
+                    self._timeline_last_sent_seq = int(timeline_seq) & 0xFFFFFFFF
             self.game.network.send(target_channel, "n/a", encoded, reliable=False)
         except Exception:
             pass
@@ -608,6 +676,8 @@ class AudioStreamer(threading.Thread):
                 with self._lock:
                     if self._queue_local(data):
                         pre_buffered += 1
+                        if self.bot:
+                            self._timeline_delay.append(bytes(data))
         return pre_buffered, leftover
 
     def run(self):
@@ -791,6 +861,9 @@ class AudioStreamer(threading.Thread):
                 self._update_spatial_gain()
             self._play_all()
             self.ready_event.set()
+            # Frame zero leaves at the same instant local OpenAL begins frame
+            # zero. Subsequent decoded frames advance this fixed delay line.
+            self._route_aligned_network_frame()
 
         # === Streaming loop ===
         eof = False
@@ -821,9 +894,14 @@ class AudioStreamer(threading.Thread):
             if not self.running:
                 break
 
-            # === NETWORK: Send at hardware-synchronized real-time rate ===
+            # === NETWORK: Send at the performer's audible media position ===
             if data:
-                self._send_to_network(data)
+                self._route_aligned_network_frame(data)
+            elif eof and self._timeline_delay:
+                # ffmpeg has ended, but OpenAL still owns the pre-buffer tail.
+                # Flush one aligned frame per loop so listeners hear the same
+                # ending instead of losing the final ~180ms.
+                self._route_aligned_network_frame()
 
             # === LOCAL: Buffer for OpenAL playback ===
             if data:
@@ -855,7 +933,9 @@ class AudioStreamer(threading.Thread):
                 except Exception:
                     pass
 
-            if eof and not self._pause_buffer and self._buffers_queued() == 0:
+            if (eof and not self._pause_buffer
+                    and not self._timeline_delay
+                    and self._buffers_queued() == 0):
                 break
                 
             # Sleep a bit to prevent busy-waiting ONLY if we didn't read any data
@@ -930,6 +1010,21 @@ class AudioStreamer(threading.Thread):
     def stop(self):
         self.running = False
         self._cleanup()
+
+    def resume_output_if_buffered(self):
+        """Restart a stopped OpenAL output without replacing this stream.
+
+        This is intentionally limited to already queued frames.  Starting a
+        fresh stream here would lose timing and can duplicate a broadcast;
+        the decoder thread remains the owner of buffering new audio.
+        """
+        with self._lock:
+            if not self.running or self.paused or self._buffers_queued() <= 0:
+                return False
+            if not self._all_playing():
+                self._play_all()
+                return True
+        return False
 
     def set_pause(self, paused):
         self.paused = paused
@@ -2255,6 +2350,30 @@ class MapMusicBot:
                     speak("Could not load track.")
                 else:
                     speak("Track finished.")
+
+    def recover_output(self):
+        """Resume buffered local music after a transient UI/output interruption."""
+        streamer = self.streamer
+        if not (self.enabled and self.playing and not self.paused and streamer):
+            return False
+        try:
+            return bool(streamer.resume_output_if_buffered())
+        except Exception:
+            return False
+
+    def performance_timeline_marker(self):
+        """Marker attached to this performer's event-driven instruments.
+
+        Only ordinary Music Broadcast has a versioned timeline. Megaphone and
+        private playback keep their existing paths and therefore return None.
+        """
+        if (not self.broadcast_enabled or self.broadcast_to_megaphone
+                or self.paused or not self.playing):
+            return None
+        streamer = self.streamer
+        if streamer is None:
+            return None
+        return streamer.performance_timeline_marker()
 
     def _ensure_live_relay_streamer(self):
         """Ensure background live relay thread runs when broadcast is enabled and live input exists without an active MP3 stream."""

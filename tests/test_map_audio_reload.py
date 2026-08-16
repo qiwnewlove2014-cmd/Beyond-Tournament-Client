@@ -50,8 +50,80 @@ class TestMapAudioThreadOwnership(unittest.TestCase):
         self.assertEqual(handler.gameplay.megaphone.lock_owner, "alice")
         self.assertEqual(handler.gameplay.megaphone.lock_owners, {"alice", "bob"})
 
+    def test_staff_permission_refresh_updates_live_client_flags(self):
+        from libs.event_handeler import EventHandeler
+
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.gameplay = SimpleNamespace(
+            is_staff=False, is_builder=False, is_technician=False,
+            can_broadcast_megaphone=False,
+        )
+        handler.staff_permissions({
+            "is_staff": True,
+            "is_builder": True,
+            "is_technician": False,
+            "can_broadcast_megaphone": True,
+        })
+        self.assertTrue(handler.gameplay.is_staff)
+        self.assertTrue(handler.gameplay.is_builder)
+        self.assertFalse(handler.gameplay.is_technician)
+        self.assertTrue(handler.gameplay.can_broadcast_megaphone)
+
 
 class TestMapReloadResourceOwnership(unittest.TestCase):
+    def test_in_place_update_keeps_live_instrument_voices(self):
+        """Reload Map Data must not reset Piano/Drums like a map transition."""
+        from libs.event_handeler import EventHandeler
+
+        resets = []
+        audio = SimpleNamespace(
+            apply_filter=lambda *args, **kwargs: None,
+            piano=SimpleNamespace(reset_for_map_change=lambda: resets.append("piano")),
+            drums=SimpleNamespace(reset_for_map_change=lambda: resets.append("drums")),
+        )
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.game = SimpleNamespace(
+            automations=[], audio_mngr=audio, exclude_water=set(),
+            ignore_others_water=False,
+            network=SimpleNamespace(send=lambda *args, **kwargs: None),
+        )
+        handler.gameplay = SimpleNamespace(
+            player=SimpleNamespace(in_water=False, x=1, y=2, z=3, move=lambda *args, **kwargs: None),
+            map=SimpleNamespace(entities={}),
+            parser=SimpleNamespace(load=lambda *args, **kwargs: None),
+        )
+        handler._begin_map_audio_reload = lambda: None
+        handler._finish_map_audio_reload = lambda: None
+
+        handler._apply_update_map({"data": {}})
+        self.assertEqual(resets, [])
+
+    def test_full_parse_requests_jukebox_resync_before_grace_sweep(self):
+        """A Reload Map Data parse must preserve a live server relay."""
+        from libs import consts
+        from libs.event_handeler import EventHandeler
+
+        sent = []
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.game = SimpleNamespace(
+            automations=[],
+            audio_mngr=SimpleNamespace(apply_filter=lambda *args, **kwargs: None),
+            exclude_water=set(),
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+        )
+        handler.gameplay = SimpleNamespace(
+            voice_channels={},
+            player=SimpleNamespace(move=lambda *args, **kwargs: None),
+            parser=SimpleNamespace(load=lambda *args, **kwargs: None),
+        )
+        handler._begin_map_audio_reload = lambda: None
+        handler._finish_map_audio_reload = lambda: None
+        handler._reset_instruments_for_map_change = lambda: None
+        handler._stop_jukebox_players_for_map_change = lambda: None
+
+        handler._apply_parse_map({"data": {}, "x": 0, "y": 0, "z": 0})
+        self.assertIn((consts.CHANNEL_MISC, "jukebox_resync"), sent)
+
     def test_resync_preserves_existing_entity_and_continuous_sources(self):
         from libs.world_map import Map
 

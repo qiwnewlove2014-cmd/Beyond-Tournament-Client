@@ -1,8 +1,11 @@
 import unittest
+import os
+import tempfile
 
 import pygame
 
 from libs import drum_keyconfig
+from libs.keyconfig import Keyconfig
 from libs.midi.profiles import DRUM_MIDI_PROFILE
 
 
@@ -120,6 +123,39 @@ class DrumKeyconfigTests(unittest.TestCase):
         self.assertEqual(keyconfig.keys[binding.function], pygame.K_b)
         self.assertNotIn(binding.alternate_function, keyconfig.keys)
         self.assertEqual(keyconfig.save_count, 1)
+
+    def test_clear_all_releases_defaults_for_immediate_rebinding(self):
+        keyconfig = FakeKeyconfig({
+            "drum_kick": pygame.K_b,
+            "drum_kick_alt": pygame.K_g,
+        })
+        drum_keyconfig.clear_all(keyconfig)
+
+        self.assertEqual(keyconfig.save_count, 1)
+        self.assertEqual(drum_keyconfig.key_to_pad(keyconfig), {})
+        self.assertTrue(all(
+            keyconfig.keys[binding.function] is None
+            for binding in drum_keyconfig.DRUM_BINDINGS
+        ))
+        self.assertIsNone(
+            drum_keyconfig.validate_key(keyconfig, "drum_kick", pygame.K_z)
+        )
+
+        keyconfig.set(pygame.K_z, "drum_kick")
+        self.assertEqual(drum_keyconfig.key_to_pad(keyconfig), {pygame.K_z: 0})
+
+    def test_cleared_primaries_survive_keyconfig_save_and_reload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_file = os.path.join(temp_dir, "keyconfig.json")
+            keyconfig = Keyconfig(config_file)
+            drum_keyconfig.clear_all(keyconfig)
+
+            restored = Keyconfig(config_file)
+            self.assertEqual(drum_keyconfig.key_to_pad(restored), {})
+            self.assertTrue(all(
+                restored.keys[binding.function] is None
+                for binding in drum_keyconfig.DRUM_BINDINGS
+            ))
 
 
 if __name__ == "__main__":

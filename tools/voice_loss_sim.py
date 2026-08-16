@@ -229,6 +229,7 @@ for ch_name, ch_id, call_reliable in [
     ("voice chat", consts.CHANNEL_VOICECHAT, True),
     ("dynamic voice channel", 21, True),
     ("music bot", consts.CHANNEL_MUSICBOT, True),
+    ("music timeline upload", consts.CHANNEL_MUSICBOT_TIMELINE, True),
     ("megaphone", consts.CHANNEL_MEGAPHONE, True),
     ("megaphone explicit reliable=True", consts.CHANNEL_MEGAPHONE, True),
 ]:

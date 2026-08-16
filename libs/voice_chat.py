@@ -1025,6 +1025,8 @@ class VoiceChatRecord(threading.Thread):
 class MusicCompression(threading.Thread):
     PRE_BUFFER_FRAMES = 8   # 160ms before first play
     RESUME_FRAMES     = 3   # 60ms before resuming after underrun
+    TIMELINE_EVENT_TIMEOUT = 1.0
+    MAX_TIMELINE_EVENTS = 256
 
     # Max gap between two packets before we treat the next packet as the start
     # of a brand-new broadcast.  When a broadcaster stops and restarts music,
@@ -1043,6 +1045,12 @@ class MusicCompression(threading.Thread):
             self.decoder.set_sampling_frequency(48000)
             self._has_started = False
             self._last_recv_time = None
+            self._timeline_epoch = None
+            self._timeline_last_received_seq = None
+            self._timeline_first_queued_seq = None
+            self._timeline_anchor_seq = None
+            self._timeline_anchor_time = None
+            self._timeline_pending = []
             self._running = True
             self.start()
         except Exception as e:
@@ -1054,17 +1062,19 @@ class MusicCompression(threading.Thread):
 
     def close(self):
         self._running = False
+        self._timeline_pending = []
         self.queue.put_nowait(None)
 
     def run(self):
         while getattr(self, '_running', True):
             try:
                 time.sleep(0.002)
-                if self.queue.empty(): continue
-                value = self.queue.get_nowait()
-                if value is None: break
-                if callable(value):
-                    value()
+                if not self.queue.empty():
+                    value = self.queue.get_nowait()
+                    if value is None: break
+                    if callable(value):
+                        value()
+                self._dispatch_timeline_events()
             except Exception as e:
                 print(f"[ERROR MusicCompression.run] {e}")
                 logger.log_exception(e, "MusicCompression.run")
@@ -1074,7 +1084,74 @@ class MusicCompression(threading.Thread):
             return
         self.put(lambda: self.recieve_actual(data, music_source, radio_source, channelID, gameplay))
 
-    def recieve_actual(self, data, music_source, radio_source, channelID, gameplay):
+    def recieve_timeline(self, data, music_source, radio_source, channelID,
+                         gameplay, epoch, frame_seq):
+        if music_source is None:
+            return
+        self.put(lambda: self.recieve_actual(
+            data, music_source, radio_source, channelID, gameplay,
+            epoch=epoch, frame_seq=frame_seq,
+        ))
+
+    @staticmethod
+    def _sequence_reached(current, target):
+        """Return True when current is at/after target in uint32 sequence space."""
+        return ((current - target) & 0xFFFFFFFF) < 0x80000000
+
+    def _audible_timeline_seq(self, now=None):
+        if self._timeline_anchor_seq is None or self._timeline_anchor_time is None:
+            return None
+        elapsed = max(0.0, (time.perf_counter() if now is None else now)
+                      - self._timeline_anchor_time)
+        return (self._timeline_anchor_seq + int(elapsed / 0.020)) & 0xFFFFFFFF
+
+    def schedule_timeline_event(self, epoch, frame_seq, callback):
+        if not callable(callback):
+            return False
+        if not (isinstance(epoch, int) and isinstance(frame_seq, int)):
+            return False
+        if not (0 <= epoch <= 0xFFFFFFFF and 0 <= frame_seq <= 0xFFFFFFFF):
+            return False
+        self.put(lambda: self._queue_timeline_event(epoch, frame_seq, callback))
+        return True
+
+    def _queue_timeline_event(self, epoch, frame_seq, callback):
+        if len(self._timeline_pending) >= self.MAX_TIMELINE_EVENTS:
+            # A bounded queue protects the audio worker from a malicious or
+            # stuck instrument. Fall back the oldest action instead of losing it.
+            _, _, _, oldest = self._timeline_pending.pop(0)
+            oldest()
+        self._timeline_pending.append((
+            epoch & 0xFFFFFFFF,
+            frame_seq & 0xFFFFFFFF,
+            time.perf_counter() + self.TIMELINE_EVENT_TIMEOUT,
+            callback,
+        ))
+        self._dispatch_timeline_events()
+
+    def _dispatch_timeline_events(self, now=None):
+        if not self._timeline_pending:
+            return
+        current_time = time.perf_counter() if now is None else now
+        audible_seq = self._audible_timeline_seq(current_time)
+        remaining = []
+        for epoch, frame_seq, deadline, callback in self._timeline_pending:
+            if self._timeline_epoch is not None and epoch != self._timeline_epoch:
+                # A new broadcast epoch supersedes stale notes from the old song.
+                continue
+            due = (
+                audible_seq is not None
+                and epoch == self._timeline_epoch
+                and self._sequence_reached(audible_seq, frame_seq)
+            )
+            if due or current_time >= deadline:
+                callback()
+            else:
+                remaining.append((epoch, frame_seq, deadline, callback))
+        self._timeline_pending = remaining
+
+    def recieve_actual(self, data, music_source, radio_source, channelID, gameplay,
+                       epoch=None, frame_seq=None):
         if music_source is None:
             return
             
@@ -1094,9 +1171,20 @@ class MusicCompression(threading.Thread):
                     return
 
                 now = time.time()
+                timeline_changed = (
+                    epoch is not None
+                    and epoch != self._timeline_epoch
+                )
+                sequence_discontinuity = False
+                if (epoch is not None and not timeline_changed
+                        and self._timeline_last_received_seq is not None):
+                    seq_delta = (frame_seq - self._timeline_last_received_seq) & 0xFFFFFFFF
+                    sequence_discontinuity = seq_delta == 0 or seq_delta > 9
                 is_new_session = (
                     self._last_recv_time is None
                     or (now - self._last_recv_time) > self.SESSION_RESET_GAP
+                    or timeline_changed
+                    or sequence_discontinuity
                 )
                 if is_new_session:
                     # New broadcast (or first after a stop): discard everything
@@ -1111,6 +1199,22 @@ class MusicCompression(threading.Thread):
                     except Exception:
                         pass
                     self._has_started = False
+                    self._timeline_first_queued_seq = None
+                    self._timeline_anchor_seq = None
+                    self._timeline_anchor_time = None
+                if timeline_changed:
+                    self._timeline_epoch = epoch
+                    self._timeline_last_received_seq = frame_seq
+                    self._timeline_pending = [
+                        event for event in self._timeline_pending
+                        if event[0] == epoch
+                    ]
+                elif epoch is None and is_new_session:
+                    self._timeline_epoch = None
+                    self._timeline_last_received_seq = None
+                    self._timeline_pending = []
+                elif epoch is not None:
+                    self._timeline_last_received_seq = frame_seq
                 self._last_recv_time = now
 
                 try:
@@ -1123,6 +1227,9 @@ class MusicCompression(threading.Thread):
                 if state == cyal.SourceState.STOPPED and self._has_started:
                     try:
                         self._has_started = False
+                        self._timeline_first_queued_seq = None
+                        self._timeline_anchor_seq = None
+                        self._timeline_anchor_time = None
                         while getattr(music_source, 'buffers_processed', 0) > 0:
                             music_source.unqueue_buffers()
                     except Exception:
@@ -1158,6 +1265,8 @@ class MusicCompression(threading.Thread):
                 try:
                     buf.set_data(bytes(pcm), sample_rate=48000, format=cyal.BufferFormat.MONO16)
                     music_source.queue_buffers(buf)
+                    if epoch is not None and self._timeline_first_queued_seq is None:
+                        self._timeline_first_queued_seq = frame_seq
                 except Exception as e:
                     if not hasattr(self, '_last_err2'): self._last_err2 = 0
                     if time.time() - self._last_err2 > 1.0:
@@ -1176,8 +1285,14 @@ class MusicCompression(threading.Thread):
                                 music_source.gain = 1.0
                             music_source.play()
                             self._has_started = True
+                            if (epoch is not None
+                                    and self._timeline_first_queued_seq is not None):
+                                self._timeline_anchor_seq = self._timeline_first_queued_seq
+                                self._timeline_anchor_time = time.perf_counter()
                         except Exception:
                             pass
+
+                self._dispatch_timeline_events()
 
         except Exception as e:
             logger.log_exception(e, "MusicCompression.recieve")

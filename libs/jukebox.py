@@ -57,6 +57,8 @@ class JukeboxRelayReceiver(threading.Thread):
         # make start()/stop() raise AttributeError, killing relay playback.
         self._play_started = False
         self._last_sequence = None
+        self.created_at = time.monotonic()
+        self.last_packet_at = None
         for _ in range(self.NUM_BUFFERS):
             try:
                 self._pool.append(game.audio_mngr.context.gen_buffer())
@@ -76,6 +78,7 @@ class JukeboxRelayReceiver(threading.Thread):
             if delta == 0 or delta > 0x8000:
                 return
         self._last_sequence = sequence
+        self.last_packet_at = time.monotonic()
         if flags & 0x01:
             self._reset_queue()
         item = bytes(payload)
@@ -224,6 +227,15 @@ class JukeboxPlayer:
         # seamlessly; unconfirmed ones are stopped after a short grace period.
         self._pending_map_change = set()
         self._pending_map_change_serial = None
+        self._last_recovery_request_at = 0.0
+
+    RELAY_STARTUP_TIMEOUT = 7.0
+    RELAY_STALL_TIMEOUT = 5.0
+    RECOVERY_COOLDOWN = 5.0
+    # Full parse_map reloads can cross the ordered map channel and the misc
+    # response channel.  The observed state reply can arrive just over two
+    # seconds later, so do not destroy the healthy receiver prematurely.
+    MAP_RELOAD_CONFIRM_TIMEOUT = 4.0
 
     @property
     def control_serial(self):
@@ -384,6 +396,7 @@ class JukeboxPlayer:
                 "transport": transport,
                 "playback_key": playback_key,
                 "relay_key": (int(relay_id), int(stream_epoch)) if transport == "relay" else None,
+                "created_at": time.monotonic(),
             }
             if transport == "relay":
                 self.relay_routes[(int(relay_id), int(stream_epoch))] = streamer
@@ -454,6 +467,85 @@ class JukeboxPlayer:
         for jukebox_id in list(self.players.keys()):
             self.stop(jukebox_id)
 
+    def update(self):
+        """Recover a jukebox stream that stopped without a stop packet.
+
+        Relay frames are intentionally unreliable.  A temporary loss should
+        normally be hidden by the receiver's buffer, but a dead receiver or a
+        route that no longer receives frames used to leave an existing client
+        permanently silent until reconnect.  The server's ``jukebox_resync``
+        reply includes both the authoritative play state and relay warm-up
+        frames, so it is the safe recovery authority.
+        """
+        now = time.monotonic()
+        restart_ids = []
+        needs_resync = False
+        with self._lock:
+            for jukebox_id, entry in list(self.players.items()):
+                transport = entry.get("transport")
+                streamer = entry.get("streamer")
+                created_at = float(entry.get("created_at") or now)
+                age = now - created_at
+                if transport == "relay" and streamer is not None:
+                    alive = streamer.is_alive() if hasattr(streamer, "is_alive") else True
+                    last_packet = getattr(streamer, "last_packet_at", None)
+                    stalled = (
+                        age >= self.RELAY_STARTUP_TIMEOUT and last_packet is None
+                    ) or (
+                        last_packet is not None
+                        and now - float(last_packet) >= self.RELAY_STALL_TIMEOUT
+                    )
+                    if not alive:
+                        restart_ids.append(jukebox_id)
+                        needs_resync = True
+                    elif stalled:
+                        needs_resync = True
+                elif transport == "direct" and streamer is not None:
+                    # Direct fallback has no server relay to signal a mid-song
+                    # decoder failure.  Restart only an explicit failure; a
+                    # normally completed stream is allowed to await the server's
+                    # next-song timer.
+                    if (hasattr(streamer, "is_alive") and not streamer.is_alive()
+                            and getattr(streamer, "failure_reason", None)):
+                        restart_ids.append(jukebox_id)
+                        needs_resync = True
+        if needs_resync:
+            # Do not remove a dead route unless this call actually sent the
+            # recovery request.  Otherwise a cooldown could leave no route
+            # behind to trigger the next retry.
+            if not self.request_resync("relay recovery"):
+                restart_ids = []
+            else:
+                # A dead receiver must be removed before the matching
+                # ``jukebox_play`` arrives; otherwise idempotent same-identity
+                # handling would retain it.
+                for jukebox_id in restart_ids:
+                    self.stop(jukebox_id)
+
+    def request_resync(self, reason="manual recovery"):
+        """Ask the server for current jukebox routes and relay warm-up frames.
+
+        This is safe after a UI transition: the server remains the playback
+        authority, and the cooldown prevents repeated requests from creating
+        needless traffic.
+        """
+        now = time.monotonic()
+        with self._lock:
+            # A UI close needs no server round-trip when this map has no
+            # active jukebox playback known to the client.
+            if not self.players:
+                return False
+            if now - self._last_recovery_request_at < self.RECOVERY_COOLDOWN:
+                return False
+            self._last_recovery_request_at = now
+        try:
+            from . import consts
+            self.game.network.send(consts.CHANNEL_MISC, "jukebox_resync")
+            log_line(f"[Jukebox] requested resync: {reason}")
+            return True
+        except Exception:
+            return False
+
     def stop_all_if_serial(self, serial):
         """Ignore a delayed map-cleanup after a newer play control has arrived."""
         with self._lock:
@@ -486,7 +578,7 @@ class JukeboxPlayer:
             return True
 
         def sweep():
-            time.sleep(2.0)
+            time.sleep(self.MAP_RELOAD_CONFIRM_TIMEOUT)
             with self._lock:
                 if self._pending_map_change_serial != serial:
                     return  # a newer reload's mark superseded this one

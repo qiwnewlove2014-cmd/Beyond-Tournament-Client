@@ -35,6 +35,13 @@ class Keyconfig:
                 if isinstance(data, dict) and data.get("format") == 2:
                     bindings = data.get("bindings", {})
                     for func, key_name in bindings.items():
+                        # ``null`` explicitly means an intentionally unassigned
+                        # binding (currently used by Clear drum keys).  It is
+                        # distinct from a missing entry, which still falls back
+                        # to that action's normal default.
+                        if key_name is None:
+                            self.keys[func.strip()] = None
+                            continue
                         try:
                             self.keys[func.strip()] = _key_code(key_name)
                         except (AttributeError, ValueError):
@@ -50,6 +57,8 @@ class Keyconfig:
 
     def save(self):
         def key_name(code):
+            if code is None:
+                return None
             # pygame.key.name(K_KP_ENTER) is "enter", which would collide with
             # the main Enter alias on load; write an unambiguous name instead.
             return "kp_enter" if code == key.key_code("enter") else key.name(code)
