@@ -38,6 +38,19 @@ from . import (
 )
 from .speech import speak
 from .logger import log, log_exception
+
+# The agreement players read before creating an account. Written to be
+# polite and short — spoken aloud by the screen reader, so each line is a
+# complete, plain sentence. Keep it in sync with server/agreement.txt.
+AGREEMENT_TEXT = """Welcome to Beyond Tournament! Before creating your account, please read our simple agreement.
+1. Be respectful. Treat other players the way you would like to be treated. Harassment, hate speech, and bullying are not allowed.
+2. Play fairly. Cheating, hacking, or abusing bugs is not allowed.
+3. Your account is yours. Do not share your password, and remember that you are responsible for what happens on your account.
+4. Be honest. Do not impersonate staff members or make false reports.
+5. Listen to the staff. Moderators and developers keep the server safe and fun, and their decisions should be respected.
+6. Have fun. This is a game for everyone. If you see a problem or have an idea, please tell us — we are always happy to listen.
+By choosing Yes below, you agree to follow these simple rules. Thank you for being part of our community!
+"""
 from .os_tools import get_os
 from .keyconfig import Keyconfig
 from .midi import MidiHub
@@ -278,9 +291,9 @@ class Game:
     def create_account(self):
         m = menu.Menu(self, "Do you agree with this game's agreement?")
         menus.set_default_sounds(m)
-        # webbrowser.open("https://final-hour.net/agreement")
         m.add_items(
             [
+                ("Read the agreement", self._agreement_menu),
                 (
                     "Yes, I have read, understood, and agreed to everything in the agreement.",
                     lambda: self.replace(
@@ -294,13 +307,31 @@ class Game:
         )
         self.replace(m)
 
+    def _agreement_menu(self):
+        """Read-only, scrollable copy of the agreement. It is pushed on top of
+        the create-account menu (append, never replace) so Back/ESC return to
+        the agreement question instead of popping into nothing and exiting."""
+        m = menu.Menu(self, "Beyond Tournament agreement", autoclose=False, parrent=self)
+        menus.set_default_sounds(m)
+        items = []
+        for line in AGREEMENT_TEXT.strip().splitlines():
+            line = line.strip()
+            if line:
+                items.append((line, lambda: None))
+        items.append(("Back to the agreement question", lambda: self.pop()))
+        m.add_items(items)
+        m.pos = -1
+        self.append(m)
+
     def create_account2(self, username):
         # change any whitespaces with dashes.
         for i in whitespace:
             username = username.replace(i, "-", -1)
         if len(username) < 3 or len(username) > 25:
-            return self.cancel(
-                "Error. Make sure your username is in the range of 4-25 characters."
+            # Never pop into an empty stack: return to the main menu instead.
+            menus.main_menu(self)
+            return speak(
+                "Canceled. Your username must be 4 to 25 characters."
             )
         options.set("username", username)
         self.replace(
@@ -309,9 +340,11 @@ class Game:
 
     def create_account3(self, password):
         if password.strip()=="":
-            return self.cancel()
+            menus.main_menu(self)
+            return speak("Canceled.")
         if len(password) > 70:
-            return self.cancel("Your password must be less than 70 characters.")
+            menus.main_menu(self)
+            return speak("Canceled. Your password must be less than 70 characters.")
         options.set("password", password)
         self.add_account_to_list(options.get("username"), password)
         if self.network:
@@ -320,10 +353,8 @@ class Game:
         try:
             self.network = self._new_network_client()
         except (OSError, server_config.ServerConfigError) as e:
-            self.pop()
             menus.main_menu(self)
             speak(self._connection_failure_message(e))
-            self.pop()
             return
         self.replace(self.creating)
 

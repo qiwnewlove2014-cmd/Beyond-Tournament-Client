@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from . import buffer, options
+from . import buffer, options, server_config
 from .speech import speak
 
 
@@ -92,7 +92,14 @@ class PresenceSoundManager:
             self.base_url = configured_url
             return
 
-        host = str(options.get("host", "localhost")).strip()
+        # options.host is intentionally unavailable in compiled builds (the
+        # endpoint is embedded in the encrypted VFS config and scrubbed from
+        # settings) — resolve the real server endpoint so uploads reach the
+        # server machine instead of this player's own localhost.
+        try:
+            host, _ = server_config.get_server_endpoint()
+        except server_config.ServerConfigError:
+            host = str(options.get("host", "localhost")).strip()
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
         default_port = int(options.get("port", 13000)) + 1

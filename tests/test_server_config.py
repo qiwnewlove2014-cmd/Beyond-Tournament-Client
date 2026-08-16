@@ -306,5 +306,46 @@ class ServerConfigPackagingTests(unittest.TestCase):
             vfs.EMBEDDED_SERVER_CONFIG = old_config
 
 
+    def test_presence_sounds_configure_uses_embedded_endpoint_in_production(self):
+        # Compiled builds never keep host/port in options (scrubbed for
+        # security) — presence-sound uploads must resolve the endpoint
+        # embedded in the encrypted VFS config instead of localhost.
+        from libs.game import Game
+        from libs.presence_sounds import PresenceSoundManager
+
+        game = Game.__new__(Game)
+        manager = PresenceSoundManager(game)
+        with mock.patch.object(
+            server_config, "is_production_build", return_value=True
+        ), mock.patch.object(
+            server_config, "_production_endpoint", return_value=("26.0.0.10", 13000)
+        ):
+            manager.configure(
+                {"presence_upload_token": "tok", "presence_sound_http_port": 13001}
+            )
+        self.assertEqual(manager.base_url, "http://26.0.0.10:13001")
+
+    def test_presence_sounds_configure_uses_options_host_in_source(self):
+        # Source builds keep the developer-facing Options host, so the old
+        # fallback still applies there.
+        from libs.game import Game
+        from libs.presence_sounds import PresenceSoundManager
+
+        old_host = options.prefs.get("host")
+        old_port = options.prefs.get("port")
+        try:
+            options.set("host", "192.168.1.5", autosave=False)
+            options.set("port", 13000, autosave=False)
+            game = Game.__new__(Game)
+            manager = PresenceSoundManager(game)
+            manager.configure(
+                {"presence_upload_token": "tok", "presence_sound_http_port": 13001}
+            )
+            self.assertEqual(manager.base_url, "http://192.168.1.5:13001")
+        finally:
+            options.prefs["host"] = old_host
+            options.prefs["port"] = old_port
+
+
 if __name__ == "__main__":
     unittest.main()

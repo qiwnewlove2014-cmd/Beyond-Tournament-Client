@@ -153,7 +153,7 @@ class Gameplay(state.State):
         }
         self.keys_pressed = {
             kc.get("tracking_menu", pygame.K_t): self.open_tracking_menu,
-            kc.get("voice_chat", pygame.K_g): self.voice_chat_start,  # Push-to-Talk mode
+            kc.get("voice_chat", pygame.K_g): self.voice_chat_toggle,  # Toggle mode (tap to talk, tap again to stop)
             pygame.K_RETURN: self.buffer_options,
             kc.get("open_volume_mixer", pygame.K_F7): lambda mod: self.add_substate(volume_mixer.volume_mixer(self.game, parent=self)),
             pygame.K_o: self.handle_o_key,  # PA Test Mode (no mod) or Options (ALT+O)
@@ -246,7 +246,6 @@ class Gameplay(state.State):
             kc.get("raise_shield", pygame.K_s): self.start_raise_shield,
         }
         self.keys_released = {
-            kc.get("voice_chat", pygame.K_g): self.voice_chat_stop,  # Push-to-Talk mode
             kc.get("raise_shield", pygame.K_s): self.stop_raise_shield,
             kc.get("strafe_left", pygame.K_q): lambda mod: (
                 setattr(self, "can_run", True)
@@ -2891,3 +2890,13 @@ class Gameplay(state.State):
         self.voice_chat_using_megaphone = False
         self.game.call_after(40, self.voice_chat.voice_chat_finish)
         self.game.direct_soundgroup.play("ui/voxoff.ogg")
+
+    def voice_chat_toggle(self, mod):
+        """Toggle voice chat on/off — no need to hold the key."""
+        if self.voice_chat is not None and self.voice_chat.recording:
+            self.voice_chat_stop(mod)
+            speak("Voice chat deactivated")
+            return
+        self.voice_chat_start(mod)
+        if self.voice_chat is not None and getattr(self.voice_chat, "recording", False):
+            speak("Voice chat activated")
