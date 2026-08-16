@@ -712,6 +712,10 @@ def open_jukebox_menu(game, gp):
         gp.pop_last_substate()
         _skip_song(game, gp, jukebox_id)
 
+    def go_stop():
+        gp.pop_last_substate()
+        _stop_playback(game, gp, jukebox_id)
+
     def go_volume():
         gp.pop_last_substate()
         _open_volume_menu(game, gp, jukebox_id)
@@ -732,6 +736,7 @@ def open_jukebox_menu(game, gp):
         ("Search YouTube and queue a song", go_search),
         ("Queue by YouTube URL", go_direct_url),
         ("Skip current song", go_skip),
+        ("Stop playback", go_stop),
         ("Adjust jukebox volume", go_volume),
         ("View queue", go_queue),
         ("Remove my queued song", go_remove),
@@ -824,6 +829,11 @@ def _skip_song(game, gp, jukebox_id):
 def _clear_all(game, gp, jukebox_id):
     from . import consts
     game.network.send(consts.CHANNEL_MISC, "jukebox_clear_all", {"id": jukebox_id})
+
+
+def _stop_playback(game, gp, jukebox_id):
+    from . import consts
+    game.network.send(consts.CHANNEL_MISC, "jukebox_stop", {"id": jukebox_id})
 
 
 def _get_or_create_jukebox_player(game, gp):
