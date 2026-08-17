@@ -550,6 +550,344 @@ class TestReloadSurvival(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0][1], "jukebox_resync")
 
+    def test_repeated_relay_failures_switch_to_direct_playback(self):
+        """Three consecutive relay recovery failures on one connection switch
+        that jukebox to local direct playback — chronic unreliable-channel
+        loss used to leave a player silent until a full relogin."""
+        import time
+        from types import SimpleNamespace
+        from unittest import mock
+
+        sent = []
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        params = {
+            "x": 1.0, "y": 2.0, "z": 3.0, "title": "Song",
+            "url": "https://youtu.be/x", "duration": 120,
+            "start_offset": 10.0, "http_headers": None,
+            "received_at": time.monotonic() - 30,
+        }
+        plays = []
+        player.play = lambda *a, **k: plays.append((a, k))
+
+        with mock.patch("libs.jukebox.speak"):
+            for _ in range(3):
+                player.players["box"] = {
+                    "source": None,
+                    "secondary_source": None,
+                    "streamer": SimpleNamespace(is_alive=lambda: False),
+                    "transport": "relay",
+                    "created_at": time.monotonic() - 20,
+                    "play_params": dict(params),
+                }
+                # Each iteration represents one executed recovery attempt
+                # (~5s apart in real time): let the resync cooldown expire.
+                player._last_recovery_request_at = 0.0
+                player.update()
+
+        self.assertEqual(player._relay_fail_counts.get("box"), 3)
+        # The switch fired exactly once, with direct transport and an offset
+        # advanced past the original start by wall-clock time.
+        self.assertEqual(len(plays), 1)
+        args, kwargs = plays[0]
+        self.assertEqual(args[0], "box")
+        self.assertEqual(kwargs.get("transport"), "direct")
+        self.assertGreaterEqual(kwargs.get("start_offset", 0), 40.0)
+        # Sticky: later relay play events stay direct until the map changes.
+        self.assertIn("box", player._direct_fallback_until)
+
+    def test_healthy_resets_strike_count(self):
+        """A relay that demonstrably delivers frames clears its strike count,
+        so an earlier blip never escalates to a direct switch."""
+        import time
+        from types import SimpleNamespace
+
+        sent = []
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        player._relay_fail_counts["box"] = 2
+        now = time.monotonic()
+        player.players["box"] = {
+            "source": None,
+            "secondary_source": None,
+            "streamer": SimpleNamespace(
+                is_alive=lambda: True,
+                last_packet_at=now,
+                last_audio_activity=now,
+                _play_started=True,
+            ),
+            "transport": "relay",
+            "created_at": now,
+        }
+
+        player.update()
+
+        self.assertEqual(player._relay_fail_counts.get("box"), 0)
+        self.assertIn("box", player.players)
+        self.assertEqual(sent, [])
+
+    def test_sticky_direct_overrides_relay_play(self):
+        """While the direct fallback is sticky, an incoming relay play event
+        plays directly instead of building another receiver for frames that
+        never arrive on this connection."""
+        import time
+        from unittest import mock
+
+        class Source:
+            position = None
+        class Context:
+            def gen_source(self): return Source()
+        class Audio:
+            context = Context()
+        class Game:
+            audio_mngr = Audio()
+
+        with mock.patch("libs.music_bot.AudioStreamer") as streamer_cls:
+            player = jukebox.JukeboxPlayer(Game())
+            player._direct_fallback_until["box"] = time.monotonic() + 60
+            player._relay_pending[(7, 8)] = {"frames": [], "at": time.monotonic()}
+            player.play(
+                "box", 1, 2, 3, "Song", "https://youtu.be/x", 60,
+                playback_id=9, transport="relay", relay_id=7, stream_epoch=8,
+            )
+
+        self.assertTrue(streamer_cls.called)
+        entry = player.players["box"]
+        self.assertEqual(entry["transport"], "direct")
+        # No relay route was registered and the pending buffer was dropped.
+        self.assertNotIn((7, 8), player.relay_routes)
+        self.assertNotIn((7, 8), player._relay_pending)
+
+    def test_map_change_clears_direct_sticky(self):
+        """A fresh map is a fresh chance for the relay channel."""
+        import time
+        from types import SimpleNamespace
+
+        sent = []
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        player._direct_fallback_until["box"] = time.monotonic() + 60
+        player._relay_fail_counts["box"] = 3
+
+        self.assertTrue(player.mark_pending_map_change(player.control_serial))
+
+        self.assertEqual(player._direct_fallback_until, {})
+        self.assertEqual(player._relay_fail_counts, {})
+
+    def test_repeated_warmup_unsticks_rebuild_early(self):
+        """A stall that keeps surviving warm-up resyncs rebuilds immediately
+        after RELAY_UNSTICK_TRIES attempts, instead of waiting out the full
+        hard-stall timeout (the post-map-reload pattern from the field)."""
+        import time
+        from types import SimpleNamespace
+
+        sent = []
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+
+        def stall_box():
+            player.players["box"] = {
+                "source": None,
+                "secondary_source": None,
+                # Alive receiver whose last packet is already >5s old.
+                "streamer": SimpleNamespace(
+                    is_alive=lambda: True,
+                    last_packet_at=time.monotonic() - 6,
+                    last_audio_activity=None,
+                    _play_started=False,
+                ),
+                "transport": "relay",
+                "created_at": time.monotonic(),
+                "play_params": {},
+            }
+
+        # First stalled update: resync sent, un-stick counted, entry kept.
+        stall_box()
+        player._last_recovery_request_at = 0.0
+        player.update()
+        self.assertEqual(player._stall_unsticks.get("box"), 1)
+        self.assertIn("box", player.players)
+
+        # Second stalled update: the un-stick did not hold — rebuild now.
+        stall_box()
+        player._last_recovery_request_at = 0.0
+        player.update()
+        self.assertEqual(player._stall_unsticks.get("box"), 2)
+        self.assertNotIn("box", player.players)
+
+    def test_underrunning_speaker_triggers_rebuild(self):
+        """A stream whose frames arrive and buffers queue, but whose speakers
+        stopped CONSUMING (slow starvation / stutter loop), is invisible to
+        every packet-based check — only output consumption catches it."""
+        import time
+        from types import SimpleNamespace
+
+        sent = []
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        now = time.monotonic()
+        # Everything looks "healthy": alive receiver, fresh packets, fresh
+        # buffer queueing — but OpenAL consumed nothing for 10 seconds.
+        player.players["box"] = {
+            "source": None,
+            "secondary_source": None,
+            "streamer": SimpleNamespace(
+                is_alive=lambda: True,
+                last_packet_at=now,
+                last_audio_activity=now,
+                last_output_at=now - 10,
+                _play_started=True,
+            ),
+            "transport": "relay",
+            "created_at": now,
+            "play_params": {},
+        }
+
+        player.update()
+
+        self.assertNotIn("box", player.players)
+
+    def test_trickling_frame_rate_escalates_to_rebuild(self):
+        """A trickling channel (a few frames every few seconds) passes every
+        liveness check — packets fresh, buffers queueing, speakers consuming
+        the bursts — while the listener hears a sped-up stutter fading to
+        silence. Only the arrival RATE over a window exposes it; the rebuild
+        ladder then escalates to direct playback mid-song."""
+        import time
+        from types import SimpleNamespace
+        from unittest import mock
+
+        sent = []
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        plays = []
+        player.play = lambda *a, **k: plays.append((a, k))
+        real_params = {
+            "x": 1.0, "y": 2.0, "z": 3.0, "title": "Song",
+            "url": "https://youtu.be/x", "duration": 120,
+            "start_offset": 10.0, "http_headers": None,
+            "received_at": time.monotonic() - 30,
+        }
+
+        def trickling_box():
+            now = time.monotonic()
+            player.players["box"] = {
+                "source": None,
+                "secondary_source": None,
+                "streamer": SimpleNamespace(
+                    is_alive=lambda: True,
+                    last_packet_at=now,
+                    last_audio_activity=now,
+                    last_output_at=now,
+                    _play_started=True,
+                    received_frames=1000,
+                ),
+                "transport": "relay",
+                "created_at": now,
+                "play_params": dict(real_params),
+                # Snapshot taken 10s ago with only 4 more frames back then:
+                # 4 frames / 10s = 0.4 fps, far below the 12.5 fps floor.
+                "frame_rate_check": [now - 10, 996],
+            }
+
+        with mock.patch("libs.jukebox.speak"):
+            for _ in range(3):
+                trickling_box()
+                player._last_recovery_request_at = 0.0
+                player.update()
+
+        # Three starvation rebuilds escalate to the direct fallback.
+        self.assertEqual(player._relay_fail_counts.get("box"), 3)
+        self.assertEqual(len(plays), 1)
+        self.assertEqual(plays[0][1].get("transport"), "direct")
+
+    def test_healthy_frame_rate_does_not_rebuild(self):
+        """A full-rate stream (25 fps) with all-green metrics never trips the
+        starvation watchdog."""
+        import time
+        from types import SimpleNamespace
+
+        sent = []
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        now = time.monotonic()
+        player.players["box"] = {
+            "source": None,
+            "secondary_source": None,
+            "streamer": SimpleNamespace(
+                is_alive=lambda: True,
+                last_packet_at=now,
+                last_audio_activity=now,
+                last_output_at=now,
+                _play_started=True,
+                received_frames=1250,
+            ),
+            "transport": "relay",
+            "created_at": now,
+            "play_params": {},
+            # 250 frames over 10s = 25 fps — exactly a healthy stream.
+            "frame_rate_check": [now - 10, 1000],
+        }
+
+        player.update()
+
+        self.assertIn("box", player.players)
+        self.assertEqual(sent, [])
+
+    def test_relay_pending_keeps_working_direct_stream(self):
+        """Make-before-break: a relay_pending event for the song already
+        playing over a healthy DIRECT stream must not stop it (map reloads
+        used to mute a working direct stream for ~10s while the relay
+        readied)."""
+        import time
+        from types import SimpleNamespace
+
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *a: None),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        player.players["box"] = {
+            "source": None,
+            "secondary_source": None,
+            "streamer": SimpleNamespace(is_alive=lambda: True),
+            "title": "Song", "url": "https://youtu.be/x",
+            "transport": "direct",
+            "playback_key": ("id", 4),
+            "created_at": time.monotonic(),
+            "play_params": {},
+        }
+
+        player.play(
+            "box", 1, 2, 3, "Song", "https://youtu.be/x", 120,
+            playback_id=4, transport="relay_pending",
+        )
+
+        entry = player.players["box"]
+        self.assertEqual(entry["transport"], "direct")
+        self.assertIsNotNone(entry.get("streamer"))
+
     def test_relay_receiver_thread_starts_and_stops_cleanly(self):
         """Regression: JukeboxRelayReceiver used to set `self._started = False`,
         shadowing threading.Thread._started (an Event). Thread.start() then

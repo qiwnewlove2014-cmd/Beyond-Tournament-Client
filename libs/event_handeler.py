@@ -1430,6 +1430,7 @@ class EventHandeler:
             box = boxes.setdefault(jid, {"id": jid})
             box["current"] = data.get("current")
             box["queue"] = data.get("queue", [])
+            box["repeat"] = data.get("repeat", "off")
 
     def jukebox_play(self, data):
         """A jukebox started playing a song — play it at the jukebox position."""
@@ -1451,6 +1452,12 @@ class EventHandeler:
         player = self._jukebox_player()
         start_offset = float(data.get("start_offset") or 0.0)
         if player is not None:
+            if data.get("transport") == "relay":
+                # Reserve the relay route synchronously on the network thread:
+                # relay frames arriving before the deferred play() registers
+                # the receiver are buffered instead of dropped, so the song
+                # starts from its true intro rather than a few frames in.
+                player.pend_relay_route(data.get("relay_id"), data.get("stream_epoch"))
             self.game.put(lambda: player.play(
                 jid, x, y, z,
                 data.get("title", ""),

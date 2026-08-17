@@ -88,6 +88,10 @@ class YouTubeSearcher:
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
+            # One poisoned result (e.g. an age-restricted video raising
+            # "Sign in to confirm your age") must not kill the WHOLE search —
+            # broken entries come back as None and are filtered below.
+            'ignoreerrors': True,
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:

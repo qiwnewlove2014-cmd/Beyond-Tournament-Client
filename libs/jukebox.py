@@ -59,6 +59,24 @@ class JukeboxRelayReceiver(threading.Thread):
         self._last_sequence = None
         self.created_at = time.monotonic()
         self.last_packet_at = None
+        # When audio last made REAL progress (a buffer successfully queued
+        # into OpenAL). The auto-recovery watchdog compares this against
+        # last_packet_at to catch "frames keep arriving but no sound" states
+        # (dead sources after an audio device switch) that the packet-based
+        # stall check can never see.
+        self.last_audio_activity = None
+        # When OpenAL last CONSUMED a buffer (a source reported
+        # buffers_processed > 0). This is the ground truth of audible
+        # playback: a slowly starving stream (frames arriving, buffers
+        # queueing, but the speaker underrunning) stays invisible to every
+        # other check — only consumption proves sound is coming out.
+        self.last_output_at = None
+        # Total frames accepted through the sequence gate. The starvation
+        # watchdog compares this over a rolling window: a trickling channel
+        # (a few frames every few seconds) keeps every liveness check green
+        # while the listener hears mostly silence — only the arrival RATE
+        # exposes it (a healthy stream delivers 25 fps).
+        self.received_frames = 0
         for _ in range(self.NUM_BUFFERS):
             try:
                 self._pool.append(game.audio_mngr.context.gen_buffer())
@@ -79,6 +97,7 @@ class JukeboxRelayReceiver(threading.Thread):
                 return
         self._last_sequence = sequence
         self.last_packet_at = time.monotonic()
+        self.received_frames += 1
         if flags & 0x01:
             self._reset_queue()
         item = bytes(payload)
@@ -104,6 +123,11 @@ class JukeboxRelayReceiver(threading.Thread):
     def _reclaim(self):
         for source in (self.source_l, self.source_r):
             try:
+                if source.buffers_processed > 0:
+                    # OpenAL only marks buffers processed while a source is
+                    # audibly playing them out — this is the proof of life
+                    # the underrun watchdog depends on.
+                    self.last_output_at = time.monotonic()
                 while source.buffers_processed > 0:
                     result = source.unqueue_buffers()
                     if result is None:
@@ -150,6 +174,7 @@ class JukeboxRelayReceiver(threading.Thread):
             buf_r.set_data(right, sample_rate=48000, format=cyal.BufferFormat.MONO16)
             self.source_l.queue_buffers(buf_l)
             self.source_r.queue_buffers(buf_r)
+            self.last_audio_activity = time.monotonic()
             return True
         except Exception:
             self._pool.extend((buf_l, buf_r))
@@ -221,6 +246,11 @@ class JukeboxPlayer:
         self.volume = 65
         self._lock = threading.Lock()
         self.relay_routes = {}
+        # Frames buffered for relay routes whose jukebox_play event is still
+        # sitting on the deferred game queue (see pend_relay_route) — this is
+        # what keeps the first fraction of a song (its intro) from being
+        # dropped between the network thread and the main loop.
+        self._relay_pending = {}
         self._control_serial = 0
         # Jukebox ids awaiting a post-reload play confirmation (see
         # mark_pending_map_change). Confirmed players are kept playing
@@ -228,14 +258,66 @@ class JukeboxPlayer:
         self._pending_map_change = set()
         self._pending_map_change_serial = None
         self._last_recovery_request_at = 0.0
+        # Consecutive relay recovery failures per jukebox + sticky
+        # direct-playback deadlines (see update() — the cure for "sound dies
+        # until a full relogin": map changes keep the same ENet peer, only a
+        # fresh connection or local direct playback restores audio).
+        self._relay_fail_counts = {}
+        self._direct_fallback_until = {}
+        # Consecutive warm-up un-stick attempts per stalled jukebox (see
+        # update(): failed un-sticks escalate to a full rebuild early).
+        self._stall_unsticks = {}
 
     RELAY_STARTUP_TIMEOUT = 7.0
     RELAY_STALL_TIMEOUT = 5.0
+    # A stall that survived a warm-up un-stick attempt escalates to a full
+    # rebuild (chronic loss of the unreliable relay channel).
+    RELAY_HARD_STALL_TIMEOUT = 12.0
+    # Frames still arriving but OpenAL making no audible progress for this
+    # long -> full rebuild (dead sources / lost context after an audio device
+    # switch — the packet-based stall check can never see this state).
+    RELAY_AUDIO_STALL_TIMEOUT = 10.0
+    # Playback started but the speakers stopped CONSUMING buffers for this
+    # long -> the stream is slowly starving (underrunning): frames arrive
+    # just often enough to dodge the packet stall check and buffers still
+    # queue, yet the listener hears silence or a stutter loop. Only real
+    # output consumption proves otherwise.
+    RELAY_OUTPUT_STALL_TIMEOUT = 8.0
+    # Frame-rate starvation: a trickling channel (a few frames every few
+    # seconds) passes every liveness check above — packets arrive, buffers
+    # queue, speakers consume the tiny bursts — while the listener hears a
+    # sped-up stutter that fades to silence. A healthy relay delivers 25
+    # frames/second; below half of that over a 10s window the channel is
+    # starving and the rebuild ladder (ending in direct TCP playback) must
+    # kick in MID-SONG instead of waiting for the next song.
+    RELAY_STARVE_WINDOW = 10.0
+    RELAY_STARVE_MIN_FPS = 12.5
+    # A relay_pending placeholder whose follow-up play event never landed
+    # (server worker died mid-retry) asks for a resync after this long.
+    RELAY_PENDING_TIMEOUT = 15.0
     RECOVERY_COOLDOWN = 5.0
+    # A stall normally recovers via resync + warm-up replay. If this many
+    # consecutive un-stick attempts fail to hold, rebuild immediately instead
+    # of waiting for the hard-stall timeout (observed after map reloads: the
+    # warm-up blip plays but live frames never follow — only a fresh
+    # receiver fixes that, so get there in ~10s instead of 15).
+    RELAY_UNSTICK_TRIES = 2
+    # When relay recovery fails this many times in a row for one jukebox, the
+    # client plays that song directly over HTTP/ffmpeg (TCP) instead. Chronic
+    # loss of the unreliable relay channel on one player's ENet peer can never
+    # be fixed by resyncing — the warm-up frames use the same lost channel —
+    # and used to leave that player silent until a full relogin.
+    RELAY_DIRECT_FALLBACK_AFTER = 3
+    # Direct stays sticky for this long (or until a map change) so later songs
+    # don't re-pay the failing-relay window; relay is then tried again.
+    DIRECT_FALLBACK_TTL = 10 * 60.0
     # Full parse_map reloads can cross the ordered map channel and the misc
     # response channel.  The observed state reply can arrive just over two
     # seconds later, so do not destroy the healthy receiver prematurely.
     MAP_RELOAD_CONFIRM_TIMEOUT = 4.0
+    # A pending relay route that never turns into a real receiver (play was
+    # rejected, or the server switched relay identity) is swept after this.
+    RELAY_PENDING_TTL = 10.0
 
     @property
     def control_serial(self):
@@ -264,8 +346,32 @@ class JukeboxPlayer:
             log_line(f"[Jukebox] play({jukebox_id}) skipped: no url")
             return
 
+        # Emergency direct fallback: when this connection chronically loses
+        # the unreliable relay channel, play locally over HTTP instead of
+        # waiting for relay frames that never arrive. Sticky until the
+        # deadline (or a map change) so later songs stay audible too.
+        if transport in ("relay", "relay_pending"):
+            deadline = self._direct_fallback_until.get(jukebox_id)
+            if deadline is not None and time.monotonic() < deadline:
+                if relay_id is not None and stream_epoch is not None:
+                    try:
+                        with self._lock:
+                            self._relay_pending.pop((int(relay_id), int(stream_epoch)), None)
+                    except (TypeError, ValueError):
+                        pass
+                transport = "direct"
+
         effective_volume = self.volume if volume is None else volume
         playback_key = ("id", int(playback_id)) if playback_id is not None else ("url", url)
+        # Kept so the emergency direct fallback can re-start this exact song
+        # from its current wall-clock position without another server event.
+        play_params = {
+            "x": float(x), "y": float(y), "z": float(z),
+            "title": title, "url": url, "duration": int(duration or 0),
+            "start_offset": float(start_offset or 0.0),
+            "http_headers": http_headers,
+            "received_at": time.monotonic(),
+        }
 
         with self._lock:
             self._control_serial += 1
@@ -308,6 +414,31 @@ class JukeboxPlayer:
                 log_line(f"[Jukebox] play({jukebox_id}) seamless continuity for {title!r}")
                 return
 
+        # Make-before-break: a relay_pending event must not kill a working
+        # DIRECT stream for the same song. Map reloads re-offer the relay
+        # ("wait for it") while the listener is happily playing direct —
+        # stopping that stream made ~10s of silence until the relay actually
+        # became ready. Keep direct running; the ready relay event (or direct
+        # failing) switches streams on its own.
+        if transport == "relay_pending":
+            with self._lock:
+                existing_entry = self.players.get(jukebox_id)
+                direct_streamer = existing_entry.get("streamer") if existing_entry else None
+                keep_direct = bool(
+                    existing_entry is not None
+                    and existing_entry.get("playback_key") == playback_key
+                    and existing_entry.get("transport") == "direct"
+                    and direct_streamer is not None
+                    and hasattr(direct_streamer, "is_alive")
+                    and direct_streamer.is_alive()
+                )
+            if keep_direct:
+                log_line(
+                    f"[Jukebox] play({jukebox_id}) keeping direct stream "
+                    f"for {title!r} while the relay readies"
+                )
+                return
+
         self.stop(jukebox_id)
         if transport == "relay_pending":
             with self._lock:
@@ -315,6 +446,12 @@ class JukeboxPlayer:
                     "source": None, "secondary_source": None, "streamer": None,
                     "title": title, "url": url, "transport": transport,
                     "playback_key": playback_key,
+                    "play_params": play_params,
+                    # Without a timestamp the update() watchdog computed this
+                    # placeholder's age as 0 on every frame, so a placeholder
+                    # whose follow-up relay event never landed waited silently
+                    # forever (the "must relog after a map reload" bug).
+                    "created_at": time.monotonic(),
                 }
             log_line(
                 f"[Jukebox] waiting for server relay {title!r} "
@@ -397,9 +534,18 @@ class JukeboxPlayer:
                 "playback_key": playback_key,
                 "relay_key": (int(relay_id), int(stream_epoch)) if transport == "relay" else None,
                 "created_at": time.monotonic(),
+                "play_params": play_params,
             }
             if transport == "relay":
                 self.relay_routes[(int(relay_id), int(stream_epoch))] = streamer
+                # Take over any frames buffered while this receiver was being
+                # created and flush them UNDER THE SAME LOCK: a live frame on
+                # the network thread must not slip in first and make the
+                # sequence gate reject the buffered intro frames.
+                pending = self._relay_pending.pop((int(relay_id), int(stream_epoch)), None)
+                if pending is not None:
+                    for seq, payload, flags in pending["frames"]:
+                        streamer.receive(seq, payload, flags)
         log_line(
             f"[Jukebox] playing {title!r} transport={transport} "
             f"playback={playback_id!r} relay={relay_id!r}/{stream_epoch!r} "
@@ -426,6 +572,7 @@ class JukeboxPlayer:
         if relay_key is not None:
             with self._lock:
                 self.relay_routes.pop(relay_key, None)
+                self._relay_pending.pop(relay_key, None)
         try:
             if streamer is not None:
                 if isinstance(streamer, JukeboxRelayReceiver):
@@ -476,11 +623,29 @@ class JukeboxPlayer:
         permanently silent until reconnect.  The server's ``jukebox_resync``
         reply includes both the authoritative play state and relay warm-up
         frames, so it is the safe recovery authority.
+
+        Recovery is layered so every failure mode ends in a full rebuild
+        instead of an infinite silent wait:
+        * frames stopped arriving -> resync + warm-up un-stick (5s), escalating
+          to a full rebuild if the stall survives to 12s;
+        * frames keep arriving but OpenAL makes no audible progress -> full
+          rebuild after 10s;
+        * a relay_pending placeholder whose follow-up play event never lands
+          -> resync after 15s.
         """
         now = time.monotonic()
-        restart_ids = []
+        rebuilds = []  # [(jukebox_id, reason)]
+        stalled_ids = []  # relays relying on a warm-up un-stick this cycle
         needs_resync = False
         with self._lock:
+            # Drop pending relay routes that never became receivers (play
+            # rejected, or the server switched relay identity mid-flight).
+            stale_pending = [
+                key for key, entry in self._relay_pending.items()
+                if now - entry["at"] > self.RELAY_PENDING_TTL
+            ]
+            for key in stale_pending:
+                del self._relay_pending[key]
             for jukebox_id, entry in list(self.players.items()):
                 transport = entry.get("transport")
                 streamer = entry.get("streamer")
@@ -489,16 +654,83 @@ class JukeboxPlayer:
                 if transport == "relay" and streamer is not None:
                     alive = streamer.is_alive() if hasattr(streamer, "is_alive") else True
                     last_packet = getattr(streamer, "last_packet_at", None)
-                    stalled = (
+                    stall_age = (now - float(last_packet)) if last_packet is not None else None
+                    no_packets = (
                         age >= self.RELAY_STARTUP_TIMEOUT and last_packet is None
                     ) or (
-                        last_packet is not None
-                        and now - float(last_packet) >= self.RELAY_STALL_TIMEOUT
+                        stall_age is not None and stall_age >= self.RELAY_STALL_TIMEOUT
                     )
+                    last_audio = getattr(streamer, "last_audio_activity", None)
+                    stuck_audio = bool(
+                        alive
+                        and last_packet is not None
+                        and stall_age is not None and stall_age < 1.0
+                        and getattr(streamer, "_play_started", False)
+                        and last_audio is not None
+                        and now - float(last_audio) >= self.RELAY_AUDIO_STALL_TIMEOUT
+                    )
+                    # Underrun watchdog: frames may arrive and buffers may
+                    # queue, but if the speakers have not consumed anything
+                    # for a while the listener is hearing silence/stutter
+                    # that every packet-based check calls "healthy".
+                    last_output = getattr(streamer, "last_output_at", None)
+                    starved_output = bool(
+                        alive
+                        and getattr(streamer, "_play_started", False)
+                        and last_output is not None
+                        and now - float(last_output) >= self.RELAY_OUTPUT_STALL_TIMEOUT
+                    )
+                    hard_stall = bool(
+                        no_packets and stall_age is not None
+                        and stall_age >= self.RELAY_HARD_STALL_TIMEOUT
+                    )
+                    # Frame-rate starvation: everything above can look green
+                    # while the listener hears a sped-up stutter fading to
+                    # silence. Only the arrival RATE over a window exposes
+                    # the trickling channel (healthy = 25 fps).
+                    starved_rate = False
+                    if (alive and not no_packets and not stuck_audio
+                            and not starved_output
+                            and getattr(streamer, "_play_started", False)):
+                        frames_now = int(getattr(streamer, "received_frames", 0) or 0)
+                        check = entry.get("frame_rate_check")
+                        if not isinstance(check, list) or len(check) != 2:
+                            entry["frame_rate_check"] = [now, frames_now]
+                        elif now - float(check[0]) >= self.RELAY_STARVE_WINDOW:
+                            window = now - float(check[0])
+                            fps = (frames_now - int(check[1])) / window
+                            entry["frame_rate_check"] = [now, frames_now]
+                            if fps < self.RELAY_STARVE_MIN_FPS:
+                                starved_rate = True
+                                rebuilds.append(
+                                    (jukebox_id, f"frame starvation ({fps:.1f} fps)")
+                                )
+                    if (alive and not no_packets and not stuck_audio
+                            and not starved_output and not starved_rate
+                            and last_audio is not None):
+                        # Relay demonstrably working — clear the strike and
+                        # un-stick counters.
+                        self._relay_fail_counts[jukebox_id] = 0
+                        self._stall_unsticks[jukebox_id] = 0
                     if not alive:
-                        restart_ids.append(jukebox_id)
+                        rebuilds.append((jukebox_id, "receiver thread died"))
+                    elif stuck_audio:
+                        rebuilds.append((jukebox_id, "frames arriving but no audio progress"))
+                    elif starved_output:
+                        rebuilds.append((jukebox_id, "speaker stopped consuming (underrun)"))
+                    elif no_packets:
+                        if hard_stall:
+                            # The stall survived a warm-up un-stick attempt —
+                            # stop waiting and rebuild from scratch.
+                            rebuilds.append((jukebox_id, f"no frames for {stall_age:.0f}s"))
+                        else:
+                            stalled_ids.append(jukebox_id)
                         needs_resync = True
-                    elif stalled:
+                elif transport == "relay_pending":
+                    # The server said a relay is coming but the follow-up play
+                    # event never landed (worker died mid-retry): ask for the
+                    # authoritative state instead of waiting for a relog.
+                    if age >= self.RELAY_PENDING_TIMEOUT:
                         needs_resync = True
                 elif transport == "direct" and streamer is not None:
                     # Direct fallback has no server relay to signal a mid-song
@@ -507,20 +739,83 @@ class JukeboxPlayer:
                     # next-song timer.
                     if (hasattr(streamer, "is_alive") and not streamer.is_alive()
                             and getattr(streamer, "failure_reason", None)):
-                        restart_ids.append(jukebox_id)
-                        needs_resync = True
+                        rebuilds.append((jukebox_id, "direct streamer failed"))
+        if rebuilds:
+            needs_resync = True
         if needs_resync:
             # Do not remove a dead route unless this call actually sent the
             # recovery request.  Otherwise a cooldown could leave no route
             # behind to trigger the next retry.
             if not self.request_resync("relay recovery"):
-                restart_ids = []
+                rebuilds = []
             else:
+                # The resync just went out: every still-stalled relay that is
+                # NOT being rebuilt now owes its recovery to the warm-up
+                # replay. Count these un-stick attempts — when they repeat
+                # without holding (observed after map reloads: the warm-up
+                # blip plays but live frames never follow), rebuild right
+                # away instead of waiting out the hard-stall timeout.
+                for jukebox_id in stalled_ids:
+                    if any(jid == jukebox_id for jid, _ in rebuilds):
+                        continue
+                    unsticks = self._stall_unsticks.get(jukebox_id, 0) + 1
+                    self._stall_unsticks[jukebox_id] = unsticks
+                    if unsticks >= self.RELAY_UNSTICK_TRIES:
+                        rebuilds.append((jukebox_id, "warm-up un-stick did not hold"))
                 # A dead receiver must be removed before the matching
                 # ``jukebox_play`` arrives; otherwise idempotent same-identity
-                # handling would retain it.
-                for jukebox_id in restart_ids:
+                # handling would retain it.  The resync reply rebuilds it with
+                # fresh sources, and the buffered pending-route frames plus
+                # the server's warm-up replay bridge the gap seamlessly.
+                direct_switches = []
+                for jukebox_id, reason in rebuilds:
+                    log_line(f"[Jukebox] auto-recovery: rebuilding {jukebox_id} ({reason})")
+                    params = None
+                    with self._lock:
+                        entry = self.players.get(jukebox_id)
+                        # A strike per EXECUTED recovery attempt (not per scan
+                        # frame): three failed rebuild cycles in a row means
+                        # resyncing cannot fix this connection.
+                        strikes = self._relay_fail_counts.get(jukebox_id, 0) + 1
+                        self._relay_fail_counts[jukebox_id] = strikes
+                        if entry is not None and strikes >= self.RELAY_DIRECT_FALLBACK_AFTER:
+                            # Snapshot before stop() removes the entry.
+                            params = dict(entry.get("play_params") or {})
                     self.stop(jukebox_id)
+                    if params is not None:
+                        direct_switches.append((jukebox_id, params))
+                for jukebox_id, params in direct_switches:
+                    # Relay keeps failing on this connection: switch this one
+                    # jukebox to local direct playback (TCP-based) instead of
+                    # looping rebuilds forever on a lost unreliable channel.
+                    self._switch_to_direct(jukebox_id, params)
+
+    def _switch_to_direct(self, jukebox_id, params):
+        """Emergency: play the current song locally over HTTP when the relay
+        channel is chronically unusable on this connection.
+
+        Direct playback does not depend on the unreliable relay channel at
+        all, so it survives exactly the cases resyncing cannot fix — chronic
+        per-peer loss of the relay channel, where even the warm-up frames
+        die and only a full relogin used to restore audio. Other listeners
+        keep hearing the server relay unaffected."""
+        params = dict(params or {})
+        self._direct_fallback_until[jukebox_id] = time.monotonic() + self.DIRECT_FALLBACK_TTL
+        if not params.get("url"):
+            return
+        # Continue from the song's current wall-clock position: the original
+        # offset plus everything elapsed since the play event arrived.
+        now = time.monotonic()
+        offset = float(params.get("start_offset") or 0.0) + max(
+            0.0, now - float(params.get("received_at") or now))
+        log_line(f"[Jukebox] auto-recovery: {jukebox_id} relay unusable — direct playback")
+        speak("Jukebox playing directly.")
+        self.play(
+            jukebox_id, params["x"], params["y"], params["z"],
+            params.get("title", ""), params["url"], params.get("duration") or 0,
+            transport="direct", start_offset=offset,
+            http_headers=params.get("http_headers"),
+        )
 
     def request_resync(self, reason="manual recovery"):
         """Ask the server for current jukebox routes and relay warm-up frames.
@@ -574,6 +869,16 @@ class JukeboxPlayer:
             pending = set(self.players.keys())
             self._pending_map_change = pending
             self._pending_map_change_serial = serial
+            # A fresh map is a fresh chance for the relay channel: give the
+            # server relay another try after the emergency direct fallback.
+            self._direct_fallback_until.clear()
+            self._relay_fail_counts.clear()
+            self._stall_unsticks.clear()
+            if pending:
+                log_line(
+                    f"[Jukebox] map reload: {len(pending)} jukebox(es) awaiting "
+                    f"play confirmation"
+                )
         if not pending:
             return True
 
@@ -601,6 +906,27 @@ class JukeboxPlayer:
         _threading.Thread(target=sweep, daemon=True).start()
         return True
 
+    def pend_relay_route(self, relay_id, stream_epoch):
+        """Reserve a relay route BEFORE play() registers the real receiver.
+
+        Relay frames are processed synchronously on the network thread, while
+        jukebox_play playback setup is deferred to the main game loop. Without
+        a pending buffer every frame in that gap — the song's first few 40 ms
+        slices — was dropped, so songs started a fraction of a second in.
+        Called from the jukebox_play network handler, so it only touches a dict.
+        """
+        if relay_id is None or stream_epoch is None:
+            return
+        try:
+            key = (int(relay_id), int(stream_epoch))
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            if key in self.relay_routes:
+                return
+            if key not in self._relay_pending:
+                self._relay_pending[key] = {"frames": [], "at": time.monotonic()}
+
     def receive_relay_packet(self, data):
         """Parse and enqueue a compact relay frame; safe under the network lock."""
         try:
@@ -613,8 +939,20 @@ class JukeboxPlayer:
                 return False
             with self._lock:
                 receiver = self.relay_routes.get((relay_id, stream_epoch))
+                pending = None
+                if receiver is None:
+                    # No live route yet: keep the frame for a pending route so
+                    # the song intro survives until play() registers the
+                    # receiver. Bounded; the oldest frames drop first.
+                    pending = self._relay_pending.get((relay_id, stream_epoch))
+                    if pending is not None:
+                        pending["at"] = time.monotonic()
+                        frames = pending["frames"]
+                        if len(frames) >= JukeboxRelayReceiver.MAX_PENDING_FRAMES:
+                            frames.pop(0)
+                        frames.append((sequence, payload, flags))
             if receiver is None:
-                return False
+                return pending is not None
             receiver.receive(sequence, payload, flags)
             return True
         except Exception:
@@ -716,6 +1054,14 @@ def open_jukebox_menu(game, gp):
         gp.pop_last_substate()
         _stop_playback(game, gp, jukebox_id)
 
+    def go_repeat():
+        gp.pop_last_substate()
+        _toggle_repeat(game, gp, jukebox_id)
+
+    def go_shuffle():
+        gp.pop_last_substate()
+        _shuffle_queue(game, gp, jukebox_id)
+
     def go_volume():
         gp.pop_last_substate()
         _open_volume_menu(game, gp, jukebox_id)
@@ -732,11 +1078,21 @@ def open_jukebox_menu(game, gp):
         gp.pop_last_substate()
         _clear_all(game, gp, jukebox_id)
 
+    repeat_names = {"off": "off", "one": "repeat one", "all": "repeat all"}
+
+    def _repeat_label():
+        # Callable label: evaluated when the menu speaks, so it always shows
+        # the latest repeat mode from the cached server state.
+        mode = _get_repeat_mode(gp, jukebox_id)
+        return f"Toggle repeat mode (now: {repeat_names.get(mode, 'off')})"
+
     menu_items = [
         ("Search YouTube and queue a song", go_search),
         ("Queue by YouTube URL", go_direct_url),
         ("Skip current song", go_skip),
         ("Stop playback", go_stop),
+        (_repeat_label, go_repeat),
+        ("Shuffle queue", go_shuffle),
         ("Adjust jukebox volume", go_volume),
         ("View queue", go_queue),
         ("Remove my queued song", go_remove),
@@ -792,27 +1148,54 @@ def _on_url_submit(game, gp, jukebox_id, raw_url):
     if not url:
         speak("Cancelled.")
         return
+    # The jukebox streams through the server's YouTube relay, so only YouTube
+    # links are supported. Other yt-dlp sites would resolve here and then be
+    # mangled into a bogus youtube.com/watch?v=<foreign-id> queue entry that
+    # can never play.
+    if url and not url.startswith(("http://", "https://")):
+        # Be kind to links pasted without a scheme.
+        url = "https://" + url
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not url.startswith(("http://", "https://")) or not (
+            host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"):
+        speak("Only YouTube links are supported on the jukebox.")
+        return
     speak("Loading YouTube song info...")
 
     def do_fetch():
         try:
             import yt_dlp
             from . import logger
-            ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'no_warnings': True}
+            # noplaylist: a shared link with &list=... must resolve to the ONE
+            # video, not the whole playlist (otherwise the playlist name, a
+            # guessed duration, and the playlist URL all get queued as a song).
+            ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'no_warnings': True,
+                        'noplaylist': True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                title = info.get('title', 'YouTube Audio')
-                duration = int(info.get('duration') or 300)
-                webpage_url = info.get('webpage_url') or ""
-                if not _is_canonical_youtube(webpage_url) and info.get('id'):
-                    webpage_url = f"https://www.youtube.com/watch?v={info['id']}"
-                if not webpage_url:
-                    webpage_url = url
+            # A pure /playlist?list= link still resolves to the whole playlist
+            # even with noplaylist — queue its first video instead.
+            if info and 'entries' in info:
+                entries = [e for e in (info.get('entries') or []) if e]
+                if not entries:
+                    raise ValueError("empty playlist")
+                info = entries[0]
+            title = info.get('title', 'YouTube Audio')
+            duration = int(info.get('duration') or 300)
+            webpage_url = info.get('webpage_url') or ""
+            if not _is_canonical_youtube(webpage_url) and info.get('id'):
+                webpage_url = f"https://www.youtube.com/watch?v={info['id']}"
+            if not webpage_url:
+                webpage_url = url
 
-                def do_send():
-                    _queue_song(game, gp, jukebox_id, title, webpage_url, duration)
+            def do_send():
+                _queue_song(game, gp, jukebox_id, title, webpage_url, duration)
 
-                game.put(do_send)
+            game.put(do_send)
         except Exception as ex:
             from . import logger
             logger.log_exception(ex, "Jukebox direct URL load")
@@ -834,6 +1217,31 @@ def _clear_all(game, gp, jukebox_id):
 def _stop_playback(game, gp, jukebox_id):
     from . import consts
     game.network.send(consts.CHANNEL_MISC, "jukebox_stop", {"id": jukebox_id})
+
+
+def _get_repeat_mode(gp, jukebox_id):
+    """The cached server repeat mode for one jukebox (off / one / all)."""
+    box = _current_state(gp).get("jukeboxes", {}).get(jukebox_id) or {}
+    mode = box.get("repeat") or "off"
+    return mode if mode in ("off", "one", "all") else "off"
+
+
+def _toggle_repeat(game, gp, jukebox_id):
+    from . import consts
+    order = ("off", "one", "all")
+    current = _get_repeat_mode(gp, jukebox_id)
+    nxt = order[(order.index(current) + 1) % len(order)]
+    # The server speaks the confirmation and the queue update refreshes the
+    # cached mode shown by the menu label.
+    game.network.send(consts.CHANNEL_MISC, "jukebox_set_repeat", {
+        "id": jukebox_id,
+        "repeat": nxt,
+    })
+
+
+def _shuffle_queue(game, gp, jukebox_id):
+    from . import consts
+    game.network.send(consts.CHANNEL_MISC, "jukebox_shuffle", {"id": jukebox_id})
 
 
 def _get_or_create_jukebox_player(game, gp):
@@ -975,6 +1383,11 @@ def _view_queue(game, gp):
 
     m = menu_mod.Menu(game, "Jukebox Queue", parrent=gp)
     items = []
+    repeat_names = {"off": "Off", "one": "Repeat one", "all": "Repeat all"}
+    items.append((
+        f"Repeat mode: {repeat_names.get(jb_state.get('repeat') or 'off', 'Off')}",
+        lambda: None,
+    ))
     if current:
         items.append((
             f"Now playing: {current.get('title', 'Unknown')} "
