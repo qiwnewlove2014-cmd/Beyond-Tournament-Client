@@ -1344,6 +1344,67 @@ class TestAudioStreamerFailureSurfacing(unittest.TestCase):
 
 
 class TestMusicBotStreamMetadata(unittest.TestCase):
+    def test_search_uses_flat_extraction_and_builds_canonical_urls(self):
+        """Search must use extract_flat (one-request metadata, ~5x faster) and
+        still return canonical watch URLs — never expired signed streams."""
+        from unittest import mock
+        import yt_dlp
+        from libs import music_bot as mb
+
+        class FakeYDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def extract_info(self, target, download=False):
+                self.target = target
+                return {
+                    "entries": [
+                        {
+                            "id": "abc123",
+                            "title": "Flat Song",
+                            "duration": 210,
+                            # Flat entries have no webpage_url; the watch URL
+                            # sits in `url` instead.
+                            "url": "https://www.youtube.com/watch?v=abc123",
+                        },
+                        {
+                            "id": "def456",
+                            "title": "Broken result",
+                        },
+                        None,  # poisoned entry must not kill the search
+                    ]
+                }
+
+        instances = []
+
+        def factory(opts):
+            inst = FakeYDL(opts)
+            instances.append(inst)
+            return inst
+
+        with mock.patch.object(yt_dlp, "YoutubeDL", side_effect=factory):
+            results = mb.YouTubeSearcher.search("query", count=5)
+        fake = instances[0]
+
+        self.assertEqual(fake.options.get("extract_flat"), "in_playlist")
+        self.assertTrue(fake.options.get("skip_download"))
+        self.assertEqual(fake.target, "ytsearch5:query")
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["webpage_url"], "https://www.youtube.com/watch?v=abc123")
+        # No signed googlevideo stream leaks out of search.
+        self.assertNotIn("googlevideo", results[0]["url"])
+        self.assertEqual(results[0]["duration"], 210)
+        self.assertEqual(
+            results[1]["webpage_url"],
+            "https://www.youtube.com/watch?v=def456",
+        )
+
     def test_get_stream_info_keeps_url_and_authorization_headers(self):
         from unittest import mock
         import yt_dlp
