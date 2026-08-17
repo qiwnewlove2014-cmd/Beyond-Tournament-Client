@@ -43,7 +43,25 @@ def main():
     crash_reporting.begin_session()
     logger.clear_log()
     logger.log("Starting Beyond Tournament Client...")
-    
+
+    # Compiled builds are single-instance: refuse a second copy before any
+    # heavy initialization (pygame, audio, network). Running from source keeps
+    # the normal multi-instance behavior for testing several accounts at once.
+    # Updater relaunches carry extra CLI args: the previous process (argv[3])
+    # is being replaced and is killed without running its atexit handlers, so
+    # hand its single-instance lock over before the new copy starts up.
+    if len(sys.argv) > 3:
+        try:
+            from libs import instance_manager as _im
+            _im.release_lock_for_pid(int(sys.argv[3]))
+        except Exception:
+            pass
+    else:
+        from libs import instance_manager
+        if instance_manager.InstanceManager.compiled_instance_blocked():
+            _show_single_instance_message()
+            return
+
     from libs import options
 
     options.initialize()
@@ -88,6 +106,22 @@ def main():
 import sys
 import traceback
 import threading
+
+def _show_single_instance_message():
+    """Tell the player the compiled build only allows one open instance."""
+    msg = (
+        "Beyond Tournament is already running.\n\n"
+        "Only one instance of this build can be open at a time.\n"
+        "Close the other window first, then try again."
+    )
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            None, msg, "Beyond Tournament", 0x10  # MB_ICONERROR
+        )
+    except Exception:
+        print(msg)
+
 
 def show_crash_dialog(error_text):
     """
