@@ -119,6 +119,13 @@ def main_menu(game):
     """replace the current game state with the main menu."""
     if hasattr(game, 'instance_mngr'):
         game.instance_mngr.set_character(None)
+    # An in-game logout fade drops the listener gain to silence; restore it
+    # so the menu (and its music) is audible again.
+    try:
+        master = game.audio_mngr.volume_categories["master"][0]
+        game.audio_mngr.listener.gain = master / 100
+    except Exception:
+        pass
     m = menu.Menu(
         game,
         "Main menu.",
@@ -131,7 +138,9 @@ def main_menu(game):
             ("Create account", game.create_account),
             ("options", lambda: options_menu(game, lambda: main_menu(game))),
             ("Check for Updates", lambda: game.replace(updater.Updater(game))),
-            ("Exit", game.exit),
+            # Esc on the root main menu reaches this item too (menu.py matches
+            # the "exit" keyword) — fade the audio out smoothly before quitting.
+            ("Exit", game.fade_out_and_exit),
         )
     )
     m.set_music("music/10.ogg")

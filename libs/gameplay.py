@@ -38,6 +38,19 @@ import math
 import cyal
 
 
+class _ExitFadeState(state.State):
+    """Blocks all input while the exit fade-out plays out.
+
+    Pushed as a substate on top of Gameplay: Gameplay keeps running underneath
+    (so its map audio stays alive and audibly fades instead of hard-cutting),
+    but every key/event is swallowed until the fade finishes and the process
+    exits.
+    """
+
+    def update(self, events):
+        return True
+
+
 class Gameplay(state.State):
     _PIANO_MIN_BASE_OCTAVE = 1
     _PIANO_MAX_BASE_OCTAVE = 6
@@ -2271,12 +2284,33 @@ class Gameplay(state.State):
             parrent=self,
         )
         items = [
-            ("Yes", lambda: self.quit(mod)),
+            ("Yes", lambda: self._exit_faded(mod)),
             ("No", self.pop_last_substate),
         ]
         m.add_items(items)
         menus.set_default_sounds(m)
         self.add_substate(m)
+
+    def _exit_faded(self, mod):
+        """Yes on the Esc confirm: fade the map audio out, then quit.
+
+        Announces "Disconnecting" and fades while Gameplay is still alive so
+        the ambience/music actually softens to silence instead of being
+        destroyed instantly; when it completes, the normal quit flow (logout
+        + cleanup) runs and the server disconnect lands us back on the main
+        menu.
+        """
+        if not self.game.start_exit_fade(
+            on_faded=lambda: self.quit(mod),
+            exit_after=False,  # logout returns to the main menu, not app exit
+            announce="Disconnecting",  # logging the character out, not closing the app
+        ):
+            return
+        # Block all input for the fade's duration; Gameplay underneath keeps
+        # updating its audio so the fade is audible. When the fade completes,
+        # quit() logs out and the server disconnect lands us on the main menu
+        # (whose listener gain is restored there).
+        self.replace_last_substate(_ExitFadeState(self.game))
 
     def spectator_menu(self, mod):
         m = menu.Menu(

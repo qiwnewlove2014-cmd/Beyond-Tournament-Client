@@ -389,6 +389,65 @@ class Game:
     def exit(self):
         self.stack = []
 
+    def start_exit_fade(self, on_faded=None, exit_after=True, announce="Exiting"):
+        """Fade all audio to silence over ~1.5s, then run ``on_faded``.
+
+        Announces ``announce`` ("Exiting" by default) and ramps the OpenAL
+        listener gain (the global output gain) down to 0. When the fade
+        completes, ``on_faded`` runs (if given); with ``exit_after``
+        (default) the process then exits, otherwise the caller keeps control
+        (e.g. the in-game logout flow, which returns to the main menu and
+        announces "Disconnecting" instead). The saved master-volume option
+        is never touched. Returns False if a fade is already running.
+        """
+        if getattr(self, "_exit_fade_started", False):
+            return False
+        self._exit_fade_started = True
+        speak(announce)
+        master = self.audio_mngr.volume_categories["master"][0]
+
+        def step(value):
+            try:
+                # Listener gain is the global output gain (see set_volume):
+                # scaling it fades every audio category together.
+                self.audio_mngr.listener.gain = value / 100
+            except Exception:
+                pass
+
+        def done():
+            try:
+                if on_faded is not None:
+                    on_faded()
+            except Exception:
+                pass
+            # Allow a later fade (e.g. exiting from the main menu after an
+            # in-game logout fade) to run again.
+            self._exit_fade_started = False
+            if exit_after:
+                self.exit()
+
+        self.automate(
+            None, None, 0.0, 1500,
+            step_callback=step,
+            callback=done,
+            start_value=master,
+            cancelable=False,
+        )
+        return True
+
+    def fade_out_and_exit(self):
+        """Fade all audio to silence, then exit the game (main menu Exit).
+
+        Used by the main menu's Exit action (and the Esc shortcut that
+        triggers it). The menu is swapped for an inert state so no input can
+        interrupt the fade.
+        """
+        if not self.start_exit_fade():
+            return
+        # Swap the menu for an inert state that blocks all input while the
+        # fade plays out.
+        self.replace(state.State(self))
+
     def new_clock(self):
         cl = clock.Clock()
         self.clocks.add(cl)
