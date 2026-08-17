@@ -966,7 +966,22 @@ class AudioStreamer(threading.Thread):
                 pass
 
         if self.running:
-            self.completed_normally = True
+            # Distinguish a natural song end from a mid-song ffmpeg death (403
+            # on a CDN reconnect, connection reset, ...). ffmpeg exits 0 on a
+            # clean EOF; any other exit code after audio already started means
+            # the stream died EARLY. Mark it a failure so the jukebox recovery
+            # watchdog rebuilds with a fresh resolve instead of treating the
+            # silence as a finished song ("music disappears before the end").
+            exit_code = None
+            try:
+                if self.process is not None:
+                    exit_code = self.process.poll()
+            except Exception:
+                exit_code = None
+            if exit_code not in (None, 0):
+                self.failure_reason = f"ffmpeg exited early (code {exit_code})"
+            else:
+                self.completed_normally = True
 
         # Cleanup
         self._cleanup()

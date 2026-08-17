@@ -119,10 +119,102 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
         handler._begin_map_audio_reload = lambda: None
         handler._finish_map_audio_reload = lambda: None
         handler._reset_instruments_for_map_change = lambda: None
-        handler._stop_jukebox_players_for_map_change = lambda: None
+        handler._stop_jukebox_players_for_map_change = lambda same_map=False: None
 
         handler._apply_parse_map({"data": {}, "x": 0, "y": 0, "z": 0})
         self.assertIn((consts.CHANNEL_MISC, "jukebox_resync"), sent)
+
+    def test_parse_map_stops_jukebox_immediately_on_real_transition(self):
+        """parse_map naming a DIFFERENT map must stop all old-map jukebox
+        audio synchronously (no 4s mark-and-sweep grace, no ghost tail)."""
+        from libs.event_handeler import EventHandeler
+
+        marks = []
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.gameplay = SimpleNamespace(
+            map_name="oldmap",
+            jukebox_state={},
+            jukebox_player=SimpleNamespace(
+                control_serial=7,
+                mark_pending_map_change=lambda serial: marks.append(serial),
+                stop_all=lambda: marks.append("stop_all"),
+            ),
+        )
+        handler._stop_jukebox_players_for_map_change(same_map=False)
+        self.assertEqual(marks, ["stop_all"])
+        self.assertEqual(handler.gameplay.jukebox_state, {"jukeboxes": {}})
+
+    def test_parse_map_keeps_mark_and_sweep_for_same_map(self):
+        """A same-name full reparse keeps the graceful mark-and-sweep so a
+        re-broadcast jukebox_play can preserve the stream seamlessly."""
+        from libs.event_handeler import EventHandeler
+
+        marks = []
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.gameplay = SimpleNamespace(
+            map_name="oldmap",
+            jukebox_state={},
+            jukebox_player=SimpleNamespace(
+                control_serial=7,
+                mark_pending_map_change=lambda serial: marks.append(serial),
+                stop_all=lambda: marks.append("stop_all"),
+            ),
+        )
+        handler._stop_jukebox_players_for_map_change(same_map=True)
+        self.assertEqual(marks, [7])
+
+    def test_apply_parse_map_detects_real_transition_by_name(self):
+        """_apply_parse_map compares the incoming map name against the current
+        one: different name -> immediate stop, same name -> mark-and-sweep."""
+        from libs.event_handeler import EventHandeler
+
+        def make_handler(previous_name):
+            handler = EventHandeler.__new__(EventHandeler)
+            handler.game = SimpleNamespace(
+                automations=[],
+                audio_mngr=SimpleNamespace(apply_filter=lambda *args, **kwargs: None),
+                exclude_water=set(),
+                network=SimpleNamespace(send=lambda *args, **kwargs: None),
+            )
+            handler.gameplay = SimpleNamespace(
+                voice_channels={},
+                map_name=previous_name,
+                jukebox_state={},
+                player=SimpleNamespace(move=lambda *args, **kwargs: None),
+                parser=SimpleNamespace(load=lambda *args, **kwargs: None),
+            )
+            handler._begin_map_audio_reload = lambda: None
+            handler._finish_map_audio_reload = lambda: None
+            handler._reset_instruments_for_map_change = lambda: None
+            handler._stop_jukebox_players_for_map_change = (
+                lambda same_map=False: marks.append(same_map)
+            )
+            return handler
+
+        marks = []
+        make_handler("oldmap")._apply_parse_map(
+            {"name": "newmap", "data": {}, "x": 0, "y": 0, "z": 0}
+        )
+        self.assertEqual(marks, [False])
+
+        marks = []
+        handler = make_handler("oldmap")
+        handler._apply_parse_map(
+            {"name": "oldmap", "data": {}, "x": 0, "y": 0, "z": 0}
+        )
+        self.assertEqual(marks, [True])
+        # The new map name is remembered for the next comparison.
+        self.assertEqual(handler.gameplay.map_name, "oldmap")
+
+        # First map load (no previous name): treated as a transition (nothing
+        # to stop) and the name is recorded.
+        marks = []
+        handler = make_handler(None)
+        handler._apply_parse_map(
+            {"name": "first", "data": {}, "x": 0, "y": 0, "z": 0}
+        )
+        self.assertEqual(marks, [False])
+        self.assertEqual(handler.gameplay.map_name, "first")
 
     def test_resync_preserves_existing_entity_and_continuous_sources(self):
         from libs.world_map import Map

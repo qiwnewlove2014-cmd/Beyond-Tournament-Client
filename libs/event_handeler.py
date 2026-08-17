@@ -284,8 +284,20 @@ class EventHandeler:
         # map so memory does not accumulate. Must run on the main thread because
         # reset() touches OpenAL sources/filters.
         self._reset_instruments_for_map_change()
-        # Stop any jukebox audio still playing from the previous map.
-        self._stop_jukebox_players_for_map_change()
+        # Stop any jukebox audio still playing from the previous map. A
+        # parse_map naming a DIFFERENT map is a real transition: stop every
+        # old-map jukebox NOW (sources, relay routes, pending sweeps) so no
+        # ghost audio bleeds into the new map and nothing from the old map can
+        # touch the new map's playback. Only a same-name full reparse keeps the
+        # graceful mark-and-sweep that lets re-broadcast play events preserve
+        # the stream seamlessly.
+        incoming_map_name = data.get("name")
+        same_map = bool(
+            incoming_map_name
+            and getattr(self.gameplay, "map_name", None) == incoming_map_name
+        )
+        self._stop_jukebox_players_for_map_change(same_map=same_map)
+        self.gameplay.map_name = incoming_map_name
         self.gameplay.parser.load(data["data"])
         raw_x = data.get("x")
         raw_y = data.get("y")
@@ -1386,22 +1398,34 @@ class EventHandeler:
             player = gp.jukebox_player = jukebox.JukeboxPlayer(self.game)
         return player
 
-    def _stop_jukebox_players_for_map_change(self):
-        """Mark jukebox audio for post-reload confirmation (map change / reload).
+    def _stop_jukebox_players_for_map_change(self, same_map=False):
+        """Stop old-map jukebox audio for a map change; mark-and-sweep on reload.
 
-        Songs still playing get a jukebox_play from the server right after the
-        reload, which keeps them playing seamlessly.  Only players that are NOT
-        re-confirmed (song ended / jukebox gone / different map) get stopped a
-        short while later — so repeated reloads no longer tear down and rebuild
-        the stream (which made the song disappear after a few reloads)."""
+        A real map transition (parse_map naming a different map) stops every
+        jukebox player SYNCHRONOUSLY: the old map's relay frames stop arriving
+        the instant the player leaves, so any buffered tail would otherwise
+        keep playing into the new map (~1s of ghost audio) and stale receivers
+        from the old map could race the new map's playback during quick
+        round-trips. Only a same-name full reparse keeps the graceful
+        mark-and-sweep: songs still playing get a jukebox_play from the server
+        right after the reload, which keeps them playing seamlessly, while
+        players that are NOT re-confirmed (song ended / jukebox gone) are
+        stopped a short while later."""
         gp = self.gameplay
         player = getattr(gp, "jukebox_player", None)
         if player is not None:
-            cleanup_serial = player.control_serial
-            # parse_map itself is now serialized on the game thread, so mark
-            # immediately. Queuing a second callback let jukebox_play overtake
-            # this mark across ENet channels and made the stale sweep stop it.
-            player.mark_pending_map_change(cleanup_serial)
+            if same_map:
+                cleanup_serial = player.control_serial
+                # parse_map itself is now serialized on the game thread, so
+                # mark immediately. Queuing a second callback let jukebox_play
+                # overtake this mark across ENet channels and made the stale
+                # sweep stop it.
+                player.mark_pending_map_change(cleanup_serial)
+            else:
+                # Invalidate every old-map jukebox now: stop sources, drop
+                # relay routes, and clear any pending sweep marks so nothing
+                # from the previous map can act on the new map's playback.
+                player.stop_all()
         gp.jukebox_state = {"jukeboxes": {}}
 
     def jukebox_state(self, data):

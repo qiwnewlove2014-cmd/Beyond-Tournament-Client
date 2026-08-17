@@ -1263,19 +1263,20 @@ class TestAudioStreamerFailureSurfacing(unittest.TestCase):
                 return self.data[:size]
 
         class FakeProc:
-            def __init__(self, pcm=b"", stderr=b""):
+            def __init__(self, pcm=b"", stderr=b"", exit_code=1):
                 self.stdout = FakeStdout(pcm)
                 self.stderr = FakeStderr(stderr)
                 self.killed = False
+                self._exit_code = exit_code
 
             def poll(self):
-                return None if self.stdout.data else 1
+                return None if self.stdout.data else self._exit_code
 
             def kill(self):
                 self.killed = True
 
             def wait(self, timeout=None):
-                return 0
+                return self._exit_code
 
         class FakeBuffer:
             def set_data(self, data, sample_rate=None, format=None):
@@ -1319,7 +1320,9 @@ class TestAudioStreamerFailureSurfacing(unittest.TestCase):
                 self.state = cyal.SourceState.STOPPED
 
         denied = FakeProc(stderr=b"Server returned 403 Forbidden")
-        playable = FakeProc(pcm=b"\0" * (3840 * 10))
+        # The retried process produces audio and then exits 0 (clean EOF) — a
+        # genuine song end must stay a normal completion, not a failure.
+        playable = FakeProc(pcm=b"\0" * (3840 * 10), exit_code=0)
         streamer = mb.AudioStreamer(
             FakeGame(),
             "https://rr.example.googlevideo.com/audio",
@@ -1337,6 +1340,7 @@ class TestAudioStreamerFailureSurfacing(unittest.TestCase):
         self.assertTrue(denied.killed)
         self.assertTrue(streamer.ready_event.is_set())
         self.assertIsNone(streamer.failure_reason)
+        self.assertTrue(streamer.completed_normally)
 
 
 class TestMusicBotStreamMetadata(unittest.TestCase):
@@ -1401,6 +1405,221 @@ class TestMusicBotStreamMetadata(unittest.TestCase):
         with mock.patch.object(mb, "speak") as speak:
             bot.loop()
         speak.assert_called_once_with("Could not load track.")
+
+
+class TestRelayPendingMakeBeforeBreak(unittest.TestCase):
+    """A relay_pending re-offer must never tear down a stream that is still
+    audibly working for the same song — the server's retry notice can race in
+    while the current relay (or direct) stream is perfectly healthy, and
+    stopping it made the jukebox go silent for no reason (rapid map
+    round-trips)."""
+
+    def _player_with_relay(self, last_packet_ago):
+        import time
+        from types import SimpleNamespace
+
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *a: None),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+
+        class FakeRelayReceiver:
+            def __init__(self):
+                self.last_packet_at = time.monotonic() - last_packet_ago
+
+            def is_alive(self):
+                return True
+
+            def stop(self):
+                pass
+
+        receiver = FakeRelayReceiver()
+        player.players["box"] = {
+            "source": None,
+            "secondary_source": None,
+            "streamer": receiver,
+            "title": "Song", "url": "https://youtu.be/x",
+            "transport": "relay",
+            "playback_key": ("id", 4),
+            "relay_key": (1001, 2001),
+            "created_at": time.monotonic(),
+            "play_params": {},
+        }
+        player.relay_routes[(1001, 2001)] = receiver
+        return player, receiver
+
+    def test_relay_pending_keeps_live_relay_receiver(self):
+        """Same song, receiver still receiving frames (0.5s ago): the pending
+        re-offer is a stale/racing notice — keep the receiver playing."""
+        player, receiver = self._player_with_relay(last_packet_ago=0.5)
+        player.play(
+            "box", 1, 2, 3, "Song", "https://youtu.be/x", 120,
+            playback_id=4, transport="relay_pending",
+        )
+        entry = player.players["box"]
+        self.assertEqual(entry["transport"], "relay")
+        self.assertIs(entry.get("streamer"), receiver)
+        self.assertIn((1001, 2001), player.relay_routes)
+
+    def test_relay_pending_replaces_stale_relay_receiver(self):
+        """Receiver starved for 30s: the relay is truly gone — install the
+        pending placeholder so the ready relay event can rebuild it."""
+        player, receiver = self._player_with_relay(last_packet_ago=30.0)
+        player.play(
+            "box", 1, 2, 3, "Song", "https://youtu.be/x", 120,
+            playback_id=4, transport="relay_pending",
+        )
+        entry = player.players["box"]
+        self.assertEqual(entry["transport"], "relay_pending")
+        self.assertIsNone(entry.get("streamer"))
+
+    def test_stop_all_clears_pending_map_change_marks(self):
+        """A synchronous map-change teardown must clear any pending sweep marks
+        so a stale sweep can never act on a later jukebox instance."""
+        import time
+        from types import SimpleNamespace
+
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *a: None),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        player.players["box"] = {
+            "source": None,
+            "secondary_source": None,
+            "streamer": None,
+            "title": "Song", "url": "https://youtu.be/x",
+            "transport": "direct",
+            "playback_key": ("id", 4),
+            "created_at": time.monotonic(),
+            "play_params": {},
+        }
+        player.mark_pending_map_change(player.control_serial)
+        self.assertEqual(player._pending_map_change, {"box"})
+        player.stop_all()
+        self.assertEqual(player._pending_map_change, set())
+        self.assertIsNone(player._pending_map_change_serial)
+        self.assertEqual(player.players, {})
+
+
+class TestAudioStreamerMidSongDeath(unittest.TestCase):
+    """An ffmpeg process that dies AFTER audio started (403 on a CDN
+    reconnect, connection reset, ...) must be reported as a FAILURE so the
+    jukebox recovery watchdog rebuilds it — not as a naturally finished song
+    (which left the cabinet silent until the next track)."""
+
+    def _run_streamer(self, pcm, exit_code):
+        from unittest import mock
+        import cyal
+        from libs import music_bot as mb
+
+        class FakeStdout:
+            def __init__(self, data=b""):
+                self.data = bytearray(data)
+
+            def read(self, size):
+                if not self.data:
+                    return b""
+                chunk = bytes(self.data[:size])
+                del self.data[:size]
+                return chunk
+
+        class FakeStderr:
+            def read(self, size):
+                return b""
+
+        class FakeProc:
+            def __init__(self, pcm=b"", exit_code=0):
+                self.stdout = FakeStdout(pcm)
+                self.stderr = FakeStderr()
+                self._exit_code = exit_code
+                self.killed = False
+
+            def poll(self):
+                # The process is alive while it still has output to give;
+                # once the stream is exhausted it has exited.
+                return None if self.stdout.data else self._exit_code
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):
+                return self._exit_code
+
+        class FakeBuffer:
+            def set_data(self, data, sample_rate=None, format=None):
+                self.data = data
+
+        class FakeContext:
+            def gen_buffer(self):
+                return FakeBuffer()
+
+        class FakeAudio:
+            def __init__(self):
+                self.context = FakeContext()
+
+        class FakeGame:
+            def __init__(self):
+                self.audio_mngr = FakeAudio()
+
+        class FakeSource:
+            def __init__(self):
+                self.items = []
+                self.state = cyal.SourceState.STOPPED
+
+            @property
+            def buffers_queued(self):
+                return len(self.items)
+
+            @property
+            def buffers_processed(self):
+                return len(self.items)
+
+            def queue_buffers(self, buffer):
+                self.items.append(buffer)
+
+            def unqueue_buffers(self):
+                return self.items.pop(0) if self.items else None
+
+            def play(self):
+                self.state = cyal.SourceState.PLAYING
+
+            def stop(self):
+                self.state = cyal.SourceState.STOPPED
+
+        proc = FakeProc(pcm=pcm, exit_code=exit_code)
+        streamer = mb.AudioStreamer(
+            FakeGame(),
+            "https://example.com/audio.mp3",
+            FakeSource(),
+            bot=None,
+        )
+        with mock.patch.object(mb.subprocess, "Popen", return_value=proc) as popen, \
+                mock.patch.object(mb.time, "sleep"), \
+                mock.patch.object(mb, "speak"), \
+                mock.patch.object(mb.logger, "log"):
+            streamer.run()
+        return streamer
+
+    def test_mid_song_ffmpeg_death_is_a_failure(self):
+        # 12 frames: 10 pre-buffered, 2 played, then the pipe dies with exit 1.
+        streamer = self._run_streamer(
+            pcm=b"\0" * (3840 * 12), exit_code=1
+        )
+        self.assertTrue(streamer.ready_event.is_set())
+        self.assertFalse(streamer.completed_normally)
+        self.assertIsNotNone(streamer.failure_reason)
+        self.assertIn("ffmpeg exited early", streamer.failure_reason)
+
+    def test_clean_eof_stays_normal_completion(self):
+        # Natural song end: ffmpeg exits 0 -> still a normal completion.
+        streamer = self._run_streamer(
+            pcm=b"\0" * (3840 * 12), exit_code=0
+        )
+        self.assertTrue(streamer.ready_event.is_set())
+        self.assertTrue(streamer.completed_normally)
+        self.assertIsNone(streamer.failure_reason)
 
 
 if __name__ == "__main__":

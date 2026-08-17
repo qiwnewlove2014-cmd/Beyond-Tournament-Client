@@ -90,6 +90,10 @@ class Gameplay(state.State):
         # 🎵 Music jukebox: server-side queue playback anchored at jukebox elements.
         self.jukebox_player = None
         self.jukebox_state = {"jukeboxes": {}}
+        # Name of the currently parsed map (from parse_map), so a real map
+        # transition can be told apart from a same-name reparse for jukebox
+        # teardown (immediate stop vs. seamless mark-and-sweep).
+        self.map_name = None
         self.vehicle_mode = False
         self.vehicle_name = None
         self.vehicle_type = None

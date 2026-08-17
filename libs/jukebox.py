@@ -415,27 +415,44 @@ class JukeboxPlayer:
                 return
 
         # Make-before-break: a relay_pending event must not kill a working
-        # DIRECT stream for the same song. Map reloads re-offer the relay
+        # stream for the same song. Map reloads re-offer the relay
         # ("wait for it") while the listener is happily playing direct —
         # stopping that stream made ~10s of silence until the relay actually
-        # became ready. Keep direct running; the ready relay event (or direct
-        # failing) switches streams on its own.
+        # became ready. The same applies to a LIVE relay receiver when the
+        # server's retry notice races in: the worker may still be streaming
+        # (frames keep arriving), and tearing the receiver down would cut the
+        # song for no reason. Keep the live stream running; the ready relay
+        # event (or the stall watchdogs / direct fallback) switches streams on
+        # its own.
         if transport == "relay_pending":
             with self._lock:
                 existing_entry = self.players.get(jukebox_id)
-                direct_streamer = existing_entry.get("streamer") if existing_entry else None
-                keep_direct = bool(
+                keep_live = False
+                if (
                     existing_entry is not None
                     and existing_entry.get("playback_key") == playback_key
-                    and existing_entry.get("transport") == "direct"
-                    and direct_streamer is not None
-                    and hasattr(direct_streamer, "is_alive")
-                    and direct_streamer.is_alive()
-                )
-            if keep_direct:
+                ):
+                    existing_streamer = existing_entry.get("streamer")
+                    if existing_entry.get("transport") == "direct":
+                        keep_live = bool(
+                            existing_streamer is not None
+                            and hasattr(existing_streamer, "is_alive")
+                            and existing_streamer.is_alive()
+                        )
+                    elif existing_entry.get("transport") == "relay":
+                        last_packet = getattr(existing_streamer, "last_packet_at", None)
+                        keep_live = bool(
+                            existing_streamer is not None
+                            and hasattr(existing_streamer, "is_alive")
+                            and existing_streamer.is_alive()
+                            and last_packet is not None
+                            and time.monotonic() - float(last_packet) < 2.0
+                        )
+            if keep_live:
                 log_line(
-                    f"[Jukebox] play({jukebox_id}) keeping direct stream "
-                    f"for {title!r} while the relay readies"
+                    f"[Jukebox] play({jukebox_id}) keeping live "
+                    f"{existing_entry.get('transport')} stream for {title!r} "
+                    f"while the relay readies"
                 )
                 return
 
@@ -610,8 +627,16 @@ class JukeboxPlayer:
         return True
 
     def stop_all(self):
-        """Stop every jukebox (map change / disconnect)."""
-        for jukebox_id in list(self.players.keys()):
+        """Stop every jukebox (map change / disconnect).
+
+        Clears the pending map-change marks too, so any in-flight sweep from an
+        earlier reload can never act on a jukebox created after this teardown.
+        """
+        with self._lock:
+            self._pending_map_change = set()
+            self._pending_map_change_serial = None
+            ids = list(self.players.keys())
+        for jukebox_id in ids:
             self.stop(jukebox_id)
 
     def update(self):
