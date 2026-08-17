@@ -1315,7 +1315,10 @@ def _show_results_menu(game, gp, jukebox_id, results):
     m = menu_mod.Menu(game, "Search Results", parrent=gp)
     items = []
     for i, r in enumerate(results):
-        dur = r.get("duration") or 0
+        # int(): yt-dlp flat search returns durations as float, and the
+        # '02d' format only accepts ints — a float here used to crash the
+        # whole results menu before it opened.
+        dur = int(r.get("duration") or 0)
         dur_str = f"{dur // 60}:{dur % 60:02d}" if dur else "?"
         title = r.get("title", "Unknown")
         items.append((f"{title} ({dur_str})", make_callback(i)))

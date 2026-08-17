@@ -129,7 +129,11 @@ class YouTubeSearcher:
                         webpage_url = e.get('url')
                     results.append({
                         'title': e.get('title', 'Unknown'),
-                        'duration': e.get('duration', 0),
+                        # Flat search returns durations as FLOAT (233.0); the
+                        # results menus format them with '% 60:02d', which only
+                        # accepts ints — normalize here so a float can never
+                        # crash the menu open.
+                        'duration': int(e.get('duration') or 0),
                         'webpage_url': webpage_url,
                         'url': e.get('url', ''),  # canonical watch URL in flat mode
                         # A googlevideo URL can be authorized for the exact
@@ -1978,7 +1982,7 @@ class MapMusicBot:
         m = menu_mod.Menu(self.game, "Search Results", parrent=gp)
         items = []
         for i, r in enumerate(results):
-            dur = r.get('duration', 0)
+            dur = int(r.get('duration', 0))
             dur_str = f"{dur // 60}:{dur % 60:02d}" if dur else "?"
             title = r.get('title', 'Unknown')
             # Use default_factory to capture loop variable

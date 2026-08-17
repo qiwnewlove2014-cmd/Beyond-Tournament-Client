@@ -1368,7 +1368,11 @@ class TestMusicBotStreamMetadata(unittest.TestCase):
                         {
                             "id": "abc123",
                             "title": "Flat Song",
-                            "duration": 210,
+                            # Flat search returns durations as FLOAT — the
+                            # results menus format with '% 60:02d' (int-only),
+                            # so search() must normalize to int or the menu
+                            # crashes before it opens.
+                            "duration": 210.0,
                             # Flat entries have no webpage_url; the watch URL
                             # sits in `url` instead.
                             "url": "https://www.youtube.com/watch?v=abc123",
@@ -1399,7 +1403,9 @@ class TestMusicBotStreamMetadata(unittest.TestCase):
         self.assertEqual(results[0]["webpage_url"], "https://www.youtube.com/watch?v=abc123")
         # No signed googlevideo stream leaks out of search.
         self.assertNotIn("googlevideo", results[0]["url"])
+        # Float duration must be normalized to int (menu crash regression).
         self.assertEqual(results[0]["duration"], 210)
+        self.assertIsInstance(results[0]["duration"], int)
         self.assertEqual(
             results[1]["webpage_url"],
             "https://www.youtube.com/watch?v=def456",
