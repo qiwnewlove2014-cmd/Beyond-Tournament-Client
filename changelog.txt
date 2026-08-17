@@ -3,6 +3,21 @@
 • for the Beyond Tournament project (Server & Client core).
 • ============================================================
 
+[v1.8.0] Official Launch: Doors, Jukebox Controls & Beyond Tournament 1.8.0 — 2026-08-16
+--------------------------------------------------------------------------------
+
+• Stability
+- **Chat Deadlock During Map Transitions (Fix):** Sending a chat message while the client was changing maps could freeze the entire game — the main thread held the game lock while joining the network thread, and the network thread was parked on the same lock trying to process the received packet, a permanent deadlock. Network teardown is now non-blocking in both the in-game exit path and account creation, and diagnostic logging (chat submit, map-transition start/end, network teardown) pinpoints any future freeze.
+
+• Jukebox Speed & Reliability
+- **~5x Faster Song Search:** Jukebox and Music Bot song searches now read metadata straight from the YouTube search page (flat extraction) instead of fully resolving every result, cutting a 5-result search from ~5 seconds to ~1 second. The canonical watch URL is still built from the video ID, so queued tracks resolve cleanly.
+- **Search Results Menu Crash (Fix):** The faster flat search returned song durations as floats, and both result menus formatted them with integer-only %02d — opening the menu crashed with a ValueError (Jukebox and Music Bot menus appeared dead). Durations are now normalized to integers at the search source and both menus guard with an int cast.
+
+• Client Lifecycle
+- **Single-Instance Compiled Builds:** Compiled (Nuitka) builds now refuse to start while another instance is running — a dedicated lock in the temp folder shows a message box and exits before pygame/audio/network init. Source-code runs keep the multi-instance 10-slot behavior for multi-account testing; the updater's process hand-off takes over the old lock, stale locks from dead processes are reclaimed, and the check matches the renamed "Beyond Tournament.exe".
+- **Smooth Exit Fade & "Disconnecting":** Exiting now fades all audio to silence over ~1.5 seconds instead of a hard cut. The main-menu Exit (Esc) fades, announces "Exiting", then closes the app; the in-game Esc confirm fades, announces "Disconnecting", logs out, and returns to the main menu — which restores the listener gain so it is not silent.
+
+
 [v1.7.8] Long-Haul Truck, Hold Horn & Brake Pedal — 2026-08-15
 --------------------------------------------------------------------------------
 

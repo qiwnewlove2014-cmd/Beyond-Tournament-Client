@@ -6,13 +6,6 @@ changelog.txt.
 
 [v1.8.0] Official Launch — 2026-08-16
 --------------------------------------------------------------------------------
-- The new long-haul truck is here! Staff can spawn it with /spawntruck — driving it sounds like the engine rumbles along the whole length of the body, not from a single point.
-- The engine auto-idles on spawn — walk around the truck and audition the engine before you even mount up.
-- The horn works both short and long: a quick tap beeps once, holding it keeps honking (new horn sample).
-- Press Down to brake — the brake squeal starts high-pitched and drops lower as the truck slows (the truck no longer reverses).
-- Burnout! Hold Up and Down together — the truck stays put while the engine revs at the free-wheel level it had, with the brake sound mixed in. Release Down and accelerate away from the same level.
-- Get out without stalling: Shift+Enter (or Shift+F) leaves the engine idling when you get off — perfect for hopping out to listen to the engine or run an errand and come back. Works on both the truck and the motorcycle.
-- Enter now works as an interact key too (mount/dismount vehicles, open jukeboxes, use travel points), just like F.
 - World-map doors can now close! Press interact once to open, again to close — opening/closing announces "Door open" / "Door closed", and closing uses a brand-new dedicated door sound.
 - Doors inside matches or the pre-match exploration lobby only open (never close) — nobody can lock a door behind themselves.
 - Rapidly mashing interact on a door is silent in matches and the exploration lobby (no cooldown spam while fighting); world maps keep the warning.
