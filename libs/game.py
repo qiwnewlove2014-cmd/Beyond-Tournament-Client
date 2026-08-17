@@ -348,8 +348,14 @@ class Game:
         options.set("password", password)
         self.add_account_to_list(options.get("username"), password)
         if self.network:
+            # Never join here: this handler runs inside the locked frame body
+            # (input handlers are invoked from st.update under self.lock), and
+            # the network worker takes that same lock around every received
+            # packet. If it is parked on the lock, join() deadlocks the whole
+            # client. The worker is a daemon: stop polling and queue the
+            # terminator; it drains and exits on its own.
+            self.network.put(("should_poll", False))
             self.network.put(None)
-            self.network.join()
         try:
             self.network = self._new_network_client()
         except (OSError, server_config.ServerConfigError) as e:

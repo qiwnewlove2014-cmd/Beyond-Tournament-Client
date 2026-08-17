@@ -1,6 +1,7 @@
 import time
 import random
 import os
+import threading
 import base64
 import cyal.exceptions
 import pyperclip
@@ -271,6 +272,14 @@ class EventHandeler:
         self._queue_map_audio_event(self._apply_parse_map, data)
 
     def _apply_parse_map(self, data):
+        try:
+            from libs import logger as _logger
+            _logger.log(
+                f"[TRANSITION] parse_map start name={data.get('name')!r} "
+                f"thread={threading.current_thread().name}"
+            )
+        except Exception:
+            pass
         self._begin_map_audio_reload()
         self.game.automations.clear()
         self.game.audio_mngr.apply_filter(
@@ -326,6 +335,14 @@ class EventHandeler:
         # state immediately instead of waiting for a later map-sync packet.
         self.game.network.send(consts.CHANNEL_MISC, "jukebox_resync")
         self._finish_map_audio_reload()
+        try:
+            from libs import logger as _logger
+            _logger.log(
+                f"[TRANSITION] parse_map done name={data.get('name')!r} "
+                f"thread={threading.current_thread().name}"
+            )
+        except Exception:
+            pass
 
     def update_map(self, data):
         self._queue_map_audio_event(self._apply_update_map, data)

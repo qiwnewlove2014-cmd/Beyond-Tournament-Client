@@ -1110,9 +1110,27 @@ class Gameplay(state.State):
         if self.player.locked and self.game.network and getattr(self.game.network, 'event_handeler', None):
             self.game.network.event_handeler.death({"dead": False})
         if self.game.network:
-            self.game.network.put(None)
-            self.game.network.join()
+            # NEVER join here. gameplay.exit() runs from game.pop(), which the
+            # main loop invokes while holding game.lock (game.py loop_function
+            # wraps st.update in the lock). The network worker acquires the
+            # SAME lock around every received packet (networking.py Client.loop),
+            # so if a chat echo or map packet arrived during the transition it
+            # is parked on `with self.game.lock:` and join() would wait for it
+            # forever -> the intermittent complete freeze seen when a chat
+            # message is sent while a map transition is in flight. The worker
+            # is a daemon: stop its polling and queue the terminator; it flushes
+            # and exits on its own within a couple of milliseconds.
+            network = self.game.network
+            network.put(("should_poll", False))
+            network.put(None)
             self.game.network = None
+        try:
+            from libs import logger as _logger
+            _logger.log(
+                "[TRANSITION] gameplay.exit: network teardown done (non-blocking)"
+            )
+        except Exception:
+            pass
         self.ambience.destroy()
         self.pingging = False
         # === Cleanup Music Bot ===
@@ -1595,6 +1613,11 @@ class Gameplay(state.State):
         buffer.cycle(2)
 
     def chat(self, mod=0):
+        try:
+            from libs import logger as _logger
+            _logger.log("[CHAT] input opened")
+        except Exception:
+            pass
         self.add_substate(
             self.game.input.run(
                 "Enter a chat message or a slash command", handeler=self.chat2
@@ -1608,8 +1631,22 @@ class Gameplay(state.State):
             return self.cancel()
         if len(message) <= 1:
             return self.cancel("Message is too short.")
+        try:
+            from libs import logger as _logger
+            _logger.log(
+                f"[CHAT] submit: len={len(message)} "
+                f"is_command={message.lstrip().startswith('/')} "
+                f"network={'alive' if self.game.network else 'None'}"
+            )
+        except Exception:
+            pass
         self.game.network.send(consts.CHANNEL_CHAT, "chat", {"message": message})
         self.pop_last_substate()
+        try:
+            from libs import logger as _logger
+            _logger.log("[CHAT] submit done (packet queued non-blocking)")
+        except Exception:
+            pass
 
     def map_chat(self, mod=0):
         self.add_substate(
