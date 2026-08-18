@@ -123,15 +123,13 @@ class JukeboxRelayReceiver(threading.Thread):
     def _reclaim(self):
         for source in (self.source_l, self.source_r):
             try:
-                if source.buffers_processed > 0:
-                    # OpenAL only marks buffers processed while a source is
-                    # audibly playing them out — this is the proof of life
-                    # the underrun watchdog depends on.
-                    self.last_output_at = time.monotonic()
-                while source.buffers_processed > 0:
+                drain_limit = 32
+                while source.buffers_processed > 0 and drain_limit > 0:
+                    drain_limit -= 1
                     result = source.unqueue_buffers()
                     if result is None:
-                        continue
+                        break
+                    self.last_output_at = time.monotonic()
                     try:
                         self._pool.extend(result)
                     except TypeError:
@@ -169,15 +167,21 @@ class JukeboxRelayReceiver(threading.Thread):
         left, right = AudioStreamer._split_stereo_16(pcm)
         buf_l = self._pool.pop()
         buf_r = self._pool.pop()
+        l_queued = False
         try:
             buf_l.set_data(left, sample_rate=48000, format=cyal.BufferFormat.MONO16)
             buf_r.set_data(right, sample_rate=48000, format=cyal.BufferFormat.MONO16)
             self.source_l.queue_buffers(buf_l)
+            l_queued = True
             self.source_r.queue_buffers(buf_r)
             self.last_audio_activity = time.monotonic()
             return True
         except Exception:
-            self._pool.extend((buf_l, buf_r))
+            if not l_queued:
+                self._pool.extend((buf_l, buf_r))
+            else:
+                # buf_l is attached to source_l; do NOT put back into pool
+                self._pool.append(buf_r)
             return False
 
     def run(self):
@@ -187,23 +191,30 @@ class JukeboxRelayReceiver(threading.Thread):
             except queue.Empty:
                 self._reclaim()
                 self._update_gain()
+                if self._play_started:
+                    try:
+                        if self.source_l.buffers_queued > 0 and self.source_l.state != cyal.SourceState.PLAYING:
+                            self.source_l.play()
+                        if self.source_r.buffers_queued > 0 and self.source_r.state != cyal.SourceState.PLAYING:
+                            self.source_r.play()
+                    except Exception:
+                        pass
                 continue
             if payload is None:
                 break
             try:
                 pcm = bytearray(self.decoder.decode(bytearray(payload)))
-                with self.game.audio_mngr.context.batch():
-                    if not self._queue_pcm(pcm):
-                        continue
-                    self._update_gain()
-                    queued = min(self.source_l.buffers_queued, self.source_r.buffers_queued)
-                    stopped = (self.source_l.state != cyal.SourceState.PLAYING
-                               or self.source_r.state != cyal.SourceState.PLAYING)
-                    if (not self._play_started and queued >= self.PREBUFFER_FRAMES) or (
-                            self._play_started and stopped and queued >= self.RESUME_FRAMES):
-                        self.source_l.play()
-                        self.source_r.play()
-                        self._play_started = True
+                if not self._queue_pcm(pcm):
+                    continue
+                self._update_gain()
+                queued = min(self.source_l.buffers_queued, self.source_r.buffers_queued)
+                stopped = (self.source_l.state != cyal.SourceState.PLAYING
+                           or self.source_r.state != cyal.SourceState.PLAYING)
+                if (not self._play_started and queued >= self.PREBUFFER_FRAMES) or (
+                        self._play_started and stopped and queued > 0):
+                    self.source_l.play()
+                    self.source_r.play()
+                    self._play_started = True
             except Exception as ex:
                 log_line(f"[JukeboxRelay] decode/queue error: {ex}")
 
@@ -747,11 +758,12 @@ class JukeboxPlayer:
                         stall_age is not None and stall_age >= self.RELAY_STALL_TIMEOUT
                     )
                     last_audio = getattr(streamer, "last_audio_activity", None)
+                    has_started = bool(getattr(streamer, "_play_started", False) or age >= self.RELAY_STARTUP_TIMEOUT)
                     stuck_audio = bool(
                         alive
                         and last_packet is not None
                         and stall_age is not None and stall_age < 1.0
-                        and getattr(streamer, "_play_started", False)
+                        and has_started
                         and last_audio is not None
                         and now - float(last_audio) >= self.RELAY_AUDIO_STALL_TIMEOUT
                     )
@@ -762,7 +774,7 @@ class JukeboxPlayer:
                     last_output = getattr(streamer, "last_output_at", None)
                     starved_output = bool(
                         alive
-                        and getattr(streamer, "_play_started", False)
+                        and has_started
                         and last_output is not None
                         and now - float(last_output) >= self.RELAY_OUTPUT_STALL_TIMEOUT
                     )
@@ -777,7 +789,7 @@ class JukeboxPlayer:
                     starved_rate = False
                     if (alive and not no_packets and not stuck_audio
                             and not starved_output
-                            and getattr(streamer, "_play_started", False)):
+                            and has_started):
                         frames_now = int(getattr(streamer, "received_frames", 0) or 0)
                         check = entry.get("frame_rate_check")
                         if not isinstance(check, list) or len(check) != 2:
@@ -791,8 +803,20 @@ class JukeboxPlayer:
                                 rebuilds.append(
                                     (jukebox_id, f"frame starvation ({fps:.1f} fps)")
                                 )
+                    stopped_sources = False
+                    src_l = entry.get("source")
+                    src_r = entry.get("secondary_source")
+                    if src_l is not None and src_r is not None and age >= self.RELAY_STARTUP_TIMEOUT:
+                        try:
+                            if ((src_l.buffers_queued > 0 or src_r.buffers_queued > 0)
+                                    and src_l.state != cyal.SourceState.PLAYING
+                                    and src_r.state != cyal.SourceState.PLAYING):
+                                stopped_sources = True
+                        except Exception:
+                            pass
                     if (alive and not no_packets and not stuck_audio
                             and not starved_output and not starved_rate
+                            and not stopped_sources
                             and last_audio is not None):
                         # Relay demonstrably working — clear the strike and
                         # un-stick counters.
@@ -800,6 +824,8 @@ class JukeboxPlayer:
                         self._stall_unsticks[jukebox_id] = 0
                     if not alive:
                         rebuilds.append((jukebox_id, "receiver thread died"))
+                    elif stopped_sources:
+                        rebuilds.append((jukebox_id, "sources stopped with queued audio"))
                     elif stuck_audio:
                         rebuilds.append((jukebox_id, "frames arriving but no audio progress"))
                     elif starved_output:
