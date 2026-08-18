@@ -275,9 +275,54 @@ class JukeboxPlayer:
         # fresh connection or local direct playback restores audio).
         self._relay_fail_counts = {}
         self._direct_fallback_until = {}
-        # Consecutive warm-up un-stick attempts per stalled jukebox (see
-        # update(): failed un-sticks escalate to a full rebuild early).
         self._stall_unsticks = {}
+        self.eq_profiles = {}
+        self.eq_slots = {}
+
+    EQ_PRESETS = {
+        "bass_boost": (
+            ("low_gain", 3.2),
+            ("low_cutoff", 220.0),
+            ("mid1_gain", 1.0),
+            ("high_gain", 1.1),
+            ("high_cutoff", 4000.0),
+        ),
+    }
+
+    def _get_eq_slot(self, profile):
+        """Get or create the OpenAL Hardware Equalizer effect slot for a profile."""
+        profile = str(profile or "normal").lower()
+        if profile not in self.EQ_PRESETS:
+            return None
+        audio = getattr(self.game, "audio_mngr", None)
+        if audio is None or getattr(audio, "efx", None) is None or not hasattr(audio, "gen_effect"):
+            return None
+        if profile not in self.eq_slots:
+            try:
+                params = self.EQ_PRESETS[profile]
+                self.eq_slots[profile] = audio.gen_effect("EQUALIZER", *params)
+            except Exception:
+                self.eq_slots[profile] = None
+        return self.eq_slots.get(profile)
+
+    def set_eq_profile(self, jukebox_id, profile):
+        """Update EQ profile for a specific jukebox and re-apply EFX sends in real-time."""
+        profile = str(profile or "normal").lower()
+        self.eq_profiles[jukebox_id] = profile
+        audio = getattr(self.game, "audio_mngr", None)
+        if audio is None or getattr(audio, "efx", None) is None:
+            return
+        slot = self._get_eq_slot(profile)
+        with self._lock:
+            entry = self.players.get(jukebox_id)
+            if entry is not None:
+                for key in ("source", "secondary_source"):
+                    src = entry.get(key)
+                    if src is not None:
+                        try:
+                            audio.efx.send(src, 1, slot)
+                        except Exception:
+                            pass
 
     RELAY_STARTUP_TIMEOUT = 7.0
     RELAY_STALL_TIMEOUT = 5.0
@@ -523,6 +568,16 @@ class JukeboxPlayer:
                     audio.efx.send(src_r, 0, reverb)
         except Exception:
             pass
+        # Jukebox Equalizer profile (e.g. Bass Boost / Horn Speaker per-jukebox):
+        try:
+            eq_profile = str(_kwargs.get("eq_profile") or self.eq_profiles.get(jukebox_id, "normal")).lower()
+            self.eq_profiles[jukebox_id] = eq_profile
+            slot = self._get_eq_slot(eq_profile)
+            if slot is not None and getattr(audio, "efx", None) is not None:
+                audio.efx.send(src_l, 1, slot)
+                audio.efx.send(src_r, 1, slot)
+        except Exception:
+            pass
         try:
             if transport == "relay":
                 if relay_id is None or stream_epoch is None:
@@ -624,6 +679,7 @@ class JukeboxPlayer:
                         if audio is not None and getattr(audio, "efx", None) is not None:
                             try:
                                 audio.efx.send(s, 0, None)
+                                audio.efx.send(s, 1, None)
                             except Exception:
                                 pass
                         s.stop()
@@ -683,6 +739,7 @@ class JukeboxPlayer:
                     if audio is not None and getattr(audio, "efx", None) is not None:
                         try:
                             audio.efx.send(source, 0, None)
+                            audio.efx.send(source, 1, None)
                         except Exception:
                             pass
                     source.stop()
@@ -1190,6 +1247,10 @@ def open_jukebox_menu(game, gp):
         gp.pop_last_substate()
         _clear_all(game, gp, jukebox_id)
 
+    def go_eq():
+        gp.pop_last_substate()
+        _open_eq_menu(game, gp, jukebox_id)
+
     repeat_names = {"off": "off", "one": "repeat one", "all": "repeat all"}
 
     def _repeat_label():
@@ -1198,12 +1259,23 @@ def open_jukebox_menu(game, gp):
         mode = _get_repeat_mode(gp, jukebox_id)
         return f"Toggle repeat mode (now: {repeat_names.get(mode, 'off')})"
 
+    EQ_NAMES = {
+        "normal": "Standard",
+        "bass_boost": "Bass Boost",
+    }
+
+    def _eq_label():
+        mode = _get_eq_profile(gp, jukebox_id)
+        name = EQ_NAMES.get(mode, "Standard")
+        return f"Sound profile EQ (now: {name})"
+
     menu_items = [
         ("Search YouTube and queue a song", go_search),
         ("Queue by YouTube URL", go_direct_url),
         ("Skip current song", go_skip),
         ("Stop playback", go_stop),
         (_repeat_label, go_repeat),
+        (_eq_label, go_eq),
         ("Shuffle queue", go_shuffle),
         ("Adjust jukebox volume", go_volume),
         ("View queue", go_queue),
@@ -1221,6 +1293,29 @@ def open_jukebox_menu(game, gp):
 
     m = menu_mod.Menu(game, "Music Jukebox", parrent=gp)
     m.add_items(menu_items)
+    menus.set_default_sounds(m)
+    gp.add_substate(m)
+
+
+def _open_eq_menu(game, gp, jukebox_id):
+    """Submenu for selecting Jukebox Equalizer / Sound Profile (Server Synchronized)."""
+    from . import consts, menu as menu_mod, menus
+
+    def select_profile(mode):
+        def _cb():
+            gp.pop_last_substate()
+            game.network.send(
+                consts.CHANNEL_MISC, "jukebox_set_eq", {"id": jukebox_id, "eq": mode}
+            )
+        return _cb
+
+    m = menu_mod.Menu(game, "Jukebox Sound Profiles", parrent=gp)
+    items = [
+        ("Standard / Flat (Original unaltered sound)", select_profile("normal")),
+        ("Bass Boost (Deep & Punchy Bass)", select_profile("bass_boost")),
+        ("Back to Jukebox menu", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))),
+    ]
+    m.add_items(items)
     menus.set_default_sounds(m)
     gp.add_substate(m)
 
@@ -1341,6 +1436,13 @@ def _get_repeat_mode(gp, jukebox_id):
     box = _current_state(gp).get("jukeboxes", {}).get(jukebox_id) or {}
     mode = box.get("repeat") or "off"
     return mode if mode in ("off", "one", "all") else "off"
+
+
+def _get_eq_profile(gp, jukebox_id):
+    """The cached server EQ sound profile for one jukebox."""
+    box = _current_state(gp).get("jukeboxes", {}).get(jukebox_id) or {}
+    profile = str(box.get("eq_profile") or "normal").lower()
+    return profile if profile in ("normal", "bass_boost") else "normal"
 
 
 def _toggle_repeat(game, gp, jukebox_id):

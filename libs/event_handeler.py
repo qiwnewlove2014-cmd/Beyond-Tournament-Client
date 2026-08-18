@@ -1508,7 +1508,25 @@ class EventHandeler:
                 relay_id=data.get("relay_id"),
                 stream_epoch=data.get("stream_epoch"),
                 http_headers=data.get("http_headers"),
+                eq_profile=data.get("eq_profile", "normal"),
             ))
+
+    def jukebox_eq(self, data):
+        """Server broadcasted an EQ profile update for a jukebox."""
+        if not isinstance(data, dict):
+            return
+        jid = data.get("id")
+        eq = data.get("eq_profile", "normal")
+        gp = self.gameplay
+        if gp:
+            state = getattr(gp, "jukebox_state", None)
+            if isinstance(state, dict):
+                boxes = state.setdefault("jukeboxes", {})
+                box = boxes.setdefault(jid, {"id": jid})
+                box["eq_profile"] = eq
+            player = self._jukebox_player()
+            if player is not None:
+                self.game.put(lambda: player.set_eq_profile(jid, eq))
 
     def process_jukebox_relay(self, data):
         """Bounded relay enqueue only; Opus decode/OpenAL run off the network thread."""
