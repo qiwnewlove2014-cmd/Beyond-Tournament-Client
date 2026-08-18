@@ -1198,8 +1198,13 @@ def _on_url_submit(game, gp, jukebox_id, raw_url):
             # noplaylist: a shared link with &list=... must resolve to the ONE
             # video, not the whole playlist (otherwise the playlist name, a
             # guessed duration, and the playlist URL all get queued as a song).
-            ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'no_warnings': True,
-                        'noplaylist': True}
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             # A pure /playlist?list= link still resolves to the whole playlist
@@ -1381,7 +1386,12 @@ def _pick_song(game, gp, jukebox_id, result):
         canonical = direct_url
         try:
             import yt_dlp
-            ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'no_warnings': True}
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'quiet': True,
+                'no_warnings': True,
+                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(direct_url, download=False)
                 if info:

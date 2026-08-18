@@ -162,6 +162,7 @@ class YouTubeSearcher:
             'format': 'best[acodec!=none][vcodec!=none][height<=360]/bestaudio/best',
             'quiet': True,
             'no_warnings': True,
+            'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -720,15 +721,14 @@ class AudioStreamer(threading.Thread):
             self._cleanup()
             return
 
-        # Resolve the stream URL. When the caller hands us a canonical YouTube
-        # page URL, resolve it now (and again on retry) so the signed stream URL
-        # is always fresh — a stale googlevideo URL 403s forever.
+        # Resolve the stream URL if target_url is not already a direct stream.
         canonical_url = self.canonical_url
         target_url = self.audio_url
         input_headers = dict(self.http_headers)
         if "youtube.com" in target_url or "youtu.be" in target_url:
             canonical_url = target_url
-        if canonical_url and ("youtube.com" in canonical_url or "youtu.be" in canonical_url):
+            target_url = ""
+        if canonical_url and not target_url.startswith(("http://", "https://")):
             fresh = YouTubeSearcher.get_stream_info(canonical_url)
             if fresh:
                 target_url = fresh['url']
@@ -2124,7 +2124,7 @@ class MapMusicBot:
             self.game.put(lambda: self._start_youtube_stream(
                 stream_info['url'], title, playback_generation,
                 http_headers=stream_info.get('http_headers'),
-                canonical_url=webpage_url or target,
+                canonical_url=webpage_url or direct_url,
             ))
 
         t = threading.Thread(target=do_play, daemon=True)
