@@ -281,10 +281,10 @@ class JukeboxPlayer:
 
     EQ_PRESETS = {
         "bass_boost": (
-            ("low_gain", 3.2),
-            ("low_cutoff", 220.0),
-            ("mid1_gain", 1.0),
-            ("high_gain", 1.1),
+            ("low_gain", 7.0),
+            ("low_cutoff", 260.0),
+            ("mid1_gain", 0.9),
+            ("high_gain", 1.0),
             ("high_cutoff", 4000.0),
         ),
     }
