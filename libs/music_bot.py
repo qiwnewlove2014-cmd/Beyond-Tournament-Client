@@ -305,6 +305,10 @@ class AudioStreamer(threading.Thread):
         samples.frombytes(data)
         return samples[0::2].tobytes(), samples[1::2].tobytes()
 
+    def set_cabinet_volume(self, volume):
+        self.cabinet_gain = max(0.0, min(1.0, float(volume) / 100.0))
+        self._update_spatial_gain()
+
     def _update_spatial_gain(self):
         """Linear distance fade for spatial pairs (same behavior as drums' 3D
         stereo): full volume inside the reference distance, linearly down to
@@ -330,7 +334,7 @@ class AudioStreamer(threading.Thread):
                 # Jukebox songs use their own mixer category ("jukebox"), so
                 # lowering the music-bot/map-music slider does not silence them.
                 music_gain = audio.volume_categories.get("jukebox", [100])[0] / 100.0
-                src.gain = self.spatial_base_gain * music_gain * g
+                src.gain = self.spatial_base_gain * music_gain * getattr(self, "cabinet_gain", 1.0) * g
 
             # Wall occlusion check for spatial pair (Jukebox direct mode):
             if self.spatial_src_l is not None and self.spatial_src_r is not None:

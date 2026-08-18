@@ -39,6 +39,7 @@ class JukeboxRelayReceiver(threading.Thread):
         self, game, source_l, source_r, volume,
         relay_id, stream_epoch, reference_distance, max_distance,
         box_pos=None, player=None, reverb_slot=None, eq_slot=None,
+        cabinet_volume=100,
     ):
         super().__init__(daemon=True, name=f"jukebox-relay-{relay_id}")
         from pyogg import OpusDecoder
@@ -46,6 +47,7 @@ class JukeboxRelayReceiver(threading.Thread):
         self.source_l = source_l
         self.source_r = source_r
         self.volume = int(volume)
+        self.cabinet_volume = max(0.0, min(1.0, float(cabinet_volume) / 100.0))
         self.relay_id = int(relay_id)
         self.stream_epoch = int(stream_epoch)
         self.reference_distance = float(reference_distance)
@@ -94,6 +96,10 @@ class JukeboxRelayReceiver(threading.Thread):
 
     def set_volume(self, volume):
         self.volume = max(0, min(100, int(volume)))
+        self._update_gain()
+
+    def set_cabinet_volume(self, volume):
+        self.cabinet_volume = max(0.0, min(1.0, float(volume) / 100.0))
         self._update_gain()
 
     def receive(self, sequence, payload, flags=0):
@@ -153,7 +159,8 @@ class JukeboxRelayReceiver(threading.Thread):
             # Jukebox relay audio has its own mixer slider ("jukebox"),
             # independent from the music bot / map music.
             category = audio.volume_categories.get("jukebox", [100])[0] / 100.0
-            local = self.volume / 100.0
+            cab_vol = getattr(self, "cabinet_volume", 1.0)
+            local = (self.volume / 100.0) * cab_vol
             span = max(0.0001, self.max_distance - self.reference_distance)
             for source in (self.source_l, self.source_r):
                 distance_gain = 1.0
@@ -317,6 +324,7 @@ class JukeboxPlayer:
         self._stall_unsticks = {}
         self.eq_profiles = {}
         self.eq_slots = {}
+        self.cabinet_volumes = {}
         self._occlusion_filter = None
 
     def get_occlusion_filter(self):
@@ -389,6 +397,17 @@ class JukeboxPlayer:
                             audio.efx.send(src, 1, slot, filter=filt)
                         except Exception:
                             pass
+
+    def set_cabinet_volume(self, jukebox_id, volume):
+        """Set server-synchronized master volume for a specific jukebox cabinet (0-100)."""
+        vol = max(0, min(100, int(volume)))
+        self.cabinet_volumes[jukebox_id] = vol
+        with self._lock:
+            p = self.players.get(jukebox_id)
+            if p is not None:
+                streamer = p.get("streamer")
+                if streamer is not None and hasattr(streamer, "set_cabinet_volume"):
+                    streamer.set_cabinet_volume(vol)
 
     RELAY_STARTUP_TIMEOUT = 7.0
     RELAY_STALL_TIMEOUT = 5.0
@@ -661,6 +680,15 @@ class JukeboxPlayer:
                 audio.efx.send(src_r, 1, slot, filter=filt)
         except Exception:
             pass
+        cab_vol = _kwargs.get("cabinet_volume")
+        if cab_vol is None:
+            cab_vol = self.cabinet_volumes.get(jukebox_id, 100)
+        try:
+            cab_vol = int(cab_vol)
+        except Exception:
+            cab_vol = 100
+        self.cabinet_volumes[jukebox_id] = cab_vol
+
         try:
             if transport == "relay":
                 if relay_id is None or stream_epoch is None:
@@ -670,6 +698,7 @@ class JukeboxPlayer:
                     relay_id, stream_epoch, ref, maxd,
                     box_pos=(float(x), float(y), float(z)), player=self,
                     reverb_slot=reverb, eq_slot=slot,
+                    cabinet_volume=cab_vol,
                 )
             else:
                 from . import music_bot as mb
@@ -682,6 +711,8 @@ class JukeboxPlayer:
                 )
                 streamer.reverb_slot = reverb
                 streamer.eq_slot = slot
+                if hasattr(streamer, "set_cabinet_volume"):
+                    streamer.set_cabinet_volume(cab_vol)
             streamer.start()
         except Exception as ex:
             for src in (src_l, src_r):
@@ -1368,6 +1399,10 @@ def open_jukebox_menu(game, gp):
         name = EQ_NAMES.get(mode, "Standard")
         return f"Sound profile EQ (now: {name})"
 
+    def _volume_label():
+        vol = _get_jukebox_volume(gp, jukebox_id)
+        return f"Adjust jukebox volume (now: {vol}%)"
+
     menu_items = [
         ("Search YouTube and queue a song", go_search),
         ("Queue by YouTube URL", go_direct_url),
@@ -1376,7 +1411,7 @@ def open_jukebox_menu(game, gp):
         (_repeat_label, go_repeat),
         (_eq_label, go_eq),
         ("Shuffle queue", go_shuffle),
-        ("Adjust jukebox volume", go_volume),
+        (_volume_label, go_volume),
         ("View queue", go_queue),
         ("Remove my queued song", go_remove),
     ]
@@ -1544,6 +1579,16 @@ def _get_eq_profile(gp, jukebox_id):
     return profile if profile in ("normal", "bass_boost") else "normal"
 
 
+def _get_jukebox_volume(gp, jukebox_id):
+    """The cached server volume for one jukebox (0-100)."""
+    box = _current_state(gp).get("jukeboxes", {}).get(jukebox_id) or {}
+    try:
+        vol = int(box.get("volume", 100))
+        return max(0, min(100, vol))
+    except Exception:
+        return 100
+
+
 def _toggle_repeat(game, gp, jukebox_id):
     from . import consts
     order = ("off", "one", "all")
@@ -1570,13 +1615,15 @@ def _get_or_create_jukebox_player(game, gp):
 
 
 def _open_volume_menu(game, gp, jukebox_id):
-    from . import menu as menu_mod, menus
-    player = _get_or_create_jukebox_player(game, gp)
-    current_vol = player.volume
+    from . import menu as menu_mod, menus, consts
+    current_vol = _get_jukebox_volume(gp, jukebox_id)
 
     def set_vol(val):
-        player.set_volume(val)
-        speak(f"Jukebox volume set to {val} percent.")
+        if getattr(game, "network", None) is not None:
+            game.network.send(consts.CHANNEL_MISC, "jukebox_set_volume", {
+                "id": jukebox_id,
+                "volume": val,
+            })
         gp.pop_last_substate()
         open_jukebox_menu(game, gp)
 
@@ -1584,7 +1631,7 @@ def _open_volume_menu(game, gp, jukebox_id):
     m.add_items([
         (f"100%{' (Active)' if current_vol == 100 else ''}", lambda: set_vol(100)),
         (f"80%{' (Active)' if current_vol == 80 else ''}", lambda: set_vol(80)),
-        (f"65%{' (Default)' if current_vol == 65 else ''}", lambda: set_vol(65)),
+        (f"65%{' (Active)' if current_vol == 65 else ''}", lambda: set_vol(65)),
         (f"50%{' (Active)' if current_vol == 50 else ''}", lambda: set_vol(50)),
         (f"30%{' (Active)' if current_vol == 30 else ''}", lambda: set_vol(30)),
         (f"10%{' (Active)' if current_vol == 10 else ''}", lambda: set_vol(10)),
