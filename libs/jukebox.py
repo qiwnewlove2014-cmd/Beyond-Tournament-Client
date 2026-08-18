@@ -15,6 +15,7 @@ searching YouTube, direct YouTube URL input, viewing the queue, removing own
 queued songs, skipping songs, adjusting volume, and staff queue clearance.
 """
 
+import contextlib
 import queue
 import struct
 import threading
@@ -34,8 +35,11 @@ class JukeboxRelayReceiver(threading.Thread):
     MAX_PENDING_FRAMES = 32
     NUM_BUFFERS = 32
 
-    def __init__(self, game, source_l, source_r, volume, relay_id, stream_epoch,
-                 reference_distance=8.0, max_distance=40.0):
+    def __init__(
+        self, game, source_l, source_r, volume,
+        relay_id, stream_epoch, reference_distance, max_distance,
+        box_pos=None, player=None, reverb_slot=None, eq_slot=None,
+    ):
         super().__init__(daemon=True, name=f"jukebox-relay-{relay_id}")
         from pyogg import OpusDecoder
         self.game = game
@@ -46,6 +50,11 @@ class JukeboxRelayReceiver(threading.Thread):
         self.stream_epoch = int(stream_epoch)
         self.reference_distance = float(reference_distance)
         self.max_distance = float(max_distance)
+        self.box_pos = box_pos
+        self.player = player
+        self.reverb_slot = reverb_slot
+        self.eq_slot = eq_slot
+        self._last_occluded = None
         self.running = True
         self.frames = queue.Queue(maxsize=self.MAX_PENDING_FRAMES)
         self.decoder = OpusDecoder()
@@ -156,6 +165,33 @@ class JukeboxRelayReceiver(threading.Thread):
                     elif distance > self.reference_distance:
                         distance_gain = 1.0 - (distance - self.reference_distance) / span
                 source.gain = local * category * distance_gain
+
+            # Wall occlusion check (Lowpass Direct Filter + Auxiliary Send Filters):
+            if listener is not None and self.box_pos is not None:
+                gp = getattr(self.game, "gameplay", None)
+                cur_map = getattr(gp, "map", None) if gp is not None else None
+                if cur_map is not None and hasattr(cur_map, "valid_straight_path"):
+                    los = cur_map.valid_straight_path(self.box_pos, listener)
+                    occluded = (los is False)
+                    if occluded != self._last_occluded:
+                        self._last_occluded = occluded
+                        filt = None
+                        if occluded and self.player is not None and hasattr(self.player, "get_occlusion_filter"):
+                            filt = self.player.get_occlusion_filter()
+                        for s in (self.source_l, self.source_r):
+                            try:
+                                if filt is not None:
+                                    s.direct_filter = filt
+                                else:
+                                    with contextlib.suppress(Exception):
+                                        del s.direct_filter
+                                if audio is not None and getattr(audio, "efx", None) is not None:
+                                    if getattr(self, "reverb_slot", None) is not None:
+                                        audio.efx.send(s, 0, self.reverb_slot, filter=filt)
+                                    if getattr(self, "eq_slot", None) is not None:
+                                        audio.efx.send(s, 1, self.eq_slot, filter=filt)
+                            except Exception:
+                                pass
         except Exception:
             pass
 
@@ -278,6 +314,22 @@ class JukeboxPlayer:
         self._stall_unsticks = {}
         self.eq_profiles = {}
         self.eq_slots = {}
+        self._occlusion_filter = None
+
+    def get_occlusion_filter(self):
+        """Lazy-create and return a shared Lowpass filter for wall occlusion muffling."""
+        if self._occlusion_filter is None:
+            audio = getattr(self.game, "audio_mngr", None)
+            if audio is not None and hasattr(audio, "gen_filter"):
+                try:
+                    self._occlusion_filter = audio.gen_filter(
+                        "LOWPASS",
+                        ("GAINHF", 0.15),
+                        ("GAIN", 0.5),
+                    )
+                except Exception:
+                    self._occlusion_filter = None
+        return self._occlusion_filter
 
     EQ_PRESETS = {
         "bass_boost": (
@@ -316,11 +368,22 @@ class JukeboxPlayer:
         with self._lock:
             entry = self.players.get(jukebox_id)
             if entry is not None:
+                streamer = entry.get("streamer")
+                if streamer is not None:
+                    streamer.eq_slot = slot
+                filt = None
+                gp = getattr(self.game, "gameplay", None)
+                cur_map = getattr(gp, "map", None) if gp is not None else None
+                listener = getattr(audio, "position", None)
+                src = entry.get("source")
+                if cur_map is not None and listener is not None and src is not None and hasattr(cur_map, "valid_straight_path"):
+                    if cur_map.valid_straight_path(src.position, listener) is False:
+                        filt = self.get_occlusion_filter()
                 for key in ("source", "secondary_source"):
                     src = entry.get(key)
                     if src is not None:
                         try:
-                            audio.efx.send(src, 1, slot)
+                            audio.efx.send(src, 1, slot, filter=filt)
                         except Exception:
                             pass
 
@@ -556,26 +619,43 @@ class JukeboxPlayer:
                 src.gain = base_gain
         except Exception:
             pass
-        # Room reverb: like piano/drums, the song picks up the reverb zone of
-        # the place the jukebox stands in (none if the spot has no reverb).
+        # Initial wall occlusion check:
+        filt = None
         try:
             gameplay = getattr(self.game, "gameplay", None)
+            cur_map = getattr(gameplay, "map", None) if gameplay is not None else None
+            audio = getattr(self.game, "audio_mngr", None)
+            listener = getattr(audio, "position", None) if audio is not None else None
+            if cur_map is not None and listener is not None and hasattr(cur_map, "valid_straight_path"):
+                los = cur_map.valid_straight_path((float(x), float(y), float(z)), listener)
+                if los is False:
+                    filt = self.get_occlusion_filter()
+                    if filt is not None:
+                        src_l.direct_filter = filt
+                        src_r.direct_filter = filt
+        except Exception:
+            pass
+        # Room reverb: like piano/drums, the song picks up the reverb zone of
+        # the place the jukebox stands in (none if the spot has no reverb).
+        reverb = None
+        try:
             if gameplay is not None and getattr(gameplay, "map", None) is not None:
                 reverb_zone = gameplay.map.get_reverb_at(float(x), float(y), float(z))
                 reverb = reverb_zone.reverb if reverb_zone and hasattr(reverb_zone, "reverb") else None
-                if reverb is not None:
-                    audio.efx.send(src_l, 0, reverb)
-                    audio.efx.send(src_r, 0, reverb)
+                if reverb is not None and getattr(audio, "efx", None) is not None:
+                    audio.efx.send(src_l, 0, reverb, filter=filt)
+                    audio.efx.send(src_r, 0, reverb, filter=filt)
         except Exception:
             pass
         # Jukebox Equalizer profile (e.g. Bass Boost / Horn Speaker per-jukebox):
+        slot = None
         try:
             eq_profile = str(_kwargs.get("eq_profile") or self.eq_profiles.get(jukebox_id, "normal")).lower()
             self.eq_profiles[jukebox_id] = eq_profile
             slot = self._get_eq_slot(eq_profile)
             if slot is not None and getattr(audio, "efx", None) is not None:
-                audio.efx.send(src_l, 1, slot)
-                audio.efx.send(src_r, 1, slot)
+                audio.efx.send(src_l, 1, slot, filter=filt)
+                audio.efx.send(src_r, 1, slot, filter=filt)
         except Exception:
             pass
         try:
@@ -585,6 +665,8 @@ class JukeboxPlayer:
                 streamer = JukeboxRelayReceiver(
                     self.game, src_l, src_r, effective_volume,
                     relay_id, stream_epoch, ref, maxd,
+                    box_pos=(float(x), float(y), float(z)), player=self,
+                    reverb_slot=reverb, eq_slot=slot,
                 )
             else:
                 from . import music_bot as mb
@@ -595,6 +677,8 @@ class JukeboxPlayer:
                     start_offset_received_at=time.monotonic(),
                     http_headers=http_headers,
                 )
+                streamer.reverb_slot = reverb
+                streamer.eq_slot = slot
             streamer.start()
         except Exception as ex:
             for src in (src_l, src_r):
@@ -676,6 +760,8 @@ class JukeboxPlayer:
                 audio = getattr(self.game, "audio_mngr", None)
                 for s in valid_sources:
                     try:
+                        with contextlib.suppress(Exception):
+                            del s.direct_filter
                         if audio is not None and getattr(audio, "efx", None) is not None:
                             try:
                                 audio.efx.send(s, 0, None)
@@ -735,6 +821,8 @@ class JukeboxPlayer:
             source = player.get(key)
             if source is not None:
                 try:
+                    with contextlib.suppress(Exception):
+                        del source.direct_filter
                     audio = getattr(self.game, "audio_mngr", None)
                     if audio is not None and getattr(audio, "efx", None) is not None:
                         try:
@@ -1145,8 +1233,16 @@ class JukeboxPlayer:
                     pos = src_l.position
                     reverb_zone = gameplay.map.get_reverb_at(pos[0] + 2.5, pos[1], pos[2])
                     reverb = reverb_zone.reverb if reverb_zone and hasattr(reverb_zone, "reverb") else None
-                    audio.efx.send(src_l, 0, reverb)
-                    audio.efx.send(src_r, 0, reverb)
+                    streamer = p.get("streamer")
+                    if streamer is not None:
+                        streamer.reverb_slot = reverb
+                    filt = None
+                    listener = getattr(audio, "position", None)
+                    if listener is not None and hasattr(gameplay.map, "valid_straight_path"):
+                        if gameplay.map.valid_straight_path((pos[0] + 2.5, pos[1], pos[2]), listener) is False:
+                            filt = self.get_occlusion_filter()
+                    audio.efx.send(src_l, 0, reverb, filter=filt)
+                    audio.efx.send(src_r, 0, reverb, filter=filt)
                 except Exception:
                     pass
 

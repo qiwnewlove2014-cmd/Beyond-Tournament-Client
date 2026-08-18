@@ -331,6 +331,40 @@ class AudioStreamer(threading.Thread):
                 # lowering the music-bot/map-music slider does not silence them.
                 music_gain = audio.volume_categories.get("jukebox", [100])[0] / 100.0
                 src.gain = self.spatial_base_gain * music_gain * g
+
+            # Wall occlusion check for spatial pair (Jukebox direct mode):
+            if self.spatial_src_l is not None and self.spatial_src_r is not None:
+                box_pos = (
+                    (self.spatial_src_l.position[0] + self.spatial_src_r.position[0]) / 2.0,
+                    self.spatial_src_l.position[1],
+                    self.spatial_src_l.position[2],
+                )
+                gp = getattr(self.game, "gameplay", None)
+                cur_map = getattr(gp, "map", None) if gp is not None else None
+                if cur_map is not None and hasattr(cur_map, "valid_straight_path"):
+                    los = cur_map.valid_straight_path(box_pos, pos)
+                    occluded = (los is False)
+                    if occluded != getattr(self, "_last_occluded", None):
+                        self._last_occluded = occluded
+                        filt = None
+                        if occluded and hasattr(audio, "gen_filter"):
+                            if not hasattr(self, "_occlusion_filter") or self._occlusion_filter is None:
+                                self._occlusion_filter = audio.gen_filter("LOWPASS", ("GAINHF", 0.15), ("GAIN", 0.5))
+                            filt = self._occlusion_filter
+                        for s in (self.spatial_src_l, self.spatial_src_r):
+                            try:
+                                if filt is not None:
+                                    s.direct_filter = filt
+                                else:
+                                    with contextlib.suppress(Exception):
+                                        del s.direct_filter
+                                if getattr(audio, "efx", None) is not None:
+                                    if hasattr(self, "reverb_slot") and self.reverb_slot is not None:
+                                        audio.efx.send(s, 0, self.reverb_slot, filter=filt)
+                                    if hasattr(self, "eq_slot") and self.eq_slot is not None:
+                                        audio.efx.send(s, 1, self.eq_slot, filter=filt)
+                            except Exception:
+                                pass
         except Exception:
             pass
 
