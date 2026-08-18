@@ -270,13 +270,16 @@ class JukeboxRelayReceiver(threading.Thread):
         for source in (self.source_l, self.source_r):
             try:
                 source.stop()
-                while source.buffers_queued > 0:
+                drain_limit = 64
+                while source.buffers_processed > 0 and drain_limit > 0:
+                    drain_limit -= 1
                     result = source.unqueue_buffers()
-                    if result is not None:
-                        try:
-                            self._pool.extend(result)
-                        except TypeError:
-                            self._pool.append(result)
+                    if result is None:
+                        break
+                    try:
+                        self._pool.extend(result)
+                    except TypeError:
+                        self._pool.append(result)
             except Exception:
                 pass
 
