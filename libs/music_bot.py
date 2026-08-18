@@ -1331,6 +1331,51 @@ class MapMusicBot:
                 pass
             self.stream_source = None
 
+    def _fade_out_source(self, source, streamer=None, duration=0.5):
+        """Fade an active OpenAL stream source to 0 gain in background and delete."""
+        if source is None:
+            if streamer is not None:
+                try:
+                    streamer.stop()
+                except Exception:
+                    pass
+            return
+
+        def _fade_worker():
+            try:
+                start_gain = float(getattr(source, 'gain', 1.0) or 0.0)
+                steps = 10
+                step_sleep = duration / steps
+                for i in range(steps):
+                    fraction = (steps - 1 - i) / steps
+                    try:
+                        source.gain = max(0.0, start_gain * fraction)
+                    except Exception:
+                        break
+                    time.sleep(step_sleep)
+            except Exception:
+                pass
+            finally:
+                if streamer is not None:
+                    try:
+                        streamer.stop()
+                    except Exception:
+                        pass
+                try:
+                    source.stop()
+                    drain_limit = 64
+                    while source.buffers_processed > 0 and drain_limit > 0:
+                        source.unqueue_buffers()
+                        drain_limit -= 1
+                    while source.buffers_queued > 0 and drain_limit > 0:
+                        source.unqueue_buffers()
+                        drain_limit -= 1
+                    source.delete()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_fade_worker, daemon=True).start()
+
     def _begin_playback_generation(self):
         """Invalidate pending starts and reserve a generation for new playback."""
         with self._playback_generation_lock:
@@ -1709,6 +1754,7 @@ class MapMusicBot:
                     clear_queue=False,
                     clear_feed=not preserve_feed,
                     invalidate_pending=False,
+                    fade=True,
                 )
                 self.is_loading_stream = True
 
@@ -2097,7 +2143,7 @@ class MapMusicBot:
         self.is_loading_stream = True
 
         # Stop any current playback
-        self.stop(invalidate_pending=False)
+        self.stop(invalidate_pending=False, fade=True)
         self.is_loading_stream = True
 
         # Get stream URL in background
@@ -2237,7 +2283,7 @@ class MapMusicBot:
 
     # === Common Controls ===
 
-    def stop(self, clear_queue=True, clear_feed=True, invalidate_pending=True):
+    def stop(self, clear_queue=True, clear_feed=True, invalidate_pending=True, fade=False):
         """Stop all playback and cancel any pending search"""
         if invalidate_pending:
             self._begin_playback_generation()
@@ -2245,10 +2291,17 @@ class MapMusicBot:
         self.searching = False
         self.is_loading_stream = False
         # Stop YouTube streamer
-        if self.streamer:
-            self.streamer.stop()
+        if fade and self.stream_source:
+            old_src = self.stream_source
+            old_streamer = self.streamer
+            self.stream_source = None
             self.streamer = None
-        self._destroy_stream_source()
+            self._fade_out_source(old_src, old_streamer, duration=0.5)
+        else:
+            if self.streamer:
+                self.streamer.stop()
+                self.streamer = None
+            self._destroy_stream_source()
         # Stop local playback
         self._stop_local()
         self.playing = False

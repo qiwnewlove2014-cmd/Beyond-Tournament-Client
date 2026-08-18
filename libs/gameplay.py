@@ -2636,13 +2636,8 @@ class Gameplay(state.State):
             self._finish_pa_toggle()
             return
 
-        # Flags unknown/missing (e.g. an older server payload). Ask the server
-        # live - it is the authority - and finish the toggle when the answer
-        # arrives (see event_handeler.megaphone_permission).
-        self.game.network.send(
-            consts.CHANNEL_MISC, "check_megaphone_permission", {}
-        )
-        speak("Checking permission...")
+        # Normal players: remain completely silent
+        return
 
     def _finish_pa_toggle(self):
         """Finish the PA Test Mode toggle once staff permission is confirmed."""

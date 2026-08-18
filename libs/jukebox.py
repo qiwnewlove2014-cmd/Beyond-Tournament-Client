@@ -456,7 +456,7 @@ class JukeboxPlayer:
                 )
                 return
 
-        self.stop(jukebox_id)
+        self.stop(jukebox_id, fade=True)
         if transport == "relay_pending":
             with self._lock:
                 self.players[jukebox_id] = {
@@ -569,7 +569,65 @@ class JukeboxPlayer:
             f"at ({x}, {y}, {z}) offset={start_offset:.1f}s url={url[:60]!r}"
         )
 
-    def stop(self, jukebox_id, playback_id=None):
+    def _fade_out_sources(self, sources, streamer=None, duration=0.5):
+        """Fade active OpenAL sources to 0 gain in a daemon thread and clean them up."""
+        valid_sources = [s for s in sources if s is not None]
+        if not valid_sources:
+            if streamer is not None:
+                try:
+                    if hasattr(streamer, "stop"):
+                        streamer.stop()
+                    else:
+                        streamer.running = False
+                except Exception:
+                    pass
+            return
+
+        def _fade_worker():
+            try:
+                start_gains = [float(getattr(s, 'gain', 1.0) or 0.0) for s in valid_sources]
+                steps = 10
+                step_sleep = duration / steps
+                for i in range(steps):
+                    fraction = (steps - 1 - i) / steps
+                    for idx, s in enumerate(valid_sources):
+                        try:
+                            s.gain = max(0.0, start_gains[idx] * fraction)
+                        except Exception:
+                            pass
+                    time.sleep(step_sleep)
+            except Exception:
+                pass
+            finally:
+                if streamer is not None:
+                    try:
+                        if hasattr(streamer, "stop"):
+                            streamer.stop()
+                        else:
+                            streamer.running = False
+                    except Exception:
+                        pass
+                audio = getattr(self.game, "audio_mngr", None)
+                for s in valid_sources:
+                    try:
+                        if audio is not None and getattr(audio, "efx", None) is not None:
+                            try:
+                                audio.efx.send(s, 0, None)
+                            except Exception:
+                                pass
+                        s.stop()
+                        drain_limit = 64
+                        while s.buffers_processed > 0 and drain_limit > 0:
+                            s.unqueue_buffers()
+                            drain_limit -= 1
+                        s.delete()
+                    except Exception:
+                        pass
+
+        import threading
+        threading.Thread(target=_fade_worker, daemon=True).start()
+
+    def stop(self, jukebox_id, playback_id=None, fade=False):
         """Stop the song for one jukebox and free its audio source."""
         with self._lock:
             existing = self.players.get(jukebox_id)
@@ -590,6 +648,9 @@ class JukeboxPlayer:
             with self._lock:
                 self.relay_routes.pop(relay_key, None)
                 self._relay_pending.pop(relay_key, None)
+        if fade:
+            self._fade_out_sources([player.get("source"), player.get("secondary_source")], streamer=streamer, duration=0.5)
+            return True
         try:
             if streamer is not None:
                 if isinstance(streamer, JukeboxRelayReceiver):

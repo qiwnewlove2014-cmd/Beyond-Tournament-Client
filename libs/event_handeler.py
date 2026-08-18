@@ -118,8 +118,6 @@ class EventHandeler:
             gp.is_staff = True
             if hasattr(gp, "_finish_pa_toggle"):
                 gp._finish_pa_toggle()
-        else:
-            speak("System: PA Test Mode is only available for staff, builders, and sound technicians.")
 
     def client_crash_report_ack(self, data):
         from . import crash_reporting
