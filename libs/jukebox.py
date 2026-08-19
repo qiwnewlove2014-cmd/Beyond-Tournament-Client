@@ -1405,7 +1405,7 @@ def open_jukebox_menu(game, gp):
 
     menu_items = [
         ("Search YouTube and queue a song", go_search),
-        ("Queue by YouTube URL", go_direct_url),
+        ("Queue by YouTube URL or livestream", go_direct_url),
         ("Skip current song", go_skip),
         ("Stop playback", go_stop),
         (_repeat_label, go_repeat),
@@ -1458,7 +1458,7 @@ def _open_eq_menu(game, gp, jukebox_id):
 
 def _open_search_input(game, gp, jukebox_id):
     gp.add_substate(game.input.run(
-        "Enter a song name to search YouTube:",
+        "Enter a song name or livestream to search YouTube:",
         handeler=lambda query: _on_search_submit(game, gp, jukebox_id, query),
     ))
 
@@ -1480,7 +1480,7 @@ def _on_search_submit(game, gp, jukebox_id, query):
 
 def _open_url_input(game, gp, jukebox_id):
     gp.add_substate(game.input.run(
-        "Enter YouTube video URL:",
+        "Enter YouTube video URL (or paste a livestream link):",
         handeler=lambda url: _on_url_submit(game, gp, jukebox_id, url),
     ))
 
