@@ -1409,7 +1409,6 @@ def open_jukebox_menu(game, gp):
         ("Skip current song", go_skip),
         ("Stop playback", go_stop),
         (_repeat_label, go_repeat),
-        (_eq_label, go_eq),
         ("Shuffle queue", go_shuffle),
         (_volume_label, go_volume),
         ("View queue", go_queue),
@@ -1417,10 +1416,13 @@ def open_jukebox_menu(game, gp):
     ]
 
     is_staff = bool(
-        getattr(gp.player, "moderator", False)
-        or (hasattr(gp.player, "hasPermission") and gp.player.hasPermission("builder"))
+        getattr(gp, "is_staff", False)
+        or getattr(gp, "is_builder", False)
+        or getattr(gp, "is_technician", False)
+        or getattr(gp, "can_broadcast_megaphone", False)
     )
     if is_staff:
+        menu_items.append((_eq_label, go_eq))
         menu_items.append(("Clear queue and stop (Staff only)", go_clear_all))
 
     menu_items.append(("Cancel", lambda: gp.pop_last_substate()))
