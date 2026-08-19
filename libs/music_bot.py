@@ -141,6 +141,8 @@ class YouTubeSearcher:
                         # so ffmpeg is not rejected with HTTP 403. Flat search
                         # results carry none; consumers re-resolve at play time.
                         'http_headers': dict(e.get('http_headers') or {}),
+                        'is_live': bool(e.get('is_live', False)),
+                        'live_status': e.get('live_status', ''),
                     })
                 return results
         except Exception as ex:

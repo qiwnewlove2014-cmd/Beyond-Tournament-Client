@@ -1661,7 +1661,13 @@ def _show_results_menu(game, gp, jukebox_id, results):
         # '02d' format only accepts ints — a float here used to crash the
         # whole results menu before it opened.
         dur = int(r.get("duration") or 0)
-        dur_str = f"{dur // 60}:{dur % 60:02d}" if dur else "?"
+        is_live = r.get("is_live", False) or r.get("live_status") == "is_live"
+        if is_live:
+            dur_str = "LIVE"
+        elif dur:
+            dur_str = f"{dur // 60}:{dur % 60:02d}"
+        else:
+            dur_str = "?"
         title = r.get("title", "Unknown")
         items.append((f"{title} ({dur_str})", make_callback(i)))
     items.append(("Cancel", lambda: gp.pop_last_substate()))
