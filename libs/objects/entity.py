@@ -526,7 +526,8 @@ class Entity(Object):
             if not is_focus:
                 self.game.audio_mngr.play_unbound("foley/swim/start/", self.x, self.y, self.z)
             self.in_water = True
-            self.game.exclude_water.append(self.soundgroup)
+            if hasattr(self.game, 'exclude_water') and self.soundgroup not in self.game.exclude_water:
+                self.game.exclude_water.append(self.soundgroup)
             muffling = self.water_muffling
             
             # Cancel any existing water automation first
@@ -572,7 +573,8 @@ class Entity(Object):
                 )
                 self._water_automation = task
             self.in_water=False
-            self.game.exclude_water.pop(self.game.exclude_water.index(self.soundgroup))
+            if hasattr(self.game, 'exclude_water') and self.soundgroup in self.game.exclude_water:
+                self.game.exclude_water.remove(self.soundgroup)
 
         if round(self.depth, 3) != round(self.recorded_depth,3) and self.in_water:
             muffling = self.water_muffling
