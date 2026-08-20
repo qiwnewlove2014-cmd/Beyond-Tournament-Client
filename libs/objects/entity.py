@@ -636,12 +636,11 @@ class Entity(Object):
             except ValueError:
                 pass
                 
-        # Explicitly delete water_filter
+        # Return the water filter to the AudioManager pool. It must NEVER be
+        # garbage collected: cyal's Filter.__dealloc__ calls through a
+        # crash-prone stored function pointer (hard 0xC0000005 crashes).
         if getattr(self, 'water_filter', None) is not None:
-            try:
-                self.water_filter.delete()
-            except Exception:
-                pass
+            self.game.audio_mngr.release_filter(self.water_filter)
         self.water_filter = None
 
         if self.player: 
@@ -674,5 +673,27 @@ class Entity(Object):
         if self.beacon is not None:
             self.beacon.destroy(force=True)
         super().destroy()
-    
+
+    def __del__(self):
+        # Safety net: if this entity is garbage-collected without an explicit
+        # destroy() call (e.g. overwritten in the entities dict during a map
+        # reload), return the water_filter to the AudioManager pool.  cyal's
+        # Filter.__dealloc__ calls through a stored C function pointer that
+        # becomes invalid after context teardown — letting GC invoke it causes
+        # a hard 0xC0000005 access-violation crash.
+        wf = getattr(self, 'water_filter', None)
+        if wf is not None:
+            try:
+                game = getattr(self, 'game', None)
+                if game is not None:
+                    am = getattr(game, 'audio_mngr', None)
+                    if am is not None:
+                        am.release_filter(wf)
+            except Exception:
+                pass
+            try:
+                self.water_filter = None
+            except Exception:
+                pass
+
 

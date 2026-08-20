@@ -150,7 +150,11 @@ class TestMegaphoneJitterBuffer(unittest.TestCase):
         )
         game = SimpleNamespace(
             audio_mngr=SimpleNamespace(
-                context=SimpleNamespace(batch=lambda: contextlib.nullcontext())
+                context=SimpleNamespace(batch=lambda: contextlib.nullcontext()),
+                # Playout frames are deferred to the main thread via the
+                # audio inbox; execute immediately here so the clock-tick
+                # assertions below keep testing the worker cadence exactly.
+                defer_audio=lambda fn: fn(),
             )
         )
         worker = vc.voice_chat_compression.__new__(vc.voice_chat_compression)
@@ -184,7 +188,9 @@ class TestMegaphoneJitterBuffer(unittest.TestCase):
         worker = vc.voice_chat_compression.__new__(vc.voice_chat_compression)
         worker.game = SimpleNamespace(
             audio_mngr=SimpleNamespace(
-                context=SimpleNamespace(batch=lambda: contextlib.nullcontext())
+                context=SimpleNamespace(batch=lambda: contextlib.nullcontext()),
+                # Audio inbox deferral runs immediately in tests.
+                defer_audio=lambda fn: fn(),
             )
         )
         worker._megaphone_decoders = {}

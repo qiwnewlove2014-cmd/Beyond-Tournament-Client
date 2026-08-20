@@ -291,10 +291,10 @@ class MegaphoneManager:
             for filter_key in ('filter', 'refl_filter'):
                 filter_obj = data.get(filter_key)
                 if filter_obj:
-                    try:
-                        filter_obj.delete()
-                    except Exception:
-                        pass
+                    # Return to the AudioManager pool — cyal Filter has no
+                    # delete() and must never be GC-freed (crash-prone
+                    # dealloc call).
+                    self.game.audio_mngr.release_filter(filter_obj)
             if data.get('reverb_slot'):
                 self.game.audio_mngr.release_effect_slot(data['reverb_slot'])
 
@@ -1095,7 +1095,12 @@ class MegaphoneManager:
             if consts.CHANNEL_MEGAPHONE in self.voice_channels:
                 channel = self.voice_channels[consts.CHANNEL_MEGAPHONE]
                 if hasattr(channel, 'vc_compression'):
-                    channel.vc_compression.put(lambda: voice_chat.tick_megaphone_delay(self.gameplay))
+                    # tick_megaphone_delay does OpenAL work — run it on the
+                    # main thread via the audio inbox, never on a worker
+                    # thread (cross-thread AL caused native crashes).
+                    self.game.audio_mngr.defer_audio(
+                        lambda: voice_chat.tick_megaphone_delay(self.gameplay)
+                    )
 
         # === MEGAPHONE DYNAMIC REVERB SYNC ===
         # Synchronize megaphone speakers with the player's local reverb zone

@@ -1,5 +1,6 @@
 import cyal, cyal.efx
 import contextlib
+import gc
 import math
 import weakref
 
@@ -166,8 +167,15 @@ class SoundGroup:
             except cyal.exceptions.InvalidOperationError as e: pass
         if self.filter is not None and len(self.filter) > 0: source.direct_filter=self.filter[-1]
         source.play()
-        self.parent.volume_categories["master"][1].add(snd)
-        self.parent.volume_categories[cat][1].add(snd)
+        # Temporarily suppress GC so that a concurrent _remove callback
+        # (triggered by a worker-thread collection) cannot mutate the
+        # internal WeakSet while we are inserting into it.
+        gc.disable()
+        try:
+            self.parent.volume_categories["master"][1].add(snd)
+            self.parent.volume_categories[cat][1].add(snd)
+        finally:
+            gc.enable()
         return snd
     
     def pause(self):
@@ -188,8 +196,10 @@ class SoundGroup:
     
     def destroy(self):
         if getattr(self, 'cached_filter', None) is not None:
+            # Return to the AudioManager pool — never GC-freed (cyal Filter
+            # __dealloc__ calls through a crash-prone function pointer).
             try:
-                self.cached_filter.delete()
+                self.parent.release_filter(self.cached_filter)
             except Exception:
                 pass
             self.cached_filter = None
@@ -264,25 +274,23 @@ class SoundGroup:
     
     def loop(self):
         self.mute_if_far()
-            
-        for source in self.labeled_sources:
-            if self.labeled_sources[source].source is None: 
-                snd = self.labeled_sources.pop(source)
-                snd.destroy()
-                break
-            if self.labeled_sources[source].source.state == cyal.SourceState.STOPPED: 
-                snd = self.labeled_sources.pop(source)
-                snd.destroy()
-                break
-        for source in self.unlabeled_sources:
-            if source.source is None: 
-                source.destroy()
-                continue
 
-            if source.source.state == cyal.SourceState.STOPPED: 
-                source = self.unlabeled_sources.pop(self.unlabeled_sources.index(source))
-                source.destroy()
-                break
+        # Drain ALL finished sources every frame. The old one-per-frame
+        # `break` could not keep up when many entities play at once (mass
+        # zombie rounds), so live OpenAL sources accumulated faster than
+        # they were reclaimed and spiked toward the driver limit each round.
+        # Iterate over snapshots: destroying mutates the containers.
+        for key in list(self.labeled_sources):
+            snd = self.labeled_sources.get(key)
+            if snd is None:
+                continue
+            if snd.source is None or snd.source.state == cyal.SourceState.STOPPED:
+                del self.labeled_sources[key]
+                snd.destroy()
+        for snd in list(self.unlabeled_sources):
+            if snd.source is None or snd.source.state == cyal.SourceState.STOPPED:
+                self.unlabeled_sources.remove(snd)
+                snd.destroy()
 
     def mute_if_far(self):
         if self.direct: return

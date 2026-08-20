@@ -1,6 +1,8 @@
 import cyal, cyal.efx, cyal.hrtf, cyal.exceptions
 import contextlib
+import gc
 import os
+import queue
 import weakref
 import math
 import threading
@@ -71,6 +73,15 @@ class AudioManager():
         self.unbound_sources = []
         self.buffers = weakref.WeakValueDictionary()
         self._preloaded_buffers = {}  # Strong references for preloaded sounds to prevent GC
+        # Audio Inbox: worker threads (voice chat, megaphone playout, music
+        # bot) hand their OpenAL work here instead of touching OpenAL
+        # themselves. AudioManager.loop() drains it on the MAIN thread inside
+        # the frame batch, so every AL call in the process happens on one
+        # thread — the OpenAL context is only current there, and concurrent
+        # cross-thread AL usage (especially mismatched context.batch()
+        # nesting, a per-context GLOBAL flag) corrupted native memory and
+        # crashed the game (0xC0000005) under load.
+        self._audio_inbox = queue.SimpleQueue()
         self.piano = PianoAudio(self)
         self.drums = DrumAudio(self)
         
@@ -87,6 +98,13 @@ class AudioManager():
         self._slot_pool = []      # Available slots
         self._slot_in_use = []    # Currently borrowed slots
         self._slot_pool_size = 0
+        # Recycled EFX filters. cyal's Filter has no explicit delete(): the
+        # AL resource is only released by __dealloc__, which calls through a
+        # function pointer stored on the EfxExtension instance — a call that
+        # hard-crashes the game (0xC0000005 into python311.dll's .data) when
+        # that pointer slot is corrupted. Pooling filter wrappers means they
+        # are NEVER garbage collected, so that code path never runs at all.
+        self._filter_pool = []
         self._init_slot_pool()
     
     # Sets the orientation, taking (horizontal angle, pitch, lean)
@@ -171,7 +189,13 @@ class AudioManager():
         if cache_key in self.buffers.keys():
             return self.buffers[cache_key]
         try:
-            file = pyogg.VorbisFile(path)
+            # Safe chunked decoder — pyogg 0.7's VorbisFile can write past
+            # its destination buffer on files whose PCM exceeds the
+            # granulepos estimate, silently corrupting the CPython heap
+            # (root cause of the hard zombie-round crashes). See
+            # libs/safe_vorbis.py.
+            from .safe_vorbis import load_vorbis_pcm
+            file = load_vorbis_pcm(path)
             try: buffer = self.context.gen_buffer()
             except cyal.exceptions.InvalidOperationError as e:
                 print(e)
@@ -195,7 +219,11 @@ class AudioManager():
                 sample_rate=file.frequency,
                 format = format
             )
-            self.buffers[cache_key] = buffer
+            gc.disable()
+            try:
+                self.buffers[cache_key] = buffer
+            finally:
+                gc.enable()
             # Keep strong reference if this path was preloaded
             if path in self._preloaded_buffers:
                 self._preloaded_buffers[path] = buffer
@@ -218,7 +246,12 @@ class AudioManager():
                     self.listener.gain = self.volume_categories["master"][0] / 100
                     return
                 
-                for source in self.volume_categories[cat][1]:
+                # Snapshot the WeakSet: sounds can be added concurrently
+                # (music-synced queues, worker callbacks), and mutating a
+                # WeakSet during iteration raises RuntimeError.
+                for source in list(self.volume_categories[cat][1]):
+                    if source.source is None:
+                        continue
                     gain = (self.volume_categories[cat][0] / 100) * (source.volume / 100)
                     if not source.muted: source.source.gain = gain
 
@@ -276,8 +309,12 @@ class AudioManager():
         except Exception:
             with contextlib.suppress(Exception):
                 source.stop()
-        self.volume_categories["master"][1].add(snd)
-        self.volume_categories[cat][1].add(snd)
+        gc.disable()
+        try:
+            self.volume_categories["master"][1].add(snd)
+            self.volume_categories[cat][1].add(snd)
+        finally:
+            gc.enable()
         return snd
 
 
@@ -382,10 +419,14 @@ class AudioManager():
                     src_l.stop()
                 with contextlib.suppress(Exception):
                     src_r.stop()
-            self.volume_categories["master"][1].add(snd_l)
-            self.volume_categories["master"][1].add(snd_r)
-            self.volume_categories[cat][1].add(snd_l)
-            self.volume_categories[cat][1].add(snd_r)
+            gc.disable()
+            try:
+                self.volume_categories["master"][1].add(snd_l)
+                self.volume_categories["master"][1].add(snd_r)
+                self.volume_categories[cat][1].add(snd_l)
+                self.volume_categories[cat][1].add(snd_r)
+            finally:
+                gc.enable()
             return (snd_l, snd_r)
 
         buffer = self.load_buffer(path, as_mono=as_mono)
@@ -461,22 +502,55 @@ class AudioManager():
         except Exception:
             with contextlib.suppress(Exception):
                 source.stop()
-        self.volume_categories["master"][1].add(snd)
-        self.volume_categories[cat][1].add(snd)
+        gc.disable()
+        try:
+            self.volume_categories["master"][1].add(snd)
+            self.volume_categories[cat][1].add(snd)
+        finally:
+            gc.enable()
         return snd
 
 
 
+    def defer_audio(self, fn):
+        """Schedule an OpenAL-touching callable to run on the main thread.
+
+        Safe to call from ANY thread (SimpleQueue, no locks, never blocks,
+        never raises). The callable runs inside AudioManager.loop()'s frame
+        batch on the main thread. Use this for every AL operation that used
+        to run on voice/music worker threads.
+        """
+        self._audio_inbox.put(fn)
+
+    def _drain_audio_inbox(self, limit=500):
+        drained = 0
+        while drained < limit:
+            try:
+                fn = self._audio_inbox.get_nowait()
+            except queue.Empty:
+                return
+            drained += 1
+            try:
+                fn()
+            except Exception as e:
+                print(f"[AUDIO INBOX] deferred call failed: {e}")
+
     def loop(self):
         with contextlib.suppress(RuntimeError):
             with self.context.batch():
+                # Deferred worker-thread audio runs FIRST, inside the same
+                # single-thread batch window as everything else below.
+                self._drain_audio_inbox()
                 self.piano.update()
                 self.drums.update()
-                for source in self.unbound_sources:
-                    if source.source.state == cyal.SourceState.STOPPED:
-                        self.unbound_sources.pop(self.unbound_sources.index(source))
-                        source.destroy()
-                        break
+                # Drain ALL finished unbound sources every frame (the old
+                # one-per-frame break let sources accumulate without bound
+                # under mass-spawn load). Snapshot first: destroy() mutates
+                # the list.
+                for snd in list(self.unbound_sources):
+                    if snd.source is None or snd.source.state == cyal.SourceState.STOPPED:
+                        self.unbound_sources.remove(snd)
+                        snd.destroy()
                 for soundgroup in self.soundgroups:
                     soundgroup.loop()
     
@@ -514,20 +588,66 @@ class AudioManager():
         for sg in self.soundgroups:
             if sg not in exclude: sg.apply_filter(filter, replace=replace, clear=clear)
     
-    def gen_filter(self, type, *args):
-        """Create an EFX filter safely.
+    def _armor_filter(self, filter_obj, site, label="filter"):
+        """Permanently INCREF an EFX wrapper so its refcount can never hit 0.
 
-        This method now catches errors when the requested filter type is not
-        supported by the underlying OpenAL implementation. If the filter
-        cannot be created, ``None`` is returned and a warning is printed. The
-        caller must check for ``None`` before using the filter.
+        cyal EFX wrappers (Filter/Effect/AuxiliaryEffectSlot) delete their AL
+        resource in __dealloc__ through stored function pointers — crash
+        dumps show this firing on a Filter whose memory was ALREADY reused
+        (its efx field pointed at a static type object), i.e. a
+        use-after-free of the wrapper itself. Leaking one reference makes
+        that dealloc unreachable no matter what reference-counting bug
+        occurs elsewhere. The finalize callback only fires if the armor
+        somehow fails, and then names the creation site.
         """
         try:
-            filter_obj = self.efx.gen_filter(type=type)
-        except cyal.exceptions.InvalidOperationError as e:
-            # Log the failure and return ``None`` so the caller can handle it.
-            print(f"[AudioManager] Unable to create filter '{type}': {e}")
-            return None
+            import ctypes
+            import weakref
+            ctypes.pythonapi.Py_IncRef.argtypes = [ctypes.py_object]
+            ctypes.pythonapi.Py_IncRef(ctypes.py_object(filter_obj))
+
+            def _armor_broken(f_id=id(filter_obj), s=site, lbl=label):
+                try:
+                    from .logger import log
+                    log(f"[EFX ARMOR] WARNING: {lbl} {f_id} (created at {s}) was garbage collected despite INCREF armor!")
+                except Exception:
+                    pass
+
+            weakref.finalize(filter_obj, _armor_broken)
+        except Exception:
+            pass
+
+    def gen_filter(self, type, *args):
+        """Borrow an EFX filter, serving from the pool when possible.
+
+        Wrappers are INCREF-armored (see _armor_filter) and pooled, so their
+        crash-prone __dealloc__ is unreachable. Return filters with
+        release_filter() instead of dropping them. Returns ``None`` when the
+        filter type is unsupported — callers must check.
+        """
+        import sys as _sys
+        try:
+            frame = _sys._getframe(1)
+            site = f"{frame.f_code.co_filename}:{frame.f_lineno}"
+        except Exception:
+            site = "unknown"
+        if self._filter_pool:
+            filter_obj = self._filter_pool.pop()
+            try:
+                filter_obj.type = type  # reconfigure the recycled filter
+            except Exception as e:
+                print(f"[AudioManager] Unable to retype pooled filter '{type}': {e}")
+                # Keep the wrapper pooled (never GC-freed) even on failure.
+                self._filter_pool.append(filter_obj)
+                return None
+        else:
+            try:
+                filter_obj = self.efx.gen_filter(type=type)
+            except cyal.exceptions.InvalidOperationError as e:
+                # Log the failure and return ``None`` so the caller can handle it.
+                print(f"[AudioManager] Unable to create filter '{type}': {e}")
+                return None
+            self._armor_filter(filter_obj, site)
 
         # Apply any additional parameters safely.
         for param in args:
@@ -536,6 +656,22 @@ class AudioManager():
             except cyal.exceptions.InvalidAlEnumError as e:
                 print(f"{e} in audio_manager.gen_filter with parameters {param}")
         return filter_obj
+
+    def release_filter(self, filter_obj):
+        """Return a borrowed filter to the pool (call on the main thread).
+
+        The wrapper is deliberately kept alive forever — deleting a cyal
+        Filter runs through __dealloc__'s crash-prone indirect call. Peak
+        live filter count is bounded by concurrent use, never above the
+        previous (GC-based) peak.
+        """
+        if filter_obj is None:
+            return
+        try:
+            filter_obj.type = "null"  # neutral state for the next borrower
+        except Exception:
+            pass
+        self._filter_pool.append(filter_obj)
     
     # === Effect Slot Pool Methods ===
 
@@ -547,6 +683,7 @@ class AudioManager():
         for i in range(max_slots):
             try:
                 slot = self.efx.gen_auxiliary_effect_slot()
+                self._armor_filter(slot, "slot_pool_init", label="slot")
                 self._slot_pool.append(slot)
                 self._slot_pool_size += 1
             except (MemoryError, cyal.exceptions.InvalidOperationError):
@@ -582,6 +719,7 @@ class AudioManager():
         The caller must acquire a slot separately via acquire_effect_slot()."""
         try:
             efx = self.efx.gen_effect(type=type)
+            self._armor_filter(efx, f"create_effect:{type}", label="effect")
             for param in args:
                 try:
                     efx.set(*param)

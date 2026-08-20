@@ -604,7 +604,11 @@ class Game:
                 ),
             )
         pygame.display.update()
-        for i in self.clocks:
+        try:
+            clocks_snapshot = list(self.clocks)
+        except RuntimeError:
+            clocks_snapshot = []
+        for i in clocks_snapshot:
             i.update(delta)
 
     def pop(self):

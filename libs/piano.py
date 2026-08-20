@@ -102,7 +102,8 @@ class PianoAudio:
             return self.am.buffers[cache_key_l], self.am.buffers[cache_key_r]
         
         try:
-            file = pyogg.VorbisFile(path)
+            from .safe_vorbis import load_vorbis_pcm
+            file = load_vorbis_pcm(path)
             audio_data = bytes(file.buffer)
             if file.channels == 2:
                 stereo_samples = array.array('h', audio_data)

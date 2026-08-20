@@ -1,4 +1,3 @@
-import contextlib
 import cyal.exceptions
 
 class Sound:
@@ -9,18 +8,18 @@ class Sound:
         self.dist = dist
         self.muted = False
         self.force_to_destroy = False
-        
+
     def destroy(self, force=False):
         if self.force_to_destroy and not force: return
-        with contextlib.suppress(cyal.exceptions.InvalidAlValueError):
-            if self.source is not None: 
-                try: self._source.stop()
-                except cyal.exceptions.InvalidOperationError: pass
-                try: self._source.delete()  # Release OpenAL source back to pool
-                except Exception: pass
-                self._source = None
-        
-    
+        if self.source is None: return
+        # cyal's Source has no explicit delete() method: the AL source is
+        # released by Source.__dealloc__ once the last Python reference
+        # (this wrapper) is dropped. The old code called the nonexistent
+        # .delete() and swallowed the AttributeError, so sources were never
+        # explicitly released and lingered until GC ran on some thread.
+        try: self._source.stop()
+        except cyal.exceptions.InvalidOperationError: pass
+        self._source = None
     @property
     def source(self):
         return self._source

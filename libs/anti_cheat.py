@@ -72,6 +72,7 @@ class SecureFloat:
 
 import psutil
 import ctypes
+import ctypes.wintypes
 
 _game = None
 
@@ -97,10 +98,19 @@ def detect_cheat_engine():
 
     # 2. Window Title Detection (Catches renamed executables)
     EnumWindows = ctypes.windll.user32.EnumWindows
-    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+    # Correct Win32 signature: BOOL CALLBACK EnumWindowsProc(HWND, LPARAM)
+    # c_bool (1 byte) is WRONG for BOOL (4 bytes) — causes stack corruption.
+    # POINTER(c_int) is WRONG for HWND/LPARAM — causes invalid dereferences.
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
     GetWindowText = ctypes.windll.user32.GetWindowTextW
+    GetWindowText.argtypes = [ctypes.wintypes.HWND, ctypes.c_wchar_p, ctypes.c_int]
+    GetWindowText.restype = ctypes.c_int
     GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
+    GetWindowTextLength.argtypes = [ctypes.wintypes.HWND]
+    GetWindowTextLength.restype = ctypes.c_int
     IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+    IsWindowVisible.argtypes = [ctypes.wintypes.HWND]
+    IsWindowVisible.restype = ctypes.wintypes.BOOL
 
     cheat_engine_found = False
 
@@ -116,7 +126,10 @@ def detect_cheat_engine():
                     return False
         return True
     
-    EnumWindows(EnumWindowsProc(foreach_window), 0)
+    # Store callback in a local variable to prevent GC from collecting the
+    # ctypes thunk while EnumWindows is still invoking it.
+    callback = EnumWindowsProc(foreach_window)
+    EnumWindows(callback, 0)
     return cheat_engine_found
 
 def _speedhack_watchdog():
@@ -129,12 +142,20 @@ def _speedhack_watchdog():
     
     last_real_time = time.time()
     last_game_time = pygame.time.get_ticks() / 1000.0
-    
+
+    # Developer diagnostic gate: set BT_DISABLE_ANTICHEAT_SCAN=1 to skip the
+    # psutil/Win32 process scan (the remaining CRT-heap corruption suspect)
+    # while KEEPING the speedhack check below. Local debugging only — remove
+    # once the corrupter is confirmed and the scan is moved off-process.
+    skip_process_scan = os.environ.get("BT_DISABLE_ANTICHEAT_SCAN") == "1"
+    if skip_process_scan:
+        print("Anti-Cheat: process scan DISABLED via BT_DISABLE_ANTICHEAT_SCAN (diagnostic mode).")
+
     while True:
         time.sleep(1.0)
-        
+
         # 1. Global Process Check
-        if detect_cheat_engine():
+        if not skip_process_scan and detect_cheat_engine():
             print("CRITICAL: Cheat Engine process detected! Exiting...")
             try:
                 from libs import logger

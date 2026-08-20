@@ -151,7 +151,8 @@ class DrumAudio:
             return self.am.buffers[cache_key_l], self.am.buffers[cache_key_r]
 
         try:
-            file = pyogg.VorbisFile(path)
+            from .safe_vorbis import load_vorbis_pcm
+            file = load_vorbis_pcm(path)
             audio_data = bytes(file.buffer)
             if file.channels != 2:
                 buffer = self.am.load_buffer(path)
@@ -531,6 +532,10 @@ class DrumAudio:
                 self._pending_hits.get_nowait()
             except queue.Empty:
                 break
+        # Return the occlusion filter to the pool instead of dropping it for
+        # garbage collection (cyal Filter dealloc = crash-prone call).
+        if self._occlusion_filter is not None:
+            self.am.release_filter(self._occlusion_filter)
         self._occlusion_filter = None
         # Release preloaded drum kit buffers so memory does not accumulate across
         # map changes. _preloaded_buffers holds strong refs to OpenAL buffers;

@@ -144,9 +144,19 @@ class Camera:
         if megaphone and hasattr(megaphone, 'request_spatial_refresh'):
             megaphone.request_spatial_refresh()
 
+        # Return the previous move()'s filter to the pool BEFORE borrowing a
+        # new one. Camera.move runs on every movement update; the old filter
+        # object used to fall to garbage collection here dozens of times per
+        # second, and cyal Filter.__dealloc__ calls through a crash-prone
+        # stored function pointer (the hard-crash root cause).
+        if getattr(self, "_pooled_water_filter", None) is not None:
+            self.game.audio_mngr.release_filter(self._pooled_water_filter)
+            self._pooled_water_filter = None
+
         filter = self.game.audio_mngr.gen_filter(
             type="LOWPASS"
         )
+        self._pooled_water_filter = filter
         
         def muffling_at(d):
             # Same depth->GAINHF curve as Entity.water_muffling, so the world

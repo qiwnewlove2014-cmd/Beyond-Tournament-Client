@@ -144,7 +144,9 @@ class EventHandeler:
         else:
             speak(data["text"], data["interupt"], not data["buffer"])
             if data["sound"]:
-                self.game.direct_soundgroup.play(data["sound"])
+                # Play notification sounds on the main thread (OpenAL rule).
+                sound = data["sound"]
+                self.game.put(lambda sound=sound: self.game.direct_soundgroup.play(sound))
 
     def travel_point_hint(self, data):
         """Server-side walk-in hint for a travel point. Rendered here so we can
@@ -562,20 +564,25 @@ class EventHandeler:
             self.gameplay.map.remove_entity(data["name"])
 
     def play_sound(self, data):
+        # ALL entity audio must be created on the main thread: the OpenAL
+        # context is only current there, and calling it from this network
+        # thread under mass-spawn load corrupted native state (hard 0xC0000005
+        # crashes with no Python traceback). Vehicles already queued
+        # themselves; now every entity sound does.
+        if (not data.get("_entity_main_thread")
+                and not data.get("_vehicle_main_thread")
+                and not data.get("_motorcycle_main_thread")):
+            sound_data = dict(data)
+            sound_data["_entity_main_thread"] = True
+            self.game.put(
+                lambda sound_data=sound_data: self.play_sound(sound_data)
+            )
+            return
         entity = (
             self.gameplay.player
             if data["name"] == self.gameplay.player.name
             else self.gameplay.map.entities.get(data["name"])
         )
-        if (getattr(entity, "is_vehicle", False) and
-                not data.get("_vehicle_main_thread") and
-                not data.get("_motorcycle_main_thread")):
-            sound_data = dict(data)
-            sound_data["_vehicle_main_thread"] = True
-            self.game.put(
-                lambda sound_data=sound_data: self.play_sound(sound_data)
-            )
-            return
         if entity:
             entity.play_sound(
                 data["sound"],
@@ -596,6 +603,15 @@ class EventHandeler:
                 )
 
     def play_direct(self, data):
+        # Route through the main-thread queue: the OpenAL context is only
+        # current on the main thread (same rule as every other audio path).
+        if not data.get("_main_thread"):
+            sound_data = dict(data)
+            sound_data["_main_thread"] = True
+            self.game.put(
+                lambda sound_data=sound_data: self.play_direct(sound_data)
+            )
+            return
         from .logger import log
         log(f"[DEBUG.AUDIO] play_direct received: {data['sound']}")
         self.game.direct_soundgroup.play(
@@ -603,21 +619,36 @@ class EventHandeler:
         )
 
     def play_unbound(self, data):
+        # Piano/guitar notes take the music-synced queue first (before the
+        # main-thread gate below — they must never re-enter this handler).
+        # OpenAL context is only current on the main thread, so we MUST NOT
+        # play them from this network-thread handler.
+        if (data.get("is_stereo_spatial") and getattr(self, 'gameplay', None)
+                and getattr(self.gameplay, 'player', None)
+                and (data.get("piano_note") or data.get("guitar_note"))):
+            # Guitar notes arrive via play_unbound with a guitar_note field
+            # (same piano-sample placeholder); route them through the piano
+            # queue so PA speakers / occlusion apply exactly like piano.
+            if not self._schedule_music_synced(
+                data,
+                lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+            ):
+                self.game.audio_mngr.piano.enqueue_remote_note(data)
+            return
+        # ALL remaining unbound sounds (zombie splashes/summons, foley,
+        # ambience — both the stereo-spatial and plain 3D branches) must
+        # play on the main thread: the OpenAL context is only current there,
+        # and network-thread playback under mass-spawn load caused hard
+        # native crashes (0xC0000005 with no Python traceback).
+        if not data.get("_main_thread"):
+            sound_data = dict(data)
+            sound_data["_main_thread"] = True
+            self.game.put(
+                lambda sound_data=sound_data: self.play_unbound(sound_data)
+            )
+            return
         occluded = False
         if data.get("is_stereo_spatial") and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
-            # Piano notes go through the main-thread queue (piano_note field present).
-            # OpenAL context is only current on the main thread, so we MUST NOT play
-            # piano audio from this network-thread handler.
-            if data.get("piano_note") or data.get("guitar_note"):
-                # Guitar notes arrive via play_unbound with a guitar_note field
-                # (same piano-sample placeholder); route them through the piano
-                # queue so PA speakers / occlusion apply exactly like piano.
-                if not self._schedule_music_synced(
-                    data,
-                    lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
-                ):
-                    self.game.audio_mngr.piano.enqueue_remote_note(data)
-                return
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
             facing = getattr(self.gameplay.player, 'facing', 0.0)
 
@@ -777,23 +808,32 @@ class EventHandeler:
                         speak("Music broadcast was disabled because you entered a competition match.")
 
     def move(self, data):
-        from .logger import log, log_exception
+        from .logger import log
         if not isinstance(data, dict):
             log("[ENTITY] Ignored malformed move packet")
             return
-        name = data.get("name")
-        if not name:
+        if not data.get("name"):
             log("[ENTITY] Ignored move packet without a name")
             return
+        # entity.move() drives footsteps, water splashes, fall sounds and
+        # per-tile audio, and entity.face() mutates soundgroup orientation —
+        # all OpenAL work that must run on the main thread (the context is
+        # only current there). Queue the whole move; vehicles already worked
+        # this way. The FIFO game queue preserves packet order, including
+        # ordering against queued spawn_entity calls.
+        move_data = dict(data)
+        move_data["_main_thread"] = True
+        self.game.put(lambda move_data=move_data: self._apply_move(move_data))
+
+    def _apply_move(self, data):
+        from .logger import log, log_exception
+        name = data.get("name")
         entity = self.gameplay.map.entities.get(name)
         if not entity and name == self.gameplay.player.name:
             entity = self.gameplay.player
         if entity:
             if getattr(entity, "is_vehicle", False):
-                move_data = dict(data)
-                self.game.put(
-                    lambda move_data=move_data: self._apply_vehicle_move(move_data)
-                )
+                self._apply_vehicle_move(data)
                 return
             try:
                 entity.move(
@@ -1083,6 +1123,10 @@ class EventHandeler:
             self.gameplay.player.face(0, 0, 0)
             if self.gameplay.wmanager.activeWeapon != None:
                 self.gameplay.wmanager.activeWeapon.locked = False
+            # Return the death filter to the pool instead of dropping it for
+            # garbage collection (cyal Filter dealloc = crash-prone call).
+            if getattr(self.gameplay.player, "death_filter", None) is not None:
+                self.game.audio_mngr.release_filter(self.gameplay.player.death_filter)
             self.gameplay.player.death_filter = None
             for i in self.gameplay.map.get_ambiences_at(
                 self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z

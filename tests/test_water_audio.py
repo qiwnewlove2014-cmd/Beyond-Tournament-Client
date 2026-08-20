@@ -88,6 +88,11 @@ class FakeAudioMngr:
         self.filters.append(f)
         return f
 
+    def release_filter(self, f):
+        # Pooled-filter recycling contract (see AudioManager.release_filter).
+        if f in self.filters:
+            self.filters.remove(f)
+
     def apply_filter(self, f, exclude=None, replace=True, clear=False):
         self.apply_calls.append((f, list(exclude or []), replace))
 
