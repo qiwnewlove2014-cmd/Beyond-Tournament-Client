@@ -98,6 +98,7 @@ class Gameplay(state.State):
         self.pong_mode = False      # True when player is in an active Pong match (suppresses normal footsteps)
         self.piano_mode = False     # True when playing piano
         self.drum_mode = False      # True when playing a drumset
+        self.drum_volume_percent = 100  # Dynamic drum volume (10-100%)
         self._drum_pressed_keys = set()
         self._midi_lease = None
         # 🎵 Music jukebox: server-side queue playback anchored at jukebox elements.
@@ -708,12 +709,22 @@ class Gameplay(state.State):
             packet["music_sync"] = marker
         return packet
 
+    def _adjust_drum_volume(self, delta):
+        cur = getattr(self, "drum_volume_percent", 100)
+        new_vol = max(10, min(100, cur + delta))
+        if new_vol == cur:
+            return
+        self.drum_volume_percent = new_vol
+        speak(f"Drum volume: {new_vol} percent")
+
     def _play_local_drum_hit(self, pad, velocity=None):
-        volume = (
+        base_volume = (
             300
             if velocity is None
             else self._drum_midi_velocity_volume(velocity)
         )
+        vol_factor = getattr(self, "drum_volume_percent", 100) / 100.0
+        volume = max(20, int(base_volume * vol_factor))
         is_mega_owner = self._is_megaphone_owner()
             
         sound = self.game.audio_mngr.drums.play_hit(
@@ -733,8 +744,8 @@ class Gameplay(state.State):
                 )
         if self.game.network:
             packet = {"pad": pad}
-            if velocity is not None:
-                packet["velocity"] = max(1, min(127, int(velocity)))
+            base_vel = 127 if velocity is None else max(1, min(127, int(velocity)))
+            packet["velocity"] = max(1, min(127, int(base_vel * vol_factor)))
             self._attach_music_timeline(packet)
             self.game.network.send(
                 consts.CHANNEL_MAP, "play_drum_hit", packet
@@ -1343,6 +1354,12 @@ class Gameplay(state.State):
                 if event.type == pygame.KEYDOWN:
                     if event.key in drum_keyconfig.RESERVED_DRUM_KEYS:
                         self._end_drum_session(notify_server=True)
+                        continue
+                    if event.key in (pygame.K_UP, pygame.K_PAGEUP):
+                        self._adjust_drum_volume(10)
+                        continue
+                    if event.key in (pygame.K_DOWN, pygame.K_PAGEDOWN):
+                        self._adjust_drum_volume(-10)
                         continue
                     key_to_pad = self._get_drum_key_to_pad()
                     if event.key in key_to_pad:
