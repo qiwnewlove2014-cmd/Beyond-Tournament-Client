@@ -82,6 +82,7 @@ class AudioManager():
         # nesting, a per-context GLOBAL flag) corrupted native memory and
         # crashed the game (0xC0000005) under load.
         self._audio_inbox = queue.SimpleQueue()
+        self._unbound_occlusion_filter = None
         self.piano = PianoAudio(self)
         self.drums = DrumAudio(self)
         
@@ -140,8 +141,21 @@ class AudioManager():
     
     @position.setter
     def position(self, value: tuple):
-        self.listener.position=value
-    
+        self.listener.position = value
+
+    def get_unbound_occlusion_filter(self):
+        """Get or lazily create a persistent lowpass filter for occluded unbound 3D sounds (e.g. doors behind walls)."""
+        if getattr(self, "_unbound_occlusion_filter", None) is None:
+            flt = self.gen_filter("LOWPASS")
+            if flt is not None:
+                try:
+                    flt.set("GAINHF", 0.12)
+                    flt.set("GAIN", 0.45)
+                    self._unbound_occlusion_filter = flt
+                except Exception:
+                    self._unbound_occlusion_filter = None
+        return self._unbound_occlusion_filter
+
     def preload_ui_sounds(self):
         """Pre-load critical UI sounds at startup to prevent first-play silence."""
         ui_sounds = [

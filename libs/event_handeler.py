@@ -649,16 +649,19 @@ class EventHandeler:
             )
             return
         occluded = False
-        if data.get("is_stereo_spatial") and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
+        lx = ly = lz = 0.0
+        facing = 0.0
+        if getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
             facing = getattr(self.gameplay.player, 'facing', 0.0)
 
-            if getattr(self.gameplay, 'map', None):
+            if getattr(self.gameplay, 'map', None) and not getattr(self.game, 'pong_mode', False):
                 with contextlib.suppress(Exception):
                     los = self.gameplay.map.valid_straight_path((data["x"], data["y"], data["z"]), (lx, ly, lz))
                     if los is False:
                         occluded = True
 
+        if data.get("is_stereo_spatial") and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
             snd = self.game.audio_mngr.play_unbound_stereo_spatial(
                 data["sound"], data["x"], data["y"], data["z"], lx, ly, lz,
                 volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"),
@@ -668,9 +671,13 @@ class EventHandeler:
                 occluded=occluded,
             )
         else:
+            direct_filt = None
+            if occluded:
+                direct_filt = self.game.audio_mngr.get_unbound_occlusion_filter()
             snd = self.game.audio_mngr.play_unbound(
                 data["sound"], data["x"], data["y"], data["z"], False, volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"),
-                reference_distance=data.get("reference_distance", 3.0), rolloff=data.get("rolloff", 1.0), max_distance=data.get("max_distance", 25.0)
+                reference_distance=data.get("reference_distance", 3.0), rolloff=data.get("rolloff", 1.0), max_distance=data.get("max_distance", 25.0),
+                direct_filter=direct_filt
             )
         if snd and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'map', None):
             reverb = self.gameplay.map.get_reverb_at(data["x"], data["y"], data["z"])
