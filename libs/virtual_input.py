@@ -177,11 +177,9 @@ class Virtual_input:
         Return Value:
                         A single character if the cursor is in the bounds of the string and the string is not empty, empty string otherwise
         """
-        return (
-            ""
-            if len(self.current_string) == 0 or self._cursor == len(self.current_string)
-            else self.current_string[self._cursor]
-        )
+        if 0 <= self._cursor < len(self.current_string):
+            return self.current_string[self._cursor]
+        return ""
 
     def insert_character(self, character):
         """Inserts a character into the text
@@ -213,7 +211,7 @@ class Virtual_input:
         self.speak_character(character, True)
         if re.match("\r?\n", character):
             self.line_num += 1
-        if self.typing == False and self.current_string[0] != "/":
+        if self.typing == False and self.current_string and self.current_string[0] != "/":
             if self.game.network:
                 self.game.network.send(
                     consts.CHANNEL_MISC, "set_typing", {"typing": True}
@@ -228,8 +226,10 @@ class Virtual_input:
 
     def remove_character(self):
         """Removes a character from the string based upon the cursor's position"""
-        if self._cursor == 0:
+        if self._cursor == 0 or len(self.current_string) == 0:
             return
+        if self._cursor > len(self.current_string):
+            self._cursor = len(self.current_string)
         self.speak_character(self.current_string[self._cursor - 1])
         if re.match("\r?\n", self.current_string[self._cursor - 1]):
             self.line_num -= 1
@@ -243,7 +243,7 @@ class Virtual_input:
             )
         self._cursor -= 1
         if self.typing == False and self._cursor > 0:
-            if self.current_string[0] != "/" and self.game.network:
+            if self.current_string and self.current_string[0] != "/" and self.game.network:
                 self.game.network.send(
                     consts.CHANNEL_MISC, "set_typing", {"typing": True}
                 )
