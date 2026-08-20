@@ -651,7 +651,10 @@ class EventHandeler:
         occluded = False
         lx = ly = lz = 0.0
         facing = 0.0
-        if getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
+        snd_path = str(data.get("sound", "")).lower()
+        # Keep door open sounds crisp and natural (bypass occlusion for door open)
+        allow_occlusion = "door/open" not in snd_path
+        if allow_occlusion and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
             lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
             facing = getattr(self.gameplay.player, 'facing', 0.0)
 
