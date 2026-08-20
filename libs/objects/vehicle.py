@@ -24,6 +24,8 @@ class Vehicle(Entity):
         audio_profile=None,
     ):
         super().__init__(game, map, x, y, z, hp, name=name)
+        # Enable wall occlusion filtering for all vehicle 3D sounds (engine, horn, brake, terrain)
+        self.soundgroup.filterable = True
         self.vehicle_type = self._safe_profile_id(vehicle_type, "motorcycle")
         self.sound_profile = self._safe_profile_id(
             sound_profile, self.vehicle_type
