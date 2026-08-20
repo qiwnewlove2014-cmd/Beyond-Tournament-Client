@@ -6,6 +6,11 @@
 [v1.8.0] Official Launch: Doors, Jukebox Controls & Beyond Tournament 1.8.0 — 2026-08-16
 --------------------------------------------------------------------------------
 
+• Acoustic Isolation & Instrument Audio Enhancements
+- **Studio-Grade Acoustic Wall Insulation & Enhanced Muffled Filter:** Upgraded the global wall occlusion and acoustic absorption filter for Jukebox, Music Bot, and all Musical Instruments (Piano, Drums, Guitar). Sound passing through solid walls and closed rooms now features deeper lowpass muffling and realistic 78% volume attenuation. High-frequency treble, vocals, and harsh percussions are completely absorbed, leaving only a warm, realistic low-end rumble in adjacent rooms and preventing sound from leaking loudly across buildings.
+- **Musical Instrument Map Reload Continuity:** Fixed an issue where reloading map data or rebuilding map elements silenced active drum and piano performances for remote listeners. Active instrument playing sessions are now seamlessly maintained and re-synced across map updates without requiring performers to exit and re-enter their instruments.
+- **Normalized Minigame Arcade Interaction Bounds:** Standardized interaction boundaries for Arcade Cabinets to match the exact placement bounds of Musical Instruments and Jukeboxes, ensuring consistent and predictable interaction across all interactive map objects.
+
 • Stability
 - **Chat Deadlock During Map Transitions (Fix):** Sending a chat message while the client was changing maps could freeze the entire game — the main thread held the game lock while joining the network thread, and the network thread was parked on the same lock trying to process the received packet, a permanent deadlock. Network teardown is now non-blocking in both the in-game exit path and account creation, and diagnostic logging (chat submit, map-transition start/end, network teardown) pinpoints any future freeze.
 
