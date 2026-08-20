@@ -512,6 +512,7 @@ class EventHandeler:
         # Auto-focus spectator camera if this is the target player we were spectating
         if getattr(self.gameplay, "spectator_mode", False) and data["name"] == getattr(self.gameplay, "spectator_target_name", ""):
             self.gameplay.camera.set_focus_object(entity)
+            speak(f"Spectating {data['name']}")
             try:
                 if hasattr(entity, 'soundgroup') and entity.soundgroup:
                     entity.soundgroup.volume = 1.0
@@ -1786,7 +1787,8 @@ class EventHandeler:
     def switch_spectator_target(self, data):
         target_name = data["target"]
         self.gameplay.spectator_target_name = target_name
-        target = self.gameplay.map.entities.get(target_name)
+        cur_map = getattr(self.gameplay, "map", None)
+        target = cur_map.entities.get(target_name) if cur_map and hasattr(cur_map, "entities") else None
         if target:
             target.muted_by_spectator = False
             self.gameplay.camera.set_focus_object(target)
@@ -1803,7 +1805,11 @@ class EventHandeler:
             except Exception:
                 pass
         else:
-            speak(f"Target {target_name} not found")
+            # If map is currently loading or entities have not populated yet,
+            # we store the spectator_target_name and let _apply_spawn_entity focus & speak smoothly.
+            # Only announce 'not found' if the map is already active and populated with players.
+            if cur_map and getattr(cur_map, "entities", None) and len(cur_map.entities) > 0:
+                speak(f"Target {target_name} not found")
 
     def open_language_menu(self, data):
         available_langs = data.get("available_languages", {})
