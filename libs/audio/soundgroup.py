@@ -352,8 +352,8 @@ class SoundGroup:
                 filter_obj = get_occlusion_filter()
                 if filter_obj:
                     try:
-                        filter_obj.set("GAINHF", 0.1) # Stronger muffling for walls
-                        filter_obj.set("GAIN", 0.4)
+                        filter_obj.set("GAINHF", 0.05) # Stronger muffling for walls
+                        filter_obj.set("GAIN", 0.22)
                         self.apply_filter(filter_obj, replace=True)
                     except Exception as e:
                         print(f"[SoundGroup] Error setting occlusion filter: {e}")

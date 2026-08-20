@@ -355,7 +355,7 @@ class AudioStreamer(threading.Thread):
                         filt = None
                         if occluded and hasattr(audio, "gen_filter"):
                             if not hasattr(self, "_occlusion_filter") or self._occlusion_filter is None:
-                                self._occlusion_filter = audio.gen_filter("LOWPASS", ("GAINHF", 0.15), ("GAIN", 0.5))
+                                self._occlusion_filter = audio.gen_filter("LOWPASS", ("GAINHF", 0.05), ("GAIN", 0.22))
                             filt = self._occlusion_filter
                         for s in (self.spatial_src_l, self.spatial_src_r):
                             try:

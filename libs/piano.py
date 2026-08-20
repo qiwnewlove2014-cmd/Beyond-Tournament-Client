@@ -134,8 +134,8 @@ class PianoAudio:
         if self._occlusion_filter is None:
             self._occlusion_filter = self.am.gen_filter(
                 "LOWPASS",
-                ("GAINHF", 0.15),  # Muffle high frequencies behind walls
-                ("GAIN", 0.5)      # Attenuate overall direct volume
+                ("GAINHF", 0.05),  # Muffle high frequencies behind walls
+                ("GAIN", 0.22)     # Attenuate overall direct volume
             )
         return self._occlusion_filter
 

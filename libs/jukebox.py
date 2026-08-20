@@ -335,8 +335,8 @@ class JukeboxPlayer:
                 try:
                     self._occlusion_filter = audio.gen_filter(
                         "LOWPASS",
-                        ("GAINHF", 0.15),
-                        ("GAIN", 0.5),
+                        ("GAINHF", 0.05),
+                        ("GAIN", 0.22),
                     )
                 except Exception:
                     self._occlusion_filter = None

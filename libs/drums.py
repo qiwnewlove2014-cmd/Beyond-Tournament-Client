@@ -180,7 +180,7 @@ class DrumAudio:
     def get_occlusion_filter(self):
         if self._occlusion_filter is None:
             self._occlusion_filter = self.am.gen_filter(
-                "LOWPASS", ("GAINHF", 0.10), ("GAIN", 0.40)
+                "LOWPASS", ("GAINHF", 0.05), ("GAIN", 0.22)
             )
         return self._occlusion_filter
 

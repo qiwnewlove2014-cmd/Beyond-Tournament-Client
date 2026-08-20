@@ -149,8 +149,8 @@ class AudioManager():
             flt = self.gen_filter("LOWPASS")
             if flt is not None:
                 try:
-                    flt.set("GAINHF", 0.12)
-                    flt.set("GAIN", 0.45)
+                    flt.set("GAINHF", 0.05)
+                    flt.set("GAIN", 0.22)
                     self._unbound_occlusion_filter = flt
                 except Exception:
                     self._unbound_occlusion_filter = None
