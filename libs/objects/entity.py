@@ -273,21 +273,11 @@ class Entity(Object):
             if down:
                 dist = (self.x, self.y, self.z - 1)
                 if self.in_water:
-                    if self.depth > 0.0:
-                        if self.limit_depth >= 0.0: self.depth = round(self.depth - 0.1, 3) 
-                        self.limit_depth -= 0.1
-                    else:
-                        self.depth = 0.0
-                        self.limit_depth-=0.1
+                    self.depth = max(0.0, round(self.depth - 0.1, 3))
             if up:
                 dist = (self.x, self.y, self.z + 1)
                 if self.in_water:
-                    if self.depth < 1.0:
-                        if self.limit_depth >= 0.0: self.depth = round(self.depth + 0.1, 3)
-                        self.limit_depth+=0.1
-                    else: 
-                        self.depth = 1.0
-                        self.limit_depth = 1.0
+                    self.depth = min(1.0, round(self.depth + 0.1, 3))
             if self.map.in_bound(*dist):
                 disttile = self.map.get_tile_at(*dist)
                 if "wall" not in disttile:
@@ -459,12 +449,7 @@ class Entity(Object):
                 )
 
             if self.in_water:
-                if self.depth > 0.0:
-                    if self.limit_depth >= 0.0: self.depth = round(self.depth - 0.1, 3) 
-                    self.limit_depth -= 0.1
-                else:
-                    self.depth = 0.0
-                    self.limit_depth-=0.1
+                self.depth = max(0.0, round(self.depth - 0.1, 3))
             if not self.in_water: self.face(random(-45, 45), random(-45, 45), random(-45, 45))
             self.fall_distance += 1
             if not self.map.in_bound(self.x, self.y, self.z):

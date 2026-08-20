@@ -27,11 +27,37 @@ class Camera:
         # can ramp from the current value instead of jumping.
         self._water_automation = None
         self._water_gainhf = 1.0
+        self._water_filter = None
+        self._camera_recorded_depth = None
         # Sideline spectator camera (Pong). "follow" = locked to focus object (first
         # person); "east"/"west" = parked at the field edge so both teams are heard
         # in stereo (left/right).
         self.spectator_cam_mode = "follow"
         self.spectator_arena = None
+
+    def get_water_filter(self):
+        if getattr(self, "_water_filter", None) is None:
+            self._water_filter = self.game.audio_mngr.gen_filter(type="LOWPASS")
+        return self._water_filter
+
+    def release_water_filter(self):
+        if getattr(self, "_water_filter", None) is not None:
+            self.game.audio_mngr.release_filter(self._water_filter)
+            self._water_filter = None
+
+    def __del__(self):
+        wf = getattr(self, "_water_filter", None)
+        if wf is not None:
+            try:
+                game = getattr(self, "game", None)
+                if game and hasattr(game, "audio_mngr"):
+                    game.audio_mngr.release_filter(wf)
+            except Exception:
+                pass
+            try:
+                self._water_filter = None
+            except Exception:
+                pass
 
     def set_focus_object(self, target):
         if self.focus_object:
@@ -144,20 +170,6 @@ class Camera:
         if megaphone and hasattr(megaphone, 'request_spatial_refresh'):
             megaphone.request_spatial_refresh()
 
-        # Return the previous move()'s filter to the pool BEFORE borrowing a
-        # new one. Camera.move runs on every movement update; the old filter
-        # object used to fall to garbage collection here dozens of times per
-        # second, and cyal Filter.__dealloc__ calls through a crash-prone
-        # stored function pointer (the hard-crash root cause).
-        if getattr(self, "_pooled_water_filter", None) is not None:
-            self.game.audio_mngr.release_filter(self._pooled_water_filter)
-            self._pooled_water_filter = None
-
-        filter = self.game.audio_mngr.gen_filter(
-            type="LOWPASS"
-        )
-        self._pooled_water_filter = filter
-        
         def muffling_at(d):
             # Same depth->GAINHF curve as Entity.water_muffling, so the world
             # (this filter) and the player's own sounds (Entity's filter) un-
@@ -177,14 +189,15 @@ class Camera:
             # Track the last applied value so the next task can ramp from the
             # current position instead of snapping back to an old start point.
             self._water_gainhf = value
-            if filter is None:
+            flt = self.get_water_filter()
+            if flt is None:
                 return
-            filter.set("GAINHF", value)
-            self.game.audio_mngr.apply_filter(filter, self.game.exclude_water, replace=True)
+            flt.set("GAINHF", value)
+            self.game.audio_mngr.apply_filter(flt, self.game.exclude_water, replace=True)
             if hasattr(self.focus_object, "vc_source") and self.focus_object.vc_source:
-                self.focus_object.vc_source.direct_filter = filter
+                self.focus_object.vc_source.direct_filter = flt
 
-        def start_water_task(target, duration, start_value):
+        def start_water_task(target, duration, start_value, callback=None):
             # Only one water task may run at a time: two automations animating
             # the same shared filter (or the same vc_source) fight over GAINHF
             # every 20ms tick, which is what made the sound bend/wobble while
@@ -194,6 +207,7 @@ class Camera:
                 None, None,
                 target, duration,
                 step_callback=automation_water, start_value=start_value,
+                callback=callback,
             )
             self._water_automation = task
 
@@ -204,17 +218,29 @@ class Camera:
             self.focus_object.drown_clock.restart()
             self.game.ignore_others_water = True
             self.focus_object.drown_clock.restart()
+            self._camera_recorded_depth = round(self.focus_object.depth, 3)
+            self.focus_object.recorded_depth = round(self.focus_object.depth, 3)
             start_water_task(muffling_at(self.focus_object.depth), 500, self._water_gainhf)
-        if self.focus_object.in_water and self.focus_object.map.get_tile_at(self.focus_object.x, self.focus_object.y, self.focus_object.z) != "underwater":
+        elif self.focus_object.in_water and self.focus_object.map.get_tile_at(self.focus_object.x, self.focus_object.y, self.focus_object.z) != "underwater":
             self.focus_object.play_sound("foley/swim/end/", cat="self")
-            start_water_task(1.0, 500, self._water_gainhf)
+            def on_exit_complete():
+                self.game.audio_mngr.apply_filter(None)
+                if hasattr(self.focus_object, "vc_source") and self.focus_object.vc_source:
+                    with contextlib.suppress(Exception):
+                        del self.focus_object.vc_source.direct_filter
+                self.release_water_filter()
+            start_water_task(1.0, 500, self._water_gainhf, callback=on_exit_complete)
             self.focus_object.in_water=False
             self.focus_object.drownable = False
             self.game.ignore_others_water = False
-        if round(self.focus_object.depth, 3) != round(self.focus_object.recorded_depth,3) and self.focus_object.in_water:
-            muffling = muffling_at(round(self.focus_object.depth,3))
-            start_water_task(muffling, 100, self._water_gainhf)
-            self.focus_object.recorded_depth = round(self.focus_object.depth,3)
+            self._camera_recorded_depth = None
+        elif self.focus_object.in_water:
+            cur_depth = round(self.focus_object.depth, 3)
+            if self._camera_recorded_depth is None or cur_depth != self._camera_recorded_depth:
+                muffling = muffling_at(cur_depth)
+                start_water_task(muffling, 100, self._water_gainhf)
+                self._camera_recorded_depth = cur_depth
+                self.focus_object.recorded_depth = cur_depth
 
 
         # change reverb if required.

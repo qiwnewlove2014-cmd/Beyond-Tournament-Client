@@ -346,6 +346,18 @@ class TestCameraWaterTasks(unittest.TestCase):
             cam.move(0, 0, 0)
             self.assertEqual(len(cam.game.automations), 1)
 
+    def test_horizontal_walking_preserves_water_filter(self):
+        cam, focus = self.make_camera("underwater")
+        cam.move(0, 0, 0)
+        flt = cam.get_water_filter()
+        self.assertIsNotNone(flt)
+        # Walking horizontally in X and Y without changing depth
+        for step in range(1, 10):
+            cam.move(step, step * 2, 0)
+            # The filter must NOT be released or reset
+            self.assertIs(cam.get_water_filter(), flt)
+            self.assertTrue(focus.in_water)
+
     def test_curve_matches_entity_water_muffling(self):
         # The camera's depth->GAINHF curve must equal Entity.water_muffling so
         # the world and the player's own sounds clear at the same rate.
@@ -353,6 +365,9 @@ class TestCameraWaterTasks(unittest.TestCase):
         for d in (0.0, 0.3, 0.7, 1.0):
             ent.depth = d
             self.assertAlmostEqual(muffling_at(d), ent.water_muffling)
+        # At deepest bottom (depth = 0.0), muffling must reach 0.02
+        ent.depth = 0.0
+        self.assertAlmostEqual(ent.water_muffling, 0.02)
 
 
 if __name__ == "__main__":
