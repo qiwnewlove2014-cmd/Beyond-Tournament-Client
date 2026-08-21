@@ -186,7 +186,7 @@ class AudioManager():
                     try:
                         with open(os.path.join(consts.SOUNDPREPEND, path), 'wb+') as f:
                             f.write(data.content)
-                    except e:
+                    except Exception as e:
                         print(e)
         if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND): path = os.path.join(consts.SOUNDPREPEND, path)
         if not path.endswith(".ogg"): path = path_utils.get_next_cycle_item(path)

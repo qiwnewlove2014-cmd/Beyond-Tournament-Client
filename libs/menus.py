@@ -1,5 +1,7 @@
+import contextlib
 import functools
 import re
+from .logger import log
 from operator import mod
 from string import Template
 from . import (
@@ -746,7 +748,7 @@ def set_input_device(game, device, func_call, parent, capture, in_game=False, ta
                         pass
                 
                 if not parent.voice_chat.audio_input:
-                    speak(f"Failed to load audio device: {device}")
+                    speech.speak(f"Failed to load audio device: {device}")
     func_call()
 
 
