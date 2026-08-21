@@ -51,7 +51,7 @@ class Map:
         x2, y2, z2 = position2
         x1, y1, z1 = trunc(x1), trunc(y1), trunc(z1)
         x2, y2, z2 = trunc(x2), trunc(y2), trunc(z2)
-        dist = round(sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) + (z2 - z1) ** 2) + 1
+        dist = round(sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)) + 1
         result = None
         for n in range(0, dist):
             tile = self.get_tile_at(x1, y1, z1)
