@@ -486,7 +486,12 @@ class EventHandeler:
             entity.player = True
             
         if data["name"] == "ball":
-            entity.soundgroup.play("Pong/rolling.ogg", looping=True, id="ball_roll", cat="miscelaneous")
+            snd = entity.soundgroup.play("Pong/rolling.ogg", looping=True, id="ball_roll", cat="miscelaneous", volume=45)
+            if snd and getattr(snd, "source", None):
+                with contextlib.suppress(Exception):
+                    snd.source.reference_distance = 4.0
+                    snd.source.max_distance = 22.0
+                    snd.source.rolloff_factor = 1.0
             
         if (data.get("beacon", False) and options.get("beacons")
                 and getattr(entity, "beacon", None) is None):

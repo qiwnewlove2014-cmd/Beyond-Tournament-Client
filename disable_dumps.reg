@@ -1,0 +1,5 @@
+Windows Registry Editor Version 5.00
+
+; DISABLE crash dumps for python.exe.
+
+[-HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe]

@@ -1,0 +1,12 @@
+Windows Registry Editor Version 5.00
+
+; ENABLE PageHeap for python.exe — catches ANY out-of-bounds write
+; (Python heap, CRT heap, extension DLL internal buffers) at the exact
+; moment it happens. The crashing module will be named in Windows Event
+; Log (Application, Event ID 1000).
+; NOTE: python.exe will run SLOWER and use MORE RAM while this is enabled.
+; Run disable_pageheap.reg to remove.
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\python.exe]
+"GlobalFlag"=dword:20000000
+"PageHeapFlags"=dword:00000003

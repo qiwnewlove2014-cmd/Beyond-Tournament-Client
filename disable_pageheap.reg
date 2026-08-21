@@ -1,0 +1,7 @@
+Windows Registry Editor Version 5.00
+
+; DISABLE PageHeap for python.exe (restore normal performance).
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\python.exe]
+"GlobalFlag"=-
+"PageHeapFlags"=-

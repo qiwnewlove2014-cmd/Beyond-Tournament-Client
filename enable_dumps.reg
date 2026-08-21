@@ -1,0 +1,10 @@
+Windows Registry Editor Version 5.00
+
+; ENABLE full crash dumps for python.exe -> C:\btdumps (create it first).
+; After the next crash a full .dmp will be there; analyze it to reveal
+; the native stack that jumps into python311.dll's .data section.
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe]
+"DumpFolder"="C:\\btdumps"
+"DumpCount"=dword:00000003
+"DumpType"=dword:00000002

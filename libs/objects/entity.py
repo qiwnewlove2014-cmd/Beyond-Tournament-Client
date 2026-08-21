@@ -191,6 +191,20 @@ class Entity(Object):
                 log(f"[ENTITY.AUDIO] Voice position update skipped for {self.name!r}: {e}")
         try:
             self.soundgroup.position = (self.x, self.y, self.z)
+            if self.name == "ball" and hasattr(self, "game") and getattr(self.game, "audio_mngr", None):
+                snd = self.soundgroup.labeled_sources.get("ball_roll")
+                if snd and getattr(snd, "source", None):
+                    dist = movement.get_3d_distance(self.x, self.y, self.z, *self.game.audio_mngr.position)
+                    min_dist = 4.0
+                    max_dist = 22.0
+                    if dist <= min_dist:
+                        ball_gain = 0.45
+                    elif dist >= max_dist:
+                        ball_gain = 0.0
+                    else:
+                        norm = (dist - min_dist) / (max_dist - min_dist)
+                        ball_gain = 0.45 * (1.0 - (norm * 0.7))
+                    snd.source.gain = ball_gain
         except (cyal.exceptions.InvalidAlValueError, cyal.exceptions.InvalidOperationError) as e:
             log(f"[ENTITY.AUDIO] SoundGroup position update skipped for {self.name!r}: {e}")
         tile = self.map.get_tile_at(self.x, self.y, self.z)
