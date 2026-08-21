@@ -709,6 +709,19 @@ class Gameplay(state.State):
             packet["music_sync"] = marker
         return packet
 
+    def _send_jam_note(self, event, packet):
+        """Send one instrument note on the dedicated unreliable jam channel.
+
+        Notes are fire-and-forget events: on the shared reliable
+        CHANNEL_MAP/CHANNEL_SOUND queues a single lost world-sound packet
+        stalls every following note behind an ENet retransmission
+        (100-500ms spikes). A small uint16 sequence number lets listeners
+        drop reordered duplicates instead of playing them late."""
+        seq = getattr(self, "_jam_note_seq", 0)
+        self._jam_note_seq = (seq + 1) & 0xFFFF
+        packet["seq"] = seq
+        self.game.network.send(consts.CHANNEL_JAM, event, packet, reliable=False)
+
     def _adjust_drum_volume(self, delta):
         cur = getattr(self, "drum_volume_percent", 100)
         new_vol = max(10, min(100, cur + delta))
@@ -747,9 +760,7 @@ class Gameplay(state.State):
             base_vel = 127 if velocity is None else max(1, min(127, int(velocity)))
             packet["velocity"] = max(1, min(127, int(base_vel * vol_factor)))
             self._attach_music_timeline(packet)
-            self.game.network.send(
-                consts.CHANNEL_MAP, "play_drum_hit", packet
-            )
+            self._send_jam_note("play_drum_hit", packet)
 
     def _start_drum_midi(self):
         """Acquire the process MIDI hub with the drum profile."""
@@ -900,9 +911,7 @@ class Gameplay(state.State):
         if velocity is not None:
             packet["velocity"] = max(1, min(127, int(velocity)))
         self._attach_music_timeline(packet)
-        self.game.network.send(
-            consts.CHANNEL_MAP, "play_piano_note", packet
-        )
+        self._send_jam_note("play_piano_note", packet)
 
     def _stop_local_piano_note(self, note_name):
         self.game.audio_mngr.piano.stop_note("local", note_name)
@@ -2805,9 +2814,7 @@ class Gameplay(state.State):
             if velocity is not None:
                 packet["velocity"] = max(1, min(127, int(velocity)))
             self._attach_music_timeline(packet)
-            self.game.network.send(
-                consts.CHANNEL_MAP, "play_guitar_note", packet
-            )
+            self._send_jam_note("play_guitar_note", packet)
 
     def toggle_guitar_mode(self, mod):
         """Toggle the line-in guitar: capture pitch from the instrument input

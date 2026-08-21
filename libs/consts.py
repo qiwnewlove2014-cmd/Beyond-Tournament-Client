@@ -19,6 +19,10 @@ CHANNEL_PING = 5
 CHANNEL_MENUS = 6
 CHANNEL_WEAPONS = 7
 CHANNEL_SERVER_SOUNDS = 8
+# Dedicated unreliable channel for live instrument notes (piano/drum/guitar).
+# Keeps them off the reliable CHANNEL_MAP/CHANNEL_SOUND queues where one lost
+# world-sound packet head-of-line-blocks every following note (100-500ms spikes).
+CHANNEL_JAM = 9
 CHANNEL_VOICECHAT = 20
 CHANNEL_MUSICBOT = 22
 CHANNEL_JUKEBOX_RELAY = 23

@@ -22,6 +22,23 @@ class EventHandeler:
         self.gameplay = gameplay.Gameplay(self.game)
         self.game.gameplay = self.gameplay
         self.tickets = tickets.Tickets(self.game)
+        # Last instrument-note sequence number seen per performer (jam notes
+        # arrive on the unreliable channel; late/reordered ones are dropped).
+        self._last_note_seq = {}
+
+    def _is_stale_jam_note(self, data):
+        """Drop jam notes that arrive out of order (uint16 wrap-aware)."""
+        seq = data.get("seq")
+        peer = data.get("peer_id")
+        if seq is None or peer is None:
+            return False
+        last = self._last_note_seq.get(peer)
+        self._last_note_seq[peer] = seq
+        if last is None:
+            return False
+        delta = (seq - last) & 0xFFFF
+        # zero => exact duplicate; huge backwards delta => old packet after wrap
+        return delta == 0 or delta > 0x8000
 
     def create_fail(self, data):
         msg = "Account creation failed. Press Enter to return."
@@ -625,6 +642,10 @@ class EventHandeler:
         )
 
     def play_unbound(self, data):
+        # Jam notes (piano/guitar) carry a seq number on the unreliable
+        # channel — drop duplicates/reordered packets before doing any work.
+        if (data.get("piano_note") or data.get("guitar_note")) and self._is_stale_jam_note(data):
+            return
         # Piano/guitar notes take the music-synced queue first (before the
         # main-thread gate below — they must never re-enter this handler).
         # OpenAL context is only current on the main thread, so we MUST NOT
@@ -798,6 +819,8 @@ class EventHandeler:
 
     def play_drum_hit(self, data):
         """Queue a validated remote one-shot for main-thread audio playback."""
+        if self._is_stale_jam_note(data):
+            return
         if not self._schedule_music_synced(
             data,
             lambda data=data: self.game.audio_mngr.drums.enqueue_remote_hit(data),
