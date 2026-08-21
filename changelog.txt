@@ -6,6 +6,10 @@
 [v1.8.0] Official Launch: Doors, Jukebox Controls & Beyond Tournament 1.8.0 — 2026-08-16
 --------------------------------------------------------------------------------
 
+• Core Audio Engine & Spatial Acoustic Optimization
+- **Dynamic Audio Hardware Watchdog & Safe Device Recovery:** Enhanced the real-time audio device monitoring system to gracefully handle external USB sound cards, Bluetooth headphones, and Windows audio endpoint transitions. If an active audio device is disconnected or suspended by power-saving states, the engine seamlessly recovers and routes playback to the system default audio device without interrupting the game loop or raising exception alerts.
+- **High-Precision 3D Spatial Acoustic Raycasting:** Re-engineered 3D Euclidean distance calculations within the line-of-sight acoustic raycasting pipeline. This eliminates excessive iteration overhead in multi-story buildings, delivers noticeable client-side performance gains, and ensures pinpoint accuracy for environmental sound muffling and physical wall occlusion across all map elevations.
+
 • Pong Minigame & Acoustic Spatial Enhancements
 - **Sweet Spot Center Drive & Slicing Mechanics:** Added dynamic hit mechanics to the paddle system. Hitting the ball with the center of the paddle unleashes a high-velocity Sweet Spot Drive (+25% forward speed) with laser-straight trajectory, while hitting with the outer edges or slicing into the ball angles sharp cross-court cuts across the table.
 - **Full-Table Acoustic Coverage & Reverb Attenuation:** Re-engineered spatial audio and distance attenuation curves for the ball rolling loop. The sound is now smoothly audible across the entire 22-block table diagonal without abrupt drop-offs, while dynamically suppressing auxiliary room reverb and direct sound outside the arena to prevent ambient acoustic leakage into adjacent rooms.
