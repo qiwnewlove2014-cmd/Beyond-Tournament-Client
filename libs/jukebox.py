@@ -30,10 +30,17 @@ from .logger import log as log_line
 class JukeboxRelayReceiver(threading.Thread):
     """Decode one server-owned Opus stream without blocking the network thread."""
 
-    PREBUFFER_FRAMES = 6
+    PREBUFFER_FRAMES = 4
     RESUME_FRAMES = 3
     MAX_PENDING_FRAMES = 32
     NUM_BUFFERS = 32
+    # Backlog ceiling in OpenAL-queued frames. When a network burst leaves
+    # more than this queued, newly-arrived frames are dropped at the door
+    # until the backlog drains — the song skips forward a moment instead of
+    # the listener falling permanently behind (creeping latency). cyal can
+    # only unqueue already-processed buffers, so shedding at the receive
+    # loop is the safe way to shed backlog.
+    MAX_QUEUED_BUFFERS = 10
 
     def __init__(
         self, game, source_l, source_r, volume,
@@ -245,6 +252,9 @@ class JukeboxRelayReceiver(threading.Thread):
                 continue
             if payload is None:
                 break
+            if self._play_started and self.source_l.buffers_queued > self.MAX_QUEUED_BUFFERS:
+                # Backlog shed — see MAX_QUEUED_BUFFERS.
+                continue
             try:
                 pcm = bytearray(self.decoder.decode(bytearray(payload)))
                 if not self._queue_pcm(pcm):
@@ -254,7 +264,7 @@ class JukeboxRelayReceiver(threading.Thread):
                 stopped = (self.source_l.state != cyal.SourceState.PLAYING
                            or self.source_r.state != cyal.SourceState.PLAYING)
                 if (not self._play_started and queued >= self.PREBUFFER_FRAMES) or (
-                        self._play_started and stopped and queued > 0):
+                        self._play_started and stopped and queued >= self.RESUME_FRAMES):
                     self.source_l.play()
                     self.source_r.play()
                     self._play_started = True

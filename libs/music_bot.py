@@ -202,7 +202,10 @@ class AudioStreamer(threading.Thread):
     SAMPLES_PER_BUFFER = 960
     BUFFER_SIZE = SAMPLES_PER_BUFFER * 2 * 2  # stereo 16-bit (3840 bytes)
     NUM_BUFFERS = 32      # Total buffers in pool
-    PRE_BUFFER_COUNT = 10 # Buffers to fill before starting local playback
+    PRE_BUFFER_COUNT = 5  # Buffers to fill before starting local playback
+                          # (100ms delay line; was 10/200ms — lowered together
+                          # with MusicCompression.PRE_BUFFER_FRAMES so live
+                          # music streams stay low-latency on both ends)
 
     def __init__(self, game, audio_url, source, volume=50, bot=None, channels=2,
                  spatial_pair=None, start_offset=0.0, http_headers=None,
