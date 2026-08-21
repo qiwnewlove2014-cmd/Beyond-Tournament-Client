@@ -223,6 +223,19 @@ class Virtual_input:
         self.start_selection = self._cursor - 1
         self.end_selection = self._cursor
         self.line_list = re.split("\r?\n", self.current_string)
+        self._clamp_line_num()
+
+    def _clamp_line_num(self):
+        """Keep line_num inside the current line_list bounds.
+
+        The newline bookkeeping in insert/remove/delete paths can drift from
+        the real line count (e.g. deleting a selection mid-line), leaving
+        line_num past the end of the list — reading line_list[line_num] on
+        arrow-key navigation then crashes with IndexError."""
+        if self.line_num >= len(self.line_list):
+            self.line_num = len(self.line_list) - 1
+        if self.line_num < 0:
+            self.line_num = 0
 
     def remove_character(self):
         """Removes a character from the string based upon the cursor's position"""
@@ -234,6 +247,7 @@ class Virtual_input:
         if re.match("\r?\n", self.current_string[self._cursor - 1]):
             self.line_num -= 1
             self.line_list = re.split("\r?\n", self.current_string)
+            self._clamp_line_num()
         if self._cursor == len(self.current_string):
             self.current_string = self.current_string[:-1]
         else:
@@ -457,6 +471,7 @@ class Virtual_input:
                             + self.current_string[self.end_selection :]
                         )
                         self.line_list = re.split("\r?\n", self.current_string)
+                        self._clamp_line_num()
                         self._cursor -= len(self.selection)
                         self.selection = self.get_character()
                         self.start_selection = self._cursor - 1
@@ -500,6 +515,7 @@ class Virtual_input:
                                 + self.current_string[index:]
                             )
                         self.line_list = re.split("\r?\n", self.current_string)
+                        self._clamp_line_num()
                 elif event.key == pygame.K_TAB:
                     speak(message, True, False)
                 elif (
@@ -516,6 +532,7 @@ class Virtual_input:
                             self.line_num += 1
                         else:
                             self.line_num = self.line_num
+                    self._clamp_line_num()
                     speak(self.line_list[self.line_num], True, id="text_entry")
                     pos = 0
                     for i in range(0, self.line_num):
