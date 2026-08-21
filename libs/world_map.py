@@ -999,53 +999,6 @@ class MinigameTable(BaseMapObj):
             self.label = "Pong Arcade Table"
 
 
-class Pannable(BaseMapObj):
-    def __init__(self, game, x, y, z, sound, volume=100):
-        super().__init__(x, x, y, y, z, z, sound)
-        self.game = game
-        self.soundgroup = self.game.audio_mngr.create_soundgroup()
-        self.soundgroup.position = (x, y, z)
-        self.map = map
-        self.decay_time = t60
-        self.reverb = self.map.game.audio_mngr.gen_effect(
-            "EAXREVERB",
-            ("decay_time", float(t60)),
-            ("density", float(density)),
-            ("diffusion", float(diffusion)),
-            ("gain", float(gain)),
-            ("gainhf", float(gainhf)),
-            ("gainlf", float(gainlf)),
-            ("decay_hfratio", float(hfratio)),
-            ("decay_lfratio", float(lfratio)),
-            ("reflections_gain", float(reflections_gain)),
-            ("reflections_delay", float(reflections_delay)),
-            ("reflections_pan", tuple(reflections_pan)),
-            ("late_reverb_gain", float(late_reverb_gain)),
-            ("late_reverb_delay", float(late_reverb_delay)),
-            ("late_reverb_pan", tuple(late_reverb_pan)),
-            ("echo_time", float(echo_time)),
-            ("echo_depth", float(echo_depth)),
-            ("modulation_time", float(modulation_time)),
-            ("modulation_depth", float(modulation_depth)),
-            ("air_absorption_gainhf", float(air_absorption_gainhf)),
-            ("hfreference", float(hfrefference)),
-            ("lfreference", float(lfrefference)),
-            ("room_rolloff_factor", float(room_rolloff_factor)),
-        )
-
-    def destroy(self):
-        with contextlib.suppress(Exception):
-            if self.reverb:
-                # Detach from audio manager sends if it was the active reverb
-                am = self.map.game.audio_mngr
-                for send_idx, slot in enumerate(am.sends):
-                    if slot == self.reverb:
-                        am.apply_effect(None, send_idx)
-                
-                am.release_effect_slot(self.reverb)
-                self.reverb = None
-
-
 class Ambience(BaseMapObj):
     def __init__(
         self,
