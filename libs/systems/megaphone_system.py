@@ -5,6 +5,11 @@ import pygame
 from libs import options, consts, voice_chat
 from libs.logger import log
 
+# Master switch for [MEGAPHONE.DEBUG] tracing (speaker create/remove and the
+# once-per-second spatial refresh line). Off by default — it spams the console
+# every second during normal play. Flip to True only while debugging PA audio.
+MEGAPHONE_DEBUG_LOG = False
+
 def _smooth_occlusion_ratio(prev_ema, new_ratio):
     """Per-speaker EMA blend for the wall-occlusion target.
 
@@ -831,10 +836,11 @@ class MegaphoneManager:
                 'targets_gainlf': targets_gainlf,
                 'currents_gainlf': list(targets_gainlf)
             }
-            log(
-                f"[MEGAPHONE.DEBUG] create sender={sender_id} listener={player_pos} "
-                f"speakers={[data['position'] for data in self.speaker_data]}"
-            )
+            if MEGAPHONE_DEBUG_LOG:
+                log(
+                    f"[MEGAPHONE.DEBUG] create sender={sender_id} listener={player_pos} "
+                    f"speakers={[data['position'] for data in self.speaker_data]}"
+                )
             return sources
         return None
 
@@ -846,7 +852,8 @@ class MegaphoneManager:
             return
 
         entry = self.player_sources[sender_id]
-        log(f"[MEGAPHONE.DEBUG] remove sender={sender_id}")
+        if MEGAPHONE_DEBUG_LOG:
+            log(f"[MEGAPHONE.DEBUG] remove sender={sender_id}")
         
         # Delete unique filters to prevent memory leaks
         if 'filters' in entry:
@@ -1206,7 +1213,7 @@ class MegaphoneManager:
                 player_pos = listener_pos if listener_pos is not None else (0.0, 0.0, 0.0)
                 global_vol = options.get("megaphone_volume", 100) / 100.0
                 is_underwater = getattr(self.camera.focus_object, 'in_water', False)
-                if refresh_now - self._last_spatial_debug_time >= self.SPATIAL_DEBUG_LOG_INTERVAL:
+                if MEGAPHONE_DEBUG_LOG and refresh_now - self._last_spatial_debug_time >= self.SPATIAL_DEBUG_LOG_INTERVAL:
                     self._last_spatial_debug_time = refresh_now
                     log(
                         f"[MEGAPHONE.DEBUG] refresh listener={player_pos} "

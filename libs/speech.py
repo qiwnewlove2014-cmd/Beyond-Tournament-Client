@@ -1,3 +1,5 @@
+import pygame
+
 from . import options, consts
 
 try:
@@ -57,7 +59,14 @@ history = (
 
 
 def speak(text, interupt=True, store_in_history=True, id=None, silent=False):
-    if options.get("mute_speech_on_focus_loss", False) and not pygame.key.get_focused(): silent = True
+    if not silent and options.get("mute_speech_on_focus_loss", False):
+        try:
+            if not pygame.key.get_focused():
+                silent = True
+        except Exception:
+            # Keyboard/display subsystem not initialized yet (early startup) —
+            # speak normally instead of crashing every speak() call.
+            pass
     if id is not None:
         for item in history:
             if item[1] == id:
