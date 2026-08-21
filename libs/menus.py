@@ -666,9 +666,19 @@ def output_menu(game, func_call, replace_call=None, parent=None):
 
 def set_device(game, device, func_call):
     options.set("audio_device", device)
-    if device == "system default": device = cyal.util.get_default_all_device_specifier()
-    game.audio_mngr.context.device.reopen(name=device)
-    game.audio_mngr.hrtf.use(options.get("hrtf_model", "oalsoft_hrtf_48000"))
+    dev_name = device
+    if dev_name == "system default":
+        dev_name = cyal.util.get_default_all_device_specifier()
+    try:
+        game.audio_mngr.context.device.reopen(name=dev_name)
+    except Exception as e:
+        log(f"[AUDIO] Failed to switch to audio device {dev_name!r}: {e}")
+        default_dev = cyal.util.get_default_all_device_specifier()
+        if default_dev and default_dev != dev_name:
+            with contextlib.suppress(Exception):
+                game.audio_mngr.context.device.reopen(name=default_dev)
+    with contextlib.suppress(Exception):
+        game.audio_mngr.hrtf.use(options.get("hrtf_model", "oalsoft_hrtf_48000"))
     func_call()
 
 def input_menu(game, func_call, replace_call=None, parent=None, in_game=False, target="voice"):

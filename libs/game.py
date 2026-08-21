@@ -545,17 +545,24 @@ class Game:
                     self.title_clock.restart()
                 if self.device_clock.elapsed >= 10000:
                     device = options.get("audio_device", cyal.util.get_default_all_device_specifier())
-                    if device == "system default": device = cyal.util.get_default_all_device_specifier()
+                    if device == "system default":
+                        device = cyal.util.get_default_all_device_specifier()
                     try:
-                        if not self.audio_mngr.context.is_connected: 
-                            self.audio_mngr.context.device.reopen(name=device)
-                    except cyal.exceptions.InvalidDeviceError:
-                        self.audio_mngr.context.device.reopen(name=cyal.util.get_default_all_device_specifier())
-                    if self.audio_mngr.context.device.output_name != device:
-                        try: 
-                            self.audio_mngr.context.device.reopen(name=device)
-                        except cyal.exceptions.InvalidDeviceError:
-                            pass
+                        if not self.audio_mngr.context.is_connected:
+                            try:
+                                self.audio_mngr.context.device.reopen(name=device)
+                            except Exception:
+                                default_dev = cyal.util.get_default_all_device_specifier()
+                                if default_dev and default_dev != device:
+                                    with contextlib.suppress(Exception):
+                                        self.audio_mngr.context.device.reopen(name=default_dev)
+                        elif self.audio_mngr.context.device.output_name != device:
+                            try:
+                                self.audio_mngr.context.device.reopen(name=device)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        log(f"[AUDIO] Device reopen watchdog skipped: {e}")
                     self.device_clock.restart()
                 if options.get("mute_on_focus_loss", False):
                     if pygame.key.get_focused() and self.audio_mngr.context.device.paused: 
