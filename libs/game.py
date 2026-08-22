@@ -595,7 +595,12 @@ class Game:
                         ids_to_remove.append(i)
                 for i in ids_to_remove:
                     del self.delayed_functions[i]
-            self.delta = self.clock.tick(self.framerate)
+            # High performance mode: 120fps halves audio/queue latency
+            # (~8ms average) and speeds up key response. Read live from the
+            # options dict so toggling it in the menu takes effect instantly.
+            self.delta = self.clock.tick(
+                120 if options.get("high_framerate", False) else self.framerate
+            )
 
     def update(self, delta):
         self.screen.fill("black")

@@ -258,6 +258,12 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
                 "stream_ambience",
             )
         ),
+        (
+            game.toggle_item(
+                "High performance mode: turning this on raises the game framerate from 60 to 120, so incoming music notes, voices, and your key presses reach your ears up to twice as fast. It uses more CPU, so turn it off if your computer gets hot or slows down",
+                "high_framerate",
+            )
+        ),
         (game.toggle_item("Mute audio when the game window does not have focus", "mute_on_focus_loss")),
         (game.toggle_item("Mute speech when out of the game window", "mute_speech_on_focus_loss")),
         (game.toggle_item("Keyboard typing sounds", "keyboard_typing_sounds", True)),
