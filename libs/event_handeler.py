@@ -25,6 +25,8 @@ class EventHandeler:
         # Last instrument-note sequence number seen per performer (jam notes
         # arrive on the unreliable channel; late/reordered ones are dropped).
         self._last_note_seq = {}
+        # Clock synchronization: server_time - local_time offset (ms).
+        self._clock_offset_ms = 0.0
 
     def _is_stale_jam_note(self, data):
         """Drop jam notes that arrive out of order (uint16 wrap-aware)."""
@@ -646,6 +648,10 @@ class EventHandeler:
         # channel — drop duplicates/reordered packets before doing any work.
         if (data.get("piano_note") or data.get("guitar_note")) and self._is_stale_jam_note(data):
             return
+        # Update clock offset from server_time (latency compensation).
+        server_time = data.get("server_time")
+        if server_time is not None:
+            self._update_clock_offset(server_time)
         # Piano/guitar notes take the music-synced queue first (before the
         # main-thread gate below — they must never re-enter this handler).
         # OpenAL context is only current on the main thread, so we MUST NOT
@@ -660,7 +666,13 @@ class EventHandeler:
                 data,
                 lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
             ):
-                self.game.audio_mngr.piano.enqueue_remote_note(data)
+                # Latency compensation: aligned with the jukebox song when
+                # music is playing (target-time on the server clock), or
+                # immediate for live jamming without music.
+                self._schedule_remote_note(
+                    data,
+                    lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+                )
             return
         # ALL remaining unbound sounds (zombie splashes/summons, foley,
         # ambience — both the stereo-spatial and plain 3D branches) must
@@ -821,11 +833,21 @@ class EventHandeler:
         """Queue a validated remote one-shot for main-thread audio playback."""
         if self._is_stale_jam_note(data):
             return
+        # Update clock offset from server_time (latency compensation).
+        server_time = data.get("server_time")
+        if server_time is not None:
+            self._update_clock_offset(server_time)
         if not self._schedule_music_synced(
             data,
             lambda data=data: self.game.audio_mngr.drums.enqueue_remote_hit(data),
         ):
-            self.game.audio_mngr.drums.enqueue_remote_hit(data)
+            # Latency compensation: aligned with the jukebox song when
+            # music is playing (target-time on the server clock), or
+            # immediate for live jamming without music.
+            self._schedule_remote_note(
+                data,
+                lambda data=data: self.game.audio_mngr.drums.enqueue_remote_hit(data),
+            )
 
     def set_game_mode(self, data):
         """Receive game mode from server (e.g. 'pong' or 'normal') and update game state."""
@@ -1328,6 +1350,84 @@ class EventHandeler:
         self.gameplay.player.speed_cola = data["value"]
 
 
+
+    def _update_clock_offset(self, server_time_ms):
+        """Update clock offset using exponential moving average.
+
+        server_time_ms is the server's Date.now() when the note was created.
+        We compare it to our local time to estimate the one-way delay.
+        """
+        local_ms = time.time() * 1000
+        try:
+            from . import voice_chat
+            rtt = getattr(voice_chat, '_measured_rtt_ms', None) or 40.0
+        except Exception:
+            rtt = 40.0
+        one_way = rtt / 2.0
+        instant_offset = (server_time_ms + one_way) - local_ms
+        # Exponential moving average (alpha=0.3) to smooth jitter.
+        alpha = 0.3
+        self._clock_offset_ms = alpha * instant_offset + (1 - alpha) * self._clock_offset_ms
+
+    def _active_jukebox_buffer_ms(self):
+        """How far behind the live stream our jukebox audio is (ms), or None.
+
+        Returns None when no jukebox relay is actively playing, so live
+        jamming without background music keeps the low-latency immediate
+        path. With music playing, the queued 40ms OpenAL frames are exactly
+        the backlog between what the server is sending and what we hear.
+        """
+        try:
+            jp = getattr(self.gameplay, "jukebox_player", None)
+            if jp is None:
+                return None
+            from .jukebox import JukeboxRelayReceiver
+            for entry in list(getattr(jp, "players", {}).values()):
+                streamer = entry.get("streamer") if isinstance(entry, dict) else None
+                if (isinstance(streamer, JukeboxRelayReceiver)
+                        and getattr(streamer, "running", False)
+                        and getattr(streamer, "_play_started", False)):
+                    try:
+                        src = getattr(streamer, "source_l", None)
+                        queued = int(src.buffers_queued) if src is not None else 0
+                    except Exception:
+                        queued = 0
+                    # OpenAL plays the queue at 40ms per frame; the queue depth
+                    # is the listener's current distance behind the live edge.
+                    return max(queued, 1) * 40
+            return None
+        except Exception:
+            return None
+
+    def _schedule_remote_note(self, data, enqueue):
+        """Play a remote instrument note now, or aligned with the jukebox song.
+
+        With a jukebox relay playing, every listener schedules the note on
+        the shared server clock (note creation time + THIS listener's own
+        jukebox backlog), so the note lands on the same beat of the song for
+        everyone regardless of ping — proper target-time scheduling, not a
+        fixed delay. Without music, notes play immediately (the low-latency
+        live-jam path). Uses game.call_after (one main-loop scheduler)
+        instead of spawning a thread per note.
+        """
+        buffer_ms = self._active_jukebox_buffer_ms()
+        if buffer_ms is None:
+            enqueue()
+            return
+        server_time = data.get("server_time")
+        if server_time is None:
+            # Legacy packet without a timestamp: fall back to our own backlog.
+            self.game.call_after(buffer_ms, enqueue)
+            return
+        # _clock_offset_ms = server_clock - local_clock, so the local-time
+        # equivalent of a server instant is (server_time - offset).
+        target_local = server_time - self._clock_offset_ms + buffer_ms
+        delay = target_local - time.time() * 1000
+        if delay <= 0:
+            enqueue()
+        else:
+            # Cap guards against a wildly wrong offset stalling notes.
+            self.game.call_after(min(int(delay), 1500), enqueue)
 
     def _schedule_music_synced(self, data, callback):
         """Schedule an instrument action on its performer's audible music clock.

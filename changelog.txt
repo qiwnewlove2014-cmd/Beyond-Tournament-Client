@@ -2,6 +2,15 @@
 • This document tracks the development history and patch notes
 • for the Beyond Tournament project (Server & Client core).
 • ============================================================
+[v1.8.1] Latency Compensation for Instrument Notes — 2026-08-22
+--------------------------------------------------------------------------------
+
+• Music Jam Session & Latency Compensation
+- **Server-Side Timestamp for Instrument Notes:** Piano, guitar, and drum note payloads now include a server_time timestamp (Date.now()). This allows clients to estimate clock offset and synchronize instrument playback across all listeners, which is essential for blind-accessible music jam sessions where visual cues cannot be used.
+- **Client-Side Clock Synchronization:** Added exponential moving average (EMA) clock offset calculation that compares server_time with local time, using measured RTT to estimate one-way delay. The offset is smoothed with alpha=0.3 to filter network jitter and provide stable timing reference for all instrument notes.
+- **Latency-Compensated Note Playback:** Piano, guitar, and drum notes are now delayed by the calculated clock offset plus jukebox jitter buffer (~200ms) before playback. This ensures that remote instrument notes arrive at listeners in sync with the jukebox audio, eliminating the ~160-180ms desynchronization that previously occurred between music and instruments.
+
+
 
 [v1.8.0] Official Launch: Doors, Jukebox Controls & Beyond Tournament 1.8.0 — 2026-08-16
 --------------------------------------------------------------------------------
