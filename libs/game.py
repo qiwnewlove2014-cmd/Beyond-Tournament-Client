@@ -110,6 +110,7 @@ class Game:
         self.instance_mngr.update_title()
         self.reconnecting = False
         self._recovery_in_progress = False
+        self._restart_in_progress = False
         
         try:
             anti_cheat.set_game_reference(self)
@@ -136,6 +137,11 @@ class Game:
 
     def parse_arguments(self):
         action, param, pid = sys.argv[1], sys.argv[2], sys.argv[3]
+        if action == "restart_client":
+            # The entry point completed this hand-off before Pygame/OpenAL
+            # initialization, so no second wait or process termination is
+            # needed here.
+            return
         with contextlib.suppress(Exception):
             os.kill(int(pid), signal.SIGTERM)
         speak("Please wait...")
@@ -447,6 +453,84 @@ class Game:
         # Swap the menu for an inert state that blocks all input while the
         # fade plays out.
         self.replace(state.State(self))
+
+    def ask_to_restart_client(self):
+        """Open an accessible confirmation before replacing this process."""
+        if self._restart_in_progress:
+            return
+        restart_menu = menu.Menu(
+            self,
+            "Restart the client? This closes and reopens the game to clear all audio and client resources.",
+        )
+        menus.set_default_sounds(restart_menu)
+        restart_menu.add_items((
+            ("Yes, restart the client", self.restart_client),
+            ("No, return to the main menu", lambda: menus.main_menu(self)),
+        ))
+        self.replace(restart_menu)
+
+    @staticmethod
+    def _restart_launch_command():
+        """Build argv for the existing old-process hand-off protocol.
+
+        A compiled build relaunches its executable directly. Source mode must
+        put the Python script after the interpreter. In both cases the child
+        receives exactly ``restart_client, cwd, old_pid`` in ``sys.argv[1:]``.
+        """
+        from .logger import is_compiled
+        command = [sys.executable]
+        if not is_compiled():
+            command.append(os.path.abspath(sys.argv[0]))
+        command.extend(("restart_client", os.getcwd(), str(os.getpid())))
+        return command
+
+    def _launch_restarted_client(self):
+        """Spawn the replacement non-blockingly, then close this Client."""
+        try:
+            from . import crash_reporting
+            # The replacement may terminate us before normal ``finally`` and
+            # atexit handlers finish. Remove this session marker first so an
+            # intentional restart is never uploaded as an unclean exit.
+            crash_reporting.mark_expected_shutdown("client_restart")
+            command = self._restart_launch_command()
+            subprocess.Popen(
+                command,
+                cwd=os.getcwd(),
+                creationflags=(
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    if sys.platform == "win32" else 0
+                ),
+            )
+            log(f"[RESTART] Replacement Client launched for PID {os.getpid()}")
+            # Normal main-loop shutdown saves settings and closes Pygame. The
+            # child also waits for/kills this PID if native cleanup gets stuck.
+            self.exit()
+        except Exception as error:
+            log_exception(error, "Restart Client launch")
+            self._restart_in_progress = False
+            self._exit_fade_started = False
+            # mark_expected_shutdown removed our live marker. Re-create it if
+            # spawning failed and this process must keep running.
+            with contextlib.suppress(Exception):
+                from . import crash_reporting
+                crash_reporting.begin_session()
+            menus.main_menu(self)
+            speak("The client could not restart. You returned to the main menu.", True)
+
+    def restart_client(self):
+        """Fade out, relaunch the process, and fully release Client resources."""
+        if self._restart_in_progress:
+            return False
+        self._restart_in_progress = True
+        if not self.start_exit_fade(
+                on_faded=self._launch_restarted_client,
+                exit_after=False,
+                announce="Restarting client"):
+            self._restart_in_progress = False
+            return False
+        # Block menu input while the uninterruptible fade/relaunch completes.
+        self.replace(state.State(self))
+        return True
 
     def new_clock(self):
         cl = clock.Clock()

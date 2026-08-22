@@ -140,6 +140,7 @@ def main_menu(game):
             ("Create account", game.create_account),
             ("options", lambda: options_menu(game, lambda: main_menu(game))),
             ("Check for Updates", lambda: game.replace(updater.Updater(game))),
+            ("Restart Client", game.ask_to_restart_client),
             # Esc on the root main menu reaches this item too (menu.py matches
             # the "exit" keyword) — fade the audio out smoothly before quitting.
             ("Exit", game.fade_out_and_exit),

@@ -8,6 +8,33 @@ from libs import yt_dlp_deps
 active_game = None
 
 
+def _complete_restart_parent_handoff():
+    """Stop/wait for the old Client before initializing Pygame or OpenAL."""
+    if len(sys.argv) <= 3 or sys.argv[1] != "restart_client":
+        return
+    try:
+        old_pid = int(sys.argv[3])
+    except (TypeError, ValueError):
+        return
+    if old_pid <= 0 or old_pid == os.getpid():
+        return
+    try:
+        import signal
+        os.kill(old_pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        return
+    try:
+        import psutil
+        import time
+        deadline = time.monotonic() + 10.0
+        while psutil.pid_exists(old_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+    except Exception:
+        # The termination request above is sufficient on Windows. Waiting is
+        # best-effort and must never prevent the replacement from launching.
+        pass
+
+
 def _set_windows_timer_resolution(period_ms=1):
     """Raise the Windows multimedia timer resolution for accurate sleep()s.
 
@@ -56,6 +83,7 @@ def main():
             _im.release_lock_for_pid(int(sys.argv[3]))
         except Exception:
             pass
+        _complete_restart_parent_handoff()
     else:
         from libs import instance_manager
         if instance_manager.InstanceManager.compiled_instance_blocked():

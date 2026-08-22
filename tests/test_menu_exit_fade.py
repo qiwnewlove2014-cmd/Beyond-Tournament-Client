@@ -42,6 +42,7 @@ class FakeGame:
         self.audio_mngr = FakeAudioMngr()
         self.replaced = None
         self.fade_out_and_exit = object()  # sentinel: item must bind this
+        self.ask_to_restart_client = object()
         # Menu items reference these; they are never invoked in this test.
         self.set_account = lambda: None
         self.create_account = lambda: None
@@ -62,6 +63,15 @@ class TestMainMenuExitFade(unittest.TestCase):
         # Esc on the root menu reaches this same item (menu.py matches the
         # "exit" keyword on the last item), so this one binding covers both.
         self.assertIs(exit_item[1], game.fade_out_and_exit)
+
+    def test_restart_item_is_immediately_before_exit(self):
+        game = FakeGame()
+        menus.main_menu(game)
+        items = game.replaced.items
+        titles = [item[0] for item in items]
+        restart_index = titles.index("Restart Client")
+        self.assertEqual(restart_index, titles.index("Exit") - 1)
+        self.assertIs(items[restart_index][1], game.ask_to_restart_client)
 
     def test_main_menu_restores_listener_gain_after_fade(self):
         """Returning to the main menu after an in-game logout fade restores
