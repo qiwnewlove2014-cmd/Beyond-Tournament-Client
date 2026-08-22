@@ -16,6 +16,24 @@ from . import tickets
 from pyogg import OpusDecoder
 
 class EventHandeler:
+    # Jam-note/jukebox alignment mode.
+    #
+    # False (arrival-time, default): notes play the moment the packet
+    # arrives. Because every listener's jukebox backlog (~160ms by design)
+    # closely matches the performer's own backlog, notes land on the beat
+    # the performer heard — the two buffers cancel each other out. This
+    # was verified by ear against target-time scheduling, which could not
+    # beat it without knowing the performer's backlog and reaction time.
+    # It also keeps live-jam responsiveness at ~ping/2.
+    #
+    # True: schedule notes on the shared server clock (creation time +
+    # this listener's jukebox backlog) so all listeners hear them at the
+    # same instant — useful if players' backlogs ever diverge badly.
+    SYNC_JAM_NOTES_WITH_JUKEBOX = False
+    # Only used when SYNC_JAM_NOTES_WITH_JUKEBOX is True: compensates the
+    # note's tail latency (playing-frame lead + queue drain).
+    JAM_NOTE_ADVANCE_MS = 45
+
     def __init__(self, client, game):
         self.client = client
         self.game = game
@@ -1411,17 +1429,26 @@ class EventHandeler:
         instead of spawning a thread per note.
         """
         buffer_ms = self._active_jukebox_buffer_ms()
-        if buffer_ms is None:
+        if buffer_ms is None or not self.SYNC_JAM_NOTES_WITH_JUKEBOX:
+            # Arrival-time jamming (see SYNC_JAM_NOTES_WITH_JUKEBOX): no
+            # music playing, or alignment disabled — play immediately.
             enqueue()
             return
         server_time = data.get("server_time")
         if server_time is None:
             # Legacy packet without a timestamp: fall back to our own backlog.
-            self.game.call_after(buffer_ms, enqueue)
+            self.game.call_after(max(buffer_ms - self.JAM_NOTE_ADVANCE_MS, 0), enqueue)
             return
         # _clock_offset_ms = server_clock - local_clock, so the local-time
         # equivalent of a server instant is (server_time - offset).
-        target_local = server_time - self._clock_offset_ms + buffer_ms
+        # JAM_NOTE_ADVANCE_MS compensates for the note's own tail latency
+        # (game-frame waits + piano/drum queue drain before the speaker),
+        # which the continuous jukebox stream does not have — without it
+        # notes sit a touch behind the song.
+        target_local = (
+            server_time - self._clock_offset_ms + buffer_ms
+            - self.JAM_NOTE_ADVANCE_MS
+        )
         delay = target_local - time.time() * 1000
         if delay <= 0:
             enqueue()
