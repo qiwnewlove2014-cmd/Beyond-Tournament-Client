@@ -1071,10 +1071,11 @@ class VoiceChatRecord(threading.Thread):
 
 
 class MusicCompression(threading.Thread):
-    PRE_BUFFER_FRAMES = 5   # 100ms before first play (was 8/160ms — lowered
-                            # for live jamming; RESUME_FRAMES still guards
-                            # against post-underrun chop)
-    RESUME_FRAMES     = 3   # 60ms before resuming after underrun
+    # Music prioritizes continuity over voice-like latency. Holding 200 ms of
+    # real decoded audio covers packet-arrival bursts without inserting silent
+    # holes into the song; recovery waits for a 120 ms reserve before restart.
+    PRE_BUFFER_FRAMES = 10  # 200ms before first play
+    RESUME_FRAMES     = 6   # 120ms before resuming after underrun
     TIMELINE_EVENT_TIMEOUT = 1.0
     MAX_TIMELINE_EVENTS = 256
 
