@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from libs import consts
 from libs.event_handeler import EventHandeler
-from libs.music_bot import AudioStreamer, _next_audio_deadline
+from libs.music_bot import AudioStreamer
 from libs.voice_chat import MusicCompression
 
 
@@ -49,17 +49,6 @@ class MusicTimelineSchedulerTests(unittest.TestCase):
         self.assertEqual(fired, [])
         self.assertEqual(scheduler._timeline_pending, [])
 
-    def test_sender_deadline_does_not_accumulate_scheduler_lateness(self):
-        deadline = _next_audio_deadline(None, 100.000)
-        self.assertEqual(deadline, 100.000)
-        deadline = _next_audio_deadline(deadline, 100.021)
-        self.assertAlmostEqual(deadline, 100.020)
-        deadline = _next_audio_deadline(deadline, 100.041)
-        self.assertAlmostEqual(deadline, 100.040)
-
-    def test_sender_deadline_resets_after_long_stall(self):
-        deadline = _next_audio_deadline(100.000, 100.100)
-        self.assertEqual(deadline, 100.100)
 
 class MusicTimelinePacketTests(unittest.TestCase):
     def test_sender_delay_line_tracks_local_prebuffer(self):

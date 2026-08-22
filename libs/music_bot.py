@@ -25,40 +25,6 @@ from . import options
 from .speech import speak
 from . import logger
 
-
-AUDIO_FRAME_INTERVAL = 0.020
-
-
-def _next_audio_deadline(previous_deadline, current_time,
-                         frame_interval=AUDIO_FRAME_INTERVAL):
-    """Advance a fixed-rate media clock without accumulating wake-up drift.
-
-    Normal scheduler lateness keeps the original 50 Hz deadline. A stall of a
-    whole frame or more resets the cadence so callers never burst stale audio.
-    """
-    if previous_deadline is None:
-        return current_time
-    deadline = previous_deadline + frame_interval
-    if current_time - deadline >= frame_interval:
-        return current_time
-    return deadline
-
-
-def _pace_audio_frame(owner):
-    """Wait for one 20 ms send slot owned by a single audio worker thread."""
-    now = time.perf_counter()
-    deadline = _next_audio_deadline(
-        getattr(owner, '_next_send_deadline', None), now)
-    if deadline > now:
-        remaining = deadline - now
-        if remaining > 0.001:
-            time.sleep(remaining - 0.001)
-        while (getattr(owner, 'running', True)
-               and time.perf_counter() < deadline):
-            pass
-    owner._next_send_deadline = deadline
-
-
 # Try to find ffmpeg path
 def _is_youtube_watch_url(value):
     """True when the URL is a stable https youtube.com / youtu.be page URL."""
@@ -289,7 +255,7 @@ class AudioStreamer(threading.Thread):
         self.encoder.set_application('audio')
         self.encoder.set_channels(1)  # Opus network stream is ALWAYS MONO
         self.encoder.set_sampling_frequency(48000)
-        self._next_send_deadline = None
+        self.last_send_time = None
         # Keep broadcast latency bounded.  A network hiccup must discard stale
         # music frames instead of building an ever-growing backlog that later
         # reaches each PA cabinet at a different time.
@@ -590,12 +556,21 @@ class AudioStreamer(threading.Thread):
             if data is None:
                 continue
 
-            # Preserve the 50 Hz media clock across normal Windows scheduler
-            # lateness. Re-basing on the sampled wake time every frame slowly
-            # drained the listener's pre-buffer and caused periodic underruns.
-            _pace_audio_frame(self)
-            if not self.running:
-                break
+            # High-resolution time pacing
+            now = time.perf_counter()
+            if self.last_send_time is not None:
+                elapsed = now - self.last_send_time
+                target_interval = 0.020  # 20ms per buffer
+                if elapsed < target_interval:
+                    # Sleep most of the way (subtracting 1ms margin for Windows scheduler inaccuracy)
+                    sleep_time = target_interval - elapsed
+                    if sleep_time > 0.001:
+                        time.sleep(sleep_time - 0.001)
+                    # Spin lock for the remaining fraction of a millisecond
+                    while time.perf_counter() - self.last_send_time < target_interval:
+                        pass
+            # Set last_send_time before doing encoding/networking to prevent work time drift
+            self.last_send_time = time.perf_counter()
 
             self._send_to_network_actual(data, timeline_epoch, timeline_seq)
 
@@ -1173,7 +1148,7 @@ class LiveRelayStreamer(threading.Thread):
         self.encoder.set_application('audio')
         self.encoder.set_channels(1)  # Opus network stream is MONO
         self.encoder.set_sampling_frequency(48000)
-        self._next_send_deadline = None
+        self.last_send_time = None
 
     def stop(self):
         self.running = False
@@ -1240,10 +1215,17 @@ class LiveRelayStreamer(threading.Thread):
                     except Exception:
                         pass
 
-                # Use the same non-drifting 50 Hz clock as MP3 broadcasts.
-                _pace_audio_frame(self)
-                if not self.running:
-                    break
+                # Rate-limit to 20ms pacing
+                now = time.perf_counter()
+                if self.last_send_time is not None:
+                    elapsed = now - self.last_send_time
+                    if elapsed < 0.020:
+                        sleep_time = 0.020 - elapsed
+                        if sleep_time > 0.001:
+                            time.sleep(sleep_time - 0.001)
+                        while time.perf_counter() - self.last_send_time < 0.020:
+                            pass
+                self.last_send_time = time.perf_counter()
 
                 encoded = self.encoder.encode(bytearray(mono_data))
                 if self.game and self.game.network:
