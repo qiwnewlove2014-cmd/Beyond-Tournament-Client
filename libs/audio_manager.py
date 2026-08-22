@@ -18,25 +18,38 @@ from . import path_utils
 from . import consts
 
 class AudioManager():
-    def __init__(self):
-        device = options.get("audio_device", cyal.util.get_default_all_device_specifier())
-        if device == "system default": device = cyal.util.get_default_all_device_specifier()
-
-        try:
-            cyal_device = cyal.Device(name=device)
-        except cyal.exceptions.DeviceNotFoundError:
-            print(f"Warning: Audio device '{device}' not found. Falling back to system default.")
-            device = cyal.util.get_default_all_device_specifier()
-            cyal_device = cyal.Device(name=device)
-            options.set("audio_device", "system default")
-        
-        self.context = cyal.Context(
+    @staticmethod
+    def _open_context(cyal_device):
+        return cyal.Context(
             cyal_device,
             make_current=True,
             mono_sources=1024,
             stereo_sources=1024,
             max_auxiliary_sends=64,
         )
+
+    def __init__(self):
+        device = options.get("audio_device", cyal.util.get_default_all_device_specifier())
+        if device == "system default": device = cyal.util.get_default_all_device_specifier()
+
+        try:
+            cyal_device = cyal.Device(name=device)
+            self.context = self._open_context(cyal_device)
+        except cyal.exceptions.AlcError as ex:
+            # A saved device that has since disappeared (USB unplugged, BT
+            # headset off, port renamed) can fail either at Device open OR at
+            # Context creation (InvalidDeviceError), not only with
+            # DeviceNotFoundError. Without this recovery the game dies at
+            # startup and the player can never reach the settings menu.
+            print(f"Warning: Audio device '{device}' unusable ({ex.__class__.__name__}). Falling back to system default.")
+            try:
+                from .speech import speak
+                speak("Saved audio device could not be opened. Using system default.", True)
+            except Exception:
+                pass
+            options.set("audio_device", "system default")
+            cyal_device = cyal.Device(name=cyal.util.get_default_all_device_specifier())
+            self.context = self._open_context(cyal_device)
         self.silent_buf = bytearray(96*options.get("jitter_buffer", 60))
         self.hrtf = cyal.hrtf.HrtfExtension(self.context.device)
         self.hrtf.use(options.get("hrtf_model", "oalsoft_hrtf_48000"))
