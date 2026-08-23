@@ -3,7 +3,7 @@ import functools
 import re
 from .logger import log
 from operator import mod
-from string import Template
+from string import Formatter, Template
 from . import (
     audio_manager,
     consts,
@@ -20,6 +20,75 @@ from .key_config_screen import Key_config_screen
 from .os_tools import get_os
 import pygame
 import cyal.util
+
+
+DEFAULT_LOCATION_TEMPLATE = (
+    "{x}, \r\n"
+    "{y}, \r\n"
+    "{z}, \r\n"
+    "On {tile} \r\n"
+    "Facing {direction} at {angle} degrees with a pitch of {pitch} degrees. \r\n"
+    "You are leaning by {lean} degrees and you are {balanced}. "
+)
+
+LOCATION_TEMPLATE_PRESETS = (
+    ("Full details", DEFAULT_LOCATION_TEMPLATE),
+    ("Compact", "{x}, {y}, {z}. On {tile}. Facing {direction}."),
+    ("Coordinates only", "X {x}. Y {y}. Z {z}."),
+    (
+        "Navigation",
+        "X {x}. Y {y}. Z {z}. Facing {direction} at {angle} degrees "
+        "with a pitch of {pitch} degrees.",
+    ),
+    (
+        "Surface and posture",
+        "On {tile}. You are leaning by {lean} degrees and you are {balanced}.",
+    ),
+)
+
+LOCATION_TEMPLATE_FIELDS = frozenset(
+    {
+        "x",
+        "y",
+        "z",
+        "x_rounded",
+        "y_rounded",
+        "z_rounded",
+        "tile",
+        "direction",
+        "angle",
+        "pitch",
+        "lean",
+        "balanced",
+    }
+)
+
+LOCATION_TEMPLATE_COMPONENTS = (
+    ("x", "X coordinate", "X {x}."),
+    ("y", "Y coordinate", "Y {y}."),
+    ("z", "Z coordinate", "Z {z}."),
+    ("tile", "Surface or tile", "On {tile}."),
+    ("direction", "Facing direction", "Facing {direction}."),
+    ("angle", "Horizontal angle", "Horizontal angle {angle} degrees."),
+    ("pitch", "Vertical pitch", "Pitch {pitch} degrees."),
+    ("lean", "Lean angle", "Lean {lean} degrees."),
+    ("balanced", "Balance status", "You are {balanced}."),
+)
+
+LOCATION_TEMPLATE_PREVIEW_VALUES = {
+    "x": 12,
+    "y": 34,
+    "z": 1,
+    "x_rounded": 12,
+    "y_rounded": 34,
+    "z_rounded": 1,
+    "tile": "grass",
+    "direction": "north",
+    "angle": 0,
+    "pitch": 0,
+    "lean": 0,
+    "balanced": "balanced",
+}
 
 def linux_change_speech_module(game, func_call, replace_call = None, parent=None):
     def set_module(module):
@@ -230,6 +299,27 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
     """append the options menu to the games stack."""
     m = OptionsMenu(game, "Options menu", parent=parent)
     set_default_sounds(m)
+
+    def open_location_template_menu():
+        if in_game and parent is not None:
+            return_to_options = parent.pop_last_substate
+            navigate_location_menu = parent.replace_last_substate
+        else:
+            return_to_options = lambda: options_menu(
+                game,
+                func_call,
+                replace_call=replace_call,
+                parent=parent,
+                in_game=in_game,
+            )
+            navigate_location_menu = replace_call
+        configure_location_template(
+            game,
+            func_call=return_to_options,
+            replace_call=replace_call,
+            navigation_call=navigate_location_menu,
+        )
+
     turning_sensitivity_item = (
         m.turning_sensitivity_item_text,
         lambda: None,
@@ -282,8 +372,13 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
             "Set which HRTF Model you would like to use. Currently set to "+str(options.get("hrtf_model", game.audio_mngr.hrtf.current_model)),
             lambda: hrtf_model_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent)
         ),
-        ("edit location template. Currently set to: "+options.get("location_template", "{x}, \r\n{y}, \r\n{z}, \r\nOn {tile} \r\nFacing {direction} at {angle} degrees with a pitch of {pitch} degrees. \r\nYou are leaning by {lean} degrees and you are {balanced}. "), lambda: configure_location_template(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call)),
-        ("reset your location template to default", lambda: options.set("location_template",             "{x}, \r\n{y}, \r\n{z}, \r\nOn {tile} \r\nFacing {direction} at {angle} degrees with a pitch of {pitch} degrees. \r\nYou are leaning by {lean} degrees and you are {balanced}. ")),
+        (
+            lambda: "Configure location announcement. Current setting: "
+            + location_template_name(
+                options.get("location_template", DEFAULT_LOCATION_TEMPLATE)
+            ),
+            open_location_template_menu,
+        ),
         ("Configure key bindings.", lambda: keyconfig_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
         ("Configure drum keys.", lambda: drum_keyconfig_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
     ]
@@ -628,23 +723,307 @@ def set_default_sounds(m):
         close="menu/close.ogg",
     )
 
-def configure_location_template(game, func_call, replace_call=None):
-    if replace_call is None: replace_call = game.replace
+def location_template_fields(template):
+    """Return the simple replacement fields used by a location template."""
+    fields = set()
+    for _, field_name, _, _ in Formatter().parse(template):
+        if field_name is not None:
+            fields.add(field_name)
+    return fields
+
+
+def validate_location_template(template):
+    """Validate a user-entered location template without formatting game data."""
+    if not isinstance(template, str) or not template.strip():
+        return False, "The template cannot be empty."
+    if len(template) > 1000:
+        return False, "The template is too long. The maximum is 1000 characters."
+
+    try:
+        parsed = list(Formatter().parse(template))
+    except ValueError:
+        return False, "The opening and closing braces do not match."
+
+    used_fields = set()
+    for _, field_name, format_spec, conversion in parsed:
+        if field_name is None:
+            continue
+        if not field_name:
+            return False, "Empty braces are not allowed."
+        if field_name not in LOCATION_TEMPLATE_FIELDS:
+            return False, f"Unknown variable: {field_name}."
+        if format_spec:
+            return False, "Format codes after a colon are not supported."
+        if conversion:
+            return False, "Variable conversions are not supported."
+        used_fields.add(field_name)
+
+    if not used_fields:
+        return False, "Include at least one location variable."
+    return True, ""
+
+
+def render_location_template_preview(template):
+    valid, error = validate_location_template(template)
+    if not valid:
+        raise ValueError(error)
+    return " ".join(template.format(**LOCATION_TEMPLATE_PREVIEW_VALUES).split())
+
+
+def location_template_name(template):
+    for name, preset in LOCATION_TEMPLATE_PRESETS:
+        if template == preset:
+            return name
+    valid, _ = validate_location_template(template)
+    return "Custom" if valid else "Invalid custom template"
+
+
+def build_custom_location_template(selected_fields):
+    parts = [
+        template_part
+        for field_name, _, template_part in LOCATION_TEMPLATE_COMPONENTS
+        if field_name in selected_fields
+    ]
+    return " ".join(parts)
+
+
+def _save_location_template(template, name, func_call):
+    valid, error = validate_location_template(template)
+    if not valid:
+        speech.speak(f"Template not saved. {error}")
+        return
+    options.set("location_template", template)
+    speech.speak(
+        f"Location announcement set to {name}. Example: "
+        f"{render_location_template_preview(template)}"
+    )
+    func_call()
+
+
+def _preview_location_template(template):
+    valid, error = validate_location_template(template)
+    if not valid:
+        speech.speak(f"This template is invalid. {error}")
+        return
+    speech.speak(f"Example: {render_location_template_preview(template)}")
+
+
+def configure_location_template(
+    game,
+    func_call,
+    replace_call=None,
+    navigation_call=None,
+):
+    """Open an accessible preset and custom location-announcement menu."""
+    if replace_call is None:
+        replace_call = game.replace
+    if navigation_call is None:
+        navigation_call = replace_call
+
+    current = options.get("location_template", DEFAULT_LOCATION_TEMPLATE)
+    m = menu.Menu(
+        game,
+        "Configure location announcement. Current setting: "
+        f"{location_template_name(current)}.",
+    )
+    set_default_sounds(m)
+
+    items = []
+    for name, preset in LOCATION_TEMPLATE_PRESETS:
+        items.append(
+            (
+                f"Use {name}. Example: {render_location_template_preview(preset)}",
+                functools.partial(
+                    _save_location_template,
+                    preset,
+                    name,
+                    func_call,
+                ),
+            )
+        )
+
+    return_to_config = functools.partial(
+        configure_location_template,
+        game,
+        func_call,
+        navigation_call,
+        navigation_call,
+    )
+    items.extend(
+        [
+            (
+                "Build a custom announcement by choosing individual parts",
+                functools.partial(
+                    configure_custom_location_template,
+                    game,
+                    func_call,
+                    navigation_call,
+                    None,
+                ),
+            ),
+            (
+                "Advanced raw template editor",
+                functools.partial(
+                    configure_advanced_location_template,
+                    game,
+                    func_call,
+                    navigation_call,
+                    return_to_config,
+                ),
+            ),
+            (
+                "Preview current announcement",
+                functools.partial(_preview_location_template, current),
+            ),
+            (
+                "Reset to default Full details",
+                functools.partial(
+                    _save_location_template,
+                    DEFAULT_LOCATION_TEMPLATE,
+                    "Full details",
+                    func_call,
+                ),
+            ),
+            ("Back", func_call),
+        ]
+    )
+    m.add_items(items)
+    replace_call(m)
+
+
+def configure_custom_location_template(
+    game,
+    func_call,
+    replace_call=None,
+    selected_fields=None,
+):
+    if replace_call is None:
+        replace_call = game.replace
+    if selected_fields is None:
+        current = options.get("location_template", DEFAULT_LOCATION_TEMPLATE)
+        valid, _ = validate_location_template(current)
+        if valid:
+            selected_fields = location_template_fields(current).intersection(
+                {component[0] for component in LOCATION_TEMPLATE_COMPONENTS}
+            )
+            if not selected_fields:
+                selected_fields = {
+                    component[0] for component in LOCATION_TEMPLATE_COMPONENTS
+                }
+        else:
+            selected_fields = {
+                component[0] for component in LOCATION_TEMPLATE_COMPONENTS
+            }
+    else:
+        selected_fields = set(selected_fields)
+
+    def reopen_builder():
+        configure_custom_location_template(
+            game,
+            func_call,
+            replace_call,
+            selected_fields,
+        )
+
+    def toggle_component(field_name):
+        if field_name in selected_fields:
+            selected_fields.remove(field_name)
+        else:
+            selected_fields.add(field_name)
+        reopen_builder()
+
+    draft = build_custom_location_template(selected_fields)
+    m = menu.Menu(
+        game,
+        "Build a custom location announcement. Choose each part to include or exclude it.",
+    )
+    set_default_sounds(m)
+    items = []
+    for field_name, label, _ in LOCATION_TEMPLATE_COMPONENTS:
+        status = "Included" if field_name in selected_fields else "Excluded"
+        items.append(
+            (
+                f"{label}: {status}. Press Enter to toggle.",
+                functools.partial(toggle_component, field_name),
+            )
+        )
+    items.extend(
+        [
+            (
+                "Preview custom announcement",
+                functools.partial(_preview_location_template, draft),
+            ),
+            (
+                "Save custom announcement",
+                functools.partial(
+                    _save_location_template,
+                    draft,
+                    "Custom",
+                    func_call,
+                ),
+            ),
+            (
+                "Back to location announcement choices",
+                functools.partial(
+                    configure_location_template,
+                    game,
+                    func_call,
+                    replace_call,
+                    replace_call,
+                ),
+            ),
+        ]
+    )
+    m.add_items(items)
+    replace_call(m)
+
+
+def configure_advanced_location_template(
+    game,
+    func_call,
+    replace_call=None,
+    return_call=None,
+):
+    if replace_call is None:
+        replace_call = game.replace
+    if return_call is None:
+        return_call = func_call
     replace_call(
         game.input.run(
-            "Enter a template. Surround variable names in braces. Variable names can be found in the documentation. ",
-            default=options.get("location_template",             "{x}, \r\n{y}, \r\n{z}, \r\nOn {tile} \r\nFacing {direction} at {angle} degrees with a pitch of {pitch} degrees. \r\nYou are leaning by {lean} degrees and you are {balanced}. "),
-            handeler=lambda message: configure_location_template2(game, message, func_call)
+            "Advanced template editor. Use braces around supported variables: "
+            "x, y, z, tile, direction, angle, pitch, lean, and balanced. "
+            "Press Enter on an empty input to cancel.",
+            default=options.get("location_template", DEFAULT_LOCATION_TEMPLATE),
+            handeler=lambda message: configure_location_template2(
+                game,
+                message,
+                func_call,
+                return_call,
+            ),
         )
     )
 
-def configure_location_template2(game, message, func_call):
-    if message.strip()=="": 
-        func_call()
-        speech.speak("canceled")
+
+def configure_location_template2(game, message, func_call, return_call=None):
+    """Validate and save an advanced raw template; kept for compatibility."""
+    if return_call is None:
+        return_call = func_call
+    if not message.strip():
+        speech.speak("Canceled. Location announcement was not changed.")
+        return_call()
         return
-    
+
+    valid, error = validate_location_template(message)
+    if not valid:
+        speech.speak(f"Template not saved. {error}")
+        return_call()
+        return
+
     options.set("location_template", message)
+    speech.speak(
+        "Custom location announcement saved. Example: "
+        f"{render_location_template_preview(message)}"
+    )
     func_call()
 
 
