@@ -2462,6 +2462,11 @@ class Gameplay(state.State):
 
 
     def open_language_menu(self, mod):
+        # Ctrl is also the default snap-turn modifier. The language menu can
+        # open before its KEYUP reaches Gameplay, and menus intentionally
+        # consume KEYUP events. Clear the transient modifier now so leaving
+        # the menu cannot keep forward/backward movement blocked.
+        self.turn_mod = False
         self.game.network.send(consts.CHANNEL_MISC, "request_language_menu", {})
 
     def show_language_menu(self, available_langs, language_counts, current):

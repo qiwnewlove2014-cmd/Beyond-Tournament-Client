@@ -64,6 +64,19 @@ class LanguageMenuNavigationTests(unittest.TestCase):
         )
         return self.gameplay.substates[-1]
 
+    def test_ctrl_l_request_clears_snap_modifier_before_menu_opens(self):
+        # Ctrl KEYDOWN normally enables snap turning before L is processed.
+        # If the Server opens the menu before Ctrl KEYUP reaches Gameplay,
+        # that release is consumed by the menu and turn_mod used to stay True.
+        self.gameplay.turn_mod = True
+
+        self.gameplay.reset_pitch(pygame.KMOD_CTRL)
+
+        self.assertFalse(self.gameplay.turn_mod)
+        self.assertEqual(len(self.game.network.sent), 1)
+        self.assertEqual(self.game.network.sent[0][1], "request_language_menu")
+        self.assertEqual(self.game.network.sent[0][2], {})
+
     def test_escape_closes_without_changing_language(self):
         language_menu = self._open_menu()
         self.assertEqual(language_menu.items[language_menu.pos][0], "Current Thai 2 players")
