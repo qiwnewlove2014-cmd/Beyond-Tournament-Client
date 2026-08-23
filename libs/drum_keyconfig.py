@@ -22,7 +22,7 @@ class DrumBinding:
 DRUM_BINDINGS = (
     DrumBinding("drum_kick", "Kick", 0, pygame.K_SPACE),
     DrumBinding("drum_snare", "Snare", 1, pygame.K_f),
-    DrumBinding("drum_snare_2", "Snare 2", 2, pygame.K_n),
+    DrumBinding("drum_snare_2", "Snare 2", 2, pygame.K_g),
     DrumBinding("drum_closed_hihat", "Closed Hi-Hat", 3, pygame.K_j),
     DrumBinding("drum_open_hihat", "Open Hi-Hat", 4, pygame.K_k),
     DrumBinding("drum_foot_hihat", "Foot Hi-Hat", 5, pygame.K_l),
@@ -37,7 +37,7 @@ DRUM_BINDINGS = (
     DrumBinding("drum_ride", "Ride", 14, pygame.K_u),
     DrumBinding("drum_ride_bell", "Ride Bell", 15, pygame.K_i),
     DrumBinding("drum_cowbell", "Cowbell", 16, pygame.K_o),
-    DrumBinding("drum_rim", "Rim", 17, pygame.K_m),
+    DrumBinding("drum_rim", "Rim", 17, pygame.K_d),
 )
 
 RESERVED_DRUM_KEYS = frozenset((
