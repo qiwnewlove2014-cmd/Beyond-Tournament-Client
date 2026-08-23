@@ -2469,10 +2469,23 @@ class Gameplay(state.State):
             speak("No language channels available.")
             return
 
+        m = menu.Menu(self.game, "Select your channel language", parrent=self, autoclose=False)
+
+        def close_language_menu():
+            # Only remove this menu if it is still the active substate. This
+            # keeps Enter, Cancel and Escape from popping an unrelated menu if
+            # two inputs arrive during the same update.
+            if self.substates and self.substates[-1] is m:
+                self.pop_last_substate()
+
+        def choose_language(lang_code):
+            self.set_channel_language(lang_code)
+            close_language_menu()
+
         items = []
         for code, name in available_langs.items():
             def make_cb(c):
-                return lambda: self.set_channel_language(c)
+                return lambda: choose_language(c)
             
             count = language_counts.get(code, 0)
             player_str = f" {count} players" if count > 0 else ""
@@ -2480,8 +2493,7 @@ class Gameplay(state.State):
             display_text = f"Current {name}{player_str}" if code == current else f"{name}{player_str}"
             items.append((display_text, make_cb(code)))
         
-        items.append(("Cancel", lambda: None))
-        m = menu.Menu(self.game, "Select your channel language", parrent=self, autoclose=True)
+        items.append(("Cancel", close_language_menu))
         m.add_items(items)
         menus.set_default_sounds(m)
         
