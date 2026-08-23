@@ -126,14 +126,17 @@ class PresenceSoundManager:
     def _play_on_game_thread(self, path, fallback_kind=None):
         if self._closing or self._players_buffer_muted():
             return
-        played = self.game.direct_soundgroup.play(path)
+        # Use a labeled id so a new sound stops any currently playing
+        # presence sound (online/offline) before starting — prevents
+        # overlapping sounds when multiple players join/leave quickly.
+        played = self.game.direct_soundgroup.play(path, id="presence")
         if played is None and fallback_kind:
             try:
                 if os.path.commonpath((self.cache_dir, os.path.abspath(path))) == os.path.abspath(self.cache_dir):
                     os.unlink(path)
             except (OSError, ValueError):
                 pass
-            self.game.direct_soundgroup.play(self._default_sound(fallback_kind))
+            self.game.direct_soundgroup.play(self._default_sound(fallback_kind), id="presence")
 
     def _queue_play(self, path, fallback_kind=None):
         self.game.put(lambda: self._play_on_game_thread(path, fallback_kind))
