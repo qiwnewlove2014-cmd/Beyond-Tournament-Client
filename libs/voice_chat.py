@@ -158,14 +158,12 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    # Stable v1.6 pre-buffer. Together with the six-frame PA source reserve
-    # below, this covers a normal ENet retransmission without chopping music.
-    PRE_BUFFER_FRAMES = 3       # Wait for 3 frames (60ms) before playing
-    # After an underrun, re-buffer a couple of frames before resuming instead
-    # of streaming one frame at a time (which sounds like repeated tiny chops
-    # on continuous music).
-    RESUME_FRAMES = 2           # Re-buffer 2 frames (40ms) after an underrun
-    MAX_BUFFER_FRAMES = 12      # Maximum frames in buffer (240ms) for network stability
+    # Increased pre-buffer to prevent underruns on real networks.
+    PRE_BUFFER_FRAMES = 6       # Wait for 6 frames (120ms) before playing
+    # After an underrun, re-buffer more frames before resuming to prevent
+    # rapid re-underrun cycles.
+    RESUME_FRAMES = 4           # Re-buffer 4 frames (80ms) after an underrun
+    MAX_BUFFER_FRAMES = 16      # Maximum frames in buffer (320ms) for network stability
     TARGET_BUFFER_FRAMES = 4    # Target buffer level (80ms latency)
     
     def __init__(self, game):
@@ -1071,10 +1069,10 @@ class VoiceChatRecord(threading.Thread):
 
 
 class MusicCompression(threading.Thread):
-    PRE_BUFFER_FRAMES = 5   # 100ms before first play (was 8/160ms — lowered
-                            # for live jamming; RESUME_FRAMES still guards
-                            # against post-underrun chop)
-    RESUME_FRAMES     = 3   # 60ms before resuming after underrun
+    PRE_BUFFER_FRAMES = 12  # 240ms before first play (increased from 8 to
+                            # prevent underruns on real networks)
+    RESUME_FRAMES     = 8   # 160ms before resuming after underrun (increased
+                            # from 5 to prevent rapid re-underrun cycles)
     TIMELINE_EVENT_TIMEOUT = 1.0
     MAX_TIMELINE_EVENTS = 256
 
@@ -1207,7 +1205,8 @@ class MusicCompression(threading.Thread):
                        epoch=None, frame_seq=None):
         if music_source is None:
             return
-            
+
+
         # Decode Opus packet OUTSIDE the batch lock to prevent GIL/OpenAL deadlocks!
         try:
             pcm = bytearray(self.decoder.decode(bytearray(data)))
@@ -1259,6 +1258,7 @@ class MusicCompression(threading.Thread):
                     # that entity.loop() pushes when the queue runs empty — and
                     # reset the pre-buffer threshold so playback starts cleanly,
                     # mirroring the behaviour of a fresh map load.
+
                     try:
                         music_source.stop()
                         while getattr(music_source, 'buffers_processed', 0) > 0:
@@ -1291,7 +1291,7 @@ class MusicCompression(threading.Thread):
 
                 # If we were playing but just hit an underrun and STOPPED, we need to
                 # flush out the old processed buffers and restart the pre-buffering phase.
-                if state == cyal.SourceState.STOPPED and self._has_started:
+
                     try:
                         self._has_started = False
                         self._timeline_first_queued_seq = None

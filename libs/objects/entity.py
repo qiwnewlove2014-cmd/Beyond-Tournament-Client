@@ -415,7 +415,7 @@ class Entity(Object):
                             # real audio and can leave the source stopped/silent after a
                             # broadcaster stop/restart.  The window mirrors the session
                             # reset gap used by MusicCompression.
-                            if time.time() - getattr(self, '_music_last_recv', 0) < 0.5:
+                            if time.time() - getattr(self, '_music_last_recv', 0) < 2.0:  # Increased from 0.5s to prevent silent buffer interference
                                 pass
                             else:
                                 buffer = self.game.audio_mngr.context.gen_buffer()

@@ -674,6 +674,7 @@ class AudioStreamer(threading.Thread):
                 ) + bytes(encoded)
                 with self._timeline_lock:
                     self._timeline_last_sent_seq = int(timeline_seq) & 0xFFFFFFFF
+
             self.game.network.send(target_channel, "n/a", encoded, reliable=False)
         except Exception:
             pass
