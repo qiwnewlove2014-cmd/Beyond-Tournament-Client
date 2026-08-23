@@ -1000,6 +1000,61 @@ class MinigameTable(BaseMapObj):
 
 
 class Ambience(BaseMapObj):
+    def recover(self):
+        """Restore this map-owned loop without replacing its SoundGroup.
+
+        This is intentionally synchronous: callers use it from the gameplay
+        audio thread. A valid OpenAL source is resumed in place; only a lost
+        or unusable source is replaced, preserving the map object's ownership
+        and the AudioManager's filter/effect pools.
+        """
+        repaired = False
+        source = getattr(self.sound, "source", None) if self.sound else None
+        if source is None:
+            if self.sound:
+                with contextlib.suppress(Exception):
+                    self.sound.destroy()
+            self.sound = self.soundgroup.play(
+                self.file, True, cat=self.type, volume=self.volume
+            )
+            source = getattr(self.sound, "source", None) if self.sound else None
+            repaired = True
+        if source is None:
+            self.playing = False
+            return False
+        try:
+            if source.state != cyal.SourceState.PLAYING:
+                source.play()
+                repaired = True
+            category_volume = self.map.game.audio_mngr.volume_categories.get(
+                self.type, [100]
+            )[0]
+            source.gain = (self.volume / 100) * (category_volume / 100)
+            self.sound.muted = False
+            self.playing = True
+            return repaired
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.sound.destroy()
+            self.sound = self.soundgroup.play(
+                self.file, True, cat=self.type, volume=self.volume
+            )
+            source = getattr(self.sound, "source", None) if self.sound else None
+            if source is None:
+                self.playing = False
+                return False
+            try:
+                category_volume = self.map.game.audio_mngr.volume_categories.get(
+                    self.type, [100]
+                )[0]
+                source.gain = (self.volume / 100) * (category_volume / 100)
+                self.sound.muted = False
+                self.playing = True
+                return True
+            except Exception:
+                self.playing = False
+                return False
+
     def __init__(
         self,
         map,
@@ -1160,9 +1215,35 @@ class Pannable(BaseMapObj):
     def __init__(self, game, x, y, z, sound, volume=100):
         super().__init__(x, x, y, y, z, z, sound)
         self.game = game
+        self.path = sound
+        self.volume = volume
         self.soundgroup = self.game.audio_mngr.create_soundgroup()
         self.soundgroup.position = (x, y, z)
         self.sound = self.soundgroup.play(sound, looping=True, volume=volume)
+
+    def recover(self):
+        """Resume this positional map loop, replacing only a lost source."""
+        source = getattr(self.sound, "source", None) if self.sound else None
+        if source is None:
+            if self.sound:
+                with contextlib.suppress(Exception):
+                    self.sound.destroy()
+            self.sound = self.soundgroup.play(
+                self.path, looping=True, volume=self.volume
+            )
+            return bool(self.sound and getattr(self.sound, "source", None))
+        try:
+            if source.state != cyal.SourceState.PLAYING:
+                source.play()
+                return True
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.sound.destroy()
+            self.sound = self.soundgroup.play(
+                self.path, looping=True, volume=self.volume
+            )
+            return bool(self.sound and getattr(self.sound, "source", None))
+        return False
 
     def destroy(self):
         with contextlib.suppress(Exception):
@@ -1271,6 +1352,31 @@ class SoundSource(BaseMapObj):
         if self.minz <= z <= self.maxz:
             return z
         return self.minz if z < self.minz else self.maxz
+
+    def recover(self, player_x, player_y, player_z):
+        """Re-evaluate and resume a nearby source on the gameplay thread."""
+        repaired = False
+        source = getattr(self.sound, "source", None) if self.sound else None
+        if self.sound and source is None:
+            with contextlib.suppress(Exception):
+                self.sound.destroy()
+            self.sound = None
+            self.playing = False
+            repaired = True
+        elif source is not None:
+            try:
+                if source.state != cyal.SourceState.PLAYING:
+                    source.play()
+                    self.playing = True
+                    repaired = True
+            except Exception:
+                with contextlib.suppress(Exception):
+                    self.sound.destroy()
+                self.sound = None
+                self.playing = False
+                repaired = True
+        self.loop(player_x, player_y, player_z)
+        return repaired
 
     def destroy(self):
         with contextlib.suppress(Exception):

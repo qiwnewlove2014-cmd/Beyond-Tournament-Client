@@ -382,6 +382,13 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         ("Configure key bindings.", lambda: keyconfig_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
         ("Configure drum keys.", lambda: drum_keyconfig_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
     ]
+    if in_game and callable(getattr(parent, "refresh_game_audio", None)):
+        # Keep Options open while the main-thread soft recovery runs. This
+        # avoids another menu transition and does not create competing music.
+        items.insert(
+            len(endpoint_items) + 1,
+            ("Refresh game audio", parent.refresh_game_audio),
+        )
     if in_game:
         items.append((
             "Configure custom online and offline sounds",

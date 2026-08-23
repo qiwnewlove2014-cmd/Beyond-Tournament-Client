@@ -52,6 +52,7 @@ class _ExitFadeState(state.State):
 
 
 class Gameplay(state.State):
+    _AUDIO_REFRESH_COOLDOWN_SECONDS = 5.0
     _PIANO_MIN_BASE_OCTAVE = 1
     _PIANO_MAX_BASE_OCTAVE = 6
     _PIANO_MIDI_MIN_NOTE = PIANO_MIDI_PROFILE.MIN_NOTE
@@ -104,6 +105,8 @@ class Gameplay(state.State):
         # 🎵 Music jukebox: server-side queue playback anchored at jukebox elements.
         self.jukebox_player = None
         self.jukebox_state = {"jukeboxes": {}}
+        self._audio_refresh_in_progress = False
+        self._last_audio_refresh_at = -self._AUDIO_REFRESH_COOLDOWN_SECONDS
         # Name of the currently parsed map (from parse_map), so a real map
         # transition can be told apart from a same-name reparse for jukebox
         # teardown (immediate stop vs. seamless mark-and-sweep).
@@ -2648,6 +2651,122 @@ class Gameplay(state.State):
                 jukebox.request_resync("options closed")
             except Exception:
                 pass
+
+    def refresh_game_audio(self):
+        """Soft-recover active game audio without rebuilding the OpenAL context.
+
+        The Options callback runs on the gameplay/audio owner thread.  Existing
+        sources, buffers, SoundGroups and pooled EFX objects are retained; only
+        an individual map loop whose source has already been lost may allocate
+        a replacement.  A full Client restart remains the fallback for a dead
+        device or context because rebuilding the context in place would leave
+        voice, jukebox and instrument owners holding invalid OpenAL objects.
+        """
+        now = time.monotonic()
+        if getattr(self, "_audio_refresh_in_progress", False):
+            speak("Audio refresh is already running.")
+            return False
+        last_refresh = getattr(
+            self, "_last_audio_refresh_at", -self._AUDIO_REFRESH_COOLDOWN_SECONDS
+        )
+        if now - last_refresh < self._AUDIO_REFRESH_COOLDOWN_SECONDS:
+            speak("Audio refresh is cooling down. Please wait a moment.")
+            return False
+
+        audio = getattr(self.game, "audio_mngr", None)
+        context = getattr(audio, "context", None) if audio is not None else None
+        try:
+            connected = context is not None and context.is_connected
+        except Exception:
+            connected = False
+        if not connected:
+            speak(
+                "The audio device is unavailable. Wait for automatic recovery, "
+                "or use Restart Client from the main menu."
+            )
+            return False
+
+        self._audio_refresh_in_progress = True
+        self._last_audio_refresh_at = now
+
+        def safe_call(obj, method_name, *args, **kwargs):
+            method = getattr(obj, method_name, None) if obj is not None else None
+            if not callable(method):
+                return None
+            try:
+                return method(*args, **kwargs)
+            except Exception:
+                return None
+
+        try:
+            # A focused game can safely resume a device paused by focus loss.
+            device = getattr(context, "device", None)
+            try:
+                if device is not None and device.paused:
+                    device.resume()
+                    audio.muted = False
+            except Exception:
+                pass
+
+            focus = getattr(getattr(self, "camera", None), "focus_object", None)
+            if focus is None:
+                focus = getattr(self, "player", None)
+            x = getattr(focus, "x", 0.0)
+            y = getattr(focus, "y", 0.0)
+            z = getattr(focus, "z", 0.0)
+            map_obj = getattr(self, "map", None)
+
+            if map_obj is not None:
+                # Only room ambience/music covering the listener should be
+                # audible. Nearby spatial sources re-run their normal distance
+                # and reverb calculation rather than being forced to play.
+                for ambience in list(map_obj.get_ambiences_at(x, y, z)):
+                    safe_call(ambience, "recover")
+                for music in list(map_obj.get_musics_at(x, y, z)):
+                    safe_call(music, "recover")
+                for source in list(getattr(map_obj, "source_list", ())):
+                    safe_call(source, "recover", x, y, z)
+                for pannable in list(getattr(map_obj, "pannable_list", ())):
+                    safe_call(pannable, "recover")
+
+                # Rebind the current player and remote voice/music sources to
+                # the room's existing effect slot. Never allocate a new slot.
+                seen_entities = set()
+                for entity in [focus] + list(
+                    getattr(map_obj, "entities", {}).values()
+                ):
+                    if entity is None or id(entity) in seen_entities:
+                        continue
+                    seen_entities.add(id(entity))
+                    safe_call(entity, "sync_reverb")
+
+            music_bot_obj = getattr(self, "music_bot", None)
+            safe_call(music_bot_obj, "refresh_environment_audio")
+
+            jukebox = getattr(self, "jukebox_player", None)
+            safe_call(jukebox, "sync_reverb")
+            safe_call(jukebox, "request_resync", "manual audio refresh")
+
+            safe_call(getattr(self, "megaphone", None), "request_spatial_refresh")
+
+            # An interrupted fade can leave global gain at zero even though
+            # every individual source is healthy. Restore the saved master bus.
+            try:
+                master = audio.volume_categories["master"][0]
+                audio.listener.gain = master / 100
+            except Exception:
+                pass
+
+            speak("Game audio refresh complete.")
+            return True
+        except Exception:
+            speak(
+                "Audio refresh could not complete. Please wait a moment and try "
+                "again, or use Restart Client from the main menu."
+            )
+            return False
+        finally:
+            self._audio_refresh_in_progress = False
     
     def handle_o_key(self, mod):
         """Handle O key: PA Test Mode (no modifier) or Options Menu (ALT+O)"""

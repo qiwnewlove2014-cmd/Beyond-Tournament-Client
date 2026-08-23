@@ -2503,6 +2503,12 @@ class MapMusicBot:
         except Exception:
             return False
 
+    def refresh_environment_audio(self):
+        """Soft-recover playback and forcibly restore the current room send."""
+        recovered = self.recover_output()
+        self._sync_map_reverb(force=True)
+        return recovered
+
     def performance_timeline_marker(self):
         """Marker attached to this performer's event-driven instruments.
 
@@ -2539,7 +2545,7 @@ class MapMusicBot:
                 self.live_relay_streamer = LiveRelayStreamer(self.game, bot=self)
                 self.live_relay_streamer.start()
 
-    def _sync_map_reverb(self):
+    def _sync_map_reverb(self, force=False):
         """Apply the map's reverb at the player's position to the music source.
         This gives the music an environmental feel — cave echo, outdoor ambience, etc.
         The dry signal stays stereo-direct (headphone quality),
@@ -2558,14 +2564,14 @@ class MapMusicBot:
 
             if reverb and reverb.reverb:
                 # Apply map's reverb to the music via aux send 0
-                if self._current_reverb_slot != reverb.reverb:
+                if force or self._current_reverb_slot != reverb.reverb:
                     self.game.audio_mngr.efx.send(
                         self.stream_source, 0, reverb.reverb
                     )
                     self._current_reverb_slot = reverb.reverb
             else:
                 # No reverb zone — remove effect
-                if self._current_reverb_slot is not None:
+                if force or self._current_reverb_slot is not None:
                     self.game.audio_mngr.efx.send(
                         self.stream_source, 0, None
                     )
