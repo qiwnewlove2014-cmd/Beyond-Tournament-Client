@@ -22,7 +22,7 @@ class DrumBinding:
 DRUM_BINDINGS = (
     DrumBinding("drum_kick", "Kick", 0, pygame.K_SPACE),
     DrumBinding("drum_snare", "Snare", 1, pygame.K_f),
-    DrumBinding("drum_rim", "Rim", 2, pygame.K_d),
+    DrumBinding("drum_snare_2", "Snare 2", 2, pygame.K_d),
     DrumBinding("drum_closed_hihat", "Closed Hi-Hat", 3, pygame.K_j),
     DrumBinding("drum_open_hihat", "Open Hi-Hat", 4, pygame.K_k),
     DrumBinding("drum_foot_hihat", "Foot Hi-Hat", 5, pygame.K_l),
