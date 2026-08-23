@@ -2845,7 +2845,7 @@ class Gameplay(state.State):
     def toggle_sonar_and_force_quit(self, mod):
         if mod & pygame.KMOD_ALT:
             self.quit(mod)
-            self.game.quit()
+            self.game.exit()
         setattr(
             self.camera,
             "sonar",
