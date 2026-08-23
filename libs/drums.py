@@ -65,7 +65,7 @@ class DrumAudio:
         "diw": (
             ("Kick", "drums/DrumBy (Mr. Ling, Jik Jik)/Kick.ogg", 2.50, 6),
             ("Snare", "drums/DrumBy (Mr. Ling, Jik Jik)/sanre 1.ogg", 2.80, 6),
-            ("Rim", "drums/DrumBy (Mr. Ling, Jik Jik)/rim.ogg", 3.00, 6),
+            ("Rim (Snare 2)", "drums/DrumBy (Mr. Ling, Jik Jik)/sanre 2.ogg", 2.80, 6),
             ("Closed Hi-Hat", "drums/DrumBy (Mr. Ling, Jik Jik)/hat c.ogg", 5.00, 8),
             ("Open Hi-Hat", "drums/DrumBy (Mr. Ling, Jik Jik)/hat o.ogg", 4.00, 4),
             ("Foot Hi-Hat", "drums/DrumBy (Mr. Ling, Jik Jik)/hat f.ogg", 6.00, 8),
