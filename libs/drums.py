@@ -62,6 +62,25 @@ class DrumAudio:
             ("Ride Bell", "drums/salamander/Drums.hit.RideBell.ogg", 1.44, 4),
             ("Cowbell", "drums/salamander/Drums.hit.Cowbell.ogg", 0.48, 6),
         ),
+        "diw": (
+            ("Kick", "drums/DrumBy (Mr. Ling, Jik Jik)/Kick.ogg", 1.50, 6),
+            ("Snare", "drums/DrumBy (Mr. Ling, Jik Jik)/sanre 1.ogg", 1.80, 6),
+            ("Rim", "drums/DrumBy (Mr. Ling, Jik Jik)/rim.ogg", 2.00, 6),
+            ("Closed Hi-Hat", "drums/DrumBy (Mr. Ling, Jik Jik)/hat c.ogg", 3.50, 8),
+            ("Open Hi-Hat", "drums/DrumBy (Mr. Ling, Jik Jik)/hat o.ogg", 2.50, 4),
+            ("Foot Hi-Hat", "drums/DrumBy (Mr. Ling, Jik Jik)/hat f.ogg", 4.50, 8),
+            ("Tom 1", "drums/DrumBy (Mr. Ling, Jik Jik)/tom 1.ogg", 1.80, 6),
+            ("Tom 2", "drums/DrumBy (Mr. Ling, Jik Jik)/tom 2.ogg", 1.80, 6),
+            ("Tom 3", "drums/DrumBy (Mr. Ling, Jik Jik)/tom 3.ogg", 1.80, 6),
+            ("Tom 4", "drums/DrumBy (Mr. Ling, Jik Jik)/tom 4.ogg", 1.80, 6),
+            ("Crash Left", "drums/DrumBy (Mr. Ling, Jik Jik)/crash L.ogg", 2.50, 3),
+            ("Crash Right", "drums/DrumBy (Mr. Ling, Jik Jik)/crash R.ogg", 2.50, 3),
+            ("China", "drums/DrumBy (Mr. Ling, Jik Jik)/CN.ogg", 2.00, 3),
+            ("Splash", "drums/DrumBy (Mr. Ling, Jik Jik)/Sp.ogg", 2.00, 3),
+            ("Ride", "drums/DrumBy (Mr. Ling, Jik Jik)/ride.ogg", 3.00, 4),
+            ("Ride Bell", "drums/DrumBy (Mr. Ling, Jik Jik)/bell.ogg", 3.00, 4),
+            ("Cowbell", "drums/DrumBy (Mr. Ling, Jik Jik)/Cabell lum.ogg", 2.50, 6),
+        ),
     }
     DEFAULT_KIT = "default"
     # Backwards-compatible alias: the canonical 17-pad definition. Always reflects the
