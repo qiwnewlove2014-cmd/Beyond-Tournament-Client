@@ -41,6 +41,7 @@ class DrumAudio:
             ("Ride", "drums/default/Drums.hit.Ride.ogg", 1.75, 4),
             ("Ride Bell", "drums/default/Drums.hit.RideBell.ogg", 1.44, 4),
             ("Cowbell", "drums/default/Drums.hit.Cowbell.ogg", 0.48, 6),
+            ("Rim", "drums/default/Drums.hit.Rim.ogg", 0.62, 6),
         ),
         "salamander": (
             ("Kick", "drums/salamander/Drums.hit.Kick.ogg", 0.34, 6),
@@ -61,6 +62,7 @@ class DrumAudio:
             ("Ride", "drums/salamander/Drums.hit.Ride.ogg", 1.75, 4),
             ("Ride Bell", "drums/salamander/Drums.hit.RideBell.ogg", 1.44, 4),
             ("Cowbell", "drums/salamander/Drums.hit.Cowbell.ogg", 0.48, 6),
+            ("Rim", "drums/salamander/Drums.hit.Rim.ogg", 0.62, 6),
         ),
         "diw": (
             ("Kick", "drums/DrumBy (Mr. Ling, Jik Jik)/Kick.ogg", 2.50, 6),
@@ -80,6 +82,7 @@ class DrumAudio:
             ("Ride", "drums/DrumBy (Mr. Ling, Jik Jik)/ride.ogg", 4.50, 4),
             ("Ride Bell", "drums/DrumBy (Mr. Ling, Jik Jik)/bell.ogg", 4.50, 4),
             ("Cowbell", "drums/DrumBy (Mr. Ling, Jik Jik)/Cabell lum.ogg", 4.00, 6),
+            ("Rim", "drums/DrumBy (Mr. Ling, Jik Jik)/rim.ogg", 3.00, 6),
         ),
     }
     DEFAULT_KIT = "default"

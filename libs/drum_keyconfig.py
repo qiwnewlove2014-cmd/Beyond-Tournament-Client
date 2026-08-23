@@ -37,6 +37,7 @@ DRUM_BINDINGS = (
     DrumBinding("drum_ride", "Ride", 14, pygame.K_u),
     DrumBinding("drum_ride_bell", "Ride Bell", 15, pygame.K_i),
     DrumBinding("drum_cowbell", "Cowbell", 16, pygame.K_o),
+    DrumBinding("drum_rim", "Rim", 17, pygame.K_n),
 )
 
 RESERVED_DRUM_KEYS = frozenset((
