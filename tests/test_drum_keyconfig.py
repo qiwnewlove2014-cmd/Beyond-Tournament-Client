@@ -35,7 +35,7 @@ class DrumKeyconfigTests(unittest.TestCase):
     def test_defaults_preserve_the_pad_contract(self):
         keyconfig = FakeKeyconfig()
         resolved = drum_keyconfig.key_to_pad(keyconfig)
-        self.assertEqual(len(resolved), 17)
+        self.assertEqual(len(resolved), 18)
         for binding in drum_keyconfig.DRUM_BINDINGS:
             self.assertEqual(resolved[binding.default_key], binding.pad)
 
