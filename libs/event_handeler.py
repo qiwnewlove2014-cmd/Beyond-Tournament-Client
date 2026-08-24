@@ -245,6 +245,27 @@ class EventHandeler:
                 pass
             auto = getattr(self.gameplay, '_auto_ping_inflight', False)
             self.gameplay._auto_ping_inflight = False
+
+            # --- Stereo ping sound effect (manual F3 only) ---
+            # Left channel plays the "start" ping immediately; right channel
+            # plays the "end" ping after a delay proportional to the RTT.
+            # Faster ping = shorter delay = quicker left→right sweep.
+            if not auto and self.game and hasattr(self.game, 'audio_mngr') and self.game.audio_mngr:
+                delay_ms = max(10, min(300, rtt_ms))
+                # Left: start ping (immediate)
+                self.game.audio_mngr.play_unbound(
+                    "ui/sonar/start.ogg", 0, 0, 0,
+                    direct=True, volume=80, cat="ui"
+                )
+                # Right: end ping (delayed by RTT)
+                def _play_ping_right():
+                    time.sleep(delay_ms / 1000.0)
+                    self.game.put(lambda: self.game.audio_mngr.play_unbound(
+                        "ui/sonar/stop.ogg", 0, 0, 0,
+                        direct=True, volume=80, cat="ui"
+                    ))
+                threading.Thread(target=_play_ping_right, daemon=True).start()
+
             if not auto:
                 speak(f"The ping took {rtt_ms}ms")
             self.gameplay.pingging = False
