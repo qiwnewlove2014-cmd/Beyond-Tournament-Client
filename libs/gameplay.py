@@ -9,6 +9,7 @@ from .systems.megaphone_system import MegaphoneManager
 from .systems.wall_tone_system import WallToneSystem
 from .systems.compass_turn_cue import CompassTurnCue
 from .midi.profiles import DRUM_MIDI_PROFILE
+from .drum_handler import DrumHandler
 from . import drum_keyconfig
 import pygame
 import pyogg
@@ -90,8 +91,7 @@ class Gameplay(state.State):
         self.piano_mode = False     # True when playing piano
         self.piano = PianoHandler(self)  # Piano subsystem (extracted from Gameplay)
         self.drum_mode = False      # True when playing a drumset
-        self.drum_volume_percent = 100  # Dynamic drum volume (10-100%)
-        self._drum_pressed_keys = set()
+        self.drum = DrumHandler(self)  # Drum subsystem (extracted from Gameplay)
         self._midi_lease = None
         # 🎵 Music jukebox: server-side queue playback anchored at jukebox elements.
         self.jukebox_player = None
@@ -501,38 +501,20 @@ class Gameplay(state.State):
         self.piano.handle_pitch_bend_key(key, pressed)
 
     def _get_drum_key_to_pad(self):
-        """Resolve configurable normalized keys to stable drum pad IDs."""
-        return drum_keyconfig.key_to_pad(self.game.keyconfig)
+        return self.drum.get_key_to_pad()
 
     def _start_drum_session(self, kit=None):
-        """Enter low-latency drum input mode on the main game thread."""
-        if self.piano_mode:
-            self._end_piano_session(notify_server=True)
-        self.drum_mode = True
-        self._drum_pressed_keys.clear()
-        drums = self.game.audio_mngr.drums
-        if kit and drums.is_valid_kit(kit):
-            drums.set_active_kit(kit)
-        drums.preload()
-        self._start_drum_midi()
+        self.drum.start(kit)
+        self.drum_mode = self.drum.active
 
     def _end_drum_session(self, notify_server=True):
-        """Release drum input state and the shared MIDI worker atomically."""
-        self._drum_pressed_keys.clear()
-        if self.drum_mode:
-            self._deactivate_drum_midi()
-        self.drum_mode = False
-        if notify_server and self.game.network:
-            self.game.network.send(consts.CHANNEL_MAP, "drum_stop", {})
+        self.drum.stop(notify_server)
+        self.drum_mode = self.drum.active
 
-    @classmethod
     def _drum_midi_note_to_pad(cls, midi_note):
-        """Map General MIDI percussion or the C4-E5 keyboard layout to a pad."""
         return DRUM_MIDI_PROFILE.note_to_pad(midi_note)
 
-    @classmethod
     def _drum_midi_velocity_volume(cls, velocity):
-        """Map MIDI velocity 1-127 to the drum kit's existing volume scale."""
         return DRUM_MIDI_PROFILE.volume(velocity)
 
     def _is_megaphone_owner(self):
@@ -575,60 +557,19 @@ class Gameplay(state.State):
         self.game.network.send(consts.CHANNEL_JAM, event, packet, reliable=False)
 
     def _adjust_drum_volume(self, delta):
-        cur = getattr(self, "drum_volume_percent", 100)
-        new_vol = max(10, min(100, cur + delta))
-        if new_vol == cur:
-            return
-        self.drum_volume_percent = new_vol
-        speak(f"Drum volume: {new_vol} percent")
+        self.drum.adjust_volume(delta)
 
     def _play_local_drum_hit(self, pad, velocity=None):
-        base_volume = (
-            300
-            if velocity is None
-            else self._drum_midi_velocity_volume(velocity)
-        )
-        vol_factor = getattr(self, "drum_volume_percent", 100) / 100.0
-        volume = max(20, int(base_volume * vol_factor))
-        is_mega_owner = self._is_megaphone_owner()
-            
-        sound = self.game.audio_mngr.drums.play_hit(
-            "local", pad,
-            self.player.x, self.player.y, self.player.z,
-            self.player.x, self.player.y, self.player.z,
-            volume=volume,
-            via_megaphone=getattr(self, 'voice_chat_using_megaphone', False) or is_mega_owner
-        )
-        if sound and getattr(self, "map", None):
-            reverb = self.map.get_reverb_at(
-                self.player.x, self.player.y, self.player.z
-            )
-            if reverb and reverb.reverb:
-                self.game.audio_mngr.drums.apply_effect_send(
-                    sound, 0, reverb.reverb
-                )
-        if self.game.network:
-            packet = {"pad": pad}
-            base_vel = 127 if velocity is None else max(1, min(127, int(velocity)))
-            packet["velocity"] = max(1, min(127, int(base_vel * vol_factor)))
-            self._attach_music_timeline(packet)
-            self._send_jam_note("play_drum_hit", packet)
+        self.drum.play_local_hit(pad, velocity)
 
     def _start_drum_midi(self):
-        """Acquire the process MIDI hub with the drum profile."""
-        if not self.drum_mode:
-            return
-        self._midi_lease = self.game.midi_hub.acquire(self, "drumset")
+        self.drum._start_midi()
 
     def _deactivate_drum_midi(self):
-        lease = self._midi_lease
-        if lease is not None and lease.profile_id == "drumset":
-            self.game.midi_hub.release(lease, reason="drum_mode_exit")
-            self._midi_lease = None
+        self.drum._deactivate_midi()
 
     def _poll_drum_midi(self):
-        """Dispatch queued MIDI events through the active drum profile."""
-        self.game.midi_hub.poll()
+        self.drum.poll()
 
     def _start_piano_session(self):
         self.piano.start()
@@ -1064,25 +1005,8 @@ class Gameplay(state.State):
             self._poll_drum_midi()
         for event in events:
             if getattr(self, "drum_mode", False):
-                if event.type == pygame.KEYDOWN:
-                    if event.key in drum_keyconfig.RESERVED_DRUM_KEYS:
-                        self._end_drum_session(notify_server=True)
-                        continue
-                    if event.key in (pygame.K_UP, pygame.K_PAGEUP):
-                        self._adjust_drum_volume(10)
-                        continue
-                    if event.key in (pygame.K_DOWN, pygame.K_PAGEDOWN):
-                        self._adjust_drum_volume(-10)
-                        continue
-                    key_to_pad = self._get_drum_key_to_pad()
-                    if event.key in key_to_pad:
-                        if event.key in self._drum_pressed_keys:
-                            continue
-                        self._drum_pressed_keys.add(event.key)
-                        self._play_local_drum_hit(key_to_pad[event.key])
-                elif event.type == pygame.KEYUP:
-                    self._drum_pressed_keys.discard(event.key)
-                continue
+                if self.drum.handle_event(event):
+                    continue
             if getattr(self, 'piano_mode', False):
                 if self.piano.handle_event(event):
                     continue
