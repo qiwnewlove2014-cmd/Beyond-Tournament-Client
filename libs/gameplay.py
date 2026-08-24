@@ -8,11 +8,12 @@ import cyal.exceptions
 from .systems.megaphone_system import MegaphoneManager
 from .systems.wall_tone_system import WallToneSystem
 from .systems.compass_turn_cue import CompassTurnCue
-from .midi.profiles import DRUM_MIDI_PROFILE, PIANO_MIDI_PROFILE
+from .midi.profiles import DRUM_MIDI_PROFILE
 from . import drum_keyconfig
 import pygame
 import pyogg
 from .shields import ShieldManager
+from .piano_handler import PianoHandler
 from . import (
     audio_manager,
     buffer,
@@ -53,17 +54,6 @@ class _ExitFadeState(state.State):
 
 class Gameplay(state.State):
     _AUDIO_REFRESH_COOLDOWN_SECONDS = 5.0
-    _PIANO_MIN_BASE_OCTAVE = 1
-    _PIANO_MAX_BASE_OCTAVE = 6
-    _PIANO_MIDI_MIN_NOTE = PIANO_MIDI_PROFILE.MIN_NOTE
-    _PIANO_MIDI_MAX_NOTE = PIANO_MIDI_PROFILE.MAX_NOTE
-    _PIANO_MIDI_MIN_VOLUME = 60
-    _PIANO_MIDI_MAX_VOLUME = 300
-    _PIANO_MIDI_PITCH_MIN = -8192
-    _PIANO_MIDI_PITCH_MAX = 8191
-    _PIANO_MIDI_PITCH_CENTER_DEADZONE = 32
-    _PIANO_PITCH_NETWORK_STEP = 64
-    _PIANO_PITCH_NETWORK_INTERVAL = 1.0 / 30.0
     _DRUM_MIDI_MIN_VOLUME = 60
     _DRUM_MIDI_MAX_VOLUME = 300
     _DRUM_MIDI_CHROMATIC_FIRST_NOTE = DRUM_MIDI_PROFILE.CHROMATIC_FIRST_NOTE
@@ -98,6 +88,7 @@ class Gameplay(state.State):
         self.game_started = False   # Track if game has started (blocks PA Test Mode)
         self.pong_mode = False      # True when player is in an active Pong match (suppresses normal footsteps)
         self.piano_mode = False     # True when playing piano
+        self.piano = PianoHandler(self)  # Piano subsystem (extracted from Gameplay)
         self.drum_mode = False      # True when playing a drumset
         self.drum_volume_percent = 100  # Dynamic drum volume (10-100%)
         self._drum_pressed_keys = set()
@@ -123,24 +114,6 @@ class Gameplay(state.State):
         # Compatibility mirrors for code loaded alongside an older server.
         self.motorcycle_mode = False
         self.motorcycle_name = None
-        self.piano_octave = 4       # Default octave (Octave 4 - Middle C)
-        self.piano_transpose = 0    # Default transpose offset in semitones (-12 to +12)
-        self._piano_pressed_notes = {}  # Physical key -> exact sounding note
-        self._piano_soft_pedal = False  # Left Ctrl realtime soft/mute pedal
-        self._piano_chorus_enabled = False  # Tab toggles realtime Chorus
-        self._piano_chorus_tab_down = False
-        self._piano_pitch_bend_direction = 0
-        self._piano_pitch_bend_keys = set()
-        self._piano_pitch_bend_value = 0
-        self._piano_midi_pitch_bend_value = 0
-        self._piano_midi_pitch_bend_source = None
-        self._piano_pitch_bend_pending = None
-        self._piano_pitch_bend_last_sent = None
-        self._piano_pitch_bend_last_send_time = 0.0
-        self._piano_midi_active_notes = {}
-        self._piano_midi_sustained_notes = {}
-        self._piano_midi_sustain_sources = set()
-        self._piano_midi_sustain = False
         # ENet guarantees ordering inside one channel, not across CHANNEL_MISC
         # and CHANNEL_MAP.  Player spawn packets can therefore arrive before
         # the connected event enters this state.  Create the mapping here and
@@ -504,152 +477,28 @@ class Gameplay(state.State):
                 action(event.mod)
 
     def _set_piano_soft_pedal(self, enabled, announce=True, force_network=False):
-        """Apply the local pedal immediately and replicate its state reliably."""
-        enabled = bool(enabled)
-        changed = self._piano_soft_pedal != enabled
-        self._piano_soft_pedal = enabled
-        self.game.audio_mngr.piano.set_soft_pedal("local", enabled)
-        if (changed or force_network) and self.game.network:
-            self.game.network.send(
-                consts.CHANNEL_MAP,
-                "set_piano_soft_pedal",
-                {"enabled": enabled},
-            )
-        if changed and announce:
-            speak("Soft pedal on" if enabled else "Soft pedal off")
+        self.piano._set_soft_pedal(enabled, announce, force_network)
 
     def _set_piano_chorus(self, enabled, announce=True, force_network=False):
-        """Apply local Chorus prediction and replicate only toggle changes."""
-        enabled = bool(enabled)
-        changed = self._piano_chorus_enabled != enabled
-        self._piano_chorus_enabled = enabled
-        self.game.audio_mngr.piano.set_chorus("local", enabled)
-        if (changed or force_network) and self.game.network:
-            self.game.network.send(
-                consts.CHANNEL_MAP,
-                "set_piano_chorus",
-                {"enabled": enabled},
-            )
-        if changed and announce:
-            speak("Chorus on" if enabled else "Chorus off")
+        self.piano._set_chorus(enabled, announce, force_network)
 
     def _set_piano_pitch_bend(self, direction, force_network=False):
-        """Apply the spring-loaded bend locally and replicate only state changes."""
-        if isinstance(direction, bool) or direction not in (-1, 0, 1):
-            return
-        direction = int(direction)
-        changed = self._piano_pitch_bend_direction != direction
-        self._piano_pitch_bend_direction = direction
-        value = (
-            self._PIANO_MIDI_PITCH_MAX
-            if direction > 0
-            else self._PIANO_MIDI_PITCH_MIN if direction < 0 else 0
-        )
-        self._piano_pitch_bend_value = value
-        self._piano_pitch_bend_pending = None
-        self.game.audio_mngr.piano.set_pitch_bend("local", direction)
-        if changed or force_network:
-            self._send_piano_pitch_bend(value, force=force_network)
+        self.piano._set_pitch_bend(direction, force_network)
 
     def _send_piano_pitch_bend(self, value, force=False):
-        """Send one validated 14-bit bend state and remember the replicated value."""
-        value = max(
-            self._PIANO_MIDI_PITCH_MIN,
-            min(self._PIANO_MIDI_PITCH_MAX, int(value)),
-        )
-        if not self.game.network:
-            return
-        if not force and self._piano_pitch_bend_last_sent == value:
-            return
-        self.game.network.send(
-            consts.CHANNEL_MAP,
-            "set_piano_pitch_bend",
-            {"value": value},
-        )
-        self._piano_pitch_bend_last_sent = value
-        self._piano_pitch_bend_last_send_time = time.monotonic()
+        self.piano._send_pitch_bend(value, force)
 
-    @classmethod
     def _quantize_piano_pitch_bend(cls, value):
-        if value == 0:
-            return 0
-        quantized = int(round(value / cls._PIANO_PITCH_NETWORK_STEP)) * (
-            cls._PIANO_PITCH_NETWORK_STEP
-        )
-        return max(
-            cls._PIANO_MIDI_PITCH_MIN,
-            min(cls._PIANO_MIDI_PITCH_MAX, quantized),
-        )
+        return PianoHandler._quantize_pitch_bend(value)
 
     def _flush_piano_pitch_bend_network(self, force=False):
-        value = self._piano_pitch_bend_pending
-        if value is None:
-            return
-        now = time.monotonic()
-        if (
-            not force
-            and now - self._piano_pitch_bend_last_send_time
-            < self._PIANO_PITCH_NETWORK_INTERVAL
-        ):
-            return
-        value = self._quantize_piano_pitch_bend(value)
-        self._piano_pitch_bend_pending = None
-        self._send_piano_pitch_bend(value, force=force)
+        self.piano._flush_pitch_bend_network(force)
 
-    def _set_piano_midi_pitch_bend(
-        self, value, force_network=False, source=None
-    ):
-        """Apply full-resolution MIDI bend locally and queue a bounded update."""
-        if isinstance(value, bool) or not isinstance(value, int):
-            return
-        if not self._PIANO_MIDI_PITCH_MIN <= value <= self._PIANO_MIDI_PITCH_MAX:
-            return
-        if abs(value) <= self._PIANO_MIDI_PITCH_CENTER_DEADZONE:
-            value = 0
-        self._piano_midi_pitch_bend_value = value
-        if value == 0:
-            self._piano_midi_pitch_bend_source = None
-        elif source is not None:
-            self._piano_midi_pitch_bend_source = source
-        if self._piano_pitch_bend_keys:
-            return
-
-        changed = self._piano_pitch_bend_value != value
-        self._piano_pitch_bend_direction = 0
-        self._piano_pitch_bend_value = value
-        if changed:
-            self.game.audio_mngr.piano.set_pitch_bend_14bit(
-                "local", value, animate=False
-            )
-        if changed or force_network:
-            self._piano_pitch_bend_pending = value
-            self._flush_piano_pitch_bend_network(
-                force=force_network or value == 0
-            )
+    def _set_piano_midi_pitch_bend(self, value, force_network=False, source=None):
+        self.piano._set_midi_pitch_bend(value, force_network, source)
 
     def _handle_piano_pitch_bend_key(self, key, pressed):
-        """Track both arrow keys so releasing one restores the other or center."""
-        if pressed:
-            if key in self._piano_pitch_bend_keys:
-                return
-            self._piano_pitch_bend_keys.add(key)
-            self._set_piano_pitch_bend(1 if key == pygame.K_UP else -1)
-            return
-
-        self._piano_pitch_bend_keys.discard(key)
-        if self._piano_pitch_bend_direction == (1 if key == pygame.K_UP else -1):
-            if pygame.K_UP in self._piano_pitch_bend_keys:
-                direction = 1
-            elif pygame.K_DOWN in self._piano_pitch_bend_keys:
-                direction = -1
-            else:
-                self._piano_pitch_bend_direction = 0
-                self._set_piano_midi_pitch_bend(
-                    self._piano_midi_pitch_bend_value,
-                    force_network=True,
-                )
-                return
-            self._set_piano_pitch_bend(direction)
+        self.piano.handle_pitch_bend_key(key, pressed)
 
     def _get_drum_key_to_pad(self):
         """Resolve configurable normalized keys to stable drum pad IDs."""
@@ -782,187 +631,39 @@ class Gameplay(state.State):
         self.game.midi_hub.poll()
 
     def _start_piano_session(self):
-        """Initialize client-owned piano input and audio state on the main thread."""
-        if self.drum_mode:
-            self._end_drum_session(notify_server=True)
-        self.piano_mode = True
-        self._piano_pressed_notes.clear()
-        self._piano_chorus_tab_down = False
-        self._piano_pitch_bend_keys.clear()
-        self._piano_midi_pitch_bend_value = 0
-        self._piano_midi_pitch_bend_source = None
-        self._piano_pitch_bend_pending = None
-        self._piano_pitch_bend_last_sent = None
-        self._piano_pitch_bend_last_send_time = 0.0
-        self._set_piano_soft_pedal(
-            False, announce=False, force_network=True
-        )
-        self._set_piano_chorus(
-            False, announce=False, force_network=True
-        )
-        self._set_piano_pitch_bend(
-            0, force_network=True
-        )
-        self._start_piano_midi()
+        self.piano.start()
+        self.piano_mode = self.piano.active
 
     def _end_piano_session(self, notify_server=True):
-        """Release all piano controls before another instrument owns MIDI."""
-        self._set_piano_soft_pedal(False, announce=False)
-        self._set_piano_chorus(False, announce=False)
-        self._piano_chorus_tab_down = False
-        self._piano_pitch_bend_keys.clear()
-        self._set_piano_pitch_bend(0)
-        self._deactivate_piano_midi()
-        self.piano_mode = False
-        if notify_server and self.game.network:
-            self.game.network.send(consts.CHANNEL_MAP, "piano_stop", {})
+        self.piano.stop(notify_server)
+        self.piano_mode = self.piano.active
 
     def _get_piano_key_to_note(self):
-        """Build the note map without duplicating unavailable edge octaves."""
-        octave = max(
-            self._PIANO_MIN_BASE_OCTAVE,
-            min(
-                self._PIANO_MAX_BASE_OCTAVE,
-                getattr(self, "piano_octave", 4),
-            ),
-        )
-        key_to_note = {
-            # Lower-row extension and upper main row both continue octave N.
-            pygame.K_COMMA: f"C{octave}", pygame.K_l: f"Db{octave}",
-            pygame.K_PERIOD: f"D{octave}", pygame.K_SEMICOLON: f"Eb{octave}",
-            pygame.K_SLASH: f"E{octave}", pygame.K_QUOTE: f"F{octave}",
-            pygame.K_q: f"C{octave}", pygame.K_2: f"Db{octave}",
-            pygame.K_w: f"D{octave}", pygame.K_3: f"Eb{octave}",
-            pygame.K_e: f"E{octave}", pygame.K_r: f"F{octave}",
-            pygame.K_5: f"Gb{octave}", pygame.K_t: f"G{octave}",
-            pygame.K_6: f"Ab{octave}", pygame.K_y: f"A{octave}",
-            pygame.K_7: f"Bb{octave}", pygame.K_u: f"B{octave}",
-        }
-
-        # Octave 0 is incomplete, so the lower band is intentionally disabled
-        # at octave 1 instead of being clamped and duplicating octave 1 notes.
-        if octave > self._PIANO_MIN_BASE_OCTAVE:
-            lower = octave - 1
-            key_to_note.update({
-                pygame.K_z: f"C{lower}", pygame.K_s: f"Db{lower}",
-                pygame.K_x: f"D{lower}", pygame.K_d: f"Eb{lower}",
-                pygame.K_c: f"E{lower}", pygame.K_v: f"F{lower}",
-                pygame.K_g: f"Gb{lower}", pygame.K_b: f"G{lower}",
-                pygame.K_h: f"Ab{lower}", pygame.K_n: f"A{lower}",
-                pygame.K_j: f"Bb{lower}", pygame.K_m: f"B{lower}",
-            })
-
-        # Octave 7 is incomplete, so the upper extension is disabled at
-        # octave 6 rather than replaying octave 6 notes under different keys.
-        if octave < self._PIANO_MAX_BASE_OCTAVE:
-            upper = octave + 1
-            key_to_note.update({
-                pygame.K_i: f"C{upper}", pygame.K_9: f"Db{upper}",
-                pygame.K_o: f"D{upper}", pygame.K_0: f"Eb{upper}",
-                pygame.K_p: f"E{upper}", pygame.K_LEFTBRACKET: f"F{upper}",
-                pygame.K_MINUS: f"Gb{upper}", pygame.K_RIGHTBRACKET: f"G{upper}",
-                pygame.K_EQUALS: f"Ab{upper}", pygame.K_BACKSLASH: f"A{upper}",
-            })
-        return key_to_note
+        return self.piano.get_key_to_note()
 
     def _release_piano_note(self, note_name):
-        """Release the exact note started by a physical key press."""
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_SPACE]:
-            if not hasattr(self, "_piano_sustained_notes"):
-                self._piano_sustained_notes = []
-            if note_name not in self._piano_sustained_notes:
-                self._piano_sustained_notes.append(note_name)
-            return
-        self._stop_local_piano_note(note_name)
-
-    @classmethod
-    def _piano_midi_note_name(cls, midi_note):
-        """Convert a MIDI key number into an available piano sample name."""
-        return PIANO_MIDI_PROFILE.note_name(midi_note)
-
-    @classmethod
-    def _piano_midi_velocity_volume(cls, velocity):
-        """Map MIDI velocity 1-127 to the piano's existing volume scale."""
-        return PIANO_MIDI_PROFILE.volume(velocity)
+        self.piano._release_note(note_name)
 
     def _play_local_piano_note(self, note_name, velocity=None):
-        """Predict a local note immediately, then send its compact action packet."""
-        volume = (
-            300
-            if velocity is None
-            else self._piano_midi_velocity_volume(velocity)
-        )
-        is_mega_owner = self._is_megaphone_owner()
-            
-        snd = self.game.audio_mngr.piano.play_note(
-            "local", note_name,
-            self.player.x, self.player.y, self.player.z,
-            self.player.x, self.player.y, self.player.z,
-            volume=volume,
-            via_megaphone=getattr(self, 'voice_chat_using_megaphone', False) or is_mega_owner
-        )
-        if snd and getattr(snd, "source", None) and getattr(self, "map", None):
-            reverb = self.map.get_reverb_at(
-                self.player.x, self.player.y, self.player.z
-            )
-            if reverb and reverb.reverb:
-                self.game.audio_mngr.piano.apply_effect_send(
-                    snd, 0, reverb.reverb
-                )
-        packet = {"note": note_name}
-        if velocity is not None:
-            packet["velocity"] = max(1, min(127, int(velocity)))
-        self._attach_music_timeline(packet)
-        self._send_jam_note("play_piano_note", packet)
+        self.piano.play_local_note(note_name, velocity)
 
     def _stop_local_piano_note(self, note_name):
-        self.game.audio_mngr.piano.stop_note("local", note_name)
-        if self.game.network:
-            packet = self._attach_music_timeline({"note": note_name})
-            self.game.network.send(
-                consts.CHANNEL_MAP, "stop_piano_note", packet
-            )
+        self.piano._stop_local_note(note_name)
 
     def _start_piano_midi(self):
-        """Acquire the process MIDI hub with the piano profile."""
-        if not self.piano_mode:
-            return
-        self._midi_lease = self.game.midi_hub.acquire(self, "piano")
+        self.piano._start_midi()
 
     def _release_piano_midi_sustain(self):
-        active_note_names = set(self._piano_midi_active_notes.values())
-        sustained_note_names = set(self._piano_midi_sustained_notes.values())
-        self._piano_midi_sustained_notes.clear()
-        for note_name in sustained_note_names - active_note_names:
-            self._stop_local_piano_note(note_name)
-
-    @staticmethod
-    def _keyboard_sustain_is_down():
-        try:
-            return bool(pygame.key.get_pressed()[pygame.K_SPACE])
-        except pygame.error:
-            return False
+        self.piano._release_midi_sustain()
 
     def _stop_all_piano_midi_notes(self):
-        note_names = set(self._piano_midi_active_notes.values())
-        note_names.update(self._piano_midi_sustained_notes.values())
-        self._piano_midi_active_notes.clear()
-        self._piano_midi_sustained_notes.clear()
-        self._piano_midi_sustain_sources.clear()
-        self._piano_midi_sustain = False
-        for note_name in note_names:
-            self._stop_local_piano_note(note_name)
+        self.piano._stop_all_midi_notes()
 
     def _deactivate_piano_midi(self):
-        lease = self._midi_lease
-        if lease is not None and lease.profile_id == "piano":
-            self.game.midi_hub.release(lease, reason="piano_mode_exit")
-            self._midi_lease = None
+        self.piano._deactivate_midi()
 
     def _poll_piano_midi(self):
-        """Dispatch queued MIDI events through the active piano profile."""
-        self.game.midi_hub.poll()
+        self.piano.poll()
 
     def spectator_switch_player(self, mod):
         if not self.spectator_mode:
@@ -1383,164 +1084,8 @@ class Gameplay(state.State):
                     self._drum_pressed_keys.discard(event.key)
                 continue
             if getattr(self, 'piano_mode', False):
-                if event.type == pygame.KEYDOWN:
-                    if event.key in (pygame.K_ESCAPE, pygame.K_RETURN):
-                        self._end_piano_session(notify_server=True)
-                    elif event.key == pygame.K_LCTRL:
-                        self._set_piano_soft_pedal(True)
-                    elif event.key == pygame.K_TAB:
-                        if not self._piano_chorus_tab_down:
-                            self._piano_chorus_tab_down = True
-                            self._set_piano_chorus(
-                                not self._piano_chorus_enabled
-                            )
-                    elif event.key in (pygame.K_UP, pygame.K_DOWN):
-                        self._handle_piano_pitch_bend_key(event.key, True)
-                    elif event.key in (pygame.K_LEFT, pygame.K_RIGHT):
-                        current_octave = max(
-                            self._PIANO_MIN_BASE_OCTAVE,
-                            min(
-                                self._PIANO_MAX_BASE_OCTAVE,
-                                getattr(self, 'piano_octave', 4),
-                            ),
-                        )
-                        if event.key == pygame.K_LEFT:
-                            self.piano_octave = max(
-                                self._PIANO_MIN_BASE_OCTAVE,
-                                current_octave - 1,
-                            )
-                        else:
-                            self.piano_octave = min(
-                                self._PIANO_MAX_BASE_OCTAVE,
-                                current_octave + 1,
-                            )
-                        speak(f"Octave {self.piano_octave}")
-                        # Preload octave notes
-                        oct_notes = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
-                        for n in oct_notes:
-                            snd = f"piano/Piano.mf.{n}{self.piano_octave}.ogg"
-                            snd_path = os.path.join(consts.SOUNDPREPEND, snd)
-                            try:
-                                rel_snd = os.path.relpath(snd_path)
-                            except ValueError:
-                                rel_snd = os.path.normpath(snd_path)
-                            try:
-                                buf = self.game.audio_mngr.load_buffer(snd)
-                                if buf:
-                                    self.game.audio_mngr._preloaded_buffers[rel_snd] = buf
-                            except Exception:
-                                pass
-                    elif event.key in (pygame.K_F1, pygame.K_F2, pygame.K_F3):
-                        key_names = {
-                            0: "C", 1: "C sharp", 2: "D", 3: "E flat", 4: "E", 5: "F",
-                            6: "F sharp", 7: "G", 8: "A flat", 9: "A", 10: "B flat", 11: "B",
-                            -1: "B", -2: "B flat", -3: "A", -4: "A flat", -5: "G", -6: "F sharp",
-                            -7: "F", -8: "E", -9: "E flat", -10: "D", -11: "C sharp", -12: "C"
-                        }
-                        if event.key == pygame.K_F1:
-                            self.piano_transpose = max(-12, getattr(self, 'piano_transpose', 0) - 1)
-                        elif event.key == pygame.K_F2:
-                            self.piano_transpose = min(12, getattr(self, 'piano_transpose', 0) + 1)
-                        elif event.key == pygame.K_F3:
-                            self.piano_transpose = 0
-                        
-                        target_key = key_names.get(self.piano_transpose, f"{self.piano_transpose}")
-                        speak(f"Transpose to {target_key}")
-                    else:
-                        key_to_note = self._get_piano_key_to_note()
-                        if event.key in key_to_note:
-                            # Ignore OS key-repeat while the physical piano key
-                            # remains held. KEYUP uses this stored note so an
-                            # octave change cannot leave the old note sounding.
-                            if event.key in self._piano_pressed_notes:
-                                continue
-                            raw_note = key_to_note[event.key]
-                            # Apply semitone transpose offset if non-zero
-                            transpose = getattr(self, 'piano_transpose', 0)
-                            if transpose != 0:
-                                chromatic = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
-                                import re
-                                match = re.match(r"([A-Za-z]+)(\d+)", raw_note)
-                                if match:
-                                    n_str, o_num = match.group(1), int(match.group(2))
-                                    if n_str in chromatic:
-                                        abs_idx = o_num * 12 + chromatic.index(n_str) + transpose
-                                        # Modular octave wrap-around [12=C1, 95=B7]
-                                        # Prevents entire row from flatlining into a single note at boundaries
-                                        while abs_idx < 12:
-                                            abs_idx += 12
-                                        while abs_idx > 95:
-                                            abs_idx -= 12
-                                        final_oct = abs_idx // 12
-                                        final_note_str = chromatic[abs_idx % 12]
-                                        note_name = f"{final_note_str}{final_oct}"
-                                    else:
-                                        note_name = raw_note
-                                else:
-                                    note_name = raw_note
-                            else:
-                                note_name = raw_note
-                            self._piano_pressed_notes[event.key] = note_name
-                            self._play_local_piano_note(note_name)
-                elif event.type == pygame.KEYUP:
-                    if event.key == pygame.K_TAB:
-                        self._piano_chorus_tab_down = False
-                        continue
-                    if event.key == pygame.K_LCTRL:
-                        self._set_piano_soft_pedal(False)
-                        continue
-                    if event.key in (pygame.K_UP, pygame.K_DOWN):
-                        self._handle_piano_pitch_bend_key(event.key, False)
-                        continue
-                    # Sustain pedal release (Space) — stop all sustained notes
-                    if event.key == pygame.K_SPACE:
-                        sustained = getattr(self, '_piano_sustained_notes', [])
-                        for sn in sustained:
-                            self.game.audio_mngr.piano.stop_note("local", sn)
-                            packet = self._attach_music_timeline({"note": sn})
-                            self.game.network.send(
-                                consts.CHANNEL_MAP, "stop_piano_note", packet
-                            )
-                        self._piano_sustained_notes = []
-                        if not self._piano_midi_sustain:
-                            self._release_piano_midi_sustain()
-                        continue
-                    tracked_note = self._piano_pressed_notes.pop(
-                        event.key, None
-                    )
-                    if tracked_note is not None:
-                        self._release_piano_note(tracked_note)
-                        continue
-                    key_to_note = self._get_piano_key_to_note()
-                    if event.key in key_to_note:
-                        raw_note = key_to_note[event.key]
-                        # Apply semitone transpose offset if non-zero
-                        transpose = getattr(self, 'piano_transpose', 0)
-                        if transpose != 0:
-                            chromatic = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
-                            import re
-                            match = re.match(r"([A-Za-z]+)(\d+)", raw_note)
-                            if match:
-                                n_str, o_num = match.group(1), int(match.group(2))
-                                if n_str in chromatic:
-                                    abs_idx = o_num * 12 + chromatic.index(n_str) + transpose
-                                    # Modular octave wrap-around [12=C1, 95=B7]
-                                    # Prevents entire row from flatlining into a single note at boundaries
-                                    while abs_idx < 12:
-                                        abs_idx += 12
-                                    while abs_idx > 95:
-                                        abs_idx -= 12
-                                    final_oct = abs_idx // 12
-                                    final_note_str = chromatic[abs_idx % 12]
-                                    note_name = f"{final_note_str}{final_oct}"
-                                else:
-                                    note_name = raw_note
-                            else:
-                                note_name = raw_note
-                        else:
-                            note_name = raw_note
-                        self._release_piano_note(note_name)
-                continue
+                if self.piano.handle_event(event):
+                    continue
             if getattr(self, "vehicle_mode", False) and self._handle_vehicle_control_event(event):
                 continue
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
