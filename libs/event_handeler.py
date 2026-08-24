@@ -263,6 +263,14 @@ class EventHandeler:
 
     def _reset_instruments_for_map_change(self):
         """Reset piano/drums on the game thread before rebuilding map audio."""
+        gp = self.gameplay
+        # Exit piano/drum modes cleanly so the server removes us from
+        # instrument tracking (piano.players / drum_session) before the
+        # map reload destroys the entity references.
+        if getattr(gp, 'piano_mode', False):
+            gp.piano.stop(notify_server=True)
+        if getattr(gp, 'drum_mode', False):
+            gp.drum.stop(notify_server=True)
         audio_mngr = getattr(self.game, 'audio_mngr', None)
         if audio_mngr is None:
             return

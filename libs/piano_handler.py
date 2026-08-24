@@ -126,6 +126,7 @@ class PianoHandler:
         self._set_pitch_bend(0)
         self._deactivate_midi()
         self.active = False
+        self._gp.piano_mode = False  # Sync gameplay flag so movement resumes
         if notify_server and self._game.network:
             self._game.network.send(consts.CHANNEL_MAP, "piano_stop", {})
 

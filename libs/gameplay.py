@@ -372,6 +372,70 @@ class Gameplay(state.State):
     def _poll_drum_midi(self):
         self.drum.poll()
 
+    # -- MIDI attribute proxies for profiles.py compatibility --
+    # MIDI profiles (PianoMidiProfile in midi/profiles.py) access these
+    # attributes directly on the owner (Gameplay).  After the piano refactor
+    # they live on PianoHandler, so we proxy them here.
+    @property
+    def _piano_midi_active_notes(self):
+        return self.piano._midi_active_notes
+
+    @_piano_midi_active_notes.setter
+    def _piano_midi_active_notes(self, value):
+        self.piano._midi_active_notes = value
+
+    @property
+    def _piano_midi_sustained_notes(self):
+        return self.piano._midi_sustained_notes
+
+    @_piano_midi_sustained_notes.setter
+    def _piano_midi_sustained_notes(self, value):
+        self.piano._midi_sustained_notes = value
+
+    @property
+    def _piano_midi_sustain_sources(self):
+        return self.piano._midi_sustain_sources
+
+    @_piano_midi_sustain_sources.setter
+    def _piano_midi_sustain_sources(self, value):
+        self.piano._midi_sustain_sources = value
+
+    @property
+    def _piano_midi_sustain(self):
+        return self.piano._midi_sustain
+
+    @_piano_midi_sustain.setter
+    def _piano_midi_sustain(self, value):
+        self.piano._midi_sustain = value
+
+    @property
+    def _piano_midi_pitch_bend_value(self):
+        return self.piano._midi_pitch_bend_value
+
+    @_piano_midi_pitch_bend_value.setter
+    def _piano_midi_pitch_bend_value(self, value):
+        self.piano._midi_pitch_bend_value = value
+
+    @property
+    def _piano_midi_pitch_bend_source(self):
+        return self.piano._midi_pitch_bend_source
+
+    @_piano_midi_pitch_bend_source.setter
+    def _piano_midi_pitch_bend_source(self, value):
+        self.piano._midi_pitch_bend_source = value
+
+    @property
+    def _piano_pitch_bend_pending(self):
+        return self.piano._pitch_bend_pending
+
+    @_piano_pitch_bend_pending.setter
+    def _piano_pitch_bend_pending(self, value):
+        self.piano._pitch_bend_pending = value
+
+    @property
+    def _piano_pitch_bend_keys(self):
+        return self.piano._pitch_bend_keys
+
     def _start_piano_session(self):
         self.piano.start()
         self.piano_mode = self.piano.active
@@ -582,8 +646,10 @@ class Gameplay(state.State):
 
     def exit(self):
         super().exit()
+        if getattr(self, "piano_mode", False):
+            self.piano.stop(notify_server=False)
         if getattr(self, "drum_mode", False):
-            self._end_drum_session(notify_server=False)
+            self.drum.stop(notify_server=False)
         self.vehicle.cleanup()
         self.game.midi_hub.release_owner(self, reason="gameplay_exit")
         self._midi_lease = None
