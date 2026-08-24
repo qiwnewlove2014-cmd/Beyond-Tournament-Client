@@ -11,6 +11,7 @@ from .systems.compass_turn_cue import CompassTurnCue
 from .midi.profiles import DRUM_MIDI_PROFILE
 from .drum_handler import DrumHandler
 from .guitar_handler import GuitarHandler
+from .vehicle_handler import VehicleHandler
 from . import drum_keyconfig
 import pygame
 import pyogg
@@ -103,18 +104,7 @@ class Gameplay(state.State):
         # transition can be told apart from a same-name reparse for jukebox
         # teardown (immediate stop vs. seamless mark-and-sweep).
         self.map_name = None
-        self.vehicle_mode = False
-        self.vehicle_name = None
-        self.vehicle_type = None
-        self._vehicle_keys_down = set()
-        self._vehicle_last_input = (0, 0, False, False)
-        self._vehicle_horn_down = False
-        self._horse_wind_gain = 0.0
-        self._horse_sprint_duration = 0.0
-        self._last_horse_wind_time = time.monotonic()
-        # Compatibility mirrors for code loaded alongside an older server.
-        self.motorcycle_mode = False
-        self.motorcycle_name = None
+        self.vehicle = VehicleHandler(self)  # Vehicle/Horse subsystem (extracted from Gameplay)
         # ENet guarantees ordering inside one channel, not across CHANNEL_MISC
         # and CHANNEL_MAP.  Player spawn packets can therefore arrive before
         # the connected event enters this state.  Create the mapping here and
@@ -264,211 +254,22 @@ class Gameplay(state.State):
         self.turn_mod = False
 
     def set_vehicle_session(self, data):
-        active = bool(data.get("active", False))
-        self.vehicle_mode = active
-        self.vehicle_name = str(data.get("name", "")) if active else None
-        self.vehicle_type = str(data.get("vehicle_type", "vehicle")) if active else None
-        self._vehicle_keys_down.clear()
-        self._vehicle_last_input = (0, 0, False, False)
-        self._vehicle_horn_down = False
-        self.motorcycle_mode = active and self.vehicle_type == "motorcycle"
-        self.motorcycle_name = self.vehicle_name if self.motorcycle_mode else None
-        if not active:
-            # Clean up horse wind audio immediately and completely upon dismount
-            self._horse_wind_gain = 0.0
-            self._horse_sprint_duration = 0.0
-            group = getattr(self.game, "direct_soundgroup", None)
-            if group:
-                wind_sound = group.labeled_sources.pop("horse_wind", None)
-                if wind_sound:
-                    wind_sound.destroy(force=True)
-            self._close_truck_command_menu()
-            return
-        # Suppress any normal held-key movement that was active while mounting.
-        self.running = False
-        # The command menu is for engine vehicles only — horses send the same
-        # vehicle_session packet but have no engine to start.
-        if active and self.vehicle_type in ("motorcycle", "truck", "truck2"):
-            self._open_truck_command_menu()
-
-    def _open_truck_command_menu(self):
-        """In-cab command menu for every drivable vehicle.
-
-        No vehicle auto-starts anymore — the rider starts the engine from this
-        menu. Arrow keys navigate; every UI sound is the vehicle's own
-        command blip (truck_command.ogg, shared) so the main game's menu
-        sounds never play inside the cabin.
-        """
-        if getattr(self, "_truck_command_menu", None) is not None:
-            return
-        if not (self.vehicle_mode and self.vehicle_name):
-            return
-        sound = "vehicles/truck2/truck_command.ogg"
-        title = "Vehicle Command"
-        m = menu.Menu(
-            self.game,
-            title,
-            parrent=self,
-            wrapping=True,
-        )
-        m.set_sounds(click=sound, enter=sound, open=sound, close=sound)
-        m.add_items(
-            [
-                ("Start Engine", partial(self._truck_command_action, "start")),
-                ("Stop Engine", partial(self._truck_command_action, "stop")),
-                ("Get Out", partial(self._truck_command_action, "get_out")),
-                ("Close Menu", self._close_truck_command_menu),
-            ]
-        )
-        self._truck_command_menu = m
-        self.add_substate(m)
-
-    def _close_truck_command_menu(self):
-        m = getattr(self, "_truck_command_menu", None)
-        if m is None:
-            return
-        self._truck_command_menu = None
-        if self.substates and self.substates[-1] is m:
-            self.pop_last_substate()
-
-    def _truck_command_action(self, command):
-        if command == "get_out":
-            self.interact(0)
-        elif self.game.network and self.vehicle_name:
-            self.game.network.send(
-                consts.CHANNEL_MISC,
-                "vehicle_command",
-                {"name": self.vehicle_name, "command": command},
-            )
-        self._close_truck_command_menu()
-
-    def _update_horse_wind(self):
-        is_riding_horse = getattr(self, "vehicle_mode", False) and getattr(self, "vehicle_type", None) == "horse"
-        is_galloping = is_riding_horse and ("forward" in self._vehicle_keys_down) and ("sprint" in self._vehicle_keys_down)
-        
-        now = time.monotonic()
-        dt = min(0.1, max(0.0, now - getattr(self, "_last_horse_wind_time", now)))
-        self._last_horse_wind_time = now
-
-        if is_galloping:
-            self._horse_sprint_duration += dt
-        else:
-            self._horse_sprint_duration = 0.0
-
-        # Wind ONLY activates after sustaining gallop sprint through 2 strides (> 1.35 seconds)
-        if self._horse_sprint_duration >= 1.35:
-            # Over the next 1.6 seconds, smoothly creep target_gain from 0.0 up to 0.50
-            progress = min(1.0, (self._horse_sprint_duration - 1.35) / 1.6)
-            target_gain = progress * 0.50
-        else:
-            target_gain = 0.0
-
-        # Smooth 60fps interpolation (gentle creep in, clean fade out)
-        blend = min(1.0, dt * (1.6 if target_gain > self._horse_wind_gain else 4.0))
-        self._horse_wind_gain += (target_gain - self._horse_wind_gain) * blend
-
-        group = getattr(self.game, "direct_soundgroup", None)
-        if not group:
-            return
-
-        wind_sound = group.labeled_sources.get("horse_wind")
-        if self._horse_wind_gain > 0.01 and is_riding_horse:
-            if not wind_sound or not wind_sound.source:
-                wind_sound = group.play(
-                    "vehicles/motorcycle/wind.ogg",
-                    looping=True,
-                    id="horse_wind",
-                    cat="miscelaneous",
-                    volume=0,
-                )
-            if wind_sound and wind_sound.source:
-                master_cat = (group.parent.volume_categories.get("miscelaneous", [100])[0] / 100.0) if hasattr(group, "parent") else 1.0
-                wind_sound.source.gain = self._horse_wind_gain * master_cat
-                wind_sound.source.pitch = 0.85 + self._horse_wind_gain * 0.3
-        else:
-            if wind_sound:
-                group.labeled_sources.pop("horse_wind", None)
-                wind_sound.destroy(force=True)
+        self.vehicle.set_session(data)
 
     def set_motorcycle_session(self, data):
-        session_data = dict(data or {})
-        session_data.setdefault("vehicle_type", "motorcycle")
-        self.set_vehicle_session(session_data)
+        self.vehicle.set_motorcycle_session(data)
+
+    def _update_horse_wind(self):
+        self.vehicle.update_wind()
 
     def _vehicle_key_role(self, key):
-        forward = {self.kc.get("move_forward", pygame.K_w), pygame.K_UP}
-        backward = {self.kc.get("move_backward", pygame.K_s), pygame.K_DOWN}
-        left = {self.kc.get("turn_left", pygame.K_a), pygame.K_LEFT}
-        right = {self.kc.get("turn_right", pygame.K_d), pygame.K_RIGHT}
-        sprint = {self.kc.get("sprint", pygame.K_LSHIFT), pygame.K_LSHIFT, pygame.K_RSHIFT}
-        if key in forward:
-            return "forward"
-        if key in backward:
-            return "backward"
-        if key in left:
-            return "left"
-        if key in right:
-            return "right"
-        if key in sprint:
-            return "sprint"
-        return None
+        return self.vehicle._key_role(key)
 
     def _send_vehicle_input(self):
-        throttle = int("forward" in self._vehicle_keys_down) - int("backward" in self._vehicle_keys_down)
-        steer = int("right" in self._vehicle_keys_down) - int("left" in self._vehicle_keys_down)
-        sprint = bool("sprint" in self._vehicle_keys_down)
-        # The backward key doubles as the brake pedal (truck): the server uses
-        # it to sound the brake loop and to distinguish burnout (gas + brake)
-        # from neutral, since the net throttle is 0 in both cases.
-        brake = "backward" in self._vehicle_keys_down
-        current = (throttle, steer, sprint, brake)
-        if current == self._vehicle_last_input or not self.vehicle_name:
-            return
-        self._vehicle_last_input = current
-        event = "motorcycle_input" if self.vehicle_type == "motorcycle" else "vehicle_input"
-        self.game.network.send(
-            consts.CHANNEL_MOVEMENT,
-            event,
-            {"name": self.vehicle_name, "throttle": throttle, "steer": steer, "sprint": sprint, "brake": brake},
-        )
+        self.vehicle._send_input()
 
     def _handle_vehicle_control_event(self, event):
-        if event.type not in (pygame.KEYDOWN, pygame.KEYUP):
-            return False
-        horn_keys = {pygame.K_SPACE, self.kc.get("horn", pygame.K_h)}
-        if event.key in horn_keys:
-            if event.type == pygame.KEYDOWN and not self._vehicle_horn_down:
-                self._vehicle_horn_down = True
-                if self.vehicle_name:
-                    horn_event = "motorcycle_horn" if self.vehicle_type == "motorcycle" else "vehicle_horn"
-                    self.game.network.send(
-                        consts.CHANNEL_MOVEMENT,
-                        horn_event,
-                        {"name": self.vehicle_name},
-                    )
-            elif event.type == pygame.KEYUP and self._vehicle_horn_down:
-                self._vehicle_horn_down = False
-                if self.vehicle_name:
-                    horn_release_event = (
-                        "motorcycle_horn_release"
-                        if self.vehicle_type == "motorcycle"
-                        else "vehicle_horn_release"
-                    )
-                    self.game.network.send(
-                        consts.CHANNEL_MOVEMENT,
-                        horn_release_event,
-                        {"name": self.vehicle_name},
-                    )
-            return True
-        role = self._vehicle_key_role(event.key)
-        if role is None:
-            return False
-        if event.type == pygame.KEYDOWN:
-            self._vehicle_keys_down.add(role)
-        else:
-            self._vehicle_keys_down.discard(role)
-        self._send_vehicle_input()
-        return True
+        return self.vehicle.handle_event(event)
 
     def _dispatch_configurable_key_actions(self, event):
         """Run every configurable action sharing this key, in menu order."""
@@ -783,6 +584,7 @@ class Gameplay(state.State):
         super().exit()
         if getattr(self, "drum_mode", False):
             self._end_drum_session(notify_server=False)
+        self.vehicle.cleanup()
         self.game.midi_hub.release_owner(self, reason="gameplay_exit")
         self._midi_lease = None
         if self.player.locked and self.game.network and getattr(self.game.network, 'event_handeler', None):
@@ -995,7 +797,7 @@ class Gameplay(state.State):
         key = pygame.key.get_pressed()
         is_concert = getattr(self, 'concert_spectator_mode', False)
         if not self.spectator_mode or is_concert:
-            if not getattr(self, 'piano_mode', False) and not getattr(self, 'drum_mode', False) and not getattr(self, 'vehicle_mode', False):
+            if not getattr(self, 'piano_mode', False) and not getattr(self, 'drum_mode', False) and not self.vehicle.active:
                 for i in self.keys_held:
                     if key[i]:
                         self.keys_held[i](pygame.key.get_mods())
@@ -1010,7 +812,7 @@ class Gameplay(state.State):
             if getattr(self, 'piano_mode', False):
                 if self.piano.handle_event(event):
                     continue
-            if getattr(self, "vehicle_mode", False) and self._handle_vehicle_control_event(event):
+            if self.vehicle.active and self.vehicle.handle_event(event):
                 continue
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
                 self.game.network.send(consts.CHANNEL_MAP, "pong_serve", {})
