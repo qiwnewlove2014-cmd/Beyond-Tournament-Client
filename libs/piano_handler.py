@@ -443,8 +443,32 @@ class PianoHandler:
     # event handling (called from Gameplay.update)
     # ------------------------------------------------------------------
 
+    # Keys that should always pass through to gameplay even while playing
+    # piano: music bot controls, chat, buffer navigation, main menu.
+    _ALWAYS_ALLOWED_KEYS = frozenset((
+        pygame.K_m,           # music bot toggle
+        pygame.K_F9,          # music bot volume down
+        pygame.K_F10,         # music bot volume up
+        pygame.K_SLASH,       # /  map chat
+        pygame.K_QUOTE,       # '  chat
+        pygame.K_LEFTBRACKET,  # [  buffer cycle left
+        pygame.K_RIGHTBRACKET, # ]  buffer cycle right
+        pygame.K_COMMA,       # ,  buffer move left
+        pygame.K_PERIOD,      # .  buffer move right
+        pygame.K_BACKSPACE,   # main menu
+        pygame.K_o,           # options (ALT+O) / PA test
+        pygame.K_p,           # check stats / spectator camera
+    ))
+
     def handle_event(self, event):
-        """Process a single pygame event.  Returns True if consumed."""
+        """Process a single pygame event.  Returns True if consumed.
+
+        While piano mode is active, gameplay keys (TAG, RADAR, BUILDER,
+        movement, etc.) are blocked so they don't interfere with
+        playing.  Utility keys (music bot, chat, buffer navigation,
+        main menu) are allowed through so the performer can still
+        control music and chat while playing.
+        """
         if not self.active:
             return False
 
@@ -478,6 +502,11 @@ class PianoHandler:
                 self._pressed_notes[event.key] = note_name
                 self.play_local_note(note_name)
                 return True
+            # Utility keys pass through to gameplay (music bot, chat, etc.)
+            if event.key in self._ALWAYS_ALLOWED_KEYS:
+                return False
+            # Block all other keys (TAG, RADAR, BUILDER, WASD, …)
+            return True
 
         elif event.type == pygame.KEYUP:
             if event.key == pygame.K_TAB:
@@ -501,7 +530,13 @@ class PianoHandler:
                 note_name = self._apply_transpose(key_to_note[event.key])
                 self._release_note(note_name)
                 return True
+            # Utility keys pass through to gameplay.
+            if event.key in self._ALWAYS_ALLOWED_KEYS:
+                return False
+            # Block KEYUP for gameplay keys.
+            return True
 
+        # Non-keyboard events (mouse, etc.) are not consumed.
         return False
 
     def _handle_octave_key(self, key):

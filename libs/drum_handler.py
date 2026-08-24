@@ -149,8 +149,33 @@ class DrumHandler:
     # event handling (called from Gameplay.update)
     # ------------------------------------------------------------------
 
+    # Keys that should always pass through to gameplay even while drumming:
+    # music bot controls, chat, buffer navigation, main menu, options.
+    _ALWAYS_ALLOWED_KEYS = frozenset((
+        pygame.K_m,           # music bot toggle
+        pygame.K_F9,          # music bot volume down
+        pygame.K_F10,         # music bot volume up
+        pygame.K_SLASH,       # /  map chat
+        pygame.K_QUOTE,       # '  chat
+        pygame.K_LEFTBRACKET,  # [  buffer cycle left
+        pygame.K_RIGHTBRACKET, # ]  buffer cycle right
+        pygame.K_COMMA,       # ,  buffer move left
+        pygame.K_PERIOD,      # .  buffer move right
+        pygame.K_BACKSPACE,   # main menu
+        pygame.K_o,           # options (ALT+O) / PA test
+        pygame.K_TAB,         # check direction / spectator
+        pygame.K_p,           # check stats / spectator camera
+    ))
+
     def handle_event(self, event):
-        """Process a single pygame event.  Returns True if consumed."""
+        """Process a single pygame event.  Returns True if consumed.
+
+        While drum mode is active, gameplay keys (TAG, RADAR, BUILDER,
+        movement, etc.) are blocked so they don't interfere with
+        drumming.  Utility keys (music bot, chat, buffer navigation,
+        main menu) are allowed through so the performer can still
+        control music and chat while playing.
+        """
         if not self.active:
             return False
 
@@ -171,11 +196,20 @@ class DrumHandler:
                 self._pressed_keys.add(event.key)
                 self.play_local_hit(key_to_pad[event.key])
                 return True
+            # Utility keys pass through to gameplay (music bot, chat, etc.)
+            if event.key in self._ALWAYS_ALLOWED_KEYS:
+                return False
+            # Block all other keys (TAG, RADAR, BUILDER, WASD, …)
+            return True
 
         elif event.type == pygame.KEYUP:
             self._pressed_keys.discard(event.key)
+            # Let KEYUP pass for allowed keys so held-key actions work.
+            if event.key in self._ALWAYS_ALLOWED_KEYS:
+                return False
             return True
 
+        # Non-keyboard events (mouse, etc.) are not consumed.
         return False
 
     # ------------------------------------------------------------------
