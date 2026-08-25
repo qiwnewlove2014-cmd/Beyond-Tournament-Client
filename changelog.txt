@@ -2,6 +2,22 @@
 • This document tracks the development history and patch notes
 • for the Beyond Tournament project (Server & Client core).
 • ============================================================
+[v1.8.2] Realistic Wall Thickness Occlusion — 2026-08-25
+--------------------------------------------------------------------------------
+
+• Realistic Acoustic Propagation
+- **Thickness-Aware Wall Occlusion Everywhere:** Re-engineered the global acoustic line-of-sight raycast so wall occlusion now scales with how THICK the obstacle is, instead of treating any single wall tile like an entire building. A lone pillar tile (1×1) now only slightly dulls the sound passing behind it, two tiles muffle moderately, and genuine walls of three tiles or more keep the full studio-grade deep muffle introduced in v1.8.0 — completely unchanged.
+- **Every Audio System Benefits Identically:** The new thickness-aware occlusion applies uniformly across voice chat PA megaphones, piano, drums, guitar, jukebox cabinets, music bot playback, map ambience, and all unbound effect sounds — one consistent acoustic model for the whole game.
+- **New Gentle Occlusion Filter Tier:** Added a dedicated light lowpass filter for thin obstacles. Sound around a single pillar keeps most of its body and presence with only softly rounded-off highs, instead of previously being swallowed by the heavy behind-a-wall filter.
+- **Continuous PA Muffling:** The megaphone/PA speaker system now consumes the wall-thickness ratio directly, so voice and instruments routed through stage speakers muffle proportionally to wall depth, gliding smoothly through the existing fast-attack/slow-release smoothing instead of snapping between wide open and fully blocked.
+- **Underwater Acoustics Preserved:** Sound paths crossing water still receive the realistic half-strength underwater muffling, and water can never reduce the blocking effect of an actual wall lying on the same path.
+- **Deeper Underwater Immersion Muffle:** Submerging now clamps your ears noticeably harder, the way hearing dulls the instant you dive into real water. The depth-to-muffle curve was steepened so just-submerged sound starts far darker than before while the deepest point remains fully dead; a smooth loudness dip of up to roughly -5 dB rides the same animation, making underwater audio quieter as well as duller; and the ear-clamp now engages in 250 ms instead of 500 ms for an immediate realistic dunk. Surfacing still glides everything back exactly as before.
+
+• Quality Assurance
+- **Occlusion Regression Tests:** Added a dedicated unit-test suite covering clear paths, single pillars, stacked thin walls, full walls, diagonal rays, and underwater interactions, locking the new thickness behavior against future regressions.
+
+
+
 [v1.8.1] Latency Compensation for Instrument Notes — 2026-08-22
 --------------------------------------------------------------------------------
 

@@ -148,7 +148,7 @@ class Gameplay(state.State):
             kc.get("cycle_buffer_left", pygame.K_LEFTBRACKET): self.buffer_cycle_l,
             kc.get("cycle_buffer_right", pygame.K_RIGHTBRACKET): self.buffer_cycle_r,
             kc.get("move_forward", pygame.K_w): lambda mod: (
-                setattr(self, "cann_run", True),
+                setattr(self, "can_run", True),
                 self.move_forward(
                     mod, True
                 )
@@ -164,14 +164,8 @@ class Gameplay(state.State):
             kc.get("reset_pitch", pygame.K_l): self.reset_pitch,
             kc.get("reset_bank", pygame.K_SEMICOLON): self.reset_bank,
             pygame.K_F4: self.toggle_sonar_and_force_quit,
-            kc.get("strafe_left", pygame.K_q): lambda mod: (
-                setattr(self, "can_run", False),
-                self.run_stop(mod),
-            ),
-            kc.get("strafe_right", pygame.K_e): lambda mod: (
-                setattr(self, "can_run", False),
-                self.run_stop(mod),
-            ),
+            kc.get("strafe_left", pygame.K_q): self._strafe_key_down,
+            kc.get("strafe_right", pygame.K_e): self._strafe_key_down,
             kc.get("quit", pygame.K_ESCAPE): self.ask_to_exit,
             kc.get("ping", pygame.K_F3): self.ping,
             kc.get("who_online", pygame.K_F1): self.who_online,
@@ -1272,6 +1266,20 @@ class Gameplay(state.State):
             self.player.play_sound("foley/run/stop.ogg", cat="self")
             self.running = False
             self.player.movetime = self.player.walktime
+
+    def _strafe_key_down(self, mod):
+        """Strafe key pressed — only cancel running when SHIFT is NOT held.
+
+        When the player holds SHIFT and presses a strafe direction the
+        original code unconditionally called run_stop + can_run=False,
+        which made running impossible with arrow keys (the default
+        strafe binds).  Keeping the existing no-auto-run behaviour for
+        bare strafe presses while preserving an active run when the
+        player explicitly holds the run key.
+        """
+        if not (mod & pygame.KMOD_SHIFT):
+            self.can_run = False
+            self.run_stop(mod)
 
     # tracking system
     def get_relative_direction_string(self, tx, ty, tz):

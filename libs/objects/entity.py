@@ -49,9 +49,11 @@ class Entity(Object):
 
     @property
     def water_muffling(self):
-        # Maps self.depth (0.0 to 1.0) to GAINHF (0.02 to 0.50)
-        # 1.0 (surface) = 0.50, 0.0 (bottom) = 0.02
-        return 0.02 + 0.48 * max(0.0, min(1.0, self.depth))
+        # Maps self.depth (0.0 to 1.0) to GAINHF (0.35 at surface down to
+        # 0.02 at the bottom). Realism pass: even just-submerged ears clamp
+        # hard (the old gentle 0.50 felt barely muffled). Must stay IDENTICAL
+        # to Camera.muffling_at() so world and own sounds clear together.
+        return 0.02 + 0.33 * max(0.0, min(1.0, self.depth))
 
     @player.setter
     def player(self, value):
@@ -496,6 +498,11 @@ class Entity(Object):
                 if filter_obj is None:
                     return
                 filter_obj.set("GAINHF", value)
+                # Water swallows loudness too, not just highs — a gentle gain
+                # dip derived from the SAME animated value (neutral when
+                # clear, ~0.56 at full depth) so one task drives the whole
+                # muffle without a second automation fighting this filter.
+                filter_obj.set("GAIN", 0.55 + 0.45 * value)
                 self.soundgroup.apply_filter(filter_obj, replace=True)
                 if self.player:
                     if filter_obj is not None:
@@ -557,7 +564,9 @@ class Entity(Object):
 
                 task = self.game.automate(
                     None, None,
-                    muffling, 500,
+                    # 250ms attack: real ears clamp almost instantly when the
+                    # head breaks the surface (the old 500ms lagged behind).
+                    muffling, 250,
                     step_callback = create_water_automation(filter_obj, is_focus), start_value=1.0,
                     callback=on_complete
                 )

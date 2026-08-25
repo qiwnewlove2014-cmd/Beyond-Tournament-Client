@@ -96,6 +96,7 @@ class AudioManager():
         # crashed the game (0xC0000005) under load.
         self._audio_inbox = queue.SimpleQueue()
         self._unbound_occlusion_filter = None
+        self._light_unbound_occlusion_filter = None
         self.piano = PianoAudio(self)
         self.drums = DrumAudio(self)
         
@@ -168,6 +169,24 @@ class AudioManager():
                 except Exception:
                     self._unbound_occlusion_filter = None
         return self._unbound_occlusion_filter
+
+    def get_light_unbound_occlusion_filter(self):
+        """Lowpass for PARTIALLY occluded unbound 3D sounds.
+
+        A thin obstacle (a single pillar tile between source and listener)
+        should only slightly dull the sound — much gentler than the heavy
+        full-wall filter from get_unbound_occlusion_filter().
+        """
+        if getattr(self, "_light_unbound_occlusion_filter", None) is None:
+            flt = self.gen_filter("LOWPASS")
+            if flt is not None:
+                try:
+                    flt.set("GAINHF", 0.45)
+                    flt.set("GAIN", 0.75)
+                    self._light_unbound_occlusion_filter = flt
+                except Exception:
+                    self._light_unbound_occlusion_filter = None
+        return self._light_unbound_occlusion_filter
 
     def preload_ui_sounds(self):
         """Pre-load critical UI sounds at startup to prevent first-play silence."""

@@ -337,23 +337,38 @@ class SoundGroup:
             return
 
         if not self.muted:
-            # Check for physical occlusion (walls)
-            result = map.valid_straight_path(
-                self.position,
-                self.parent.position
-            )
-            
-            if result is True:
+            # Check for physical occlusion (walls). Tiers scale with wall
+            # thickness: a lone pillar tile only LIGHTLY muffles, while a real
+            # wall (>= 3 tiles) keeps the full standard muffle.
+            tier = 0
+            tier_fn = getattr(map, "occlusion_tier", None)
+            if tier_fn is not None:
+                try:
+                    tier = int(tier_fn(self.position, self.parent.position))
+                except Exception:
+                    tier = 0
+            else:
+                result = map.valid_straight_path(
+                    self.position,
+                    self.parent.position
+                )
+                tier = 2 if result is False else 0
+
+            if tier == 0:
                 # Path is CLEAR (Inside room / Line of sight): Clear occlusion filter so sound is 100% crystal clear
                 self.apply_filter(None, replace=True, clear=True)
                 
-            elif result is False:
-                # Path is BLOCKED (Behind wall): Apply occlusion filter
+            else:
+                # Path crosses an obstacle: Apply occlusion filter
                 filter_obj = get_occlusion_filter()
                 if filter_obj:
                     try:
-                        filter_obj.set("GAINHF", 0.05) # Stronger muffling for walls
-                        filter_obj.set("GAIN", 0.22)
+                        if tier == 1:
+                            filter_obj.set("GAINHF", 0.45) # Thin obstacle (pillar): slight dulling only
+                            filter_obj.set("GAIN", 0.75)
+                        else:
+                            filter_obj.set("GAINHF", 0.05) # Stronger muffling for walls
+                            filter_obj.set("GAIN", 0.22)
                         self.apply_filter(filter_obj, replace=True)
                     except Exception as e:
                         print(f"[SoundGroup] Error setting occlusion filter: {e}")

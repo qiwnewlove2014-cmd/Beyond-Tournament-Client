@@ -175,7 +175,10 @@ class Camera:
             # Same depth->GAINHF curve as Entity.water_muffling, so the world
             # (this filter) and the player's own sounds (Entity's filter) un-
             # muffle at the same rate instead of one clearing before the other.
-            return 0.02 + 0.48 * max(0.0, min(1.0, d))
+            # Realism pass: surface submersion (d=1.0) now lands at 0.35 — far
+            # duller than the old gentle 0.50 half-muffle — while the bottom
+            # still goes fully dead at 0.02.
+            return 0.02 + 0.33 * max(0.0, min(1.0, d))
 
         def cancel_water_task():
             if self._water_automation is not None:
@@ -194,6 +197,11 @@ class Camera:
             if flt is None:
                 return
             flt.set("GAINHF", value)
+            # Water swallows loudness too, not just highs — derive a gentle
+            # gain dip from the same animated value (neutral when clear,
+            # ~0.56 at full depth) so the existing ramp drives both axes of
+            # the muffle with no extra automation task.
+            flt.set("GAIN", 0.55 + 0.45 * value)
             self.game.audio_mngr.apply_filter(flt, self.game.exclude_water, replace=True)
             if hasattr(self.focus_object, "vc_source") and self.focus_object.vc_source:
                 self.focus_object.vc_source.direct_filter = flt
@@ -221,7 +229,8 @@ class Camera:
             self.focus_object.drown_clock.restart()
             self._camera_recorded_depth = round(self.focus_object.depth, 3)
             self.focus_object.recorded_depth = round(self.focus_object.depth, 3)
-            start_water_task(muffling_at(self.focus_object.depth), 500, self._water_gainhf)
+            # 250ms attack — real ears clamp almost instantly on submersion.
+            start_water_task(muffling_at(self.focus_object.depth), 250, self._water_gainhf)
         elif self.focus_object.in_water and self.focus_object.map.get_tile_at(self.focus_object.x, self.focus_object.y, self.focus_object.z) != "underwater":
             self.focus_object.play_sound("foley/swim/end/", cat="self")
             def on_exit_complete():

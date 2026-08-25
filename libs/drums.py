@@ -104,6 +104,7 @@ class DrumAudio:
         self._fades = []
         self._pending_hits = queue.Queue(maxsize=256)
         self._occlusion_filter = None
+        self._light_occlusion_filter = None
         # Kit the local performer is currently playing. Remote hits carry their own
         # kit id in the packet, so this only governs local (client-prediction) hits.
         self._active_kit = self.DEFAULT_KIT
@@ -205,6 +206,18 @@ class DrumAudio:
                 "LOWPASS", ("GAINHF", 0.05), ("GAIN", 0.22)
             )
         return self._occlusion_filter
+
+    def get_light_occlusion_filter(self):
+        """Gentle lowpass for PARTIALLY occluded hits.
+
+        A thin obstacle (a lone pillar tile between drummer and listener)
+        only slightly dulls the hit, unlike the heavy full-wall filter above.
+        """
+        if self._light_occlusion_filter is None:
+            self._light_occlusion_filter = self.am.gen_filter(
+                "LOWPASS", ("GAINHF", 0.45), ("GAIN", 0.75)
+            )
+        return self._light_occlusion_filter
 
     def preload(self, kit=None):
         """Keep a drum kit resident for zero-latency first hits.
@@ -390,7 +403,7 @@ class DrumAudio:
         return sounds
 
     def play_hit(self, peer_id, pad, x, y, z, listener_x, listener_y, listener_z,
-                 volume=300, occluded=False, via_megaphone=False, kit=None):
+                 volume=300, occluded=False, via_megaphone=False, kit=None, occlusion=None):
         if not self.is_valid_pad(pad):
             return None
         if kit is None:
@@ -406,13 +419,22 @@ class DrumAudio:
 
         _, _, volume_scale, _ = pad_defs[pad]
         adjusted_volume = volume * volume_scale
+        if occlusion is None:
+            full_block = bool(occluded)
+            partial_direct = None
+        else:
+            full_block = occlusion >= 1.0
+            partial_direct = (
+                self.get_light_occlusion_filter() if 0.0 < occlusion < 1.0 else None
+            )
         primary = self.am.play_unbound_stereo_spatial(
             path, x, y, z, listener_x, listener_y, listener_z,
             volume=adjusted_volume,
             cat="miscelaneous",
             max_distance=50.0,
             as_3d_stereo=(peer_id != "local"),
-            occluded=occluded,
+            occluded=(full_block and partial_direct is None),
+            direct_filter=partial_direct,
             stereo_provider=self,
             stereo_offset=1.5,
             stereo_reference_distance=8.0,
@@ -446,12 +468,19 @@ class DrumAudio:
             pad = data["pad"]
         except (KeyError, TypeError, ValueError):
             return
-        occluded = False
+        # Occlusion ratio scales with wall thickness: a lone pillar tile
+        # partially muffles (~0.33), a long wall fully blocks — see
+        # map.wall_occlusion_ratio().
+        occlusion = 0.0
         if getattr(gameplay, "map", None):
             with contextlib.suppress(Exception):
-                occluded = gameplay.map.valid_straight_path(
+                wofn = getattr(gameplay.map, "wall_occlusion_ratio", None)
+                if wofn is not None:
+                    occlusion = float(wofn((x, y, z), (player.x, player.y, player.z)))
+                elif gameplay.map.valid_straight_path(
                     (x, y, z), (player.x, player.y, player.z)
-                ) is False
+                ) is False:
+                    occlusion = 1.0
         raw_volume = data.get("volume", 300)
         if isinstance(raw_volume, bool):
             raw_volume = 300
@@ -463,7 +492,8 @@ class DrumAudio:
             peer_id, pad, x, y, z,
             player.x, player.y, player.z,
             volume=volume,
-            occluded=occluded,
+            occluded=(occlusion >= 1.0),
+            occlusion=occlusion,
             via_megaphone=data.get("via_megaphone") is True,
             kit=data.get("kit"),
         )
@@ -559,6 +589,9 @@ class DrumAudio:
         if self._occlusion_filter is not None:
             self.am.release_filter(self._occlusion_filter)
         self._occlusion_filter = None
+        if self._light_occlusion_filter is not None:
+            self.am.release_filter(self._light_occlusion_filter)
+        self._light_occlusion_filter = None
         # Release preloaded drum kit buffers so memory does not accumulate across
         # map changes. _preloaded_buffers holds strong refs to OpenAL buffers;
         # without this, every kit preload leaks 17*3 buffers per session.

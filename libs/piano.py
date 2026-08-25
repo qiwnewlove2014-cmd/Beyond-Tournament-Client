@@ -32,6 +32,7 @@ class PianoAudio:
         self.gameplay = None  # Set by Gameplay.__init__ after construction
         self.active_piano_notes = {}
         self._occlusion_filter = None
+        self._light_occlusion_filter = None
         self.soft_pedal_states = {}
         self._pedal_filters = {}
         self._pedal_filter_values = {}
@@ -138,6 +139,21 @@ class PianoAudio:
                 ("GAIN", 0.22)     # Attenuate overall direct volume
             )
         return self._occlusion_filter
+
+    def get_light_occlusion_filter(self):
+        """Lazy-create a gentle lowpass for PARTIALLY occluded notes.
+
+        A thin obstacle (a single pillar tile between performer and listener)
+        should only slightly dull the tone, unlike the heavy behind-a-wall
+        filter above.
+        """
+        if self._light_occlusion_filter is None:
+            self._light_occlusion_filter = self.am.gen_filter(
+                "LOWPASS",
+                ("GAINHF", 0.45),
+                ("GAIN", 0.75)
+            )
+        return self._light_occlusion_filter
 
     @staticmethod
     def _read_filter_values(filter_obj, defaults):
@@ -728,6 +744,7 @@ class PianoAudio:
         self._chorus_transitions.clear()
         if self._occlusion_filter is not None:
             self._occlusion_filter = None
+        self._light_occlusion_filter = None
         # Drop any queued events so a stale note doesn't fire after teardown.
         self._drain_pending_notes()
         # Release preloaded piano buffers so memory does not accumulate across
@@ -836,12 +853,16 @@ class PianoAudio:
         if "piano_chorus" in data:
             self.set_chorus(peer_id, data.get("piano_chorus") is True, animate=False)
         # Recompute occlusion on the main thread (do not trust the packet).
-        occluded = False
+        # The ratio scales with wall thickness: a lone pillar tile partially
+        # muffles (~0.33), a long wall fully blocks (see map.wall_occlusion_ratio).
+        occlusion = 0.0
         if getattr(gameplay, "map", None):
             with contextlib.suppress(Exception):
-                los = gameplay.map.valid_straight_path((x, y, z), (player.x, player.y, player.z))
-                if los is False:
-                    occluded = True
+                wofn = getattr(gameplay.map, "wall_occlusion_ratio", None)
+                if wofn is not None:
+                    occlusion = float(wofn((x, y, z), (player.x, player.y, player.z)))
+                elif gameplay.map.valid_straight_path((x, y, z), (player.x, player.y, player.z)) is False:
+                    occlusion = 1.0
         # Volume sanitization (never trust client/server-supplied volume blindly).
         raw_volume = data.get("volume", 300)
         if isinstance(raw_volume, bool):
@@ -856,7 +877,8 @@ class PianoAudio:
             peer_id=peer_id, note_name=note_name,
             x=x, y=y, z=z,
             listener_x=player.x, listener_y=player.y, listener_z=player.z,
-            volume=volume, occluded=occluded, soft=soft, via_megaphone=via_megaphone
+            volume=volume, occluded=(occlusion >= 1.0), occlusion=occlusion,
+            soft=soft, via_megaphone=via_megaphone
         )
         if snd and getattr(gameplay, "map", None):
             reverb = gameplay.map.get_reverb_at(x, y, z)
@@ -872,7 +894,7 @@ class PianoAudio:
             return
         self.stop_note(peer_id, note_name)
 
-    def play_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False, soft=None, via_megaphone=False):
+    def play_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False, soft=None, via_megaphone=False, occlusion=None):
         """Play a piano note with 3D stereo spreading (remote) or direct stereo (local).
         
         Automatically handles note re-triggering, occlusion filtering,
@@ -882,8 +904,18 @@ class PianoAudio:
         if soft is not None:
             self.set_soft_pedal(peer_id, soft)
         is_local = (peer_id == "local")
-        filter_mode = "occluded" if occluded else "normal"
-        filter_obj = self.get_note_filter(peer_id, occluded=occluded)
+        if occlusion is None:
+            full_block = bool(occluded)
+            partial = False
+        else:
+            full_block = occlusion >= 1.0
+            partial = 0.0 < occlusion < 1.0
+        filter_mode = "occluded" if full_block else "normal"
+        filter_obj = self.get_note_filter(peer_id, occluded=full_block)
+        if partial:
+            # Thin obstacle (a lone pillar tile): only slightly dull the note
+            # instead of the full behind-a-wall muffle.
+            filter_obj = self.get_light_occlusion_filter()
         snd = self.am.play_unbound_stereo_spatial(
             path=f"piano/Piano.mf.{note_name}.ogg",
             x=x, y=y, z=z,
@@ -894,7 +926,7 @@ class PianoAudio:
             cat="miscelaneous",
             max_distance=50.0,
             as_3d_stereo=not is_local,
-            occluded=occluded,
+            occluded=(full_block and not partial),
             direct_filter=filter_obj,
             stereo_reference_distance=8.0,
         )

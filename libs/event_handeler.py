@@ -733,7 +733,7 @@ class EventHandeler:
                 lambda sound_data=sound_data: self.play_unbound(sound_data)
             )
             return
-        occluded = False
+        occ_tier = 0
         lx = ly = lz = 0.0
         facing = 0.0
         snd_path = str(data.get("sound", "")).lower()
@@ -745,9 +745,13 @@ class EventHandeler:
 
             if getattr(self.gameplay, 'map', None) and not getattr(self.game, 'pong_mode', False):
                 with contextlib.suppress(Exception):
-                    los = self.gameplay.map.valid_straight_path((data["x"], data["y"], data["z"]), (lx, ly, lz))
-                    if los is False:
-                        occluded = True
+                    # Wall-thickness tiers: 0 clear · 1 thin/pillar tile ->
+                    # light lowpass · 2 thick wall -> full standard occlusion.
+                    tier_fn = getattr(self.gameplay.map, 'occlusion_tier', None)
+                    if tier_fn is not None:
+                        occ_tier = int(tier_fn((data["x"], data["y"], data["z"]), (lx, ly, lz)))
+                    elif self.gameplay.map.valid_straight_path((data["x"], data["y"], data["z"]), (lx, ly, lz)) is False:
+                        occ_tier = 2
 
         if data.get("is_stereo_spatial") and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
             snd = self.game.audio_mngr.play_unbound_stereo_spatial(
@@ -756,12 +760,19 @@ class EventHandeler:
                 max_distance=data.get("max_distance", 25.0),
                 facing_angle=facing,
                 as_3d_stereo=False,
-                occluded=occluded,
+                occluded=(occ_tier >= 2),
+                direct_filter=(
+                    self.game.audio_mngr.get_light_unbound_occlusion_filter()
+                    if occ_tier == 1 else None
+                ),
             )
         else:
             direct_filt = None
-            if occluded:
+            if occ_tier >= 2:
                 direct_filt = self.game.audio_mngr.get_unbound_occlusion_filter()
+            elif occ_tier == 1:
+                # Thin obstacle (pillar): only slightly dull the sound.
+                direct_filt = self.game.audio_mngr.get_light_unbound_occlusion_filter()
             snd = self.game.audio_mngr.play_unbound(
                 data["sound"], data["x"], data["y"], data["z"], False, volume=data.get("volume", 300), cat=data.get("cat", "miscelaneous"),
                 reference_distance=data.get("reference_distance", 3.0), rolloff=data.get("rolloff", 1.0), max_distance=data.get("max_distance", 25.0),

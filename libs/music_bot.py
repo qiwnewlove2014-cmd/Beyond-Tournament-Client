@@ -351,15 +351,28 @@ class AudioStreamer(threading.Thread):
                 gp = getattr(self.game, "gameplay", None)
                 cur_map = getattr(gp, "map", None) if gp is not None else None
                 if cur_map is not None and hasattr(cur_map, "valid_straight_path"):
-                    los = cur_map.valid_straight_path(box_pos, pos)
-                    occluded = (los is False)
-                    if occluded != getattr(self, "_last_occluded", None):
-                        self._last_occluded = occluded
+                    # Wall-thickness tiers (same 0/1/2 scale as jukebox.py):
+                    # a lone pillar tile only slightly dulls the song, while
+                    # thick walls keep the full standard muffle.
+                    tier = 0
+                    tfn = getattr(cur_map, "occlusion_tier", None)
+                    if tfn is not None:
+                        with contextlib.suppress(Exception):
+                            tier = int(tfn(box_pos, pos))
+                    else:
+                        with contextlib.suppress(Exception):
+                            tier = 2 if cur_map.valid_straight_path(box_pos, pos) is False else 0
+                    if tier != getattr(self, "_last_occluded", None):
+                        self._last_occluded = tier
                         filt = None
-                        if occluded and hasattr(audio, "gen_filter"):
+                        if tier >= 2 and hasattr(audio, "gen_filter"):
                             if not hasattr(self, "_occlusion_filter") or self._occlusion_filter is None:
                                 self._occlusion_filter = audio.gen_filter("LOWPASS", ("GAINHF", 0.05), ("GAIN", 0.22))
                             filt = self._occlusion_filter
+                        elif tier == 1 and hasattr(audio, "gen_filter"):
+                            if not hasattr(self, "_light_occlusion_filter") or self._light_occlusion_filter is None:
+                                self._light_occlusion_filter = audio.gen_filter("LOWPASS", ("GAINHF", 0.45), ("GAIN", 0.75))
+                            filt = self._light_occlusion_filter
                         for s in (self.spatial_src_l, self.spatial_src_r):
                             try:
                                 if filt is not None:
@@ -953,7 +966,11 @@ class AudioStreamer(threading.Thread):
                 # Accumulate partial reads until we have a full frame.
                 # Only set eof when read() returns empty (ffmpeg closed pipe).
                 while len(_leftover) < self.BUFFER_SIZE:
-                    chunk = self.process.stdout.read(self.BUFFER_SIZE - len(_leftover))
+                    proc = self.process
+                    if proc is None:
+                        eof = True
+                        break
+                    chunk = proc.stdout.read(self.BUFFER_SIZE - len(_leftover))
                     if not chunk:  # Real EOF: ffmpeg closed the pipe
                         eof = True
                         break

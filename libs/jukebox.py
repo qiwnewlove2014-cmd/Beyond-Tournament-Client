@@ -26,6 +26,34 @@ import cyal
 from .speech import speak
 from .logger import log as log_line
 
+# Shared wall occlusion tiers used by every playback site below.
+# 0 = clear path · 1 = thin obstacle (a lone pillar tile): light lowpass ·
+# 2 = thick wall (>= 3 tiles): full standard occlusion.
+OCCLUSION_CLEAR, OCCLUSION_LIGHT, OCCLUSION_FULL = 0, 1, 2
+
+
+def wall_occlusion_tier(cur_map, src_pos, listener):
+    """Classify wall thickness between two points for discrete-filter sites.
+
+    Wraps map.occlusion_tier() (which counts wall tiles along the ray so a
+    single pillar only lightly muffles) with a legacy boolean fallback for
+    stub/foreign map objects.
+    """
+    if cur_map is None or src_pos is None or listener is None:
+        return OCCLUSION_CLEAR
+    tfn = getattr(cur_map, "occlusion_tier", None)
+    if tfn is not None:
+        try:
+            return int(tfn(src_pos, listener))
+        except Exception:
+            return OCCLUSION_CLEAR
+    try:
+        if cur_map.valid_straight_path(src_pos, listener) is False:
+            return OCCLUSION_FULL
+    except Exception:
+        pass
+    return OCCLUSION_CLEAR
+
 
 class JukeboxRelayReceiver(threading.Thread):
     """Decode one server-owned Opus stream without blocking the network thread."""
@@ -185,13 +213,16 @@ class JukeboxRelayReceiver(threading.Thread):
                 gp = getattr(self.game, "gameplay", None)
                 cur_map = getattr(gp, "map", None) if gp is not None else None
                 if cur_map is not None and hasattr(cur_map, "valid_straight_path"):
-                    los = cur_map.valid_straight_path(self.box_pos, listener)
-                    occluded = (los is False)
-                    if occluded != self._last_occluded:
-                        self._last_occluded = occluded
+                    # Wall-thickness tiers scale the muffle: a lone pillar only
+                    # slightly dulls the song; long walls keep the full muffle.
+                    tier = wall_occlusion_tier(cur_map, self.box_pos, listener)
+                    if tier != self._last_occluded:
+                        self._last_occluded = tier
                         filt = None
-                        if occluded and self.player is not None and hasattr(self.player, "get_occlusion_filter"):
+                        if tier == OCCLUSION_FULL and self.player is not None and hasattr(self.player, "get_occlusion_filter"):
                             filt = self.player.get_occlusion_filter()
+                        elif tier == OCCLUSION_LIGHT and self.player is not None and hasattr(self.player, "get_light_occlusion_filter"):
+                            filt = self.player.get_light_occlusion_filter()
                         for s in (self.source_l, self.source_r):
                             try:
                                 if filt is not None:
@@ -336,6 +367,7 @@ class JukeboxPlayer:
         self.eq_slots = {}
         self.cabinet_volumes = {}
         self._occlusion_filter = None
+        self._light_occlusion_filter = None
 
     def get_occlusion_filter(self):
         """Lazy-create and return a shared Lowpass filter for wall occlusion muffling."""
@@ -351,6 +383,26 @@ class JukeboxPlayer:
                 except Exception:
                     self._occlusion_filter = None
         return self._occlusion_filter
+
+    def get_light_occlusion_filter(self):
+        """Lazy-create a gentle Lowpass for PARTIALLY occluded playback.
+
+        A thin obstacle (a lone pillar tile between cabinet and listener)
+        should only slightly dull the song — unlike the heavy full-wall
+        filter above.
+        """
+        if self._light_occlusion_filter is None:
+            audio = getattr(self.game, "audio_mngr", None)
+            if audio is not None and hasattr(audio, "gen_filter"):
+                try:
+                    self._light_occlusion_filter = audio.gen_filter(
+                        "LOWPASS",
+                        ("GAINHF", 0.45),
+                        ("GAIN", 0.75),
+                    )
+                except Exception:
+                    self._light_occlusion_filter = None
+        return self._light_occlusion_filter
 
     EQ_PRESETS = {
         "bass_boost": (
@@ -398,8 +450,11 @@ class JukeboxPlayer:
                 listener = getattr(audio, "position", None)
                 src = entry.get("source")
                 if cur_map is not None and listener is not None and src is not None and hasattr(cur_map, "valid_straight_path"):
-                    if cur_map.valid_straight_path(src.position, listener) is False:
+                    tier = wall_occlusion_tier(cur_map, src.position, listener)
+                    if tier == OCCLUSION_FULL:
                         filt = self.get_occlusion_filter()
+                    elif tier == OCCLUSION_LIGHT:
+                        filt = self.get_light_occlusion_filter()
                 for key in ("source", "secondary_source"):
                     src = entry.get(key)
                     if src is not None:
@@ -659,9 +714,12 @@ class JukeboxPlayer:
             audio = getattr(self.game, "audio_mngr", None)
             listener = getattr(audio, "position", None) if audio is not None else None
             if cur_map is not None and listener is not None and hasattr(cur_map, "valid_straight_path"):
-                los = cur_map.valid_straight_path((float(x), float(y), float(z)), listener)
-                if los is False:
-                    filt = self.get_occlusion_filter()
+                tier = wall_occlusion_tier(cur_map, (float(x), float(y), float(z)), listener)
+                if tier != OCCLUSION_CLEAR:
+                    filt = (
+                        self.get_light_occlusion_filter() if tier == OCCLUSION_LIGHT
+                        else self.get_occlusion_filter()
+                    )
                     if filt is not None:
                         src_l.direct_filter = filt
                         src_r.direct_filter = filt
@@ -1283,8 +1341,12 @@ class JukeboxPlayer:
                     filt = None
                     listener = getattr(audio, "position", None)
                     if listener is not None and hasattr(gameplay.map, "valid_straight_path"):
-                        if gameplay.map.valid_straight_path((pos[0] + 2.5, pos[1], pos[2]), listener) is False:
-                            filt = self.get_occlusion_filter()
+                        tier = wall_occlusion_tier(gameplay.map, (pos[0] + 2.5, pos[1], pos[2]), listener)
+                        if tier != OCCLUSION_CLEAR:
+                            filt = (
+                                self.get_light_occlusion_filter() if tier == OCCLUSION_LIGHT
+                                else self.get_occlusion_filter()
+                            )
                     audio.efx.send(src_l, 0, reverb, filter=filt)
                     audio.efx.send(src_r, 0, reverb, filter=filt)
                 except Exception:

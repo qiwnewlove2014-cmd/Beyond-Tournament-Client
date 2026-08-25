@@ -176,27 +176,36 @@ class MegaphoneManager:
             self.player_sources.clear()
 
     def _check_speaker_occlusion(self, speaker_pos, player_pos):
-        """Return how much a wall blocks line-of-sight between speaker and player.
+        """Return how much walls block line-of-sight between speaker and player.
 
         Returns a float occlusion ratio in [0.0, 1.0]:
-          0.0 = fully clear (no wall tiles on the ray)
-          1.0 = fully blocked (a wall tile is on the path)
-          0.5 = underwater (partial occlusion)
+          0.0   = fully clear (no wall tiles on the ray)
+          ~0.33 = a single pillar tile on the path (light muffling only)
+          ~0.67 = two tiles of wall (medium muffling)
+          1.0   = thick wall / fully blocked
+          0.5 floor = underwater (partial occlusion)
 
-        Uses the proven map.valid_straight_path() which walks tile-by-tile
-        through the grid and reliably detects wall tiles, unlike the old
-        parametric ray that could skip tiles due to step aliasing.
+        Uses the proven tile-by-tile walk (map.wall_occlusion_ratio(), same
+        stepping as valid_straight_path()) but counts HOW MANY wall tiles
+        cross the ray, so a lone pillar only partially muffles while a real
+        long wall still blocks completely.
         """
+        try:
+            fn = getattr(self.map, "wall_occlusion_ratio", None)
+            if fn is not None:
+                return max(0.0, min(1.0, float(fn(speaker_pos, player_pos))))
+        except Exception:
+            pass
+        # Legacy fallback: hard boolean from the old raycast.
         try:
             result = self.map.valid_straight_path(speaker_pos, player_pos)
             if result is False:
                 return 1.0  # Wall detected — fully blocked
             elif result is None:
                 return 0.5  # Underwater — partial occlusion
-            else:
-                return 0.0  # Clear line-of-sight
         except Exception:
-            return 0.0  # On error, assume not blocked
+            pass
+        return 0.0  # Clear line-of-sight (or on error, assume not blocked)
 
     def setup_megaphone_speakers(self, force=False):
         """Initializes or re-initializes megaphone speakers based on map data"""

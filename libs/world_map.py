@@ -78,6 +78,77 @@ class Map:
                 z1 -= 1
         return result
 
+    def wall_occlusion_ratio(self, position1, position2, max_thickness=3):
+        """How strongly the walls crossing a straight path muffle sound.
+
+        valid_straight_path() answers "is ANY wall on this path?" — a hard
+        boolean that treats a single pillar tile exactly like a thick wall.
+        This walks the SAME tile-by-tile ray but COUNTS the wall tiles it
+        crosses, so occlusion scales with wall thickness:
+
+            1 tile  (pillar / single block)     -> ~0.33 : slight muffling
+            2 tiles                             -> ~0.67 : medium muffling
+            >= max_thickness tiles (long wall)  -> 1.0  : full standard occlusion
+
+        A path through water yields at least 0.5 (the partial occlusion
+        valid_straight_path used to signal by returning None).
+        Returns a float in [0.0, 1.0].
+        """
+        x1, y1, z1 = trunc(position1[0]), trunc(position1[1]), trunc(position1[2])
+        x2, y2, z2 = trunc(position2[0]), trunc(position2[1]), trunc(position2[2])
+        dist = round(sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)) + 1
+        wall_hits = 0
+        underwater = False
+        for n in range(0, dist):
+            tile = self.get_tile_at(x1, y1, z1)
+            if tile.startswith("wall"):
+                wall_hits += 1
+                if max_thickness > 0 and wall_hits >= max_thickness:
+                    return 1.0
+            elif tile == "underwater":
+                underwater = True
+            if x1 == x2 and y1 == y2 and z1 == z2:
+                break
+            if x1 < x2:
+                x1 += 1
+            elif trunc(x1) > x2:
+                x1 -= 1
+            if y1 < y2:
+                y1 += 1
+            elif y1 > y2:
+                y1 -= 1
+            if z1 < z2:
+                z1 += 1
+            elif z1 > z2:
+                z1 -= 1
+        if max_thickness <= 0:
+            ratio = 1.0 if wall_hits else 0.0
+        else:
+            ratio = min(wall_hits / float(max_thickness), 1.0)
+        if underwater:
+            ratio = max(ratio, 0.5)
+        return ratio
+
+    def occlusion_tier(self, position1, position2):
+        """Classify wall occlusion between two points into three tiers:
+
+          0 = clear path (no filter)
+          1 = thin obstacle (a lone pillar tile): LIGHT muffling only
+          2 = thick wall (>= 3 tiles): FULL standard occlusion
+
+        Convenience wrapper over wall_occlusion_ratio() for systems that pick
+        between discrete filters instead of consuming continuous ratios.
+        """
+        try:
+            ratio = self.wall_occlusion_ratio(position1, position2)
+        except Exception:
+            return 0
+        if ratio >= 1.0:
+            return 2
+        if ratio > 0.0:
+            return 1
+        return 0
+
     def in_bound(self, x, y, z):
         """verifies whether the hole map covers a certain coordinate
         params:

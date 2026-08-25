@@ -137,11 +137,11 @@ class FakeEntity:
     @property
     def water_muffling(self):
         # Mirrors Entity.water_muffling exactly.
-        return 0.02 + 0.48 * max(0.0, min(1.0, self.depth))
+        return 0.02 + 0.33 * max(0.0, min(1.0, self.depth))
 
 
 def muffling_at(d):
-    return 0.02 + 0.48 * max(0.0, min(1.0, d))
+    return 0.02 + 0.33 * max(0.0, min(1.0, d))
 
 
 class TestEntityWaterCheck(unittest.TestCase):
@@ -156,12 +156,31 @@ class TestEntityWaterCheck(unittest.TestCase):
         self.assertEqual(len(game.automations), 1)
         task = game.automations[0]
         self.assertEqual(task.start_value, 1.0)
-        self.assertAlmostEqual(task.target, 0.5)  # muffling_at(1.0)
+        self.assertAlmostEqual(task.target, muffling_at(1.0))
+        self.assertEqual(task.duration, 250)  # fast ear-clamp on entry
 
         task.step_callback(0.3)
         self.assertIsNotNone(ent.vc_source.direct_filter)
         self.assertIs(ent.vc_source.direct_filter, game.audio_mngr.filters[-1])
         self.assertIs(ent.music_source.direct_filter, game.audio_mngr.filters[-1])
+
+    def test_underwater_loudness_dips_with_the_muffle(self):
+        game = FakeGame()
+        ent = FakeEntity(game, tile="underwater", focus=False)
+        Entity.water_check(ent)
+
+        task = game.automations[0]
+        flt = ent.water_filter
+        task.step_callback(muffling_at(1.0))
+
+        # Highs are cut AND overall loudness dips, both driven by one value:
+        # realism pass makes submersion quieter as well as duller.
+        self.assertAlmostEqual(flt.values["GAINHF"], muffling_at(1.0))
+        self.assertAlmostEqual(flt.values["GAIN"], 0.55 + 0.45 * muffling_at(1.0))
+
+        # Fully clear again (surfaced) must be perfectly neutral loudness.
+        task.step_callback(1.0)
+        self.assertAlmostEqual(flt.values["GAIN"], 1.0)
 
     def test_focus_enter_does_not_double_play_or_touch_vc_source(self):
         game = FakeGame()
@@ -204,7 +223,7 @@ class TestEntityWaterCheck(unittest.TestCase):
         self.assertEqual(len(game.automations), 1)
         task = game.automations[0]
         self.assertEqual(task.target, 1.0)
-        self.assertAlmostEqual(task.start_value, 0.5)
+        self.assertAlmostEqual(task.start_value, muffling_at(1.0))
 
     def test_focus_exit_plays_no_unbound_end_sound(self):
         game = FakeGame()
@@ -368,6 +387,10 @@ class TestCameraWaterTasks(unittest.TestCase):
         # At deepest bottom (depth = 0.0), muffling must reach 0.02
         ent.depth = 0.0
         self.assertAlmostEqual(ent.water_muffling, 0.02)
+        # Realism pass: just-submerged (depth 1.0) must be far duller than
+        # the old half-muffle (0.50).
+        ent.depth = 1.0
+        self.assertAlmostEqual(ent.water_muffling, 0.35)
 
 
 if __name__ == "__main__":
