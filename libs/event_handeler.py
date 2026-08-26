@@ -169,18 +169,22 @@ class EventHandeler:
             if len(self.game.match_history) > 50:
                 self.game.match_history.pop(0)
 
-        if data["buffer"]:
+        # Defensive: some server paths have sent payloads without "buffer"
+        # (KeyError crash). Treat missing keys as their defaults.
+        data = data or {}
+        buffer_id = data.get("buffer", "")
+        if buffer_id:
             buffer.add_item(
                 self.game,
-                data["buffer"],
-                data["text"],
+                buffer_id,
+                text,
                 True,
                 sound=data.get("sound", ""),
             )
-            speak(data["text"], silent=True, id=f'buffer_{data["buffer"]}')
+            speak(text, silent=True, id=f'buffer_{buffer_id}')
         else:
-            speak(data["text"], data["interupt"], not data["buffer"])
-            if data["sound"]:
+            speak(text, data.get("interupt", True), not buffer_id)
+            if data.get("sound"):
                 # Play notification sounds on the main thread (OpenAL rule).
                 sound = data["sound"]
                 self.game.put(lambda sound=sound: self.game.direct_soundgroup.play(sound))
