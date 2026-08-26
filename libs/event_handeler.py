@@ -170,8 +170,12 @@ class EventHandeler:
                 self.game.match_history.pop(0)
 
         # Defensive: some server paths have sent payloads without "buffer"
-        # (KeyError crash). Treat missing keys as their defaults.
+        # (KeyError crash). Treat missing keys as their defaults. An empty
+        # text (e.g. an unpatched server sending {message, type}) is skipped
+        # entirely so the TTS never announces a blank utterance.
         data = data or {}
+        if not text and not data.get("sound"):
+            return
         buffer_id = data.get("buffer", "")
         if buffer_id:
             buffer.add_item(
