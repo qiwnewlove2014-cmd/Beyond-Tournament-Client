@@ -1703,11 +1703,25 @@ class EventHandeler:
 
     def jukebox_state(self, data):
         """Server sync of jukebox playback state (map join)."""
-        self.gameplay.jukebox_state = data if isinstance(data, dict) else {"jukeboxes": {}}
+        state = data if isinstance(data, dict) else {"jukeboxes": {}}
+        self.gameplay.jukebox_state = state
+        # A state resync is authoritative even if the real-time pause packet
+        # was lost. Stop any local source that the server says is paused or
+        # idle; do not construct a JukeboxPlayer merely to stop nothing.
+        player = getattr(self.gameplay, "jukebox_player", None)
+        if player is not None:
+            boxes = state.get("jukeboxes")
+            if not isinstance(boxes, dict):
+                boxes = {}
+            for jid, box in boxes.items():
+                if not isinstance(box, dict):
+                    continue
+                if box.get("paused") or not box.get("current"):
+                    self.game.put(lambda jid=jid: player.stop(jid))
 
     def jukebox_open(self, data):
         """Player pressed interact near a jukebox — cache state and open the menu."""
-        self.gameplay.jukebox_state = data if isinstance(data, dict) else {"jukeboxes": {}}
+        self.jukebox_state(data)
         gp = self.gameplay
         if gp:
             from . import jukebox
@@ -1728,12 +1742,17 @@ class EventHandeler:
             box["current"] = data.get("current")
             box["queue"] = data.get("queue", [])
             box["repeat"] = data.get("repeat", "off")
+            box["paused"] = bool(data.get("paused", False))
 
     def jukebox_play(self, data):
         """A jukebox started playing a song — play it at the jukebox position."""
         if not isinstance(data, dict) or not data.get("id"):
             return
         jid = data["id"]
+        state = getattr(self.gameplay, "jukebox_state", None)
+        if isinstance(state, dict):
+            boxes = state.setdefault("jukeboxes", {})
+            boxes.setdefault(jid, {"id": jid})["paused"] = False
         x = data.get("x")
         y = data.get("y")
         z = data.get("z")
@@ -1770,6 +1789,27 @@ class EventHandeler:
                 eq_values=data.get("eq_values"),
                 cabinet_volume=data.get("volume", 100),
             ))
+
+    def jukebox_pause(self, data):
+        """The server paused shared playback — silence this cabinet locally."""
+        if not isinstance(data, dict):
+            return
+        jid = data.get("id")
+        if not jid:
+            return
+        gp = self.gameplay
+        state = getattr(gp, "jukebox_state", None)
+        if isinstance(state, dict):
+            boxes = state.setdefault("jukeboxes", {})
+            boxes.setdefault(jid, {"id": jid})["paused"] = True
+        player = getattr(gp, "jukebox_player", None)
+        if player is not None:
+            playback_id = data.get("playback_id")
+            self.game.put(
+                lambda jid=jid, playback_id=playback_id: (
+                    player.stop(jid, playback_id=playback_id)
+                )
+            )
 
     def jukebox_eq(self, data):
         """Server broadcasted an EQ profile update for a jukebox."""

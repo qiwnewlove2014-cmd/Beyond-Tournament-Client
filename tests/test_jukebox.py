@@ -76,6 +76,20 @@ class TestCurrentState(unittest.TestCase):
         gp = FakeGameplay("garbage")
         self.assertEqual(jukebox._current_state(gp), {"jukeboxes": {}})
 
+    def test_pause_label_follows_cached_server_state(self):
+        gp = FakeGameplay({"jukeboxes": {"box": {"id": "box", "paused": False}}})
+        self.assertEqual(jukebox._pause_menu_label(gp, "box"), "Pause playback")
+        gp.jukebox_state["jukeboxes"]["box"]["paused"] = True
+        self.assertEqual(jukebox._pause_menu_label(gp, "box"), "Resume playback")
+
+    def test_pause_button_sends_authoritative_toggle(self):
+        game = FakeGameNetwork()
+        gp = FakeGameplay({"jukeboxes": {"box": {"id": "box", "paused": True}}})
+        jukebox._toggle_pause(game, gp, "box")
+        args, _ = game.network.sent[-1]
+        self.assertEqual(args[1], "jukebox_toggle_pause")
+        self.assertEqual(args[2], {"id": "box"})
+
 
 class _FakeJukeboxAudioPlayer:
     def __init__(self):

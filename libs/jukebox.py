@@ -1534,6 +1534,10 @@ def open_jukebox_menu(game, gp):
         gp.pop_last_substate()
         _stop_playback(game, gp, jukebox_id)
 
+    def go_pause():
+        gp.pop_last_substate()
+        _toggle_pause(game, gp, jukebox_id)
+
     def go_repeat():
         gp.pop_last_substate()
         _toggle_repeat(game, gp, jukebox_id)
@@ -1585,6 +1589,7 @@ def open_jukebox_menu(game, gp):
     menu_items = [
         ("Search YouTube and queue a song", go_search),
         ("Queue by YouTube URL or livestream", go_direct_url),
+        (lambda: _pause_menu_label(gp, jukebox_id), go_pause),
         ("Skip current song", go_skip),
         ("Stop playback", go_stop),
         (_repeat_label, go_repeat),
@@ -1828,6 +1833,25 @@ def _clear_all(game, gp, jukebox_id):
 def _stop_playback(game, gp, jukebox_id):
     from . import consts
     game.network.send(consts.CHANNEL_MISC, "jukebox_stop", {"id": jukebox_id})
+
+
+def _is_jukebox_paused(gp, jukebox_id):
+    """Return the authoritative paused flag cached for one jukebox."""
+    box = _current_state(gp).get("jukeboxes", {}).get(jukebox_id) or {}
+    return bool(box.get("paused", False))
+
+
+def _pause_menu_label(gp, jukebox_id):
+    """Accessible dynamic label for the shared Pause / Resume action."""
+    return "Resume playback" if _is_jukebox_paused(gp, jukebox_id) else "Pause playback"
+
+
+def _toggle_pause(game, gp, jukebox_id):
+    """Ask the server to toggle shared playback without trusting client state."""
+    from . import consts
+    game.network.send(
+        consts.CHANNEL_MISC, "jukebox_toggle_pause", {"id": jukebox_id}
+    )
 
 
 def _get_repeat_mode(gp, jukebox_id):
