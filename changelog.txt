@@ -2,7 +2,7 @@
 • This document tracks the development history and patch notes
 • for the Beyond Tournament project (Server & Client core).
 • ============================================================
-[v1.8.2] Realistic Wall Thickness Occlusion — 2026-08-25
+] Realistic Wall Thickness Occlusion — 2026-08-25
 --------------------------------------------------------------------------------
 
 • Realistic Acoustic Propagation
@@ -12,6 +12,10 @@
 - **Continuous PA Muffling:** The megaphone/PA speaker system now consumes the wall-thickness ratio directly, so voice and instruments routed through stage speakers muffle proportionally to wall depth, gliding smoothly through the existing fast-attack/slow-release smoothing instead of snapping between wide open and fully blocked.
 - **Underwater Acoustics Preserved:** Sound paths crossing water still receive the realistic half-strength underwater muffling, and water can never reduce the blocking effect of an actual wall lying on the same path.
 - **Deeper Underwater Immersion Muffle:** Submerging now clamps your ears noticeably harder, the way hearing dulls the instant you dive into real water. The depth-to-muffle curve was steepened so just-submerged sound starts far darker than before while the deepest point remains fully dead; a smooth loudness dip of up to roughly -5 dB rides the same animation, making underwater audio quieter as well as duller; and the ear-clamp now engages in 250 ms instead of 500 ms for an immediate realistic dunk. Surfacing still glides everything back exactly as before.
+
+• Jukebox Full-Song Playback
+- **Songs Now Finish Completely:** Fixed jukebox songs being cut off seconds before their natural end. The server previously advanced to the next song by a wall-clock timer built on metadata duration plus only a 0.5 s grace, while every listener still held one-plus seconds of buffered audio — so deep buffering chopped song endings and left dead air until the next track resolved. Queue advance now triggers from the relay stream's true end-of-stream event with a buffered-tail drain window, so the whole song plays out in every listener's ears; the duration timer remains as a safety net with a wider 3.5 s grace.
+- **No More Dead Air at Stream Death:** If a relay stream dies inside the final two seconds of a song (crash, connection reset), the cabinet now bridges straight to the next song after clients drain their tail instead of sitting silent until the fallback timer.
 
 • Quality Assurance
 - **Occlusion Regression Tests:** Added a dedicated unit-test suite covering clear paths, single pillars, stacked thin walls, full walls, diagonal rays, and underwater interactions, locking the new thickness behavior against future regressions.
