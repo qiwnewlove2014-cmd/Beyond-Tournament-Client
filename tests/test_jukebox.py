@@ -4,6 +4,7 @@ import sys
 import os
 import unittest
 import struct
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -75,6 +76,123 @@ class TestCurrentState(unittest.TestCase):
         gp = FakeGameplay("garbage")
         self.assertEqual(jukebox._current_state(gp), {"jukeboxes": {}})
 
+
+class _FakeJukeboxAudioPlayer:
+    def __init__(self):
+        self.eq_calls = []
+        self.volume_calls = []
+
+    def set_eq_profile(self, jukebox_id, profile, values=None):
+        self.eq_calls.append((jukebox_id, profile, values))
+
+    def set_cabinet_volume(self, jukebox_id, volume):
+        self.volume_calls.append((jukebox_id, volume))
+
+
+class TestAccessibleJukeboxSliders(unittest.TestCase):
+    def _event(self, key, mod=0):
+        return SimpleNamespace(type=jukebox.pygame.KEYDOWN, key=key, mod=mod)
+
+    def _make(self, box):
+        gp = FakeGameplay({"jukeboxes": {"box-1": {"id": "box-1", **box}}})
+        gp.jukebox_player = _FakeJukeboxAudioPlayer()
+        game = FakeGameNetwork()
+        return game, gp
+
+    def test_eq_slider_starts_from_current_values_and_tabs_between_bands(self):
+        from unittest import mock
+
+        game, gp = self._make({
+            "eq_profile": "custom",
+            "eq_values": {"bass": 61, "mid": 42, "treble": 73},
+        })
+        slider = jukebox._JukeboxEqSlider(game, gp, "box-1")
+        self.assertEqual(slider.values, {"bass": 61, "mid": 42, "treble": 73})
+
+        with mock.patch("libs.jukebox.speak") as spoken:
+            slider.enter()
+            slider.update([self._event(jukebox.pygame.K_TAB)])
+        self.assertEqual(slider.current_index, 1)
+        self.assertIn("Mid. Slider: 42%", [call.args[0] for call in spoken.call_args_list])
+
+    def test_eq_slider_previews_locally_and_commits_final_values(self):
+        from unittest import mock
+
+        game, gp = self._make({"eq_profile": "normal"})
+        slider = jukebox._JukeboxEqSlider(game, gp, "box-1")
+        with mock.patch("libs.jukebox.speak"), \
+                mock.patch("libs.jukebox.open_jukebox_menu"):
+            slider.update([self._event(jukebox.pygame.K_UP)])
+            slider.update([self._event(jukebox.pygame.K_RETURN)])
+
+        self.assertEqual(gp.jukebox_player.eq_calls[0], (
+            "box-1", "custom", {"bass": 51, "mid": 50, "treble": 50},
+        ))
+        packets = [args[2] for args, _ in game.network.sent]
+        self.assertTrue(packets[0]["preview"])
+        self.assertTrue(packets[-1]["commit"])
+        self.assertEqual(packets[-1]["eq_values"]["bass"], 51)
+
+    def test_volume_slider_focuses_cached_value_previews_and_commits(self):
+        from unittest import mock
+
+        game, gp = self._make({"volume": 73})
+        slider = jukebox._JukeboxVolumeSlider(game, gp, "box-1")
+        self.assertEqual(slider.value, 73)
+
+        with mock.patch("libs.jukebox.speak") as spoken, \
+                mock.patch("libs.jukebox.open_jukebox_menu"):
+            slider.enter()
+            slider.update([self._event(jukebox.pygame.K_DOWN)])
+            slider.update([self._event(jukebox.pygame.K_RETURN)])
+
+        self.assertIn("Volume. Slider: 73%", [call.args[0] for call in spoken.call_args_list])
+        self.assertEqual(gp.jukebox_player.volume_calls[0], ("box-1", 72))
+        packets = [args[2] for args, _ in game.network.sent]
+        self.assertEqual(packets[0]["volume"], 72)
+        self.assertTrue(packets[0]["preview"])
+        self.assertTrue(packets[-1]["commit"])
+
+    def test_eq_gain_curve_is_flat_at_50_and_bounded_at_extremes(self):
+        params = dict(jukebox.JukeboxPlayer._custom_eq_parameters({
+            "bass": 50, "mid": 0, "treble": 100,
+        }))
+        self.assertAlmostEqual(params["low_gain"], 1.0)
+        self.assertGreaterEqual(params["mid1_gain"], 0.126)
+        self.assertLessEqual(params["high_gain"], 7.943)
+
+    def test_custom_eq_updates_one_effect_slot_in_place(self):
+        class Effect:
+            def __init__(self):
+                self.updates = []
+
+            def set(self, *param):
+                self.updates.append(param)
+
+        class Slot:
+            def __init__(self):
+                self.effect = Effect()
+
+        class Audio:
+            def __init__(self):
+                self.efx = object()
+                self.created = []
+
+            def gen_effect(self, *_args):
+                slot = Slot()
+                self.created.append(slot)
+                return slot
+
+        game = SimpleNamespace(audio_mngr=Audio())
+        player = jukebox.JukeboxPlayer(game)
+        player.set_eq_profile("box-1", "custom", {
+            "bass": 50, "mid": 50, "treble": 50,
+        })
+        player.set_eq_profile("box-1", "custom", {
+            "bass": 60, "mid": 40, "treble": 70,
+        })
+        self.assertEqual(len(game.audio_mngr.created), 1)
+        self.assertEqual(len(game.audio_mngr.created[0].effect.updates), 10)
 
 class FakeNetwork:
     def __init__(self):

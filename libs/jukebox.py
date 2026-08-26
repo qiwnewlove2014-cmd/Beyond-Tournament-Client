@@ -22,7 +22,9 @@ import threading
 import time
 
 import cyal
+import pygame
 
+from . import state
 from .speech import speak
 from .logger import log as log_line
 
@@ -364,7 +366,9 @@ class JukeboxPlayer:
         self._direct_fallback_until = {}
         self._stall_unsticks = {}
         self.eq_profiles = {}
+        self.eq_values = {}
         self.eq_slots = {}
+        self.custom_eq_slots = {}
         self.cabinet_volumes = {}
         self._occlusion_filter = None
         self._light_occlusion_filter = None
@@ -414,14 +418,86 @@ class JukeboxPlayer:
         ),
     }
 
-    def _get_eq_slot(self, profile):
-        """Get or create the OpenAL Hardware Equalizer effect slot for a profile."""
+    @staticmethod
+    def _normalize_eq_values(values):
+        values = values if isinstance(values, dict) else {}
+        normalized = {}
+        for band in ("bass", "mid", "treble"):
+            try:
+                value = int(values.get(band, 50))
+            except (TypeError, ValueError):
+                value = 50
+            normalized[band] = max(0, min(100, value))
+        return normalized
+
+    @classmethod
+    def _custom_eq_parameters(cls, values):
+        """Map accessible 0-100 sliders to safe OpenAL EQUALIZER gains.
+
+        50 is unity/flat. The exponential curve gives equal perceptual room
+        above and below unity while staying inside the EFX 0.126-7.943 range.
+        Both mid filters move together so the single Mid slider covers vocals
+        and instruments instead of only one narrow center frequency.
+        """
+        values = cls._normalize_eq_values(values)
+
+        def gain(value):
+            return 7.0 ** ((value - 50.0) / 50.0)
+
+        mid_gain = gain(values["mid"])
+        return (
+            ("low_gain", gain(values["bass"])),
+            ("low_cutoff", 260.0),
+            ("mid1_gain", mid_gain),
+            ("mid1_center", 500.0),
+            ("mid1_width", 1.0),
+            ("mid2_gain", mid_gain),
+            ("mid2_center", 3000.0),
+            ("mid2_width", 1.0),
+            ("high_gain", gain(values["treble"])),
+            ("high_cutoff", 4000.0),
+        )
+
+    def _get_eq_slot(self, profile, jukebox_id=None, eq_values=None):
+        """Get or update an OpenAL Hardware Equalizer slot.
+
+        Presets share a cached slot. A custom profile owns one slot per active
+        cabinet and mutates its effect in place on every slider tick, avoiding
+        EFX slot leaks and keeping changes audible in real time.
+        """
         profile = str(profile or "normal").lower()
-        if profile not in self.EQ_PRESETS:
+        if profile != "custom" and profile not in self.EQ_PRESETS:
             return None
         audio = getattr(self.game, "audio_mngr", None)
         if audio is None or getattr(audio, "efx", None) is None or not hasattr(audio, "gen_effect"):
             return None
+        if profile == "custom":
+            if not jukebox_id:
+                return None
+            params = self._custom_eq_parameters(eq_values)
+            slot = self.custom_eq_slots.get(jukebox_id)
+            if slot is None:
+                try:
+                    slot = audio.gen_effect("EQUALIZER", *params)
+                except Exception:
+                    slot = None
+                self.custom_eq_slots[jukebox_id] = slot
+            elif slot is not None:
+                effect = getattr(slot, "effect", None)
+                if effect is not None:
+                    for param in params:
+                        try:
+                            effect.set(*param)
+                        except Exception:
+                            pass
+                    try:
+                        # EFX implementations may snapshot parameters when an
+                        # effect is attached; reattach the same object so the
+                        # in-place edits become audible without a new slot.
+                        slot.effect = effect
+                    except Exception:
+                        pass
+            return slot
         if profile not in self.eq_slots:
             try:
                 params = self.EQ_PRESETS[profile]
@@ -430,14 +506,22 @@ class JukeboxPlayer:
                 self.eq_slots[profile] = None
         return self.eq_slots.get(profile)
 
-    def set_eq_profile(self, jukebox_id, profile):
+    def set_eq_profile(self, jukebox_id, profile, eq_values=None):
         """Update EQ profile for a specific jukebox and re-apply EFX sends in real-time."""
         profile = str(profile or "normal").lower()
+        if profile not in ("normal", "bass_boost", "custom"):
+            profile = "normal"
+        previous_profile = self.eq_profiles.get(jukebox_id, "normal")
+        normalized_values = self._normalize_eq_values(eq_values)
         self.eq_profiles[jukebox_id] = profile
+        if profile == "custom":
+            self.eq_values[jukebox_id] = normalized_values
+        else:
+            self.eq_values.pop(jukebox_id, None)
         audio = getattr(self.game, "audio_mngr", None)
         if audio is None or getattr(audio, "efx", None) is None:
             return
-        slot = self._get_eq_slot(profile)
+        slot = self._get_eq_slot(profile, jukebox_id, normalized_values)
         with self._lock:
             entry = self.players.get(jukebox_id)
             if entry is not None:
@@ -462,6 +546,13 @@ class JukeboxPlayer:
                             audio.efx.send(src, 1, slot, filter=filt)
                         except Exception:
                             pass
+        if previous_profile == "custom" and profile != "custom":
+            old_slot = self.custom_eq_slots.pop(jukebox_id, None)
+            if old_slot is not None and hasattr(audio, "release_effect_slot"):
+                try:
+                    audio.release_effect_slot(old_slot)
+                except Exception:
+                    pass
 
     def set_cabinet_volume(self, jukebox_id, volume):
         """Set server-synchronized master volume for a specific jukebox cabinet (0-100)."""
@@ -741,8 +832,15 @@ class JukeboxPlayer:
         slot = None
         try:
             eq_profile = str(_kwargs.get("eq_profile") or self.eq_profiles.get(jukebox_id, "normal")).lower()
+            eq_values = self._normalize_eq_values(
+                _kwargs.get("eq_values") or self.eq_values.get(jukebox_id)
+            )
             self.eq_profiles[jukebox_id] = eq_profile
-            slot = self._get_eq_slot(eq_profile)
+            if eq_profile == "custom":
+                self.eq_values[jukebox_id] = eq_values
+            else:
+                self.eq_values.pop(jukebox_id, None)
+            slot = self._get_eq_slot(eq_profile, jukebox_id, eq_values)
             if slot is not None and getattr(audio, "efx", None) is not None:
                 audio.efx.send(src_l, 1, slot, filter=filt)
                 audio.efx.send(src_r, 1, slot, filter=filt)
@@ -957,6 +1055,17 @@ class JukeboxPlayer:
             ids = list(self.players.keys())
         for jukebox_id in ids:
             self.stop(jukebox_id)
+        audio = getattr(self.game, "audio_mngr", None)
+        slots = list(self.custom_eq_slots.values())
+        self.custom_eq_slots.clear()
+        self.eq_values.clear()
+        if audio is not None and hasattr(audio, "release_effect_slot"):
+            for slot in slots:
+                if slot is not None:
+                    try:
+                        audio.release_effect_slot(slot)
+                    except Exception:
+                        pass
 
     def update(self):
         """Recover a jukebox stream that stopped without a stop packet.
@@ -1461,15 +1570,13 @@ def open_jukebox_menu(game, gp):
         mode = _get_repeat_mode(gp, jukebox_id)
         return f"Toggle repeat mode (now: {repeat_names.get(mode, 'off')})"
 
-    EQ_NAMES = {
-        "normal": "Standard",
-        "bass_boost": "Bass Boost",
-    }
-
     def _eq_label():
-        mode = _get_eq_profile(gp, jukebox_id)
-        name = EQ_NAMES.get(mode, "Standard")
-        return f"Sound profile EQ (now: {name})"
+        values = _get_eq_values(gp, jukebox_id)
+        return (
+            "Sound profile EQ "
+            f"(Bass {values['bass']}%, Mid {values['mid']}%, "
+            f"Treble {values['treble']}%)"
+        )
 
     def _volume_label():
         vol = _get_jukebox_volume(gp, jukebox_id)
@@ -1505,27 +1612,111 @@ def open_jukebox_menu(game, gp):
     gp.add_substate(m)
 
 
+class _JukeboxEqSlider(state.State):
+    """Accessible, server-synchronized Bass/Mid/Treble slider state."""
+
+    SEND_INTERVAL = 0.075
+    BANDS = (("bass", "Bass"), ("mid", "Mid"), ("treble", "Treble"))
+
+    def __init__(self, game, parent, jukebox_id):
+        super().__init__(game, parrent=parent)
+        self.jukebox_id = jukebox_id
+        self.values = _get_eq_values(parent, jukebox_id)
+        self.current_index = 0
+        self._last_preview_at = 0.0
+        self._closed = False
+
+    def enter(self):
+        super().enter()
+        speak(
+            "Jukebox Sound Profile EQ. Tab switches Bass, Mid, and Treble. "
+            "Up and Down adjust. Page Up and Page Down adjust by 10. "
+            "Home resets the current band to 50. Enter saves."
+        )
+        self._announce_current()
+
+    def exit(self):
+        super().exit()
+        speak("Jukebox Sound Profile EQ closed.")
+
+    def update(self, events):
+        super().update(events)
+        for event in events:
+            if event.type != pygame.KEYDOWN:
+                continue
+            key = event.key
+            if key == pygame.K_TAB:
+                direction = -1 if event.mod & pygame.KMOD_SHIFT else 1
+                self.current_index = (self.current_index + direction) % len(self.BANDS)
+                self._announce_current()
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE):
+                self._close_and_commit()
+                break
+            elif key == pygame.K_UP:
+                self._adjust(1)
+            elif key == pygame.K_DOWN:
+                self._adjust(-1)
+            elif key == pygame.K_PAGEUP:
+                self._adjust(10)
+            elif key == pygame.K_PAGEDOWN:
+                self._adjust(-10)
+            elif key == pygame.K_HOME:
+                self._set_current(50)
+        return True
+
+    def _announce_current(self):
+        band, label = self.BANDS[self.current_index]
+        speak(f"{label}. Slider: {self.values[band]}%")
+
+    def _adjust(self, amount):
+        band, _ = self.BANDS[self.current_index]
+        self._set_current(self.values[band] + amount)
+
+    def _set_current(self, value):
+        band, _ = self.BANDS[self.current_index]
+        value = max(0, min(100, int(value)))
+        if value != self.values[band]:
+            self.values[band] = value
+            self._apply(preview=True)
+        speak(f"{value}%")
+
+    def _apply(self, preview):
+        values = dict(self.values)
+        boxes = _current_state(self.parrent).setdefault("jukeboxes", {})
+        box = boxes.setdefault(self.jukebox_id, {"id": self.jukebox_id})
+        box["eq_profile"] = "custom"
+        box["eq_values"] = values
+        player = getattr(self.parrent, "jukebox_player", None)
+        if player is not None:
+            player.set_eq_profile(self.jukebox_id, "custom", values)
+
+        now = time.monotonic()
+        if preview and now - self._last_preview_at < self.SEND_INTERVAL:
+            return
+        network = getattr(self.game, "network", None)
+        if network is not None:
+            from . import consts
+            network.send(consts.CHANNEL_MISC, "jukebox_set_eq", {
+                "id": self.jukebox_id,
+                "eq_values": values,
+                "preview": bool(preview),
+                "commit": not preview,
+            })
+            if preview:
+                self._last_preview_at = now
+
+    def _close_and_commit(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._apply(preview=False)
+        self.parrent.pop_last_substate()
+        open_jukebox_menu(self.game, self.parrent)
+
+
 def _open_eq_menu(game, gp, jukebox_id):
-    """Submenu for selecting Jukebox Equalizer / Sound Profile (Server Synchronized)."""
-    from . import consts, menu as menu_mod, menus
-
-    def select_profile(mode):
-        def _cb():
-            gp.pop_last_substate()
-            game.network.send(
-                consts.CHANNEL_MISC, "jukebox_set_eq", {"id": jukebox_id, "eq": mode}
-            )
-        return _cb
-
-    m = menu_mod.Menu(game, "Jukebox Sound Profiles", parrent=gp)
-    items = [
-        ("Standard / Flat (Original unaltered sound)", select_profile("normal")),
-        ("Bass Boost (Deep & Punchy Bass)", select_profile("bass_boost")),
-        ("Back to Jukebox menu", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))),
-    ]
-    m.add_items(items)
-    menus.set_default_sounds(m)
-    gp.add_substate(m)
+    """Open the accessible, real-time Jukebox Equalizer sliders."""
+    gp.add_substate(_JukeboxEqSlider(game, gp, jukebox_id))
 
 
 def _open_search_input(game, gp, jukebox_id):
@@ -1650,7 +1841,18 @@ def _get_eq_profile(gp, jukebox_id):
     """The cached server EQ sound profile for one jukebox."""
     box = _current_state(gp).get("jukeboxes", {}).get(jukebox_id) or {}
     profile = str(box.get("eq_profile") or "normal").lower()
-    return profile if profile in ("normal", "bass_boost") else "normal"
+    return profile if profile in ("normal", "bass_boost", "custom") else "normal"
+
+
+def _get_eq_values(gp, jukebox_id):
+    """Return the three accessible 0-100 EQ values for one cabinet."""
+    box = _current_state(gp).get("jukeboxes", {}).get(jukebox_id) or {}
+    profile = _get_eq_profile(gp, jukebox_id)
+    if profile == "bass_boost":
+        return {"bass": 100, "mid": 50, "treble": 50}
+    if profile != "custom":
+        return {"bass": 50, "mid": 50, "treble": 50}
+    return JukeboxPlayer._normalize_eq_values(box.get("eq_values"))
 
 
 def _get_jukebox_volume(gp, jukebox_id):
@@ -1688,32 +1890,94 @@ def _get_or_create_jukebox_player(game, gp):
     return player
 
 
-def _open_volume_menu(game, gp, jukebox_id):
-    from . import menu as menu_mod, menus, consts
-    current_vol = _get_jukebox_volume(gp, jukebox_id)
+class _JukeboxVolumeSlider(state.State):
+    """Accessible cabinet-volume slider with immediate local preview."""
 
-    def set_vol(val):
-        if getattr(game, "network", None) is not None:
-            game.network.send(consts.CHANNEL_MISC, "jukebox_set_volume", {
-                "id": jukebox_id,
-                "volume": val,
+    SEND_INTERVAL = 0.075
+
+    def __init__(self, game, parent, jukebox_id):
+        super().__init__(game, parrent=parent)
+        self.jukebox_id = jukebox_id
+        self.value = _get_jukebox_volume(parent, jukebox_id)
+        self._last_preview_at = 0.0
+        self._closed = False
+
+    def enter(self):
+        super().enter()
+        speak(
+            "Jukebox Volume. Up and Down adjust. Page Up and Page Down "
+            "adjust by 10. Home sets 100. End sets 0. Enter saves."
+        )
+        speak(f"Volume. Slider: {self.value}%")
+
+    def exit(self):
+        super().exit()
+        speak("Jukebox Volume closed.")
+
+    def update(self, events):
+        super().update(events)
+        for event in events:
+            if event.type != pygame.KEYDOWN:
+                continue
+            key = event.key
+            if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE):
+                self._close_and_commit()
+                break
+            if key == pygame.K_UP:
+                self._set_value(self.value + 1)
+            elif key == pygame.K_DOWN:
+                self._set_value(self.value - 1)
+            elif key == pygame.K_PAGEUP:
+                self._set_value(self.value + 10)
+            elif key == pygame.K_PAGEDOWN:
+                self._set_value(self.value - 10)
+            elif key == pygame.K_HOME:
+                self._set_value(100)
+            elif key == pygame.K_END:
+                self._set_value(0)
+        return True
+
+    def _set_value(self, value):
+        value = max(0, min(100, int(value)))
+        if value != self.value:
+            self.value = value
+            self._apply(preview=True)
+        speak(f"{value}%")
+
+    def _apply(self, preview):
+        boxes = _current_state(self.parrent).setdefault("jukeboxes", {})
+        box = boxes.setdefault(self.jukebox_id, {"id": self.jukebox_id})
+        box["volume"] = self.value
+        player = getattr(self.parrent, "jukebox_player", None)
+        if player is not None:
+            player.set_cabinet_volume(self.jukebox_id, self.value)
+
+        now = time.monotonic()
+        if preview and now - self._last_preview_at < self.SEND_INTERVAL:
+            return
+        network = getattr(self.game, "network", None)
+        if network is not None:
+            from . import consts
+            network.send(consts.CHANNEL_MISC, "jukebox_set_volume", {
+                "id": self.jukebox_id,
+                "volume": self.value,
+                "preview": bool(preview),
+                "commit": not preview,
             })
-        gp.pop_last_substate()
-        open_jukebox_menu(game, gp)
+            if preview:
+                self._last_preview_at = now
 
-    m = menu_mod.Menu(game, f"Jukebox Volume (Current: {current_vol}%)", parrent=gp)
-    m.add_items([
-        (f"100%{' (Active)' if current_vol == 100 else ''}", lambda: set_vol(100)),
-        (f"80%{' (Active)' if current_vol == 80 else ''}", lambda: set_vol(80)),
-        (f"65%{' (Active)' if current_vol == 65 else ''}", lambda: set_vol(65)),
-        (f"50%{' (Active)' if current_vol == 50 else ''}", lambda: set_vol(50)),
-        (f"30%{' (Active)' if current_vol == 30 else ''}", lambda: set_vol(30)),
-        (f"10%{' (Active)' if current_vol == 10 else ''}", lambda: set_vol(10)),
-        (f"Mute (0%){' (Active)' if current_vol == 0 else ''}", lambda: set_vol(0)),
-        ("Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))),
-    ])
-    menus.set_default_sounds(m)
-    gp.add_substate(m)
+    def _close_and_commit(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._apply(preview=False)
+        self.parrent.pop_last_substate()
+        open_jukebox_menu(self.game, self.parrent)
+
+
+def _open_volume_menu(game, gp, jukebox_id):
+    gp.add_substate(_JukeboxVolumeSlider(game, gp, jukebox_id))
 
 
 def _show_results_menu(game, gp, jukebox_id, results):

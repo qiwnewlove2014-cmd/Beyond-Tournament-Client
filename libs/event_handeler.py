@@ -1767,6 +1767,7 @@ class EventHandeler:
                 stream_epoch=data.get("stream_epoch"),
                 http_headers=data.get("http_headers"),
                 eq_profile=data.get("eq_profile", "normal"),
+                eq_values=data.get("eq_values"),
                 cabinet_volume=data.get("volume", 100),
             ))
 
@@ -1776,6 +1777,7 @@ class EventHandeler:
             return
         jid = data.get("id")
         eq = data.get("eq_profile", "normal")
+        eq_values = data.get("eq_values")
         gp = self.gameplay
         if gp:
             state = getattr(gp, "jukebox_state", None)
@@ -1783,9 +1785,13 @@ class EventHandeler:
                 boxes = state.setdefault("jukeboxes", {})
                 box = boxes.setdefault(jid, {"id": jid})
                 box["eq_profile"] = eq
+                if eq == "custom" and isinstance(eq_values, dict):
+                    box["eq_values"] = eq_values
+                else:
+                    box.pop("eq_values", None)
             player = self._jukebox_player()
             if player is not None:
-                self.game.put(lambda: player.set_eq_profile(jid, eq))
+                self.game.put(lambda: player.set_eq_profile(jid, eq, eq_values))
 
     def jukebox_volume(self, data):
         """Server broadcasted a volume update for a jukebox."""
