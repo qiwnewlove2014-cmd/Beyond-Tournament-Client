@@ -459,6 +459,13 @@ class Gameplay(state.State):
     def _stop_all_piano_midi_notes(self):
         self.piano._stop_all_midi_notes()
 
+    @staticmethod
+    def _keyboard_sustain_is_down():
+        try:
+            return bool(pygame.key.get_pressed()[pygame.K_SPACE])
+        except pygame.error:
+            return False
+
     def _deactivate_piano_midi(self):
         self.piano._deactivate_midi()
 
