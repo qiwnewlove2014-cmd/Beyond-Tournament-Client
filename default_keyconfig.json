@@ -46,6 +46,7 @@
         "voice_chat": "g",
         "helper_menu": "n",
         "open_volume_mixer": "f7",
+        "open_staff_menu": "f8",
         "music_bot_toggle": "m",
         "guitar_play": "u",
         "music_bot_vol_down": "f9",

@@ -140,6 +140,7 @@ class Gameplay(state.State):
             kc.get("voice_chat", pygame.K_g): self.voice_chat_toggle,  # Toggle mode (tap to talk, tap again to stop)
             pygame.K_RETURN: self.buffer_options,
             kc.get("open_volume_mixer", pygame.K_F7): lambda mod: self.add_substate(volume_mixer.volume_mixer(self.game, parent=self)),
+            kc.get("open_staff_menu", pygame.K_F8): self.open_staff_menu,
             pygame.K_o: self.handle_o_key,  # PA Test Mode (no mod) or Options (ALT+O)
             kc.get("map_chat", pygame.K_SLASH): self.map_chat,
             kc.get("chat", pygame.K_QUOTE): self.chat,
@@ -1604,6 +1605,10 @@ class Gameplay(state.State):
 
     def open_inventory(self, mod):
         if not self.player.dead: self.game.network.send(consts.CHANNEL_MISC, "open_inventory")
+
+    def open_staff_menu(self, mod):
+        if getattr(self, "is_staff", False):
+            self.game.network.send(consts.CHANNEL_MENUS, "staff_menu_open", {})
 
     def get_hp(self, mod):
         if self.player.lock_weapon: return
