@@ -2,6 +2,53 @@
 • This document tracks the development history and patch notes
 • for the Beyond Tournament project (Server & Client core).
 • ============================================================
+
+--------------------------------------------------------------------------------
+[v1.8.2] Jukebox Controls, Full-Song Playback & World Audio Polish — 2026-08-27
+--------------------------------------------------------------------------------
+
+• Megaphone & Music Bot
+- **Smoother Broadcaster Monitoring:** Music Bot audio routed through the Megaphone now plays more smoothly for the person broadcasting it, without changing what other players hear or how the Server distributes the broadcast.
+
+• Underwater Audio Polish
+- **Deeper Underwater Immersion Muffle:** Submerging now clamps your ears noticeably harder, the way hearing dulls the instant you dive into real water. The depth-to-muffle curve was steepened so just-submerged sound starts far darker than before while the deepest point remains fully dead; a smooth loudness dip of up to roughly -5 dB rides the same animation, making underwater audio quieter as well as duller; and the ear-clamp now engages in 250 ms instead of 500 ms for an immediate realistic dunk. Surfacing still glides everything back exactly as before.
+
+• Movement
+- **Sprint With Arrow Keys Fixed:** Holding Shift and pressing the left/right arrow keys (the default strafe bindings) used to cancel running on the spot and lock out starting it again until another movement key was tapped first. Strafe presses no longer cancel an active sprint while Shift is held, so running left/right with the arrow keys works naturally; bare strafe presses still never auto-run, exactly as before.
+
+• Staff Configuration
+- **Accessible Staff Tools:** Improved the private Staff tools menu with clearer guided inputs, choices, examples, and confirmations, making authorized commands easier and safer for staff to use. Access and actions continue to be validated securely by the Server.
+- **Task-Focused Staff Navigation:** Related player-access and Staff-access actions now appear together in permission-filtered Staff Form categories, reducing category switching without changing anyone's authority.
+- **Staff Access Safeguards:** Strengthened private senior-staff controls with clearer oversight, bounded review records, automatic notices, expiry protection, and Server-side enforcement. High-impact player-state authority is now aligned with senior operational responsibility.
+- **Moderation Authority Safeguards:** Added stricter Server-side limits, review escalation, confirmation, audit, and atomic persistence for high-impact account access decisions.
+- **Editable Login Welcome Message:** Contributors and Developers can now use `/setwelcome <message>` to change the one-line greeting spoken when a player logs in, independently from `/setmotd` and `/setsm`. The Server enforces the rank and 1-300 character limit, preserves the other message sections, serializes simultaneous edits, confirms the result accessibly, and notifies staff without exposing configuration internals.
+
+• Jukebox Staff Audio Controls
+- **Three-Band Jukebox EQ:** Staff can now adjust Bass, Mid, and Treble independently from the Sound profile EQ screen with Tab navigation, fine and ten-step arrow controls, and an accessible flat reset at 50.
+- **Continuous Cabinet Volume:** Adjust jukebox volume now opens at the cabinet's synchronized current value and changes from 0-100% in real time instead of offering only fixed presets.
+- **Server-Validated Preview and Commit:** The Server validates staff EQ authority and all numeric bounds, rate-limits preview packets, broadcasts changes immediately, and writes the final per-cabinet EQ and volume values once when the slider closes.
+
+• Jukebox Playback Controls
+- **Shared Pause and Resume:** Added a dynamic `Pause playback` / `Resume playback` button to the Jukebox menu. The Server freezes fixed-length songs at their current position, preserves the current song and waiting queue, stops the old relay, and resumes with a fresh relay identity so every listener stays synchronized. Livestreams resume at the current live point instead of attempting an unreliable rewind.
+- **Faster Resume Startup:** Resume now reuses the current Server-resolved progressive media URL and its required headers for a validated hybrid seek: ffmpeg jumps to two seconds before the frozen position, decodes only that short tail for accuracy, then returns to real-time pacing. This removes offset-dependent downloading and decoding from the normal Resume path. Unsafe, missing, expired, or slow signed URLs are rejected or abandoned within eight seconds and automatically retry through the canonical yt-dlp relay, preserving the existing reliability fallback.
+
+• Jukebox Full-Song Playback
+- **Songs Now Finish Completely:** Fixed jukebox songs being cut off seconds before their natural end. The server previously advanced to the next song by a wall-clock timer built on metadata duration plus only a 0.5 s grace, while every listener still held one-plus seconds of buffered audio — deep buffering chopped song endings and left dead air until the next track resolved. Queue advance now triggers from the relay stream's true end-of-stream event with a buffered-tail drain window, so the whole song plays out in every listener's ears; the duration timer remains as a safety net with a wider 3.5 s grace.
+- **No More Dead Air at Stream Death:** If a relay stream dies inside the final two seconds of a song (crash, connection reset), the cabinet now bridges straight to the next song after clients drain their tail instead of sitting silent until the fallback timer.
+
+• Quality Assurance
+- **Jukebox Queue Regression Suite Updated:** Expanded coverage for full-song endings, Pause/Resume, synchronized sliders, relay fallback, queue advance, repeat, and reload behavior; the complete Jukebox Server suite now passes 125 checks.
+
+- **Map-Bound Teleport Protection:** The /move staff command and the Builder Travel Point system now validate coordinates against the destination map's declared bounds before teleporting. Any attempt to place a player outside the playable area is blocked with a clear error message showing the valid coordinate range. Without this, a builder or staff member could accidentally (or intentionally) warp a player into undefined tiles beyond the map edge, where they would desync from map state and fall outside the reachable world.
+
+- **Builder Wall Labeling Fixed:** Walls are stored internally as platform elements with a wall material, so the Edit Map Elements menu announced and confirmed them as "Platform" — deleting a wall asked "Delete Platform?". The menu now names walls correctly everywhere: the options title, the delete confirmation ("Delete Wall?"), and all spoken announcements say Wall while every underlying map-file operation keeps working exactly as before.
+
+• Builder Menu Improvements
+- **Change Floor Type / Change Wall Type Shortcut Button:** Platform and wall element options now include a dedicated material button right under Edit Element. Pressing it opens the floor or wall category picker directly and applies the new material in two steps, instead of re-entering six coordinate values just to reach the type selection. The button label adapts automatically — floors show Change Floor Type and walls show Change Wall Type.
+- **Shorter Coordinate Editing Flow:** The full Edit Element flow for platforms and walls now ends immediately after Max Z and confirms the change. Material picking lives in its own shortcut button, so adjusting an element's position no longer walks through the type-selection stage; all other element types keep their existing edit flow unchanged.
+- **Wallbuy Weapon Sound Previews:** Browsing weapons in the Wallbuy placement menus now plays a short preview of each item while you move through the list, the same way floor and wall materials preview their sounds. Firearms and melee weapons play their equip sound, the frag grenade plays its pin-pull sound, and shields play their raise sound from their own sound pack; items without a matching sound file simply stay silent instead of erroring. The Select Sound Pack menu preview was also fixed to find the equip files correctly.
+
+
 ] Realistic Wall Thickness Occlusion — 2026-08-25
 --------------------------------------------------------------------------------
 

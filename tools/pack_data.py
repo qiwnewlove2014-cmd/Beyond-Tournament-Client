@@ -22,6 +22,17 @@ KEY_PART_2 = "30626a74476d364e797030536a5433316f51673d"
 DEFAULT_BUILD_CONFIG = "build_server_config.json"
 
 
+def iter_build_assets(source_root: Path):
+    """Exclude dollar-sign files and whole directories without reading them."""
+    def walk_error(error):
+        raise error
+    for directory, names, files in os.walk(source_root, followlinks=False, onerror=walk_error):
+        names[:] = sorted(name for name in names if "$" not in name)
+        for name in sorted(files):
+            if "$" not in name:
+                yield Path(directory) / name
+
+
 def pack_data(
     data_dir: os.PathLike[str] | str,
     output_path: os.PathLike[str] | str,
@@ -53,7 +64,7 @@ def pack_data(
         with zipfile.ZipFile(
             temporary_zip_path, "w", compression=zipfile.ZIP_DEFLATED
         ) as archive:
-            for source_path in sorted(source_root.rglob("*")):
+            for source_path in iter_build_assets(source_root):
                 if source_path.is_file():
                     archive_name = source_path.relative_to(source_root).as_posix()
                     if archive_name == SERVER_CONFIG_MEMBER:

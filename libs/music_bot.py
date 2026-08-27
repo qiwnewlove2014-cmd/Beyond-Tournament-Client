@@ -569,21 +569,32 @@ class AudioStreamer(threading.Thread):
             if data is None:
                 continue
 
-            # High-resolution time pacing
+            # High-resolution, deadline-based pacing. Advancing the ideal
+            # deadline by exactly 20 ms prevents normal scheduler overshoot
+            # (typically 0.2-0.8 ms/frame on Windows) from accumulating into a
+            # steadily growing network queue. A large stall starts a fresh
+            # cadence rather than bursting old audio to catch up.
             now = time.perf_counter()
-            if self.last_send_time is not None:
-                elapsed = now - self.last_send_time
-                target_interval = 0.020  # 20ms per buffer
-                if elapsed < target_interval:
+            target_interval = 0.020  # 20ms per buffer
+            if self.last_send_time is None or now - self.last_send_time > 0.100:
+                deadline = now
+            else:
+                deadline = self.last_send_time + target_interval
+                if now < deadline:
                     # Sleep most of the way (subtracting 1ms margin for Windows scheduler inaccuracy)
-                    sleep_time = target_interval - elapsed
+                    sleep_time = deadline - now
                     if sleep_time > 0.001:
                         time.sleep(sleep_time - 0.001)
                     # Spin lock for the remaining fraction of a millisecond
-                    while time.perf_counter() - self.last_send_time < target_interval:
+                    while time.perf_counter() < deadline:
                         pass
-            # Set last_send_time before doing encoding/networking to prevent work time drift
-            self.last_send_time = time.perf_counter()
+                elif now - deadline > 0.040:
+                    # Do not emit a catch-up burst after a suspended/stalled worker.
+                    deadline = now
+            # Keep the IDEAL deadline, not the overshot wall-clock time, so small
+            # scheduling errors are corrected by the next interval instead of
+            # becoming permanent drift.
+            self.last_send_time = deadline
 
             self._send_to_network_actual(data, timeline_epoch, timeline_seq)
 
@@ -672,7 +683,9 @@ class AudioStreamer(threading.Thread):
                         from . import voice_chat
                         if hasattr(voice_chat, '_feed_local_megaphone_direct'):
                             local_pcm = bytes(mono_data)
-                            voice_chat._feed_local_megaphone_direct(gp, local_pcm, producer='music')
+                            voice_chat._feed_local_megaphone_direct(
+                                gp, local_pcm, producer='music'
+                            )
                 except Exception:
                     pass
 

@@ -1,6 +1,9 @@
 [v1.8.2] Jukebox Controls, Full-Song Playback & World Audio Polish — 2026-08-27
 --------------------------------------------------------------------------------
 
+• Megaphone & Music Bot
+- **Smoother Broadcaster Monitoring:** Music Bot audio routed through the Megaphone now plays more smoothly for the person broadcasting it, without changing what other players hear or how the Server distributes the broadcast.
+
 • Underwater Audio Polish
 - **Deeper Underwater Immersion Muffle:** Submerging now clamps your ears noticeably harder, the way hearing dulls the instant you dive into real water. The depth-to-muffle curve was steepened so just-submerged sound starts far darker than before while the deepest point remains fully dead; a smooth loudness dip of up to roughly -5 dB rides the same animation, making underwater audio quieter as well as duller; and the ear-clamp now engages in 250 ms instead of 500 ms for an immediate realistic dunk. Surfacing still glides everything back exactly as before.
 
@@ -8,6 +11,10 @@
 - **Sprint With Arrow Keys Fixed:** Holding Shift and pressing the left/right arrow keys (the default strafe bindings) used to cancel running on the spot and lock out starting it again until another movement key was tapped first. Strafe presses no longer cancel an active sprint while Shift is held, so running left/right with the arrow keys works naturally; bare strafe presses still never auto-run, exactly as before.
 
 • Staff Configuration
+- **Accessible Staff Tools:** Improved the private Staff tools menu with clearer guided inputs, choices, examples, and confirmations, making authorized commands easier and safer for staff to use. Access and actions continue to be validated securely by the Server.
+- **Task-Focused Staff Navigation:** Related player-access and Staff-access actions now appear together in permission-filtered Staff Form categories, reducing category switching without changing anyone's authority.
+- **Staff Access Safeguards:** Strengthened private senior-staff controls with clearer oversight, bounded review records, automatic notices, expiry protection, and Server-side enforcement. High-impact player-state authority is now aligned with senior operational responsibility.
+- **Moderation Authority Safeguards:** Added stricter Server-side limits, review escalation, confirmation, audit, and atomic persistence for high-impact account access decisions.
 - **Editable Login Welcome Message:** Contributors and Developers can now use `/setwelcome <message>` to change the one-line greeting spoken when a player logs in, independently from `/setmotd` and `/setsm`. The Server enforces the rank and 1-300 character limit, preserves the other message sections, serializes simultaneous edits, confirms the result accessibly, and notifies staff without exposing configuration internals.
 
 • Jukebox Staff Audio Controls

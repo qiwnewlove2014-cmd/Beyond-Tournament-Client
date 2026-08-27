@@ -67,6 +67,11 @@ launch.bat
 
 ## Building the Game
 
+Before compiling, run `build.bat --check`. It performs read-only input checks
+and requires the approved FFmpeg/OpenAL helpers. See
+[Windows build integrity checks](tools/BUILD_SAFETY.md) for trusted downloads,
+Python selection, staging behavior, and the limits of these checks.
+
 To build an executable version of the game, follow these steps:
 
 1.  **Update the Version:** Before building, edit `libs/version.py` to set a new version number, following semantic versioning (e.g., `major.minor.patch`).

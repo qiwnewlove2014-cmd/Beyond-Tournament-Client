@@ -8,7 +8,7 @@ from nuitka.plugins.PluginBase import NuitkaPluginBase
 def get_libraries(module):
     """Returns a  list of the libraries needed by cyal"""
     cyal_dir = module.getCompileTimeDirectory()
-    return list(glob.glob(f'{cyal_dir}/*.dll'))
+    return [path for path in glob.glob(f'{cyal_dir}/*.dll') if '$' not in Path(path).name]
 
 class cyalPlugin(NuitkaPluginBase):
     plugin_name = "cyal"

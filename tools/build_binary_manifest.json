@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "files": {
+    "ffmpeg.exe": {
+      "version": "8.1.2-full_build-www.gyan.dev",
+      "size": 242496512,
+      "sha256": "ad8f211bc894755e0061c55ab280ae00e8d3d4f15a8cc4372b24cfa247b5942e",
+      "source_url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-full_build.7z",
+      "archive_sha256": "0fff188997a499b5382e0f66e845d4556c48c54f0113ebed4853d556dbdd7059",
+      "checksum_url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-full_build.7z.sha256",
+      "archive_member": "ffmpeg-8.1.2-full_build/bin/ffmpeg.exe",
+      "provenance": "Gyan Windows build linked by ffmpeg.org; archive matches publisher SHA-256; executable is unsigned."
+    },
+    "oalinst.exe": {
+      "version": "2.0.7.0",
+      "size": 809496,
+      "sha256": "b8f39714d41e009f75efb183c37100f2cbabb71784bbd243be881ac5b42d86fd",
+      "source_url": "https://www.openal.org/downloads/oalinst.zip",
+      "archive_sha256": "d165bcb7628fd950d14847585468cc11943b2a1da92a59a839d397c68f9d4b06",
+      "archive_member": "oalinst.exe",
+      "provenance": "Official OpenAL HTTPS download; extracted executable had a valid Creative Labs Inc Authenticode signature on 2026-08-27. Archive SHA-256 recorded locally, not a published vendor checksum."
+    }
+  }
+}

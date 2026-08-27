@@ -850,7 +850,40 @@ class voice_chat_compression(threading.Thread):
 
 
 def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
-    """Feed zero-latency local mic/music/instrument PCM to the local Megaphone PA.
+    """Hand local mic/music/instrument PCM to the main-thread PA path.
+
+    Producers run on capture/streaming workers, but every cyal/OpenAL operation
+    is owned by AudioManager.loop() on the main thread. Copy the small PCM frame
+    before deferring so the producer can safely reuse its input buffer.
+    """
+    try:
+        if not gameplay or not getattr(gameplay, 'game', None):
+            return
+        audio_mngr = getattr(gameplay.game, 'audio_mngr', None)
+        if audio_mngr is None:
+            return
+        frame = bytes(raw_buf)
+        # PCM math stays on the producer worker; only cyal/OpenAL ownership is
+        # transferred to the main thread. Running the limiter's 960-sample
+        # unpack/scan/multiply loop inside AudioManager.loop() would add avoidable
+        # work to every render frame.
+        frame = soft_limit_audio(
+            frame, threshold=0.85, ratio=8.0,
+            state_key=f"local_pa:{producer}",
+        )
+        if threading.current_thread() is threading.main_thread():
+            _feed_local_megaphone_main(gameplay, frame, producer)
+        else:
+            audio_mngr.defer_audio(
+                lambda gp=gameplay, pcm=frame, tag=producer:
+                    _feed_local_megaphone_main(gp, pcm, tag)
+            )
+    except Exception:
+        pass
+
+
+def _feed_local_megaphone_main(gameplay, raw_buf, producer='producer'):
+    """MAIN THREAD ONLY: queue one local producer frame to the PA sources.
 
     Every local producer (music bot, mic, guitar, ...) gets its OWN per-player
     source set, keyed '<player>:<producer>'. Simultaneous local streams therefore
@@ -859,11 +892,13 @@ def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
     30ms of audio per 20ms (music 20 + mic 10), so the delay kept climbing
     while talking and both streams played stretched/squeezed with clicks at
     slice boundaries. Separate sources keep each stream on its own cadence —
-    no interleaving, no queue growth, and zero added latency (each feed is
-    queued immediately, exactly like the original direct path).
+    no interleaving or shared-queue growth. Music uses three REAL PCM frames as
+    a 60 ms start/resume reserve; it never places a silence buffer between the
+    first and second music frames, which was the source of the repeating chop.
 
     producer: a tag identifying the caller ('mic', 'music', 'guitar', ...).
     """
+    sources = []
     try:
         if not (gameplay and hasattr(gameplay, 'megaphone') and gameplay.megaphone):
             return
@@ -886,8 +921,6 @@ def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
                 if entry['currents_vol'][i] <= 0.05 and i < len(entry.get('targets_vol', [])):
                     entry['currents_vol'][i] = entry['targets_vol'][i]
 
-        # Per-producer smoothed limiter state (each stream limits independently).
-        limited_data = soft_limit_audio(bytes(raw_buf), threshold=0.85, ratio=8.0, state_key=f"local_pa:{producer}")
         for idx, src in enumerate(sources):
             if src:
                 # Set gain directly just in case update_megaphone_audio hasn't run yet
@@ -895,7 +928,13 @@ def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
                     entry = gameplay.megaphone.player_sources[local_key]
                     if idx < len(entry.get('targets_vol', [])):
                         src.gain = entry['targets_vol'][idx]
-                _queue_packet_to_source(gameplay, idx, src, limited_data)
+                _queue_packet_to_source(
+                    gameplay,
+                    idx,
+                    src,
+                    raw_buf,
+                    real_prebuffer_frames=3 if producer == 'music' else None,
+                )
     except Exception:
         pass
 
@@ -1365,16 +1404,26 @@ class MusicCompression(threading.Thread):
             logger.log_exception(e, "MusicCompression.recieve")
 
 
-def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=None):
-    # DE-CLICK: if this source is (re)starting, ramp the first samples up from
-    # zero so the restart doesn't pop (underrun recovery clicks).
+def _queue_packet_to_source(gameplay, idx, src, play_packet,
+                            force_concert_mode=None, real_prebuffer_frames=None):
+    # DE-CLICK: if this source is (re)starting, ramp only the FIRST queued
+    # packet up from zero. With a real-frame prebuffer the source intentionally
+    # remains stopped for several calls; fading every one of those frames would
+    # cause 50 Hz gain modulation when playback begins.
+    is_stopped = False
     try:
-        if src.state == cyal.SourceState.STOPPED or src.state == cyal.SourceState.INITIAL:
-            play_packet = _fade_in_packet(play_packet)
+        is_stopped = src.state in (cyal.SourceState.STOPPED, cyal.SourceState.INITIAL)
     except Exception:
         pass
 
     _reclaim_source_buffers(src)
+    queued_before = 0
+    try:
+        queued_before = int(src.buffers_queued)
+        if is_stopped and queued_before == 0:
+            play_packet = _fade_in_packet(play_packet)
+    except Exception:
+        pass
     
     buf = _get_buffer_from_pool(gameplay.game.audio_mngr)
     if buf is None:
@@ -1388,16 +1437,26 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet, force_concert_mode=
     
     # Start playing if stopped
     if src.state == cyal.SourceState.STOPPED or src.state == cyal.SourceState.INITIAL:
-        # Pre-buffer cushion: Ensure at least 2 buffers (40ms) are queued
-        # before starting playback to prevent instant 20ms underrun jitter.
-        try:
-            if src.buffers_queued < 2:
-                cushion_buf = _get_buffer_from_pool(gameplay.game.audio_mngr)
-                if cushion_buf is not None:
-                    cushion_buf.set_data(b'\x00' * len(play_packet), sample_rate=48000, format=cyal.BufferFormat.MONO16)
-                    src.queue_buffers(cushion_buf)
-        except Exception:
-            pass
+        if real_prebuffer_frames is not None:
+            # Local music monitor: wait for consecutive REAL frames. The old
+            # actual-frame + trailing-silence start order produced a 20 ms hole
+            # after every underrun and was heard as a repeating stutter.
+            try:
+                threshold = max(1, int(real_prebuffer_frames))
+                if src.buffers_queued < threshold:
+                    return
+            except Exception:
+                return
+        else:
+            # Legacy listener/voice path: preserve its 40 ms silence cushion.
+            try:
+                if src.buffers_queued < 2:
+                    cushion_buf = _get_buffer_from_pool(gameplay.game.audio_mngr)
+                    if cushion_buf is not None:
+                        cushion_buf.set_data(b'\x00' * len(play_packet), sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                        src.queue_buffers(cushion_buf)
+            except Exception:
+                pass
 
         # Re-apply EFX effects before playing using the source's unique filter
         is_concert = getattr(gameplay, 'concert_spectator_mode', False)
