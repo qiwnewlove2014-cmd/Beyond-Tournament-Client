@@ -24,6 +24,7 @@ from .string_utils import friendly_key_name
 from . import options
 from .speech import speak
 from . import logger
+from .audio_diagnostics import probe
 
 # Try to find ffmpeg path
 def _is_youtube_watch_url(value):
@@ -150,35 +151,10 @@ class YouTubeSearcher:
             return []
 
     @staticmethod
-    def get_stream_info(webpage_url):
-        """Resolve a YouTube page to its paired stream URL and HTTP headers."""
-        try:
-            import yt_dlp
-        except ImportError:
-            return None
-        ydl_opts = {
-            # Progressive 360p first (see search()): audio-only DASH URLs from
-            # googlevideo intermittently 403 on fresh resolution, which made
-            # "Could not load track." appear even though pressing Ctrl+M again
-            # eventually worked (each retry resolved a new URL).
-            'format': 'best[acodec!=none][vcodec!=none][height<=360]/bestaudio/best',
-            'quiet': True,
-            'no_warnings': True,
-            'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-        }
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(webpage_url, download=False)
-                stream_url = info.get('url')
-                if not stream_url:
-                    return None
-                return {
-                    'url': stream_url,
-                    'http_headers': dict(info.get('http_headers') or {}),
-                }
-        except Exception as ex:
-            logger.log_exception(ex, "YouTubeSearcher.get_stream_info")
-            return None
+    def get_stream_info(webpage_url, *, cancelled=None):
+        """Worker-only resolution, isolated from the game's Python runtime."""
+        from .youtube_resolver import resolve_stream_info
+        return resolve_stream_info(webpage_url, cancelled=cancelled)
 
     @staticmethod
     def get_stream_url(webpage_url):
@@ -250,11 +226,14 @@ class AudioStreamer(threading.Thread):
         self.process = None
         self._buffer_pool = []       # Reusable buffer objects
         self._pause_buffer = deque() # Store data read while paused
-        from pyogg import OpusEncoder
-        self.encoder = OpusEncoder()
-        self.encoder.set_application('audio')
-        self.encoder.set_channels(1)  # Opus network stream is ALWAYS MONO
-        self.encoder.set_sampling_frequency(48000)
+        self.encoder = None
+        if bot is not None:
+            # Listening-only jukebox streams never broadcast PCM back out.
+            from pyogg import OpusEncoder
+            self.encoder = OpusEncoder()
+            self.encoder.set_application('audio')
+            self.encoder.set_channels(1)  # Opus network stream is ALWAYS MONO
+            self.encoder.set_sampling_frequency(48000)
         self.last_send_time = None
         # Keep broadcast latency bounded.  A network hiccup must discard stale
         # music frames instead of building an ever-growing backlog that later
@@ -324,6 +303,7 @@ class AudioStreamer(threading.Thread):
             if pos is None:
                 return
             span = max(0.0001, self.spatial_max - self.spatial_ref)
+            audible = False
             for src in (self.spatial_src_l, self.spatial_src_r):
                 p = src.position
                 dx = pos[0] - p[0]
@@ -336,11 +316,14 @@ class AudioStreamer(threading.Thread):
                     g = 0.0
                 else:
                     g = 1.0 - (dist - self.spatial_ref) / span
+                audible = audible or g > 0.0
                 # Jukebox songs use their own mixer category ("jukebox"), so
                 # lowering the music-bot/map-music slider does not silence them.
                 music_gain = audio.volume_categories.get("jukebox", [100])[0] / 100.0
                 src.gain = self.spatial_base_gain * music_gain * getattr(self, "cabinet_gain", 1.0) * g
 
+            if not audible:
+                return  # Keep timeline playing, but do not raycast silent cabinets.
             # Wall occlusion check for spatial pair (Jukebox direct mode):
             if self.spatial_src_l is not None and self.spatial_src_r is not None:
                 box_pos = (
@@ -356,7 +339,10 @@ class AudioStreamer(threading.Thread):
                     # thick walls keep the full standard muffle.
                     tier = 0
                     tfn = getattr(cur_map, "occlusion_tier", None)
-                    if tfn is not None:
+                    jukebox_player = getattr(self, "jukebox_player", None)
+                    if jukebox_player is not None:
+                        tier = jukebox_player.occlusion_tier(box_pos, pos, self.spatial_max)
+                    elif tfn is not None:
                         with contextlib.suppress(Exception):
                             tier = int(tfn(box_pos, pos))
                     else:
@@ -750,6 +736,13 @@ class AudioStreamer(threading.Thread):
         except Exception:
             return False
 
+    def _diagnostic_startup_call(self, label, function, *args, **kwargs):
+        # This class also handles personal music broadcasts. Only the direct
+        # jukebox worker participates in these temporary startup measurements.
+        if self.bot is None:
+            return probe.worker_call(label, function, *args, **kwargs)
+        return function(*args, **kwargs)
+
     def _read_prebuffer(self):
         """Read and queue the startup buffer for the current ffmpeg process."""
         pre_buffered = 0
@@ -761,7 +754,7 @@ class AudioStreamer(threading.Thread):
                 break
             try:
                 needed = self.BUFFER_SIZE - len(leftover)
-                chunk = self.process.stdout.read(needed)
+                chunk = self._diagnostic_startup_call("direct.read", self.process.stdout.read, needed)
                 if chunk:
                     leftover += chunk
                 elif self.process.poll() is not None:
@@ -776,7 +769,7 @@ class AudioStreamer(threading.Thread):
                 data = leftover[:self.BUFFER_SIZE]
                 leftover = leftover[self.BUFFER_SIZE:]
                 with self._lock:
-                    if self._queue_local(data):
+                    if self._diagnostic_startup_call("direct.queue", self._queue_local, data):
                         pre_buffered += 1
                         if self.bot:
                             self._timeline_delay.append(bytes(data))
@@ -799,10 +792,20 @@ class AudioStreamer(threading.Thread):
             canonical_url = target_url
             target_url = ""
         if canonical_url and not target_url.startswith(("http://", "https://")):
-            fresh = YouTubeSearcher.get_stream_info(canonical_url)
+            fresh = self._diagnostic_startup_call("direct.resolve", YouTubeSearcher.get_stream_info,
+                                                canonical_url, cancelled=lambda: not self.running)
+            if not self.running:
+                self._cleanup()
+                return
             if fresh:
                 target_url = fresh['url']
                 input_headers = fresh.get('http_headers') or {}
+            else:
+                # A failed/timed-out helper must not fall back to in-process
+                # extraction or launch ffmpeg with an empty input URL.
+                self.failure_reason = "audio link resolution failed"
+                self._cleanup()
+                return
 
         def _build_cmd():
             cmd = [FFMPEG_PATH]
@@ -862,7 +865,7 @@ class AudioStreamer(threading.Thread):
             return
 
         # Initialize buffer pool
-        self._init_buffer_pool()
+        self._diagnostic_startup_call("direct.buffers", self._init_buffer_pool)
 
         # Start background network sender thread ONLY when this stream actually
         # broadcasts (bot attached). Jukebox players (bot=None) play locally only
@@ -881,8 +884,10 @@ class AudioStreamer(threading.Thread):
         _pre_leftover = b''
         error_detail = ""
         for attempt in range(4):
+            if not self.running:
+                break
             try:
-                self.process = subprocess.Popen(
+                self.process = self._diagnostic_startup_call("direct.launch", subprocess.Popen,
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -893,7 +898,7 @@ class AudioStreamer(threading.Thread):
                 self.failure_reason = "playback launch error"
                 break
 
-            pre_buffered, _pre_leftover = self._read_prebuffer()
+            pre_buffered, _pre_leftover = self._diagnostic_startup_call("direct.prebuffer", self._read_prebuffer)
             if pre_buffered > 0 or not self.running:
                 break
 
@@ -918,7 +923,10 @@ class AudioStreamer(threading.Thread):
             if attempt >= 1 and canonical_url and ("youtube.com" in canonical_url or "youtu.be" in canonical_url):
                 # The exact URL+headers already failed once — grab a fresh
                 # signed stream URL instead of re-running the same command.
-                fresh = YouTubeSearcher.get_stream_info(canonical_url)
+                fresh = self._diagnostic_startup_call("direct.resolve", YouTubeSearcher.get_stream_info,
+                                                    canonical_url, cancelled=lambda: not self.running)
+                if not self.running:
+                    break
                 if fresh and fresh.get('url'):
                     target_url = fresh['url']
                     input_headers = fresh.get('http_headers') or {}
@@ -959,8 +967,8 @@ class AudioStreamer(threading.Thread):
         # their distance fade computed before the first audible sample).
         if pre_buffered > 0:
             if self.spatial_pair:
-                self._update_spatial_gain()
-            self._play_all()
+                self._diagnostic_startup_call("direct.spatial", self._update_spatial_gain)
+            self._diagnostic_startup_call("direct.first_play", self._play_all)
             self.ready_event.set()
             # Frame zero leaves at the same instant local OpenAL begins frame
             # zero. Subsequent decoded frames advance this fixed delay line.
@@ -1833,7 +1841,10 @@ class MapMusicBot:
                 self.is_loading_stream = True
 
                 def do_play():
-                    stream_info = YouTubeSearcher.get_stream_info(target)
+                    stream_info = YouTubeSearcher.get_stream_info(target,
+                        cancelled=lambda: not self._is_current_playback_generation(playback_generation))
+                    if not self._is_current_playback_generation(playback_generation):
+                        return
                     if not stream_info:
                         if self._is_current_playback_generation(playback_generation):
                             speak("Failed to get audio stream.")
@@ -2227,9 +2238,12 @@ class MapMusicBot:
             # are fresh. Search result direct URLs are only a fallback for
             # providers that do not expose a canonical webpage URL.
             stream_info = (
-                YouTubeSearcher.get_stream_info(webpage_url)
+                YouTubeSearcher.get_stream_info(webpage_url,
+                    cancelled=lambda: not self._is_current_playback_generation(playback_generation))
                 if webpage_url else None
             )
+            if not self._is_current_playback_generation(playback_generation):
+                return
             if not stream_info and direct_url:
                 stream_info = {
                     'url': direct_url,

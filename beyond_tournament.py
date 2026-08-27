@@ -1,7 +1,38 @@
-import pygame
 import os
-import ctypes
 import sys
+
+# Private resolver mode must exit before importing game/audio modules, mounting
+# VFS, taking the instance lock or starting a crash-report session. Compiled
+# helpers use the same executable but never open a second game.
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--bt-youtube-resolver":
+    from libs.youtube_resolver import worker_main
+    raise SystemExit(worker_main(sys.argv[2:]))
+
+
+def _configure_compiled_output():
+    """Redirect only the real game, never a resolver child, to its usual log."""
+    if not (getattr(sys, "frozen", False) or "__compiled__" in globals()):
+        return False
+    try:
+        output = open(os.path.join(os.path.dirname(sys.executable), "Beyond_Tournament.log"),
+                      "w", encoding="utf-8", errors="replace", buffering=1)
+    except OSError:
+        return False
+    # Keep native stderr diagnostics where possible even in a consoleless exe.
+    for descriptor in (1, 2):
+        try:
+            os.dup2(output.fileno(), descriptor)
+        except OSError:
+            pass
+    sys.stdout = sys.stderr = output
+    return True
+
+
+if __name__ == "__main__":
+    _configure_compiled_output()
+
+import pygame
+import ctypes
 import cyal.listener
 from libs import yt_dlp_deps
 

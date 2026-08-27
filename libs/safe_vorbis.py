@@ -53,12 +53,13 @@ def _alloc_vorbis_file():
     return vf, raw
 
 
-def load_vorbis_pcm(path, bytes_per_sample=2, signed=True):
+def load_vorbis_pcm(path, bytes_per_sample=2, signed=True, *, max_pcm_bytes=None):
     """Decode an Ogg Vorbis file to 16-bit PCM.
 
     Returns an object with the same interface the game uses from
     pyogg.VorbisFile: ``.buffer`` (bytes), ``.channels`` (int) and
-    ``.frequency`` (int).
+    ``.frequency`` (int). Optional ``max_pcm_bytes`` limits decoded memory
+    during accumulation; the default preserves existing callers' behavior.
     """
     vf, vf_raw = _alloc_vorbis_file()
     if _vorbis.libvorbisfile.ov_fopen(
@@ -100,6 +101,8 @@ def load_vorbis_pcm(path, bytes_per_sample=2, signed=True):
                     f"{path}: multiple logical bitstreams are not supported"
                 )
             # Only copy what ov_read reported — never more than the chunk.
+            if max_pcm_bytes is not None and len(pcm) + result > max_pcm_bytes:
+                raise SafeVorbisError(f"decoded PCM exceeds size limit: {path}")
             pcm += chunk.raw[:result]
 
         return SimpleNamespace(

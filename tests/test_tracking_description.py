@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from libs.tracking_description import describe_tracking_direction
+from libs.audio_diagnostics import AudioDiagnostics
 
 
 def bearing(angle, distance=275, height=0):
@@ -135,6 +136,9 @@ def gameplay_harness():
             self.items.extend(items)
 
     namespace = {
+        # Extracted tracking code uses the same no-op diagnostic path as an
+        # opt-out Client; no frame, writer or audio device is created here.
+        "audio_probe": AudioDiagnostics(enabled=False),
         "math": math, "partial": partial,
         "describe_tracking_direction": describe_tracking_direction,
         "movement": SimpleNamespace(get_3d_distance=lambda x, y, z, tx, ty, tz: math.dist((x, y, z), (tx, ty, tz))),

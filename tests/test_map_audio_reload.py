@@ -170,9 +170,14 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
 
         def make_handler(previous_name):
             handler = EventHandeler.__new__(EventHandeler)
+            cache_events = []
+            samples = SimpleNamespace(clear=lambda: cache_events.append("clear"))
             handler.game = SimpleNamespace(
                 automations=[],
-                audio_mngr=SimpleNamespace(apply_filter=lambda *args, **kwargs: None),
+                audio_mngr=SimpleNamespace(
+                    apply_filter=lambda *args, **kwargs: None,
+                    instrument_samples=samples,
+                ),
                 exclude_water=set(),
                 network=SimpleNamespace(send=lambda *args, **kwargs: None),
             )
@@ -181,8 +186,9 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
                 map_name=previous_name,
                 jukebox_state={},
                 player=SimpleNamespace(move=lambda *args, **kwargs: None),
-                parser=SimpleNamespace(load=lambda *args, **kwargs: None),
+                parser=SimpleNamespace(load=lambda *args, **kwargs: cache_events.append("parse")),
             )
+            handler.cache_events = cache_events
             handler._begin_map_audio_reload = lambda: None
             handler._finish_map_audio_reload = lambda: None
             handler._reset_instruments_for_map_change = lambda: None
@@ -192,10 +198,12 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
             return handler
 
         marks = []
-        make_handler("oldmap")._apply_parse_map(
+        handler = make_handler("oldmap")
+        handler._apply_parse_map(
             {"name": "newmap", "data": {}, "x": 0, "y": 0, "z": 0}
         )
         self.assertEqual(marks, [False])
+        self.assertEqual(handler.cache_events, ["clear", "parse"])
 
         marks = []
         handler = make_handler("oldmap")
@@ -203,6 +211,7 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
             {"name": "oldmap", "data": {}, "x": 0, "y": 0, "z": 0}
         )
         self.assertEqual(marks, [True])
+        self.assertEqual(handler.cache_events, ["parse"])
         # The new map name is remembered for the next comparison.
         self.assertEqual(handler.gameplay.map_name, "oldmap")
 
@@ -215,6 +224,7 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
         )
         self.assertEqual(marks, [False])
         self.assertEqual(handler.gameplay.map_name, "first")
+        self.assertEqual(handler.cache_events, ["clear", "parse"])
 
     def test_resync_preserves_existing_entity_and_continuous_sources(self):
         from libs.world_map import Map
@@ -335,14 +345,16 @@ class TestPersistentStreamReverbDetach(unittest.TestCase):
         )
         game = SimpleNamespace(audio_mngr=audio)
         player = JukeboxPlayer(game)
+        streamer = SimpleNamespace(reverb_slot=object())
         player.players["box"] = {
             "source": left,
             "secondary_source": right,
-            "streamer": object(),
+            "streamer": streamer,
         }
         player.detach_reverb()
         self.assertEqual(sends, [(left, 0, None), (right, 0, None)])
         self.assertIn("box", player.players)
+        self.assertIsNone(streamer.reverb_slot)
 
     def test_music_bot_detach_keeps_stream_source_alive(self):
         from libs.music_bot import MapMusicBot

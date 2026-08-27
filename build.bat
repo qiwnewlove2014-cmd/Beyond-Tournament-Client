@@ -22,7 +22,9 @@ echo packing data...
 "%BT_VERIFIED_PYTHON%" -I -X utf8 tools\pack_data.py --output "%BT_PACKAGE_STAGE%\sounds.dat"
 if errorlevel 1 goto failed
 echo building...
-"%BT_VERIFIED_PYTHON%" -I -X utf8 -m nuitka --assume-yes-for-downloads --quiet --standalone --low-memory --python-flag=no_site --user-plugin=CyalPlugin.py --enable-plugin=tk-inter --windows-disable-console --windows-force-stderr=%program%Beyond_Tournament.log --windows-force-stdout=%program%Beyond_Tournament.log --include-package-data=certifi --nofollow-import-to=yt_dlp --no-deployment-flag=excluded-module-usage beyond_tournament.py
+rem Game-only output redirection lives in the Python entry point. Forcing it
+rem here would let resolver subprocesses truncate the running game's log.
+"%BT_VERIFIED_PYTHON%" -I -X utf8 -m nuitka --assume-yes-for-downloads --quiet --standalone --low-memory --python-flag=no_site --user-plugin=CyalPlugin.py --enable-plugin=tk-inter --windows-disable-console --include-package-data=certifi --nofollow-import-to=yt_dlp --no-deployment-flag=excluded-module-usage beyond_tournament.py
 if errorlevel 1 goto failed
 "%BT_VERIFIED_PYTHON%" -I -X utf8 -S tools\build_safety.py compiled
 if errorlevel 1 goto failed

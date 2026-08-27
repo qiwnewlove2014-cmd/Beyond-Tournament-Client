@@ -36,6 +36,7 @@ from . import (
     movement,
 )
 from .speech import speak
+from .audio_diagnostics import probe as audio_probe
 from .tracking_description import describe_tracking_direction
 from .objects import player
 from .weapons import weapon, weaponmanager
@@ -696,6 +697,9 @@ class Gameplay(state.State):
         if hasattr(self.game, 'audio_mngr') and self.game.audio_mngr and hasattr(self.game.audio_mngr, 'drums'):
             self.game.audio_mngr.drums.reset()
             self.game.audio_mngr.drums.gameplay = None
+        samples = getattr(getattr(self.game, "audio_mngr", None), "instrument_samples", None)
+        if samples is not None:
+            samples.clear()
         if hasattr(self, 'megaphone') and self.megaphone:
             self.megaphone._cleanup_megaphone_efx()
         if hasattr(self, 'wall_tone') and self.wall_tone:
@@ -759,20 +763,20 @@ class Gameplay(state.State):
             self.megaphone.update_megaphone_settings(volume, bass, mid, high)
 
     def update(self, events):
-        self._update_horse_wind()
-        self.megaphone.update_megaphone_audio(0, None)
-        self.wall_tone.update()
-        self.compass_turn_cue.update()
+        audio_probe.call("gp.wind", self._update_horse_wind)
+        audio_probe.call("gp.megaphone", self.megaphone.update_megaphone_audio, 0, None)
+        audio_probe.call("gp.wall_tone", self.wall_tone.update)
+        audio_probe.call("gp.compass", self.compass_turn_cue.update)
         if self.guitar.active and self.guitar.instrument_input and not self.spectator_mode:
             # Guitar audio is raw-only: the player's own strums play back 3D
             # through the local monitor, and nearby players hear the real
             # pedal/guitar sound streamed on the 3D voice channel. Piano
             # placeholder notes are intentionally NOT played/broadcast so the
             # real sound is what comes out, not a fake piano sample.
-            self.guitar.instrument_input.drain_notes()
-            self.guitar.feed_monitor()
+            audio_probe.call("gp.guitar", self.guitar.instrument_input.drain_notes)
+            audio_probe.call("gp.guitar", self.guitar.feed_monitor)
         if not self.spectator_mode:
-            self.player.loop()
+            audio_probe.call("gp.player", self.player.loop)
         elif not self.substates:
             # Filter events for spectator mode when idle (Allow ESC, TAB, Chat, RETURN, Brackets, PageUp/Down, and Comma/Period)
             allowed_keys = [
@@ -798,20 +802,21 @@ class Gameplay(state.State):
                 self.player.drown_clock.restart()
         for entity in self.map.entities.values(): 
             entity.player_dead=True if self.player.dead else False
-        self.map.loop()
-        for i in self.map.source_list.copy():
-            i.loop(self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
+        audio_probe.call("gp.map", self.map.loop)
+        with audio_probe.span("gp.sources"):
+            for i in self.map.source_list.copy():
+                i.loop(self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
         
         # === Music Bot loop (auto-advance tracks) ===
         if hasattr(self, 'music_bot') and self.music_bot:
-            self.music_bot.loop()
+            audio_probe.call("gp.music_bot", self.music_bot.loop)
 
         # Detect a stopped/stalled jukebox receiver and ask the server for the
         # authoritative playback state plus relay warm-up frames.  This is
         # deliberately main-thread work: it only performs throttled network
         # recovery and never touches OpenAL from the gameplay loop.
         if getattr(self, 'jukebox_player', None):
-            self.jukebox_player.update()
+            audio_probe.call("gp.jukebox", self.jukebox_player.update)
         
         # === Tracking beacon & facing sound update ===
         if getattr(self, "tracking_target", None) is not None:
@@ -819,7 +824,7 @@ class Gameplay(state.State):
             
             # Revalidate dynamic objects before updating or playing their beacon.
             if target_type == "entity":
-                if self._validate_tracking_target():
+                if audio_probe.call("gp.tracking", self._validate_tracking_target):
                     pos = (obj.x, obj.y, obj.z)
                     self.tracking_target = (target_type, obj, pos)
                     
@@ -829,8 +834,8 @@ class Gameplay(state.State):
                 # / facing away, so it reads like a radar sweep.
                 if self.tracking_clock.elapsed >= 1200:
                     self.tracking_clock.restart()
-                    pitch = self._beacon_pitch(pos[0], pos[1])
-                    snd = self.game.audio_mngr.play_unbound(
+                    pitch = audio_probe.call("gp.tracking", self._beacon_pitch, pos[0], pos[1])
+                    snd = audio_probe.call("gp.tracking", self.game.audio_mngr.play_unbound,
                         "ui/facing.ogg",
                         pos[0], pos[1], pos[2],
                         looping=False,
@@ -846,37 +851,37 @@ class Gameplay(state.State):
                         reverb_slot = getattr(self, 'current_player_reverb_slot', None)
                         if reverb_slot:
                             try:
-                                self.game.audio_mngr.efx.send(snd.source, 3, reverb_slot)
+                                audio_probe.call("gp.tracking", self.game.audio_mngr.efx.send, snd.source, 3, reverb_slot)
                             except Exception:
                                 pass
         
 
         
-        should_block = super().update(events)
+        should_block = audio_probe.call("gp.substate", super().update, events)
         if should_block is True:
             # some substate doesnt want us to handel events for now.
             return
         elif isinstance(should_block, list):
             events = should_block
-        key = pygame.key.get_pressed()
+        key = audio_probe.call("gp.input_poll", pygame.key.get_pressed)
         is_concert = getattr(self, 'concert_spectator_mode', False)
         if not self.spectator_mode or is_concert:
             if not getattr(self, 'piano_mode', False) and not getattr(self, 'drum_mode', False) and not self.vehicle.active:
                 for i in self.keys_held:
                     if key[i]:
-                        self.keys_held[i](pygame.key.get_mods())
+                        audio_probe.call("gp.input_held", self.keys_held[i], pygame.key.get_mods())
         if getattr(self, "piano_mode", False):
-            self._poll_piano_midi()
+            audio_probe.call("gp.input_instrument", self._poll_piano_midi)
         elif getattr(self, "drum_mode", False):
-            self._poll_drum_midi()
+            audio_probe.call("gp.input_instrument", self._poll_drum_midi)
         for event in events:
             if getattr(self, "drum_mode", False):
-                if self.drum.handle_event(event):
+                if audio_probe.call("gp.input_instrument", self.drum.handle_event, event):
                     continue
             if getattr(self, 'piano_mode', False):
-                if self.piano.handle_event(event):
+                if audio_probe.call("gp.input_instrument", self.piano.handle_event, event):
                     continue
-            if self.vehicle.active and self.vehicle.handle_event(event):
+            if self.vehicle.active and audio_probe.call("gp.input_dispatch", self.vehicle.handle_event, event):
                 continue
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and getattr(self.game, 'pong_mode', False):
                 self.game.network.send(consts.CHANNEL_MAP, "pong_serve", {})
@@ -892,16 +897,16 @@ class Gameplay(state.State):
                 ]
                 allowed_keys.extend(key for key, _ in self.configurable_key_actions)
                 if event.type == pygame.KEYDOWN and event.key in allowed_keys:
-                    self._dispatch_configurable_key_actions(event)
+                    audio_probe.call("gp.input_dispatch", self._dispatch_configurable_key_actions, event)
                     if event.key in self.keys_pressed:
-                        self.keys_pressed[event.key](event.mod)
+                        audio_probe.call("gp.input_pressed", self.keys_pressed[event.key], event.mod)
             else:
                 if event.type == pygame.KEYDOWN:
-                    self._dispatch_configurable_key_actions(event)
+                    audio_probe.call("gp.input_dispatch", self._dispatch_configurable_key_actions, event)
                     if event.key in self.keys_pressed:
-                        self.keys_pressed[event.key](event.mod)
+                        audio_probe.call("gp.input_pressed", self.keys_pressed[event.key], event.mod)
                 elif event.type == pygame.KEYUP and event.key in self.keys_released:
-                    self.keys_released[event.key](event.mod)
+                    audio_probe.call("gp.input_released", self.keys_released[event.key], event.mod)
             if not pygame.event.get_grab():
                 pygame.event.set_grab(True)
             if event.type == pygame.MOUSEBUTTONDOWN and not self.spectator_mode:
@@ -920,7 +925,7 @@ class Gameplay(state.State):
                     self.game.mouse_buttons["right"] = False
             if event.type == pygame.MOUSEWHEEL and self.game_started and not self.spectator_mode:
                 if not self.wmanager.activeWeapon:
-                    self.wmanager.switchWeapon(0)
+                    audio_probe.call("gp.input_mouse", self.wmanager.switchWeapon, 0)
                 pos = self.wmanager.weapons.index(self.wmanager.activeWeapon)
                 num_weapons = len(self.wmanager.weapons)
                 # Scroll through all available weapon slots cyclically
@@ -928,23 +933,23 @@ class Gameplay(state.State):
                     next_pos = (pos + 1) % num_weapons
                 else:
                     next_pos = (pos - 1) % num_weapons
-                self.wmanager.switchWeapon(next_pos)
+                audio_probe.call("gp.input_mouse", self.wmanager.switchWeapon, next_pos)
             if event.type == pygame.MOUSEMOTION and not self.spectator_mode:
                 (x, y) = event.rel
                 if x == 0:
-                    self.turn_stop(pygame.K_a)
+                    audio_probe.call("gp.input_mouse", self.turn_stop, pygame.K_a)
                 if x < -1 or x > 1:
-                    self.player.face(self.player.hfacing + (x / 2), self.player.vfacing)
+                    audio_probe.call("gp.input_mouse", self.player.face, self.player.hfacing + (x / 2), self.player.vfacing)
  
         if self.game.mouse_buttons["left"] and not self.spectator_mode:
-            self.wmanager.reload()
+            audio_probe.call("gp.input_mouse", self.wmanager.reload)
         if self.game.mouse_buttons["middle"] and not self.spectator_mode:
-            self.interact(pygame.K_f)
+            audio_probe.call("gp.input_mouse", self.interact, pygame.K_f)
         if self.game.mouse_buttons["right"] and not self.spectator_mode:
             if self.wmanager.activeWeapon and self.wmanager.activeWeapon.automatic:
-                self.fire_weapon_automatic(pygame.K_SPACE)
+                audio_probe.call("gp.input_mouse", self.fire_weapon_automatic, pygame.K_SPACE)
             elif self.wmanager.activeWeapon:
-                self.fire_weapon_non_automatic(pygame.K_SPACE)
+                audio_probe.call("gp.input_mouse", self.fire_weapon_non_automatic, pygame.K_SPACE)
                 self.game.mouse_buttons["right"] = False
 
     def buffer_move_l(self, mod=0):
@@ -2047,10 +2052,16 @@ class Gameplay(state.State):
             obj.recover(*position)
             # recover() historically returns "changed", not "healthy".
             # Inspect the result instead of treating an unchanged loop as bad.
+            audible_at = getattr(obj, "is_audible_at", None)
             if (position and not getattr(obj, "playing", False)
-                    and getattr(obj, "current_gain", 1.0) <= 0.0):
+                    and getattr(obj, "current_gain", 1.0) <= 0.0
+                    and (not callable(audible_at) or not audible_at(*position))):
                 return True  # An out-of-range spatial source stays silent.
             source = getattr(getattr(obj, "sound", None), "source", None)
+            if source is None and getattr(obj, "audio_pending", False):
+                if "map sounds" not in pending:
+                    pending.append("map sounds")
+                return None
             return source is not None and source.state == cyal.SourceState.PLAYING
 
         def refresh_owner(label, owner):

@@ -16,17 +16,20 @@ queued songs, skipping songs, adjusting volume, and staff queue clearance.
 """
 
 import contextlib
-import queue
 import struct
 import threading
 import time
+from collections import OrderedDict
+from math import trunc
 
 import cyal
 import pygame
 
 from . import state
 from .speech import speak
-from .logger import log as log_line
+from .deferred_log import log_deferred as log_line
+from .jukebox_relay import JukeboxRelayReceiver
+from .audio_diagnostics import probe as audio_probe
 
 # Shared wall occlusion tiers used by every playback site below.
 # 0 = clear path · 1 = thin obstacle (a lone pillar tile): light lowpass ·
@@ -55,283 +58,6 @@ def wall_occlusion_tier(cur_map, src_pos, listener):
     except Exception:
         pass
     return OCCLUSION_CLEAR
-
-
-class JukeboxRelayReceiver(threading.Thread):
-    """Decode one server-owned Opus stream without blocking the network thread."""
-
-    PREBUFFER_FRAMES = 4
-    RESUME_FRAMES = 3
-    MAX_PENDING_FRAMES = 32
-    NUM_BUFFERS = 32
-    # Backlog ceiling in OpenAL-queued frames. When a network burst leaves
-    # more than this queued, newly-arrived frames are dropped at the door
-    # until the backlog drains — the song skips forward a moment instead of
-    # the listener falling permanently behind (creeping latency). cyal can
-    # only unqueue already-processed buffers, so shedding at the receive
-    # loop is the safe way to shed backlog.
-    MAX_QUEUED_BUFFERS = 10
-
-    def __init__(
-        self, game, source_l, source_r, volume,
-        relay_id, stream_epoch, reference_distance, max_distance,
-        box_pos=None, player=None, reverb_slot=None, eq_slot=None,
-        cabinet_volume=100,
-    ):
-        super().__init__(daemon=True, name=f"jukebox-relay-{relay_id}")
-        from pyogg import OpusDecoder
-        self.game = game
-        self.source_l = source_l
-        self.source_r = source_r
-        self.volume = int(volume)
-        self.cabinet_volume = max(0.0, min(1.0, float(cabinet_volume) / 100.0))
-        self.relay_id = int(relay_id)
-        self.stream_epoch = int(stream_epoch)
-        self.reference_distance = float(reference_distance)
-        self.max_distance = float(max_distance)
-        self.box_pos = box_pos
-        self.player = player
-        self.reverb_slot = reverb_slot
-        self.eq_slot = eq_slot
-        self._last_occluded = None
-        self.running = True
-        self.frames = queue.Queue(maxsize=self.MAX_PENDING_FRAMES)
-        self.decoder = OpusDecoder()
-        self.decoder.set_channels(2)
-        self.decoder.set_sampling_frequency(48000)
-        self._pool = []
-        # NOTE: must NOT be named `_started` — that would shadow the private
-        # `threading.Thread._started` Event (used by Thread.start()/join()) and
-        # make start()/stop() raise AttributeError, killing relay playback.
-        self._play_started = False
-        self._last_sequence = None
-        self.created_at = time.monotonic()
-        self.last_packet_at = None
-        # When audio last made REAL progress (a buffer successfully queued
-        # into OpenAL). The auto-recovery watchdog compares this against
-        # last_packet_at to catch "frames keep arriving but no sound" states
-        # (dead sources after an audio device switch) that the packet-based
-        # stall check can never see.
-        self.last_audio_activity = None
-        # When OpenAL last CONSUMED a buffer (a source reported
-        # buffers_processed > 0). This is the ground truth of audible
-        # playback: a slowly starving stream (frames arriving, buffers
-        # queueing, but the speaker underrunning) stays invisible to every
-        # other check — only consumption proves sound is coming out.
-        self.last_output_at = None
-        # Total frames accepted through the sequence gate. The starvation
-        # watchdog compares this over a rolling window: a trickling channel
-        # (a few frames every few seconds) keeps every liveness check green
-        # while the listener hears mostly silence — only the arrival RATE
-        # exposes it (a healthy stream delivers 25 fps).
-        self.received_frames = 0
-        for _ in range(self.NUM_BUFFERS):
-            try:
-                self._pool.append(game.audio_mngr.context.gen_buffer())
-            except Exception:
-                break
-
-    def set_volume(self, volume):
-        self.volume = max(0, min(100, int(volume)))
-        self._update_gain()
-
-    def set_cabinet_volume(self, volume):
-        self.cabinet_volume = max(0.0, min(1.0, float(volume) / 100.0))
-        self._update_gain()
-
-    def receive(self, sequence, payload, flags=0):
-        if not self.running or not payload or len(payload) > 1275 or flags & ~0x03:
-            return
-        sequence = int(sequence) & 0xffff
-        if self._last_sequence is not None:
-            delta = (sequence - self._last_sequence) & 0xffff
-            if delta == 0 or delta > 0x8000:
-                return
-        self._last_sequence = sequence
-        self.last_packet_at = time.monotonic()
-        self.received_frames += 1
-        if flags & 0x01:
-            self._reset_queue()
-        item = bytes(payload)
-        try:
-            self.frames.put_nowait(item)
-        except queue.Full:
-            try:
-                self.frames.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self.frames.put_nowait(item)
-            except queue.Full:
-                pass
-
-    def _reset_queue(self):
-        while True:
-            try:
-                self.frames.get_nowait()
-            except queue.Empty:
-                break
-
-    def _reclaim(self):
-        for source in (self.source_l, self.source_r):
-            try:
-                drain_limit = 32
-                while source.buffers_processed > 0 and drain_limit > 0:
-                    drain_limit -= 1
-                    result = source.unqueue_buffers()
-                    if result is None:
-                        break
-                    self.last_output_at = time.monotonic()
-                    try:
-                        self._pool.extend(result)
-                    except TypeError:
-                        self._pool.append(result)
-            except Exception:
-                pass
-
-    def _update_gain(self):
-        try:
-            audio = self.game.audio_mngr
-            listener = getattr(audio, "position", None)
-            # Jukebox relay audio has its own mixer slider ("jukebox"),
-            # independent from the music bot / map music.
-            category = audio.volume_categories.get("jukebox", [100])[0] / 100.0
-            cab_vol = getattr(self, "cabinet_volume", 1.0)
-            local = (self.volume / 100.0) * cab_vol
-            span = max(0.0001, self.max_distance - self.reference_distance)
-            for source in (self.source_l, self.source_r):
-                distance_gain = 1.0
-                if listener is not None:
-                    pos = source.position
-                    distance = sum((listener[i] - pos[i]) ** 2 for i in range(3)) ** 0.5
-                    if distance >= self.max_distance:
-                        distance_gain = 0.0
-                    elif distance > self.reference_distance:
-                        distance_gain = 1.0 - (distance - self.reference_distance) / span
-                source.gain = local * category * distance_gain
-
-            # Wall occlusion check (Lowpass Direct Filter + Auxiliary Send Filters):
-            if listener is not None and self.box_pos is not None:
-                gp = getattr(self.game, "gameplay", None)
-                cur_map = getattr(gp, "map", None) if gp is not None else None
-                if cur_map is not None and hasattr(cur_map, "valid_straight_path"):
-                    # Wall-thickness tiers scale the muffle: a lone pillar only
-                    # slightly dulls the song; long walls keep the full muffle.
-                    tier = wall_occlusion_tier(cur_map, self.box_pos, listener)
-                    if tier != self._last_occluded:
-                        self._last_occluded = tier
-                        filt = None
-                        if tier == OCCLUSION_FULL and self.player is not None and hasattr(self.player, "get_occlusion_filter"):
-                            filt = self.player.get_occlusion_filter()
-                        elif tier == OCCLUSION_LIGHT and self.player is not None and hasattr(self.player, "get_light_occlusion_filter"):
-                            filt = self.player.get_light_occlusion_filter()
-                        for s in (self.source_l, self.source_r):
-                            try:
-                                if filt is not None:
-                                    s.direct_filter = filt
-                                else:
-                                    with contextlib.suppress(Exception):
-                                        del s.direct_filter
-                                if audio is not None and getattr(audio, "efx", None) is not None:
-                                    if getattr(self, "reverb_slot", None) is not None:
-                                        audio.efx.send(s, 0, self.reverb_slot, filter=filt)
-                                    if getattr(self, "eq_slot", None) is not None:
-                                        audio.efx.send(s, 1, self.eq_slot, filter=filt)
-                            except Exception:
-                                pass
-        except Exception:
-            pass
-
-    def _queue_pcm(self, pcm):
-        self._reclaim()
-        if len(self._pool) < 2:
-            return False
-        from .music_bot import AudioStreamer
-        left, right = AudioStreamer._split_stereo_16(pcm)
-        buf_l = self._pool.pop()
-        buf_r = self._pool.pop()
-        l_queued = False
-        try:
-            buf_l.set_data(left, sample_rate=48000, format=cyal.BufferFormat.MONO16)
-            buf_r.set_data(right, sample_rate=48000, format=cyal.BufferFormat.MONO16)
-            self.source_l.queue_buffers(buf_l)
-            l_queued = True
-            self.source_r.queue_buffers(buf_r)
-            self.last_audio_activity = time.monotonic()
-            return True
-        except Exception:
-            if not l_queued:
-                self._pool.extend((buf_l, buf_r))
-            else:
-                # buf_l is attached to source_l; do NOT put back into pool
-                self._pool.append(buf_r)
-            return False
-
-    def run(self):
-        while self.running:
-            try:
-                payload = self.frames.get(timeout=0.05)
-            except queue.Empty:
-                self._reclaim()
-                self._update_gain()
-                if self._play_started:
-                    try:
-                        if self.source_l.buffers_queued > 0 and self.source_l.state != cyal.SourceState.PLAYING:
-                            self.source_l.play()
-                        if self.source_r.buffers_queued > 0 and self.source_r.state != cyal.SourceState.PLAYING:
-                            self.source_r.play()
-                    except Exception:
-                        pass
-                continue
-            if payload is None:
-                break
-            if self._play_started and self.source_l.buffers_queued > self.MAX_QUEUED_BUFFERS:
-                # Backlog shed — see MAX_QUEUED_BUFFERS.
-                continue
-            try:
-                pcm = bytearray(self.decoder.decode(bytearray(payload)))
-                if not self._queue_pcm(pcm):
-                    continue
-                self._update_gain()
-                queued = min(self.source_l.buffers_queued, self.source_r.buffers_queued)
-                stopped = (self.source_l.state != cyal.SourceState.PLAYING
-                           or self.source_r.state != cyal.SourceState.PLAYING)
-                if (not self._play_started and queued >= self.PREBUFFER_FRAMES) or (
-                        self._play_started and stopped and queued >= self.RESUME_FRAMES):
-                    self.source_l.play()
-                    self.source_r.play()
-                    self._play_started = True
-            except Exception as ex:
-                log_line(f"[JukeboxRelay] decode/queue error: {ex}")
-
-    def stop(self):
-        self.running = False
-        try:
-            self.frames.put_nowait(None)
-        except queue.Full:
-            self._reset_queue()
-            try:
-                self.frames.put_nowait(None)
-            except queue.Full:
-                pass
-        if threading.current_thread() is not self:
-            self.join(timeout=1.0)
-        self._reset_queue()
-        for source in (self.source_l, self.source_r):
-            try:
-                source.stop()
-                drain_limit = 64
-                while source.buffers_processed > 0 and drain_limit > 0:
-                    drain_limit -= 1
-                    result = source.unqueue_buffers()
-                    if result is None:
-                        break
-                    try:
-                        self._pool.extend(result)
-                    except TypeError:
-                        self._pool.append(result)
-            except Exception:
-                pass
 
 
 class JukeboxPlayer:
@@ -372,6 +98,44 @@ class JukeboxPlayer:
         self.cabinet_volumes = {}
         self._occlusion_filter = None
         self._light_occlusion_filter = None
+
+        self._occlusion_cache = OrderedDict()
+        self._occlusion_lock = threading.Lock()
+        self._retired_relays = []
+
+    def occlusion_tier(self, box_pos, listener, max_distance=40.0):
+        """Skip inaudible rays and briefly reuse exact tile-ray results.
+
+        Main relay pump and legacy direct worker may query this; only the
+        small cache is locked, never the map scan or any audio operation.
+        """
+        if listener is None or box_pos is None:
+            return OCCLUSION_CLEAR
+        if sum((listener[i] - box_pos[i]) ** 2 for i in range(3)) >= (max_distance + 2.5) ** 2:
+            return OCCLUSION_CLEAR  # Both stereo channels are out of range.
+        gp = getattr(self.game, "gameplay", None)
+        cur_map = getattr(gp, "map", None)
+        if cur_map is None:
+            return OCCLUSION_CLEAR
+        tiles = getattr(cur_map, "tile_list", ())
+        key = (id(cur_map), id(tiles), len(tiles),
+               tuple(trunc(value) for value in box_pos),
+               tuple(trunc(value) for value in listener))
+        now = time.monotonic()
+        with self._occlusion_lock:
+            cached = self._occlusion_cache.get(key)
+            if cached is not None and now - cached[0] < 0.15:
+                self._occlusion_cache.move_to_end(key)
+                return cached[1]
+        tier = wall_occlusion_tier(cur_map, box_pos, listener)
+        with self._occlusion_lock:
+            # Retain identity owners until eviction: otherwise a rebuilt tile
+            # list can immediately reuse an old id and inherit its wall tier.
+            self._occlusion_cache[key] = (now, tier, cur_map, tiles)
+            self._occlusion_cache.move_to_end(key)
+            while len(self._occlusion_cache) > 64:
+                self._occlusion_cache.popitem(last=False)
+        return tier
 
     def get_occlusion_filter(self):
         """Lazy-create and return a shared Lowpass filter for wall occlusion muffling."""
@@ -458,6 +222,7 @@ class JukeboxPlayer:
             ("high_cutoff", 4000.0),
         )
 
+    @audio_probe.measured("jukebox.eq")
     def _get_eq_slot(self, profile, jukebox_id=None, eq_values=None):
         """Get or update an OpenAL Hardware Equalizer slot.
 
@@ -534,7 +299,8 @@ class JukeboxPlayer:
                 listener = getattr(audio, "position", None)
                 src = entry.get("source")
                 if cur_map is not None and listener is not None and src is not None and hasattr(cur_map, "valid_straight_path"):
-                    tier = wall_occlusion_tier(cur_map, src.position, listener)
+                    pos = src.position
+                    tier = self.occlusion_tier((pos[0] + 2.5, pos[1], pos[2]), listener)
                     if tier == OCCLUSION_FULL:
                         filt = self.get_occlusion_filter()
                     elif tier == OCCLUSION_LIGHT:
@@ -549,6 +315,14 @@ class JukeboxPlayer:
         if previous_profile == "custom" and profile != "custom":
             old_slot = self.custom_eq_slots.pop(jukebox_id, None)
             if old_slot is not None and hasattr(audio, "release_effect_slot"):
+                # A replaced relay may still be fading on the audio owner.
+                # Detach its send before lending this slot to another sound.
+                for receiver in self._retired_relays:
+                    if receiver.eq_slot is old_slot:
+                        receiver.eq_slot = None
+                        for source in (receiver.source_l, receiver.source_r):
+                            with contextlib.suppress(Exception):
+                                audio.efx.send(source, 1, None)
                 try:
                     audio.release_effect_slot(old_slot)
                 except Exception:
@@ -630,6 +404,7 @@ class JukeboxPlayer:
                 if streamer is not None and hasattr(streamer, "set_volume"):
                     streamer.set_volume(self.volume)
 
+    @audio_probe.measured("jukebox.start", trigger=True)
     def play(self, jukebox_id, x, y, z, title, url, duration, volume=None, start_offset=0.0,
              playback_id=None, transport="direct", relay_id=None, stream_epoch=None,
              http_headers=None, **_kwargs):
@@ -701,6 +476,9 @@ class JukeboxPlayer:
                 # sync routes must never cancel the same in-flight playback.
                 src_l = existing.get("source")
                 src_r = existing.get("secondary_source")
+                current_streamer = existing.get("streamer")
+                if getattr(current_streamer, "main_thread_audio", False) is True:
+                    current_streamer.box_pos = (float(x), float(y), float(z))
                 offset = 2.5
                 if src_l is not None and src_r is not None:
                     try:
@@ -776,10 +554,12 @@ class JukeboxPlayer:
         if audio is None:
             log_line(f"[Jukebox] play({jukebox_id}) skipped: no audio_mngr")
             return
+        src_l = src_r = None
         try:
-            src_l = audio.context.gen_source()
-            src_r = audio.context.gen_source()
+            src_l = audio_probe.call("jukebox.gen_source", audio.context.gen_source)
+            src_r = audio_probe.call("jukebox.gen_source", audio.context.gen_source)
         except Exception:
+            self._release_sources((src_l, src_r))
             log_line(f"[Jukebox] play({jukebox_id}) failed: gen_source error")
             return
         offset = 2.5   # same stereo offset as piano/drums 3D-stereo sounds
@@ -787,14 +567,15 @@ class JukeboxPlayer:
         maxd = 40.0    # silent at/beyond this distance
         base_gain = max(0.0, min(1.0, effective_volume / 100.0))
         try:
-            for src, sx in ((src_l, float(x) - offset), (src_r, float(x) + offset)):
-                src.position = (sx, float(y), float(z))
-                src.rolloff_factor = 0.0   # linear fade handled per-frame
-                src.reference_distance = maxd
-                src.max_distance = maxd
-                src.spatialize = True
-                src.direct_channels = False
-                src.gain = base_gain
+            with audio_probe.span("jukebox.source_setup"):
+                for src, sx in ((src_l, float(x) - offset), (src_r, float(x) + offset)):
+                    src.position = (sx, float(y), float(z))
+                    src.rolloff_factor = 0.0   # linear fade handled per-frame
+                    src.reference_distance = maxd
+                    src.max_distance = maxd
+                    src.spatialize = True
+                    src.direct_channels = False
+                    src.gain = base_gain
         except Exception:
             pass
         # Initial wall occlusion check:
@@ -805,7 +586,8 @@ class JukeboxPlayer:
             audio = getattr(self.game, "audio_mngr", None)
             listener = getattr(audio, "position", None) if audio is not None else None
             if cur_map is not None and listener is not None and hasattr(cur_map, "valid_straight_path"):
-                tier = wall_occlusion_tier(cur_map, (float(x), float(y), float(z)), listener)
+                tier = audio_probe.call("jukebox.initial_wall", self.occlusion_tier,
+                                        (float(x), float(y), float(z)), listener, maxd)
                 if tier != OCCLUSION_CLEAR:
                     filt = (
                         self.get_light_occlusion_filter() if tier == OCCLUSION_LIGHT
@@ -821,11 +603,12 @@ class JukeboxPlayer:
         reverb = None
         try:
             if gameplay is not None and getattr(gameplay, "map", None) is not None:
-                reverb_zone = gameplay.map.get_reverb_at(float(x), float(y), float(z))
+                reverb_zone = audio_probe.call("jukebox.reverb_lookup", gameplay.map.get_reverb_at,
+                                               float(x), float(y), float(z))
                 reverb = reverb_zone.reverb if reverb_zone and hasattr(reverb_zone, "reverb") else None
                 if reverb is not None and getattr(audio, "efx", None) is not None:
-                    audio.efx.send(src_l, 0, reverb, filter=filt)
-                    audio.efx.send(src_r, 0, reverb, filter=filt)
+                    audio_probe.call("jukebox.efx", audio.efx.send, src_l, 0, reverb, filter=filt)
+                    audio_probe.call("jukebox.efx", audio.efx.send, src_r, 0, reverb, filter=filt)
         except Exception:
             pass
         # Jukebox Equalizer profile (e.g. Bass Boost / Horn Speaker per-jukebox):
@@ -842,8 +625,8 @@ class JukeboxPlayer:
                 self.eq_values.pop(jukebox_id, None)
             slot = self._get_eq_slot(eq_profile, jukebox_id, eq_values)
             if slot is not None and getattr(audio, "efx", None) is not None:
-                audio.efx.send(src_l, 1, slot, filter=filt)
-                audio.efx.send(src_r, 1, slot, filter=filt)
+                audio_probe.call("jukebox.efx", audio.efx.send, src_l, 1, slot, filter=filt)
+                audio_probe.call("jukebox.efx", audio.efx.send, src_r, 1, slot, filter=filt)
         except Exception:
             pass
         cab_vol = _kwargs.get("cabinet_volume")
@@ -855,11 +638,13 @@ class JukeboxPlayer:
             cab_vol = 100
         self.cabinet_volumes[jukebox_id] = cab_vol
 
+        streamer = None
         try:
             if transport == "relay":
                 if relay_id is None or stream_epoch is None:
                     raise ValueError("missing relay identity")
-                streamer = JukeboxRelayReceiver(
+                audio_probe.event("jukebox.relay")
+                streamer = audio_probe.call("jukebox.receiver_create", JukeboxRelayReceiver,
                     self.game, src_l, src_r, effective_volume,
                     relay_id, stream_epoch, ref, maxd,
                     box_pos=(float(x), float(y), float(z)), player=self,
@@ -868,7 +653,8 @@ class JukeboxPlayer:
                 )
             else:
                 from . import music_bot as mb
-                streamer = mb.AudioStreamer(
+                audio_probe.event("jukebox.direct")
+                streamer = audio_probe.call("jukebox.direct_create", mb.AudioStreamer,
                     self.game, url, src_l, volume=effective_volume, bot=None,
                     channels=2, spatial_pair=(src_l, src_r, ref, maxd),
                     start_offset=start_offset,
@@ -877,10 +663,13 @@ class JukeboxPlayer:
                 )
                 streamer.reverb_slot = reverb
                 streamer.eq_slot = slot
+                streamer.jukebox_player = self
                 if hasattr(streamer, "set_cabinet_volume"):
                     streamer.set_cabinet_volume(cab_vol)
-            streamer.start()
+            audio_probe.call("jukebox.thread_start", streamer.start)
         except Exception as ex:
+            if getattr(streamer, "main_thread_audio", False) is True:
+                streamer.stop()
             for src in (src_l, src_r):
                 try:
                     src.delete()
@@ -922,6 +711,16 @@ class JukeboxPlayer:
     def _fade_out_sources(self, sources, streamer=None, duration=0.5):
         """Fade active OpenAL sources to 0 gain in a daemon thread and clean them up."""
         valid_sources = [s for s in sources if s is not None]
+        if getattr(streamer, "main_thread_audio", False) is True:
+            # Relay fades share the main audio pump: no timer thread touches
+            # OpenAL, no join, and the old receiver cannot revive a new song.
+            self._retired_relays.append(streamer)
+            def finish():
+                if streamer in self._retired_relays:
+                    self._retired_relays.remove(streamer)
+                self._release_sources(valid_sources)
+            streamer.retire(duration=duration, cleanup_callback=finish)
+            return
         if not valid_sources:
             if streamer is not None:
                 try:
@@ -980,6 +779,28 @@ class JukeboxPlayer:
         import threading
         threading.Thread(target=_fade_worker, daemon=True).start()
 
+    def _release_sources(self, sources):
+        """Detach effects, then delete independently of drain failures (owner)."""
+        audio = getattr(self.game, "audio_mngr", None)
+        for source in sources:
+            if source is None:
+                continue
+            with contextlib.suppress(Exception):
+                del source.direct_filter
+            if getattr(audio, "efx", None) is not None:
+                for index in (0, 1):
+                    with contextlib.suppress(Exception):
+                        audio.efx.send(source, index, None)
+            with contextlib.suppress(Exception):
+                source.stop()
+                for _ in range(64):
+                    if source.buffers_processed <= 0:
+                        break
+                    source.unqueue_buffers()
+            with contextlib.suppress(Exception):
+                source.delete()
+
+    @audio_probe.measured("jukebox.stop")
     def stop(self, jukebox_id, playback_id=None, fade=False):
         """Stop the song for one jukebox and free its audio source."""
         with self._lock:
@@ -1003,6 +824,10 @@ class JukeboxPlayer:
                 self._relay_pending.pop(relay_key, None)
         if fade:
             self._fade_out_sources([player.get("source"), player.get("secondary_source")], streamer=streamer, duration=0.5)
+            return True
+        if getattr(streamer, "main_thread_audio", False) is True:
+            streamer.stop()
+            self._release_sources([player.get("source"), player.get("secondary_source")])
             return True
         try:
             if streamer is not None:
@@ -1055,6 +880,10 @@ class JukeboxPlayer:
             ids = list(self.players.keys())
         for jukebox_id in ids:
             self.stop(jukebox_id)
+        for receiver in list(self._retired_relays):
+            receiver.stop()  # Finishes its owner-thread source cleanup too.
+        with self._occlusion_lock:
+            self._occlusion_cache.clear()
         audio = getattr(self.game, "audio_mngr", None)
         slots = list(self.custom_eq_slots.values())
         self.custom_eq_slots.clear()
@@ -1123,6 +952,10 @@ class JukeboxPlayer:
                         and last_audio is not None
                         and now - float(last_audio) >= self.RELAY_AUDIO_STALL_TIMEOUT
                     )
+                    if (alive and has_started and last_audio is None
+                            and getattr(streamer, "failure_reason", None)
+                            and age >= self.RELAY_AUDIO_STALL_TIMEOUT):
+                        stuck_audio = True
                     # Underrun watchdog: frames may arrive and buffers may
                     # queue, but if the speakers have not consumed anything
                     # for a while the listener is hearing silence/stutter
@@ -1447,6 +1280,8 @@ class JukeboxPlayer:
 
     def sync_reverb(self):
         """Re-syncs environment Reverb EFX for all active jukebox streams after map reloads."""
+        with self._occlusion_lock:
+            self._occlusion_cache.clear()
         gameplay = getattr(self.game, "gameplay", None)
         if gameplay is None or getattr(gameplay, "map", None) is None:
             return not bool(self.players)
@@ -1471,7 +1306,7 @@ class JukeboxPlayer:
                     filt = None
                     listener = getattr(audio, "position", None)
                     if listener is not None and hasattr(gameplay.map, "valid_straight_path"):
-                        tier = wall_occlusion_tier(gameplay.map, (pos[0] + 2.5, pos[1], pos[2]), listener)
+                        tier = self.occlusion_tier((pos[0] + 2.5, pos[1], pos[2]), listener)
                         if tier != OCCLUSION_CLEAR:
                             filt = (
                                 self.get_light_occlusion_filter() if tier == OCCLUSION_LIGHT
@@ -1484,10 +1319,8 @@ class JukeboxPlayer:
         return healthy
 
     def detach_reverb(self):
-        """Detach active streams before map reverb slots return to the pool."""
+        """Detach active and fading streams before map slots return to the pool."""
         audio = getattr(self.game, "audio_mngr", None)
-        if audio is None or not hasattr(audio, "efx"):
-            return
         with self._lock:
             sources = [
                 source
@@ -1495,6 +1328,18 @@ class JukeboxPlayer:
                 for source in (player.get("source"), player.get("secondary_source"))
                 if source is not None
             ]
+            for player in self.players.values():
+                streamer = player.get("streamer")
+                if streamer is not None:
+                    streamer.reverb_slot = None
+        # Retired relay streams remain audible for the crossfade, but must not
+        # retain or reattach a slot after the old map returns it to the pool.
+        for receiver in tuple(self._retired_relays):
+            receiver.reverb_slot = None
+            sources.extend(source for source in (receiver.source_l, receiver.source_r)
+                           if source is not None)
+        if audio is None or not hasattr(audio, "efx"):
+            return
         for source in sources:
             try:
                 audio.efx.send(source, 0, None)

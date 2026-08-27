@@ -199,6 +199,36 @@ class TestGameplayAudioRefresh(unittest.TestCase):
         with mock.patch("libs.gameplay.speak"):
             self.assertTrue(gp.refresh_game_audio())
 
+    def test_nearby_pending_map_source_reports_waiting_not_success(self):
+        gp, _, _, objects = self.make_gameplay()
+        obj = objects[4]
+        obj.sound, obj.playing, obj.current_gain = None, False, 0.0
+        obj.is_audible_at = mock.Mock(return_value=True)
+        obj.audio_pending = True
+        with mock.patch("libs.gameplay.speak") as speak:
+            self.assertTrue(gp.refresh_game_audio())
+        speak.assert_called_once_with("Audio refresh requested. Waiting for map sounds.")
+
+    def test_nearby_failed_map_source_is_not_mistaken_for_out_of_range(self):
+        gp, _, _, objects = self.make_gameplay()
+        obj = objects[4]
+        obj.sound, obj.playing, obj.current_gain = None, False, 0.0
+        obj.is_audible_at = mock.Mock(return_value=True)
+        obj.audio_pending = False
+        with mock.patch("libs.gameplay.speak") as speak:
+            self.assertFalse(gp.refresh_game_audio())
+        self.assertIn("incomplete: map sounds", speak.call_args.args[0])
+
+    def test_far_pending_map_source_can_remain_silent(self):
+        gp, _, _, objects = self.make_gameplay()
+        obj = objects[4]
+        obj.sound, obj.playing, obj.current_gain = None, False, 0.0
+        obj.is_audible_at = mock.Mock(return_value=False)
+        obj.audio_pending = True
+        with mock.patch("libs.gameplay.speak") as speak:
+            self.assertTrue(gp.refresh_game_audio())
+        self.assertIn("Audio refresh finished", speak.call_args.args[0])
+
     def test_reentrant_call_is_rejected_without_touching_device(self):
         gp, device, _, _ = self.make_gameplay()
         gp._audio_refresh_in_progress = True

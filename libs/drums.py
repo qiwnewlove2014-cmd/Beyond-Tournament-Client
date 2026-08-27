@@ -1,8 +1,6 @@
 """Playable drumset audio with one-shot polyphony and hi-hat choking."""
 
-import array
 import contextlib
-import os
 import queue
 import time
 from collections import deque
@@ -12,7 +10,6 @@ import cyal.exceptions
 import pyogg
 
 from . import consts
-from . import path_utils
 
 
 class DrumAudio:
@@ -158,47 +155,8 @@ class DrumAudio:
             return False
 
     def load_stereo_split_buffers(self, path):
-        """Return cached MONO16 left/right buffers for a stereo drum sample."""
-        if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND):
-            path = os.path.join(consts.SOUNDPREPEND, path)
-        if not path.endswith(".ogg"):
-            path = path_utils.get_next_cycle_item(path)
-        try:
-            path = os.path.normpath(path) if os.path.isabs(path) else os.path.relpath(path)
-        except ValueError:
-            path = os.path.normpath(path)
-
-        cache_key_l = f"{path}_drum_split_L"
-        cache_key_r = f"{path}_drum_split_R"
-        if cache_key_l in self.am.buffers and cache_key_r in self.am.buffers:
-            return self.am.buffers[cache_key_l], self.am.buffers[cache_key_r]
-
-        try:
-            from .safe_vorbis import load_vorbis_pcm
-            file = load_vorbis_pcm(path)
-            audio_data = bytes(file.buffer)
-            if file.channels != 2:
-                buffer = self.am.load_buffer(path)
-                return buffer, buffer
-            stereo_samples = array.array("h", audio_data)
-            left_bytes = array.array("h", stereo_samples[0::2]).tobytes()
-            right_bytes = array.array("h", stereo_samples[1::2]).tobytes()
-            try:
-                buffer_l = self.am.context.gen_buffer()
-            except cyal.exceptions.InvalidOperationError:
-                buffer_l = self.am.context.gen_buffer()
-            try:
-                buffer_r = self.am.context.gen_buffer()
-            except cyal.exceptions.InvalidOperationError:
-                buffer_r = self.am.context.gen_buffer()
-            buffer_l.set_data(left_bytes, sample_rate=file.frequency, format=cyal.BufferFormat.MONO16)
-            buffer_r.set_data(right_bytes, sample_rate=file.frequency, format=cyal.BufferFormat.MONO16)
-            self.am.buffers[cache_key_l] = buffer_l
-            self.am.buffers[cache_key_r] = buffer_r
-            return buffer_l, buffer_r
-        except Exception as error:
-            print(f"Error loading split drum buffers for {path}: {error}")
-            return None, None
+        """Return prepared buffers, or silence until the main-thread upload."""
+        return self.am.instrument_samples.get(path, kind="split") or (None, None)
 
     def get_occlusion_filter(self):
         if self._occlusion_filter is None:
@@ -220,27 +178,12 @@ class DrumAudio:
         return self._light_occlusion_filter
 
     def preload(self, kit=None):
-        """Keep a drum kit resident for zero-latency first hits.
-
-        Each kit is cached independently under kit-scoped preload keys so multiple
-        kits can coexist (the local performer's kit plus kits heard from remote
-        players). Silent pads (path is None) are skipped.
-        """
+        """Request a kit without decoding or uploading on the caller's frame."""
         if kit is None:
             kit = self._active_kit
-        pad_defs = self.pad_defs(kit)
-        for pad, (_, path, _, _) in enumerate(pad_defs):
-            if path is None:
-                continue
-            with contextlib.suppress(Exception):
-                stereo = self.am.load_buffer(path)
-                if stereo is not None:
-                    self.am._preloaded_buffers[f"drums:{kit}:{pad}:stereo"] = stereo
-                left, right = self.load_stereo_split_buffers(path)
-                if left is not None:
-                    self.am._preloaded_buffers[f"drums:{kit}:{pad}:left"] = left
-                if right is not None:
-                    self.am._preloaded_buffers[f"drums:{kit}:{pad}:right"] = right
+        self.am.instrument_samples.request(
+            path for _, path, _, _ in self.pad_defs(kit) if path is not None
+        )
 
     def enqueue_remote_hit(self, data):
         """Transfer a network-thread packet to the audio-owning main thread."""

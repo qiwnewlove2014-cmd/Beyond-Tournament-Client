@@ -7,12 +7,16 @@ import weakref
 import math
 import threading
 import time
+from collections import deque
 import pyogg
 import requests
 from .audio.soundgroup import SoundGroup
 from .audio.sound import Sound
 from .piano import PianoAudio
 from .drums import DrumAudio
+from .instrument_samples import InstrumentSampleCache
+from .map_sound_cache import MapSoundCache
+from .audio_diagnostics import probe as audio_probe
 from . import options
 from . import path_utils
 from . import consts
@@ -95,6 +99,15 @@ class AudioManager():
         # nesting, a per-context GLOBAL flag) corrupted native memory and
         # crashed the game (0xC0000005) under load.
         self._audio_inbox = queue.SimpleQueue()
+        self._jukebox_receivers = deque()
+        self.instrument_samples = InstrumentSampleCache(
+            self._resolve_instrument_sample_path,
+            self._decode_instrument_sample,
+            self._upload_instrument_sample,
+        )
+        self.map_sounds = MapSoundCache(
+            self._resolve_map_sound_path, self._decode_map_sound, self._upload_instrument_sample,
+        )
         self._unbound_occlusion_filter = None
         self._light_unbound_occlusion_filter = None
         self.piano = PianoAudio(self)
@@ -207,7 +220,114 @@ class AudioManager():
             if buf:
                 self._preloaded_buffers[rel_snd] = buf
 
-    def load_buffer(self, path: str, as_mono: bool = False) -> cyal.Buffer | None:
+    @staticmethod
+    def _resolve_instrument_sample_path(path):
+        # Match the existing data/ (including encrypted VFS) path convention.
+        if not os.path.isabs(path) and not path.replace("\\", "/").startswith(consts.SOUNDPREPEND):
+            path = os.path.join(consts.SOUNDPREPEND, path)
+        return os.path.normcase(os.path.abspath(path))
+
+    @classmethod
+    def _is_prepared_instrument_sample(cls, path):
+        try:
+            relative = os.path.relpath(
+                cls._resolve_instrument_sample_path(path),
+                os.path.abspath(consts.SOUNDPREPEND),
+            ).replace("\\", "/").lower()
+        except ValueError:
+            return False
+        return relative.startswith(("piano/", "drums/")) and relative.endswith(".ogg")
+
+    @staticmethod
+    def _decode_instrument_sample(path):
+        from .safe_vorbis import load_vorbis_pcm
+        # libvorbisfile's Windows narrow fopen cannot open an absolute UTF-8
+        # path containing the Thai installation directory. Keep the canonical
+        # cache key, but use the existing relative asset path for the decoder.
+        try:
+            decode_path = os.path.relpath(path)
+        except ValueError:  # Compiled VFS can be mounted on another drive.
+            decode_path = path
+        return load_vorbis_pcm(decode_path, max_pcm_bytes=32 * 1024 * 1024)
+
+    @staticmethod
+    def _resolve_map_sound_path(path):
+        """Pure normalization on the owner; no disk/network access here."""
+        if not isinstance(path, str) or not path or len(path) > 4096:
+            return None
+        remote = path.startswith("server_sounds:")
+        if remote:
+            path = path.split(":", 1)[1]
+        root = os.path.abspath(consts.SOUNDPREPEND)
+        candidate = os.path.abspath(path)
+        try:
+            already_rooted = os.path.commonpath((root, candidate)) == root
+        except ValueError:
+            already_rooted = False
+        if not os.path.isabs(path) and not already_rooted:
+            candidate = os.path.join(root, path)
+        candidate = os.path.normcase(os.path.normpath(candidate))
+        if remote:
+            # Remote downloads must never write outside the mounted asset root.
+            if os.path.commonpath((os.path.normcase(root), candidate)) != os.path.normcase(root):
+                return None
+            return "server_sounds:" + candidate
+        return candidate
+
+    @staticmethod
+    def _decode_map_sound(path):
+        """Worker-only I/O/PCM; no AudioManager or native audio handles."""
+        from .safe_vorbis import load_vorbis_pcm
+        if path.startswith("server_sounds:"):
+            path = path.split(":", 1)[1]
+            if not os.path.exists(path):
+                relative = os.path.relpath(path, os.path.abspath(consts.SOUNDPREPEND)).replace("\\", "/")
+                # Preserve server-sound caching, with finite worker I/O bounds.
+                with requests.get(f"{consts.SERVER_SOUNDS_URL}{relative}",
+                                  timeout=(5, 10), stream=True) as response:
+                    response.raise_for_status()
+                    content = bytearray()
+                    deadline = time.monotonic() + 20.0
+                    for chunk in response.iter_content(65536):
+                        if len(content) + len(chunk) > 16 * 1024 * 1024 or time.monotonic() > deadline:
+                            raise ValueError("map sound download exceeded its limit")
+                        content.extend(chunk)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                # Publish atomically so an interrupted write cannot poison the
+                # cached asset. Temporary files stay on the destination drive.
+                import tempfile
+                fd, pending_path = tempfile.mkstemp(prefix=".map-sound-", dir=os.path.dirname(path))
+                try:
+                    with os.fdopen(fd, "wb") as output:
+                        output.write(content)
+                    os.replace(pending_path, path)
+                finally:
+                    if os.path.exists(pending_path):
+                        os.unlink(pending_path)
+        if not path.lower().endswith(".ogg"):
+            # Map loops choose one variation per cached load, not attack/hit
+            # sequencing shared with movement on another thread.
+            path = path_utils.random_item(path)
+        try:
+            decode_path = os.path.relpath(path)
+        except ValueError:
+            decode_path = path
+        return load_vorbis_pcm(decode_path, max_pcm_bytes=64 * 1024 * 1024)
+
+    def _upload_instrument_sample(self, pcm, channels, rate):
+        # Called only by the main-thread pump; workers never receive a context.
+        buffer = self.context.gen_buffer()
+        buffer.set_data(
+            pcm, sample_rate=rate,
+            format=cyal.BufferFormat.MONO16 if channels == 1 else cyal.BufferFormat.STEREO16,
+        )
+        return buffer
+
+    def load_buffer(self, path: str, as_mono: bool = False, *, instrument=False) -> cyal.Buffer | None:
+        # Only live note paths opt in. Generic menu previews and looping map
+        # sounds may use the same assets but do not have a readiness lifecycle.
+        if instrument and self._is_prepared_instrument_sample(path):
+            return self.instrument_samples.get(path, kind="mono" if as_mono else "stereo")
         if path.split(":")[0] == "server_sounds":
             path = path.split(":")[1]
             if not os.path.exists(path):
@@ -304,7 +424,7 @@ class AudioManager():
     def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0, reference_distance=15.0, rolloff=1.0, max_distance=100.0, direct_filter=None):
         if self.muted and not looping: return
         direction=self.make_orientation(*direction)
-        buffer = self.load_buffer(path)
+        buffer = self.load_buffer(path, instrument=not looping)
         if not buffer: return
         if cat not in self.volume_categories:
             cat = "miscelaneous"
@@ -475,7 +595,7 @@ class AudioManager():
                 gc.enable()
             return (snd_l, snd_r)
 
-        buffer = self.load_buffer(path, as_mono=as_mono)
+        buffer = self.load_buffer(path, as_mono=as_mono, instrument=True)
         if not buffer:
             return None
 
@@ -581,24 +701,65 @@ class AudioManager():
             except Exception as e:
                 print(f"[AUDIO INBOX] deferred call failed: {e}")
 
+    def register_jukebox_receiver(self, receiver):
+        """Register on the main thread; weak ownership lets finished streams go."""
+        self._jukebox_receivers.append(weakref.ref(receiver))
+
+    @audio_probe.measured("audio.jukebox_pump")
+    def _pump_jukebox_receivers(self, budget_seconds=0.002):
+        # Round-robin across cabinets, including while a menu covers Gameplay.
+        # All relays share this budget rather than getting 2 ms each.
+        receivers = getattr(self, "_jukebox_receivers", None)
+        if not receivers:
+            return
+        deadline = time.monotonic() + budget_seconds
+        for _ in range(len(receivers)):
+            if time.monotonic() >= deadline:
+                break
+            reference = receivers.popleft()
+            receiver = reference()
+            if receiver is None:
+                continue
+            if not receiver.running:
+                stop = getattr(receiver, "stop", None)
+                if callable(stop):
+                    stop()  # Failed decoder still needs owner-side disposal.
+                continue
+            try:
+                receiver.pump_audio(deadline=deadline, max_new_buffers=4, max_frames=4)
+            finally:
+                if receiver.running:
+                    receivers.append(reference)
+
+    @audio_probe.measured("audio.total")
     def loop(self):
         with contextlib.suppress(RuntimeError):
-            with self.context.batch():
+            # total minus body exposes time in native batch entry/commit.
+            with self.context.batch(), audio_probe.span("audio.body"):
                 # Deferred worker-thread audio runs FIRST, inside the same
                 # single-thread batch window as everything else below.
-                self._drain_audio_inbox()
-                self.piano.update()
-                self.drums.update()
+                audio_probe.call("audio.inbox", self._drain_audio_inbox)
+                self._pump_jukebox_receivers()
+                audio_probe.call("audio.instrument_upload", self.instrument_samples.pump,
+                                 max_uploads=4, budget_seconds=0.002)
+                map_sounds = getattr(self, "map_sounds", None)
+                if map_sounds is not None:
+                    audio_probe.call("audio.map_upload", map_sounds.pump,
+                                     max_uploads=1, budget_seconds=0.002)
+                audio_probe.call("audio.piano", self.piano.update)
+                audio_probe.call("audio.drums", self.drums.update)
                 # Drain ALL finished unbound sources every frame (the old
                 # one-per-frame break let sources accumulate without bound
                 # under mass-spawn load). Snapshot first: destroy() mutates
                 # the list.
-                for snd in list(self.unbound_sources):
-                    if snd.source is None or snd.source.state == cyal.SourceState.STOPPED:
-                        self.unbound_sources.remove(snd)
-                        snd.destroy()
-                for soundgroup in self.soundgroups:
-                    soundgroup.loop()
+                with audio_probe.span("audio.cleanup"):
+                    for snd in list(self.unbound_sources):
+                        if snd.source is None or snd.source.state == cyal.SourceState.STOPPED:
+                            self.unbound_sources.remove(snd)
+                            snd.destroy()
+                with audio_probe.span("audio.soundgroups"):
+                    for soundgroup in self.soundgroups:
+                        soundgroup.loop()
     
     def create_soundgroup(self, direct=False, radius=0.5, filterable=False):
         sg = SoundGroup(self.context, self, direct, radius=radius, filterable=filterable)

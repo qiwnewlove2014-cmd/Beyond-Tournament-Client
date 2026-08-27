@@ -1061,6 +1061,7 @@ class TestReloadSurvival(unittest.TestCase):
         # depend on it) — the bug was replacing it with a plain bool.
         self.assertIsInstance(receiver._started, threading.Event)
         receiver.stop()
+        receiver.join(timeout=1.0)  # Test cleanup only; stop must not join on the game thread.
         self.assertFalse(receiver.is_alive())
 
     def test_pick_song_with_only_googlevideo_url_resolves_in_background(self):
@@ -1545,29 +1546,16 @@ class TestMusicBotStreamMetadata(unittest.TestCase):
 
     def test_get_stream_info_keeps_url_and_authorization_headers(self):
         from unittest import mock
-        import yt_dlp
         from libs import music_bot as mb
-
-        class FakeYDL:
-            def __init__(self, options):
-                self.options = options
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def extract_info(self, url, download=False):
-                return {
-                    "url": "https://rr.example.googlevideo.com/audio",
-                    "http_headers": {"User-Agent": "Exact Agent"},
-                }
-
-        with mock.patch.object(yt_dlp, "YoutubeDL", FakeYDL):
+        resolved = {
+            "url": "https://rr.example.googlevideo.com/audio",
+            "http_headers": {"User-Agent": "Exact Agent"},
+        }
+        with mock.patch("libs.youtube_resolver.resolve_stream_info", return_value=resolved) as resolve:
             info = mb.YouTubeSearcher.get_stream_info(
                 "https://www.youtube.com/watch?v=abc"
             )
+        resolve.assert_called_once_with("https://www.youtube.com/watch?v=abc", cancelled=None)
         self.assertEqual(info["url"], "https://rr.example.googlevideo.com/audio")
         self.assertEqual(info["http_headers"]["User-Agent"], "Exact Agent")
 

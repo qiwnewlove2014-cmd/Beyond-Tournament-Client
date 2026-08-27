@@ -191,15 +191,14 @@ class MusicBotRefreshTests(unittest.TestCase):
 
 class JukeboxRefreshTests(unittest.TestCase):
     def make_player(self):
-        player = JukeboxPlayer.__new__(JukeboxPlayer)
-        player._lock = threading.Lock()
-        player._last_recovery_request_at = -100.0
-        player.players = {'box': {'source': _Source(), 'secondary_source': _Source()}}
-        player.game = SimpleNamespace(
+        game = SimpleNamespace(
             network=SimpleNamespace(send=mock.Mock()),
             audio_mngr=SimpleNamespace(efx=SimpleNamespace(send=mock.Mock())),
             gameplay=SimpleNamespace(map=SimpleNamespace(get_reverb_at=lambda *_: None)),
         )
+        player = JukeboxPlayer(game)
+        player._last_recovery_request_at = -100.0
+        player.players = {'box': {'source': _Source(), 'secondary_source': _Source()}}
         return player
 
     def test_resync_is_pending_and_preserves_routes(self):

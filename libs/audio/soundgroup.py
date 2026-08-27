@@ -104,9 +104,9 @@ class SoundGroup:
                 for source in self.unlabeled_sources: source.source.direction = self.parent.make_orientation(*value)
     
 
-    def play(self, path, looping=False, id="", dist=False, cat="miscelaneous", rel_x=0, rel_y=0, rel_z=0, volume=100, pitch=1.0):
+    def play(self, path, looping=False, id="", dist=False, cat="miscelaneous", rel_x=0, rel_y=0, rel_z=0, volume=100, pitch=1.0, *, prepared_buffer=None, initial_gain=None):
         if self.parent.muted and not looping or self.parent.muted and id not in ["", None]: return
-        buffer = self.parent.load_buffer(path)
+        buffer = prepared_buffer if prepared_buffer is not None else self.parent.load_buffer(path)
         if not buffer: 
             print("unable to load buffer")
             return None
@@ -116,7 +116,7 @@ class SoundGroup:
                 looping=looping, 
                 gain = 
                 (int(volume)/100) *
-                (self.parent.volume_categories[cat][0]/100),
+                (self.parent.volume_categories[cat][0]/100) if initial_gain is None else initial_gain,
                 direction=self.orientation, 
                 position=(self.position[0]+rel_x, self.position[1]+rel_y, self.position[2]+rel_z), 
                 velocity=self.velocity,
@@ -130,7 +130,7 @@ class SoundGroup:
                 looping=looping, 
                 gain = 
                 (int(volume)/100) *
-                (self.parent.volume_categories[cat][0]/100),
+                (self.parent.volume_categories[cat][0]/100) if initial_gain is None else initial_gain,
                 direction=self.orientation, 
                 position=(self.position[0]+rel_x, self.position[1]+rel_y, self.position[2]+rel_z), 
                 velocity=self.velocity,
@@ -166,6 +166,10 @@ class SoundGroup:
             try: self.parent.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
             except cyal.exceptions.InvalidOperationError as e: pass
         if self.filter is not None and len(self.filter) > 0: source.direct_filter=self.filter[-1]
+        # mute_if_far may restore a zero gain on spatial sources. A newly
+        # prepared map loop must still start at its requested fade-in gain.
+        if initial_gain is not None:
+            source.gain = initial_gain
         source.play()
         # Temporarily suppress GC so that a concurrent _remove callback
         # (triggered by a worker-thread collection) cannot mutate the

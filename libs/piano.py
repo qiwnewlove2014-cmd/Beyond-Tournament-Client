@@ -84,12 +84,24 @@ class PianoAudio:
         ("DELAY", 0.012),
     )
 
+    def preload(self):
+        """Warm common listening octaves when an existing map piano appears."""
+        self.am.instrument_samples.request(
+            f"piano/Piano.mf.{note}{octave}.ogg"
+            for octave in (3, 4, 5)
+            for note in ("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")
+        )
+
     def load_stereo_split_buffers(self, path: str):
-        """Split a stereo .ogg file into two MONO16 OpenAL buffers (L/R) in RAM.
-        
-        Returns (buf_l, buf_r). Results are cached in AudioManager.buffers.
-        For mono source files, returns the same buffer for both channels.
+        """Return split L/R buffers, or (None, None) while notes prepare.
+
+        Instruments use the shared prepared cache; other spatial sounds retain
+        their original decoder/weak cache. Mono sources share one buffer.
         """
+        # This provider is also used by non-instrument spatial sounds. Keep
+        # their existing path, but never decode piano/drums on the game thread.
+        if self.am._is_prepared_instrument_sample(path):
+            return self.am.instrument_samples.get(path, kind="split") or (None, None)
         if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND): path = os.path.join(consts.SOUNDPREPEND, path)
         if not path.endswith(".ogg"): path = path_utils.get_next_cycle_item(path)
         try:

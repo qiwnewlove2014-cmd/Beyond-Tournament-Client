@@ -38,6 +38,7 @@ from . import (
 )
 from .speech import speak
 from .logger import log, log_exception
+from .audio_diagnostics import probe as audio_probe
 
 # The agreement players read before creating an account. Written to be
 # polite and short — spoken aloud by the screen reader, so each line is a
@@ -587,6 +588,7 @@ class Game:
         finally:
             self._recovery_in_progress = False
 
+    @audio_probe.frame
     def loop_function(self):
             queue_limit = 500
             while not self.queue.empty() and queue_limit > 0:
@@ -600,7 +602,7 @@ class Game:
                     return False
                 elif callable(value):
                     try:
-                        value()
+                        audio_probe.call("game.callback", value)
                     except Exception as e:
                         print(f"Error in game queue callback: {e}")
                 elif isinstance(value, tuple):
@@ -608,11 +610,11 @@ class Game:
                     setattr(self, value[0], value[1])
             self.watchdog.heartbeat()
             with self.lock:
-                self.update(self.delta)
-                self.events = pygame.event.get()
+                audio_probe.call("game.display_clocks", self.update, self.delta)
+                self.events = audio_probe.call("game.events", pygame.event.get)
                 
                 # Normalize Thai keyboard layout keycodes to English for hotkeys
-                self.events = keyboard_layout.normalize_events(self.events)
+                self.events = audio_probe.call("game.keys", keyboard_layout.normalize_events, self.events)
                 
                 for event in self.events:
                     if (
@@ -623,7 +625,7 @@ class Game:
                         speak("", True)
                 self.audio_mngr.loop()
                 for automation_task in self.automations:
-                    automation_task.loop()
+                    audio_probe.call("game.automation", automation_task.loop)
                 if self.title_clock.elapsed >= 2500:
                     self.instance_mngr.update_title()
                     self.title_clock.restart()
@@ -656,6 +658,8 @@ class Game:
                         self.audio_mngr.context.device.pause()
                         self.audio_mngr.muted = True
                 if len(self.stack) == 0:
+                    self.audio_mngr.instrument_samples.close()
+                    self.audio_mngr.map_sounds.close()
                     self.presence_sounds.shutdown()
                     self.midi_hub.shutdown()
                     options.save()
@@ -664,9 +668,9 @@ class Game:
                     sys.exit()
                 st = self.stack[-1]
                 if isinstance(st, state.State):
-                    st.update(self.events)
+                    audio_probe.call("game.state", st.update, self.events)
                 elif callable(st):
-                    st()
+                    audio_probe.call("game.state", st)
                 self.last_fps = round(self.clock.get_fps())
                 ids_to_remove = []
                 for i in self.delayed_functions.copy():
@@ -675,14 +679,14 @@ class Game:
                         >= self.delayed_functions[i].time
                     ):
                         if callable(self.delayed_functions[i].function):
-                            self.delayed_functions[i].function()
+                            audio_probe.call("game.delayed", self.delayed_functions[i].function)
                         ids_to_remove.append(i)
                 for i in ids_to_remove:
                     del self.delayed_functions[i]
             # High performance mode: 120fps halves audio/queue latency
             # (~8ms average) and speeds up key response. Read live from the
             # options dict so toggling it in the menu takes effect instantly.
-            self.delta = self.clock.tick(
+            self.delta = audio_probe.pace(self.clock.tick,
                 120 if options.get("high_framerate", False) else self.framerate
             )
 

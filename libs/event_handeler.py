@@ -14,6 +14,7 @@ from .speech import speak
 from .weapons import weapon
 from . import tickets
 from pyogg import OpusDecoder
+from .audio_diagnostics import probe as audio_probe
 
 class EventHandeler:
     # Jam-note/jukebox alignment mode.
@@ -290,6 +291,7 @@ class EventHandeler:
         payload = dict(data) if isinstance(data, dict) else data
         self.game.put(lambda callback=callback, payload=payload: callback(payload))
 
+    @audio_probe.measured("map.instrument_reset")
     def _reset_instruments_for_map_change(self):
         """Reset piano/drums on the game thread before rebuilding map audio."""
         gp = self.gameplay
@@ -308,6 +310,7 @@ class EventHandeler:
         if hasattr(audio_mngr, 'drums') and audio_mngr.drums is not None:
             audio_mngr.drums.reset_for_map_change()
 
+    @audio_probe.measured("map.detach_audio")
     def _begin_map_audio_reload(self):
         """Detach long-lived sources before the map returns its reverb slots."""
         gp = self.gameplay
@@ -332,6 +335,7 @@ class EventHandeler:
             with contextlib.suppress(Exception):
                 detach()
 
+    @audio_probe.measured("map.sync_audio")
     def _finish_map_audio_reload(self):
         """Bind preserved streams to reverb slots from the rebuilt map."""
         gp = self.gameplay
@@ -345,15 +349,17 @@ class EventHandeler:
     def parse_map(self, data):
         self._queue_map_audio_event(self._apply_parse_map, data)
 
+    @audio_probe.measured("map.parse", trigger=True)
     def _apply_parse_map(self, data):
-        try:
-            from libs import logger as _logger
-            _logger.log(
-                f"[TRANSITION] parse_map start name={data.get('name')!r} "
-                f"thread={threading.current_thread().name}"
-            )
-        except Exception:
-            pass
+        if audio_probe.enabled:
+            try:
+                from libs import logger as _logger
+                audio_probe.call("map.log", _logger.log,
+                    f"[TRANSITION] parse_map start name={data.get('name')!r} "
+                    f"thread={threading.current_thread().name}"
+                )
+            except Exception:
+                pass
         self._begin_map_audio_reload()
         self.game.automations.clear()
         self.game.audio_mngr.apply_filter(
@@ -379,16 +385,19 @@ class EventHandeler:
             incoming_map_name
             and getattr(self.gameplay, "map_name", None) == incoming_map_name
         )
+        samples = getattr(self.game.audio_mngr, "instrument_samples", None)
+        if not same_map and samples is not None:
+            samples.clear()
         self._stop_jukebox_players_for_map_change(same_map=same_map)
         self.gameplay.map_name = incoming_map_name
-        self.gameplay.parser.load(data["data"])
+        audio_probe.call("map.parser_load", self.gameplay.parser.load, data["data"])
         raw_x = data.get("x")
         raw_y = data.get("y")
         raw_z = data.get("z")
         x = float(raw_x) if raw_x is not None else 0.0
         y = float(raw_y) if raw_y is not None else 0.0
         z = float(raw_z) if raw_z is not None else 0.0
-        self.gameplay.player.move(x, y, z, play_sound=False)
+        audio_probe.call("map.player_move", self.gameplay.player.move, x, y, z, play_sound=False)
         # Setup megaphone speakers after map data is loaded (with safety check)
         if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
             # A full parse may be a different map. Replace the old cached PA
@@ -400,27 +409,29 @@ class EventHandeler:
             self.gameplay.megaphone.lock_owners = (
                 set(owners) if isinstance(owners, (list, tuple, set)) else set()
             )
-            self.gameplay.megaphone.setup_megaphone_speakers(force=True)
+            audio_probe.call("map.pa_setup", self.gameplay.megaphone.setup_megaphone_speakers, force=True)
         # === Load Music Bot playlist for this map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
-            self.gameplay.music_bot.load_map_music(data["data"])
+            audio_probe.call("map.music_load", self.gameplay.music_bot.load_map_music, data["data"])
         # A complete map parse can also be emitted for Reload Map Data.  The
         # jukebox relay continues server-side, so request the authoritative
         # state immediately instead of waiting for a later map-sync packet.
         self.game.network.send(consts.CHANNEL_MISC, "jukebox_resync")
         self._finish_map_audio_reload()
-        try:
-            from libs import logger as _logger
-            _logger.log(
-                f"[TRANSITION] parse_map done name={data.get('name')!r} "
-                f"thread={threading.current_thread().name}"
-            )
-        except Exception:
-            pass
+        if audio_probe.enabled:
+            try:
+                from libs import logger as _logger
+                audio_probe.call("map.log", _logger.log,
+                    f"[TRANSITION] parse_map done name={data.get('name')!r} "
+                    f"thread={threading.current_thread().name}"
+                )
+            except Exception:
+                pass
 
     def update_map(self, data):
         self._queue_map_audio_event(self._apply_update_map, data)
 
+    @audio_probe.measured("map.update", trigger=True)
     def _apply_update_map(self, data):
         self._begin_map_audio_reload()
         for a in self.game.automations.copy():
@@ -442,8 +453,8 @@ class EventHandeler:
             i.in_water = False
             i.water_check()
 
-        self.gameplay.parser.load(data["data"], False)
-        self.gameplay.player.move(
+        audio_probe.call("map.parser_load", self.gameplay.parser.load, data["data"], False)
+        audio_probe.call("map.player_move", self.gameplay.player.move,
             self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
         )
         # Re-sync Reverb EFX on all preserved remote entities (voice chat, soundgroups)
@@ -455,10 +466,10 @@ class EventHandeler:
         # resumes here instead of going silent after every reload.
         self.game.network.send(consts.CHANNEL_MISC, "jukebox_resync")
         if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
-            self.gameplay.megaphone.setup_megaphone_speakers(force=True)
+            audio_probe.call("map.pa_setup", self.gameplay.megaphone.setup_megaphone_speakers, force=True)
         # === Reload Music Bot playlist for updated map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
-            self.gameplay.music_bot.load_map_music(data["data"])
+            audio_probe.call("map.music_load", self.gameplay.music_bot.load_map_music, data["data"])
         self._finish_map_audio_reload()
 
     def rebuild_elements(self, data):
@@ -874,31 +885,13 @@ class EventHandeler:
             )
 
     def piano_start(self, data):
-        """Enable piano mode to intercept keyboard input for playing piano notes and pre-load audio buffers strongly into RAM."""
+        """Enter piano mode on the main thread; its handler requests samples."""
         # The packet handler runs on the network thread. Queue all piano input
         # and audio initialization onto the main thread that owns those states.
         self.game.put(self.gameplay._start_piano_session)
-        # Preload piano buffers on the main thread too: load_buffer reaches OpenAL
-        # (context.genBuffer + set_data), which is unsafe on the network thread.
-        def _preload_piano_buffers():
-            notes = ["C4", "Db4", "D4", "Eb4", "E4", "F4", "Gb4", "G4", "Ab4", "A4", "Bb4", "B4", "C5", "Db5", "D5", "Eb5", "E5", "F5"]
-            for note in notes:
-                snd = f"piano/Piano.mf.{note}.ogg"
-                snd_path = os.path.join(consts.SOUNDPREPEND, snd)
-                try:
-                    rel_snd = os.path.relpath(snd_path)
-                except ValueError:
-                    rel_snd = os.path.normpath(snd_path)
-                try:
-                    buf = self.game.audio_mngr.load_buffer(snd)
-                    if buf:
-                        self.game.audio_mngr._preloaded_buffers[rel_snd] = buf
-                except Exception:
-                    pass
-        self.game.put(_preload_piano_buffers)
 
     def drum_start(self, data):
-        """Enter drum mode and preload the requested kit on the main thread."""
+        """Enter drum mode on the main thread; its handler requests samples."""
         kit = data.get("kit") if isinstance(data, dict) else None
         self.game.put(lambda: self.gameplay._start_drum_session(kit=kit))
 

@@ -29,6 +29,9 @@ class DrumHandler:
         self.active = False
         self.volume_percent = 100
         self._pressed_keys = set()
+        self._sample_paths = ()
+        self._sample_status = None
+        self._entry_enter_down = set()
 
     @property
     def _game(self):
@@ -53,10 +56,17 @@ class DrumHandler:
             self._gp.piano.stop(notify_server=True)
         self.active = True
         self._pressed_keys.clear()
+        self._sample_status = None
+        self._entry_enter_down = self._held_enter_keys()
         drums = self._game.audio_mngr.drums
         if kit and drums.is_valid_kit(kit):
             drums.set_active_kit(kit)
-        drums.preload()
+        self._sample_paths = tuple(
+            path for _, path, _, _ in drums.pad_defs(drums._active_kit)
+            if path is not None
+        )
+        self._game.audio_mngr.instrument_samples.request(self._sample_paths)
+        self._update_sample_readiness()
         self._start_midi()
 
     def stop(self, notify_server=True):
@@ -65,9 +75,35 @@ class DrumHandler:
         if self.active:
             self._deactivate_midi()
         self.active = False
+        self._sample_paths = ()
+        self._sample_status = None
+        self._entry_enter_down.clear()
         self._gp.drum_mode = False  # Sync gameplay flag so movement resumes
         if notify_server and self._game.network:
             self._game.network.send(consts.CHANNEL_MAP, "drum_stop", {})
+
+    @staticmethod
+    def _held_enter_keys():
+        """Release the interaction key before accepting Enter as an exit."""
+        try:
+            pressed = pygame.key.get_pressed()
+            return {key for key in (pygame.K_RETURN, pygame.K_KP_ENTER) if pressed[key]}
+        except pygame.error:
+            return set()
+
+    def _update_sample_readiness(self):
+        if not self.active or not self._sample_paths:
+            return
+        status = self._game.audio_mngr.instrument_samples.status(self._sample_paths)
+        if status == self._sample_status:
+            return
+        self._sample_status = status
+        if status == "ready":
+            speak("Drums ready.")
+        elif status == "failed":
+            speak("Some drum sounds could not load. Check the game sound files. Press Escape to exit.")
+        else:
+            speak("Loading drum sounds. Press Escape to cancel.")
 
     # ------------------------------------------------------------------
     # key mapping
@@ -94,6 +130,19 @@ class DrumHandler:
 
     def play_local_hit(self, pad, velocity=None):
         """Play a drum hit locally and broadcast to other players."""
+        if not self.active:
+            return False
+        drums = self._game.audio_mngr.drums
+        if not drums.is_valid_pad(pad):
+            return False
+        path = drums.pad_defs(drums._active_kit)[pad][1]
+        if path is None:
+            return False
+        samples = self._game.audio_mngr.instrument_samples
+        samples.request((path,))
+        if samples.get(path) is None:
+            self._update_sample_readiness()
+            return False
         base_volume = (
             300
             if velocity is None
@@ -124,6 +173,7 @@ class DrumHandler:
             packet["velocity"] = max(1, min(127, int(base_vel * vol_factor)))
             self._attach_music_timeline(packet)
             self._send_jam_note("play_drum_hit", packet)
+        return True
 
     # ------------------------------------------------------------------
     # MIDI integration
@@ -143,6 +193,9 @@ class DrumHandler:
 
     def poll(self):
         """Dispatch queued MIDI events through the active drum profile."""
+        if not self.active:
+            return
+        self._update_sample_readiness()
         self._game.midi_hub.poll()
 
     # ------------------------------------------------------------------
@@ -180,8 +233,12 @@ class DrumHandler:
             return False
 
         if event.type == pygame.KEYDOWN:
-            if event.key in drum_keyconfig.RESERVED_DRUM_KEYS:
+            if event.key == pygame.K_ESCAPE:
                 self.stop(notify_server=True)
+                return True
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                if event.key not in self._entry_enter_down and not getattr(event, "repeat", False):
+                    self.stop(notify_server=True)
                 return True
             if event.key in (pygame.K_UP, pygame.K_PAGEUP):
                 self.adjust_volume(10)
@@ -203,6 +260,9 @@ class DrumHandler:
             return True
 
         elif event.type == pygame.KEYUP:
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self._entry_enter_down.discard(event.key)
+                return True
             self._pressed_keys.discard(event.key)
             # Let KEYUP pass for allowed keys so held-key actions work.
             if event.key in self._ALWAYS_ALLOWED_KEYS:

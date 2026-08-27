@@ -3,9 +3,33 @@ from . import audio_manager, consts, options
 from .objects import entity, vehicle
 import cyal.exceptions
 from .speech import speak
-
+from .audio_diagnostics import probe as audio_probe
 from math import sqrt, trunc, floor
 
+
+def _play_map_loop(audio, group, path, *args, **kwargs):
+    """A pending map asset never falls through to the synchronous loader."""
+    cache = getattr(audio, "map_sounds", None)
+    if cache is not None:
+        buffer = cache.get(path)
+        if buffer is None:
+            return None
+        kwargs["prepared_buffer"] = buffer
+    else:
+        # Legacy/mock audio owners do not implement asynchronous preparation.
+        kwargs.pop("initial_gain", None)
+    return group.play(path, *args, **kwargs)
+
+
+def _map_loop_pending(audio, path):
+    cache = getattr(audio, "map_sounds", None)
+    return cache is not None and cache.status(path) in ("cold", "pending")
+
+
+def _retry_map_loop(audio, path):
+    cache = getattr(audio, "map_sounds", None)
+    if cache is not None:
+        cache.retry(path)
 
 class Map:
     def __init__(self, game, minx=0, miny=0, minz=0, maxx=0, maxy=0, maxz=0):
@@ -173,19 +197,30 @@ class Map:
             return False
 
     def loop(self):
+        # Camera.enter may have run before decoding finished. Poll on the
+        # owner even while stationary; no worker retains an old map object.
+        with audio_probe.span("map.loops_ready"):
+            for collection in ("ambience_list", "music_list", "pannable_list"):
+                for loop in getattr(self, collection, ()):
+                    poll = getattr(loop, "poll_audio", None)
+                    if poll is not None:
+                        poll()
         for i in self.entities.values():
-            i.loop()
-            i.water_check()
+            audio_probe.call("map.entity_update", i.loop)
+            audio_probe.call("map.entity_water", i.water_check)
             if not self.player.dead:
-                i.soundgroup.aclude_check(self)
+                audio_probe.call("map.occlusion", i.soundgroup.aclude_check, self)
         for i in self.source_list:
             if not self.player.dead:
-                i.soundgroup.aclude_check(self)
+                audio_probe.call("map.occlusion", i.soundgroup.aclude_check, self)
         for i in self.pannable_list:
             if not self.player.dead:
-                i.soundgroup.aclude_check(self)
+                audio_probe.call("map.occlusion", i.soundgroup.aclude_check, self)
 
     def destroy(self, destroy_entities=True):
+        cache = getattr(getattr(getattr(self, "game", None), "audio_mngr", None), "map_sounds", None)
+        if cache is not None:
+            cache.begin_map()  # Cancel stale work, retain bounded ready buffers.
         # audio.set_global_reverb(None)
         def destroy_map_audio(obj):
             """Dispose a map-owned looping sound synchronously during reload."""
@@ -737,6 +772,17 @@ class Map:
     def spawn_zombieSpawn(self, **kwargs):
         pass
 
+    def spawn_instrument(self, instrument="piano", kit=None, **kwargs):
+        # The server separately spawns the interactive entity. Map metadata
+        # only warms known local samples for listeners, with no audio or I/O
+        # on this frame and no change to the local performer's selected kit.
+        instrument = str(instrument or "piano").lower()
+        if instrument == "piano":
+            self.game.audio_mngr.piano.preload()
+        elif instrument == "drumset":
+            drums = self.game.audio_mngr.drums
+            drums.preload(kit or drums.DEFAULT_KIT)
+
     def spawn_entity(
         self,
         name,
@@ -1074,24 +1120,26 @@ class Ambience(BaseMapObj):
     def recover(self):
         """Restore this map-owned loop without replacing its SoundGroup.
 
-        This is intentionally synchronous: callers use it from the gameplay
-        audio thread. A valid OpenAL source is resumed in place; only a lost
-        or unusable source is replaced, preserving the map object's ownership
-        and the AudioManager's filter/effect pools.
+        Native recovery stays on the gameplay thread. A missing buffer is
+        prepared asynchronously; poll_audio resumes it when ready. A valid
+        source is kept in place, preserving the map's effect/filter ownership.
         """
+        if getattr(self, "_destroyed", False):
+            return False
+        _retry_map_loop(self.map.game.audio_mngr, self.file)
         repaired = False
         source = getattr(self.sound, "source", None) if self.sound else None
         if source is None:
             if self.sound:
                 with contextlib.suppress(Exception):
                     self.sound.destroy()
-            self.sound = self.soundgroup.play(
-                self.file, True, cat=self.type, volume=self.volume
+            self.sound = _play_map_loop(self.map.game.audio_mngr, self.soundgroup,
+                self.file, True, cat=self.type, volume=self.volume, initial_gain=0.0
             )
             source = getattr(self.sound, "source", None) if self.sound else None
             repaired = True
         if source is None:
-            self.playing = False
+            self.playing = self.audio_pending
             return False
         try:
             if source.state != cyal.SourceState.PLAYING:
@@ -1107,12 +1155,12 @@ class Ambience(BaseMapObj):
         except Exception:
             with contextlib.suppress(Exception):
                 self.sound.destroy()
-            self.sound = self.soundgroup.play(
-                self.file, True, cat=self.type, volume=self.volume
+            self.sound = _play_map_loop(self.map.game.audio_mngr, self.soundgroup,
+                self.file, True, cat=self.type, volume=self.volume, initial_gain=0.0
             )
             source = getattr(self.sound, "source", None) if self.sound else None
             if source is None:
-                self.playing = False
+                self.playing = self.audio_pending
                 return False
             try:
                 category_volume = self.map.game.audio_mngr.volume_categories.get(
@@ -1145,20 +1193,43 @@ class Ambience(BaseMapObj):
         self.file = sound if sound is not str else ""
         self.volume = volume
         self.fade_time = 0.5
+        self._destroyed = False
         self.soundgroup = self.map.game.audio_mngr.create_soundgroup(
             direct=True, filterable=True if type == "ambience" else False
         )
-        self.sound = self.soundgroup.play(self.file, True, cat=type, volume=self.volume)
+        self.sound = _play_map_loop(self.map.game.audio_mngr, self.soundgroup,
+                                   self.file, True, cat=type, volume=self.volume, initial_gain=0.0)
 
         self.playing = False
         with contextlib.suppress(AttributeError):
             self.sound.source.gain = 0.0
             self.sound.muted = True
 
+    @property
+    def audio_pending(self):
+        return (not getattr(self, "_destroyed", False) and self.sound is None
+                and _map_loop_pending(self.map.game.audio_mngr, self.file))
+
+    def poll_audio(self):
+        if getattr(self, "_destroyed", False) or not self.playing or self.sound is not None:
+            return
+        self.sound = _play_map_loop(self.map.game.audio_mngr, self.soundgroup,
+                                   self.file, True, cat=self.type, volume=self.volume, initial_gain=0.0)
+        if self.sound is not None:
+            self.sound.muted = True
+            self.playing = False
+            self.enter()  # Existing fade/volume semantics, but only when ready.
+
     def enter(self):
+        if getattr(self, "_destroyed", False):
+            return
         if not self.playing:
             self.playing = True
             if self.sound and self.sound.source is not None:
+                sound = self.sound
+                def finish_fade():
+                    if self.sound is sound and self.playing and not getattr(self, "_destroyed", False):
+                        sound.muted = False
                 try:
                     self.map.game.automate(
                         self.sound.source,
@@ -1166,7 +1237,7 @@ class Ambience(BaseMapObj):
                         (self.volume / 100)
                         * (self.map.game.audio_mngr.volume_categories[self.type][0] / 100),
                         500,
-                        callback=lambda: setattr(self.sound, "muted", False),
+                        callback=finish_fade,
                     )
                 except cyal.exceptions.InvalidOperationError:
                     pass
@@ -1195,6 +1266,16 @@ class Ambience(BaseMapObj):
         else:
             if self.sound and destroy:
                 self.sound.destroy()
+
+
+    def destroy(self):
+        self._destroyed = True
+        self.playing = False
+        sound, self.sound = self.sound, None
+        if sound:
+            with contextlib.suppress(Exception):
+                sound.destroy()
+        self.soundgroup.destroy()
 
 
 class Tile(BaseMapObj):
@@ -1284,22 +1365,37 @@ class TravelPoint(BaseMapObj):
 
 class Pannable(BaseMapObj):
     def __init__(self, game, x, y, z, sound, volume=100):
-        super().__init__(x, x, y, y, z, z, sound)
+        super().__init__("", x, x, y, y, z, z, "pannable")
         self.game = game
         self.path = sound
         self.volume = volume
+        self._destroyed = False
         self.soundgroup = self.game.audio_mngr.create_soundgroup()
         self.soundgroup.position = (x, y, z)
-        self.sound = self.soundgroup.play(sound, looping=True, volume=volume)
+        self.sound = _play_map_loop(self.game.audio_mngr, self.soundgroup,
+                                   sound, looping=True, volume=volume)
+
+    @property
+    def audio_pending(self):
+        return (not getattr(self, "_destroyed", False) and self.sound is None
+                and _map_loop_pending(self.game.audio_mngr, self.path))
+
+    def poll_audio(self):
+        if not getattr(self, "_destroyed", False) and self.sound is None:
+            self.sound = _play_map_loop(self.game.audio_mngr, self.soundgroup,
+                                       self.path, looping=True, volume=self.volume)
 
     def recover(self):
         """Resume this positional map loop, replacing only a lost source."""
+        if getattr(self, "_destroyed", False):
+            return False
+        _retry_map_loop(self.game.audio_mngr, self.path)
         source = getattr(self.sound, "source", None) if self.sound else None
         if source is None:
             if self.sound:
                 with contextlib.suppress(Exception):
                     self.sound.destroy()
-            self.sound = self.soundgroup.play(
+            self.sound = _play_map_loop(self.game.audio_mngr, self.soundgroup,
                 self.path, looping=True, volume=self.volume
             )
             return bool(self.sound and getattr(self.sound, "source", None))
@@ -1310,16 +1406,19 @@ class Pannable(BaseMapObj):
         except Exception:
             with contextlib.suppress(Exception):
                 self.sound.destroy()
-            self.sound = self.soundgroup.play(
+            self.sound = _play_map_loop(self.game.audio_mngr, self.soundgroup,
                 self.path, looping=True, volume=self.volume
             )
             return bool(self.sound and getattr(self.sound, "source", None))
         return False
 
     def destroy(self):
+        self._destroyed = True
         with contextlib.suppress(Exception):
             if self.sound:
                 self.sound.destroy()
+        self.sound = None
+        self.soundgroup.destroy()
 
 
 class SoundSource(BaseMapObj):
@@ -1333,9 +1432,29 @@ class SoundSource(BaseMapObj):
         self.playing = False
         self.fade_range = 25.0
         self.current_gain = 0.0
+        self._destroyed = False
+        cache = getattr(self.map.game.audio_mngr, "map_sounds", None)
+        if cache is not None:
+            cache.get(self.path)  # Prepare before the listener reaches this area.
+
+    @property
+    def audio_pending(self):
+        return (not getattr(self, "_destroyed", False) and self.sound is None
+                and _map_loop_pending(self.map.game.audio_mngr, self.path))
+
+    def is_audible_at(self, x, y, z):
+        # Match loop()'s weighted box distance. A zero current_gain can also
+        # mean a nearby sound is still loading, not that it is out of range.
+        category = self.map.game.audio_mngr.volume_categories.get("sound_source", [100])[0]
+        if self.volume <= 0 or category <= 0:
+            return False
+        dx = max(0.0, self.minx - x, x - self.maxx)
+        dy = max(0.0, self.miny - y, y - self.maxy)
+        dz = max(0.0, self.minz - z, z - self.maxz) * 3.5
+        return dx * dx + dy * dy + dz * dz < self.fade_range * self.fade_range
 
     def loop(self, player_x, player_y, player_z):
-        if not self.soundgroup:
+        if not self.soundgroup or getattr(self, "_destroyed", False):
             return
 
         # Calculate 3D distance to the nearest point on the bounding box (with 3.5x Z altitude weighting)
@@ -1379,11 +1498,17 @@ class SoundSource(BaseMapObj):
             self.soundgroup.position = (cx, cy, cz)
 
         if not self.playing:
-            self.playing = True
             if not self.sound:
-                self.sound = self.soundgroup.play(
-                    self.path, True, cat="sound_source", volume=self.volume
+                self.sound = audio_probe.call("map.source_start", _play_map_loop,
+                    self.map.game.audio_mngr, self.soundgroup,
+                    self.path, True, cat="sound_source", volume=self.volume, initial_gain=0.0
                 )
+                if self.sound is None:
+                    # Do not latch playing=True while loading: retry on a
+                    # later frame and begin the fade from silence when ready.
+                    self.current_gain = 0.0
+                    return
+                self.playing = True
                 if self.sound and hasattr(self.sound, "source") and self.sound.source:
                     with contextlib.suppress(Exception):
                         self.sound.source.gain = self.current_gain
@@ -1394,10 +1519,11 @@ class SoundSource(BaseMapObj):
                         if hasattr(self.sound.source, "reference_distance"):
                             self.sound.source.reference_distance = 10.0
             else:
+                self.playing = True
                 with contextlib.suppress(Exception):
                     if self.sound and self.sound.source:
                         self.sound.source.gain = self.current_gain
-                        self.sound.source.play()
+                        audio_probe.call("map.source_start", self.sound.source.play)
 
         if self.sound and hasattr(self.sound, "source") and self.sound.source:
             with contextlib.suppress(Exception):
@@ -1426,6 +1552,9 @@ class SoundSource(BaseMapObj):
 
     def recover(self, player_x, player_y, player_z):
         """Re-evaluate and resume a nearby source on the gameplay thread."""
+        if getattr(self, "_destroyed", False):
+            return False
+        _retry_map_loop(self.map.game.audio_mngr, self.path)
         repaired = False
         source = getattr(self.sound, "source", None) if self.sound else None
         if self.sound and source is None:
@@ -1450,9 +1579,13 @@ class SoundSource(BaseMapObj):
         return repaired
 
     def destroy(self):
+        self._destroyed = True
+        self.playing = False
         with contextlib.suppress(Exception):
             if self.sound:
                 self.sound.destroy()
+        self.sound = None
+        self.soundgroup.destroy()
 
 class JukeboxZone(BaseMapObj):
     """A music jukebox element. Stores the position its audio is anchored to."""
