@@ -98,12 +98,10 @@ class DrumHandler:
         if status == self._sample_status:
             return
         self._sample_status = status
-        if status == "ready":
-            speak("Drums ready.")
-        elif status == "failed":
+        # Normal preparation stays silent so it cannot interrupt the entry
+        # controls. Keep actionable failures.
+        if status == "failed":
             speak("Some drum sounds could not load. Check the game sound files. Press Escape to exit.")
-        else:
-            speak("Loading drum sounds. Press Escape to cancel.")
 
     # ------------------------------------------------------------------
     # key mapping

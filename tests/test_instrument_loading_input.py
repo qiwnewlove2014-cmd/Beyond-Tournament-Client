@@ -148,27 +148,54 @@ class InstrumentLoadingInputTests(unittest.TestCase):
         f.handler.start()
         self.assertEqual(set(f.samples.requested[0]), expected)
         self.assertGreater(len(expected), 18)
-        self.assertEqual(f.speech, ["Loading piano sounds. Press Escape to cancel."])
+        self.assertEqual(f.speech, [])
         f.game.audio_mngr.load_buffer.assert_not_called()
         f.game.midi_hub.acquire.assert_called_once_with(f.owner, "piano")
 
-    def test_ready_and_failed_announcements_are_not_repeated_each_poll(self):
+    def test_preparation_is_silent_but_failure_is_announced_once(self):
         for kind in ("piano", "drum"):
             with self.subTest(kind=kind):
                 f = self.make_handler(kind)
                 f.handler.start()
                 f.handler.poll()
-                self.assertEqual(len(f.speech), 1)
+                self.assertEqual(f.speech, [])
+                self.assertEqual(f.handler._sample_status, "loading")
                 f.samples.ready.update(f.handler._sample_paths)
                 f.handler.poll()
                 f.handler.poll()
-                self.assertEqual(len(f.speech), 2)
-                self.assertEqual(f.speech[-1], "Piano ready." if kind == "piano" else "Drums ready.")
+                self.assertEqual(f.speech, [])
+                self.assertEqual(f.handler._sample_status, "ready")
                 f.samples.failed.add(f.handler._sample_paths[0])
                 f.handler.poll()
                 f.handler.poll()
-                self.assertEqual(len(f.speech), 3)
+                self.assertEqual(len(f.speech), 1)
                 self.assertIn("Check the game sound files", f.speech[-1])
+
+    def test_cached_reentry_does_not_speak_over_control_instructions(self):
+        for kind in ("piano", "drum"):
+            with self.subTest(kind=kind):
+                f = self.make_handler(kind)
+                f.handler.start()
+                f.samples.ready.update(f.handler._sample_paths)
+                f.handler.stop()
+                f.speech.clear()
+                f.handler.start()
+                f.handler.poll()
+                self.assertEqual(f.handler._sample_status, "ready")
+                self.assertEqual(f.speech, [])
+                self.assertTrue(f.handler.active)
+
+    def test_cancelled_preparation_does_not_announce_late_failure(self):
+        for kind in ("piano", "drum"):
+            with self.subTest(kind=kind):
+                f = self.make_handler(kind)
+                f.handler.start()
+                requested = f.handler._sample_paths
+                self.key(f, f.pygame.K_ESCAPE)
+                f.samples.failed.add(requested[0])
+                f.handler.poll()
+                self.assertEqual(f.speech, [])
+                self.assertFalse(f.handler.active)
 
     def test_escape_cancels_loading_and_late_ready_does_not_reactivate(self):
         for kind in ("piano", "drum"):
@@ -181,7 +208,7 @@ class InstrumentLoadingInputTests(unittest.TestCase):
                 f.handler.poll()
                 self.assertFalse(f.handler.active)
                 self.assertEqual(f.handler._sample_paths, ())
-                self.assertEqual(len(f.speech), 1)
+                self.assertEqual(f.speech, [])
                 f.game.midi_hub.release.assert_called_once()
                 f.game.midi_hub.poll.assert_not_called()
 
@@ -264,12 +291,12 @@ class InstrumentLoadingInputTests(unittest.TestCase):
         self.assertEqual(f.calls, [])
         self.assertTrue(f.handler.play_local_note("C1", velocity=90))
 
-    def test_multiple_cold_midi_notes_do_not_repeat_loading_speech(self):
+    def test_multiple_cold_midi_notes_load_without_speech(self):
         f = self.make_handler()
         f.handler.start()
         for note in ("C1", "Db1", "D1", "Eb1"):
             self.assertFalse(f.handler.play_local_note(note, velocity=90))
-        self.assertEqual(f.speech, ["Loading piano sounds. Press Escape to cancel."])
+        self.assertEqual(f.speech, [])
 
     def test_octave_and_transpose_request_full_updated_map_without_decode(self):
         f = self.make_handler()
@@ -324,7 +351,7 @@ class InstrumentLoadingInputTests(unittest.TestCase):
         self.assertEqual(f.samples.requested, [])
         self.assertEqual(f.calls, [])
 
-    def test_cancel_then_new_session_only_announces_new_mapping_ready(self):
+    def test_cancel_then_new_session_tracks_new_mapping_without_speech(self):
         f = self.make_handler()
         f.handler.start()
         previous = f.handler._sample_paths
@@ -336,7 +363,8 @@ class InstrumentLoadingInputTests(unittest.TestCase):
         self.assertEqual(f.handler._sample_status, "loading")
         f.samples.ready.update(f.handler._sample_paths)
         f.handler.poll()
-        self.assertEqual(f.speech.count("Piano ready."), 1)
+        self.assertEqual(f.handler._sample_status, "ready")
+        self.assertEqual(f.speech, [])
 
     def test_escape_releases_notes_played_during_partial_readiness(self):
         f = self.make_handler()

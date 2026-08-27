@@ -185,7 +185,7 @@ class AudioStreamer(threading.Thread):
 
     def __init__(self, game, audio_url, source, volume=50, bot=None, channels=2,
                  spatial_pair=None, start_offset=0.0, http_headers=None,
-                 start_offset_received_at=None, canonical_url=None):
+                 start_offset_received_at=None, canonical_url=None, media_cache=None):
         super().__init__(daemon=True)
         self.game = game
         self.bot = bot
@@ -194,6 +194,13 @@ class AudioStreamer(threading.Thread):
         # googlevideo URL 403s at startup, re-resolving THIS url yields a new
         # signed URL+headers — retrying the same stale URL never helps.
         self.canonical_url = canonical_url
+        # Opt-in from JukeboxPlayer only. Workers borrow its bounded metadata
+        # cache; personal broadcasts, native sources and playback positions
+        # are never cached. These per-attempt fields belong to this worker.
+        self._media_cache = media_cache if bot is None else None
+        self._media_cache_key = None
+        self._media_cache_entry = None
+        self._media_cache_candidate = None
         self.source = source  # cyal OpenAL source
         self.volume = volume
         self.start_offset = float(start_offset or 0.0)
@@ -743,6 +750,41 @@ class AudioStreamer(threading.Thread):
             return probe.worker_call(label, function, *args, **kwargs)
         return function(*args, **kwargs)
 
+    def _resolve_playback_info(self, canonical_url, *, use_cache=False):
+        self._media_cache_key = canonical_url
+        self._media_cache_entry = None
+        self._media_cache_candidate = None
+        if not self.running:
+            return None
+        if use_cache and self._media_cache is not None:
+            entry = self._media_cache.get(canonical_url)
+            if entry is not None:
+                self._media_cache_entry = entry
+                return entry.info()
+        # Retries bypass the cache, retaining the original isolated resolver
+        # and cancellation contract. Only successful prebuffering promotes it.
+        fresh = self._diagnostic_startup_call("direct.resolve", YouTubeSearcher.get_stream_info,
+                                             canonical_url, cancelled=lambda: not self.running)
+        if self.running and self._media_cache is not None:
+            self._media_cache_candidate = fresh
+        return fresh
+
+    def _invalidate_cached_media(self):
+        if self._media_cache is not None and self._media_cache_entry is not None:
+            self._media_cache.invalidate(self._media_cache_key, self._media_cache_entry)
+        self._media_cache_entry = None
+
+    def _remember_prebuffered_media(self):
+        if (self.running and self._media_cache is not None
+                and self._media_cache_candidate is not None):
+            self._media_cache_entry = self._media_cache.put(
+                self._media_cache_key, self._media_cache_candidate)
+            if not self.running:
+                # Cancellation can arrive during validation/publication. Only
+                # remove our own entry, never another worker's newer result.
+                self._invalidate_cached_media()
+        self._media_cache_candidate = None
+
     def _read_prebuffer(self):
         """Read and queue the startup buffer for the current ffmpeg process."""
         pre_buffered = 0
@@ -792,8 +834,7 @@ class AudioStreamer(threading.Thread):
             canonical_url = target_url
             target_url = ""
         if canonical_url and not target_url.startswith(("http://", "https://")):
-            fresh = self._diagnostic_startup_call("direct.resolve", YouTubeSearcher.get_stream_info,
-                                                canonical_url, cancelled=lambda: not self.running)
+            fresh = self._resolve_playback_info(canonical_url, use_cache=True)
             if not self.running:
                 self._cleanup()
                 return
@@ -917,14 +958,32 @@ class AudioStreamer(threading.Thread):
                 pass
             self.process = None
 
+            if not self.running:
+                break
+            cached_attempt = self._media_cache_entry is not None
+            self._invalidate_cached_media()
+            if cached_attempt and attempt < 3:
+                # A cached URL may have expired or become IP-bound. Never
+                # repeat it or sleep before requesting a fresh local URL.
+                # This consumes the existing retry budget, not an extra loop.
+                fresh = self._resolve_playback_info(canonical_url)
+                if not self.running:
+                    break
+                if not fresh:
+                    self.failure_reason = "audio link resolution failed"
+                    break
+                target_url = fresh['url']
+                input_headers = fresh.get('http_headers') or {}
+                cmd = _build_cmd()
+                continue
+
             retryable = any(tok in error_detail for tok in ("403", "429", "503", "connection", "timeout", "reset"))
             if not retryable or attempt >= 3:
                 break
             if attempt >= 1 and canonical_url and ("youtube.com" in canonical_url or "youtu.be" in canonical_url):
                 # The exact URL+headers already failed once — grab a fresh
                 # signed stream URL instead of re-running the same command.
-                fresh = self._diagnostic_startup_call("direct.resolve", YouTubeSearcher.get_stream_info,
-                                                    canonical_url, cancelled=lambda: not self.running)
+                fresh = self._resolve_playback_info(canonical_url)
                 if not self.running:
                     break
                 if fresh and fresh.get('url'):
@@ -936,7 +995,7 @@ class AudioStreamer(threading.Thread):
                         pass
             time.sleep(1.0 + attempt)
 
-        if pre_buffered == 0 and not self.running:
+        if not self.running:
             # Intentional cancellation (map change, newer playback generation,
             # or stop) is not a load failure and must stay silent.
             self._cleanup()
@@ -966,6 +1025,10 @@ class AudioStreamer(threading.Thread):
         # Start local playback after pre-buffering (spatial pairs also need
         # their distance fade computed before the first audible sample).
         if pre_buffered > 0:
+            self._remember_prebuffered_media()
+            if not self.running:
+                self._cleanup()
+                return
             if self.spatial_pair:
                 self._diagnostic_startup_call("direct.spatial", self._update_spatial_gain)
             self._diagnostic_startup_call("direct.first_play", self._play_all)
@@ -1089,6 +1152,7 @@ class AudioStreamer(threading.Thread):
                 exit_code = None
             if exit_code not in (None, 0):
                 self.failure_reason = f"ffmpeg exited early (code {exit_code})"
+                self._invalidate_cached_media()
             else:
                 self.completed_normally = True
 

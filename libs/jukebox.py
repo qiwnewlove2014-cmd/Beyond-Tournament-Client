@@ -29,6 +29,7 @@ from . import state
 from .speech import speak
 from .deferred_log import log_deferred as log_line
 from .jukebox_relay import JukeboxRelayReceiver
+from .jukebox_media_cache import JukeboxMediaCache
 from .audio_diagnostics import probe as audio_probe
 
 # Shared wall occlusion tiers used by every playback site below.
@@ -69,6 +70,9 @@ class JukeboxPlayer:
     def __init__(self, game):
         self.game = game
         self.players = {}  # jukebox_id -> {"source", "secondary_source", "streamer", "title", "url"}
+        # Only URL/header metadata survives map changes, never audio sources
+        # or a playback position. Eight short-lived entries per player owner.
+        self._media_cache = JukeboxMediaCache()
         self.volume = 65
         self._lock = threading.Lock()
         self.relay_routes = {}
@@ -660,6 +664,7 @@ class JukeboxPlayer:
                     start_offset=start_offset,
                     start_offset_received_at=time.monotonic(),
                     http_headers=http_headers,
+                    media_cache=self._media_cache if play_params["duration"] > 0 else None,
                 )
                 streamer.reverb_slot = reverb
                 streamer.eq_slot = slot
