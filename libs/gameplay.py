@@ -36,6 +36,7 @@ from . import (
     movement,
 )
 from .speech import speak
+from .tracking_description import describe_tracking_direction
 from .objects import player
 from .weapons import weapon, weaponmanager
 import math
@@ -816,16 +817,11 @@ class Gameplay(state.State):
         if getattr(self, "tracking_target", None) is not None:
             target_type, obj, pos = self.tracking_target
             
-            # If target is a dynamic entity, check if it's dead
+            # Revalidate dynamic objects before updating or playing their beacon.
             if target_type == "entity":
-                if obj.dead:
-                    speak("Tracking target lost.")
-                    self.tracking_target = None
-                else:
-                    # If still in entities, update position; otherwise keep last known position
-                    if obj.name in self.map.entities:
-                        pos = (obj.x, obj.y, obj.z)
-                        self.tracking_target = (target_type, obj, pos)
+                if self._validate_tracking_target():
+                    pos = (obj.x, obj.y, obj.z)
+                    self.tracking_target = (target_type, obj, pos)
                     
             if getattr(self, "tracking_target", None) is not None:
                 # Play facing.ogg at target's 3D coordinates every 1.2 seconds.
@@ -1291,56 +1287,20 @@ class Gameplay(state.State):
 
     # tracking system
     def get_relative_direction_string(self, tx, ty, tz):
-        dx = tx - self.player.x
-        dy = ty - self.player.y
-        
-        rad = math.atan2(dx, dy)
-        deg = math.degrees(rad)
-        
-        rel = deg - self.player.hfacing
-        
-        while rel <= -180:
-            rel += 360
-        while rel > 180:
-            rel -= 360
-            
-        abs_deg = round(abs(rel))
-        
-        if abs_deg < 15:
-            dir_str = "Straight in front"
-        elif abs_deg > 165:
-            dir_str = "Behind"
-        elif rel > 0:
-            if abs_deg < 60:
-                dir_str = "Front-Right"
-            elif abs_deg < 120:
-                dir_str = "Right"
-            else:
-                dir_str = "Back-Right"
-        else:
-            if abs_deg < 60:
-                dir_str = "Front-Left"
-            elif abs_deg < 120:
-                dir_str = "Left"
-            else:
-                dir_str = "Back-Left"
-                
-        diff_z = tz - self.player.z
-        if diff_z > 2:
-            dir_str += " (Above)"
-        elif diff_z < -2:
-            dir_str += " (Below)"
-
-        return dir_str
+        return describe_tracking_direction(
+            tx - self.player.x, ty - self.player.y, tz - self.player.z,
+            self.player.hfacing,
+        )
 
     def _format_target_location(self, dist, tx, ty, tz):
-        """Build the 'X tiles, direction' suffix shown next to a trackable.
+        """Build the 'direction (X tiles away)' suffix shown next to a trackable.
         When the player is standing on the object (dist == 0), report 'right here'
         instead of a compass direction, since the bearing is meaningless there."""
         if dist <= 0:
             return "right here"
         direction_str = self.get_relative_direction_string(tx, ty, tz)
-        return f"{dist} tiles, {direction_str}"
+        unit = "tile" if dist == 1 else "tiles"
+        return f"{direction_str} ({dist} {unit} away)"
 
     def _beacon_pitch(self, tx, ty):
         """Compute a tracking-beacon pitch (0.8..1.2) from how squarely the
@@ -1362,6 +1322,9 @@ class Gameplay(state.State):
         if self.player.dead:
             return
 
+        if not self._validate_tracking_target() and mod & pygame.KMOD_ALT:
+            return
+
         # If Alt+T is pressed and we are currently tracking something, report status directly
         if mod & pygame.KMOD_ALT and getattr(self, "tracking_target", None) is not None:
             target_type, obj, pos = self.tracking_target
@@ -1372,7 +1335,7 @@ class Gameplay(state.State):
             location_str = self._format_target_location(dist, pos[0], pos[1], pos[2])
 
             name = self._get_target_label(target_type, obj)
-            speak(f"Tracking {name}: {location_str}")
+            speak(f"{name}: {location_str}")
             return
 
         trackables = self._gather_trackables()
@@ -1435,11 +1398,29 @@ class Gameplay(state.State):
             return self._clean_name(obj.name)
         return "Object"
 
+    def _is_trackable_entity(self, obj):
+        """Only current, non-destroyed object presentations; never player actors."""
+        return (
+            getattr(obj, "object_tracking", False) is True
+            and not getattr(obj, "player", False)
+            and not getattr(obj, "dead", False)
+            and getattr(obj, "name", None) != self.player.name
+            and self.map.entities.get(getattr(obj, "name", None)) is obj
+        )
+
+    def _validate_tracking_target(self):
+        target = getattr(self, "tracking_target", None)
+        if target is not None and target[0] == "entity" and not self._is_trackable_entity(target[1]):
+            self.tracking_target = None
+            speak("Tracking target lost.")
+            return False
+        return True
+
     def _gather_trackables(self):
         """Collect all trackable objects around the player.
         Returns a list of (dist, label, location_str, (type_key, obj, pos)).
-        location_str is the full 'X tiles, direction' (or 'right here' when on top).
-        Excludes zombies, hellhounds, and walls."""
+        location_str is 'direction (X tiles away)' (or 'right here' when on top).
+        Excludes players, animals, monsters, helper NPCs, and walls."""
         trackables = []
 
         # 1. Gather Doors (filter out duplicate door IDs)
@@ -1506,16 +1487,10 @@ class Gameplay(state.State):
             label = zone.zonename or "Zone"
             trackables.append((dist, label, location_str, ("zone", zone, (cx, cy, cz))))
 
-        # 7. Gather Entities (excluding local player, dead entities, zombies, and hellhounds)
+        # 7. Gather server-identified objects, not players or living creatures.
         for name, ent in self.map.entities.items():
-            if name == self.player.name or ent.dead:
+            if not self._is_trackable_entity(ent):
                 continue
-
-            lower_name = name.lower()
-            if lower_name.startswith("zomby") or "zombie" in lower_name or lower_name.startswith("hellhound") or "dog" in lower_name:
-                continue
-
-            ent.name = name  # Force correct name in case it was "None"
             dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, ent.x, ent.y, ent.z))
             location_str = self._format_target_location(dist, ent.x, ent.y, ent.z)
             cleaned_label = self._clean_name(name)
@@ -1524,11 +1499,23 @@ class Gameplay(state.State):
         return trackables
 
     def start_tracking(self, target_info):
-        self.tracking_target = target_info
         target_type, obj, pos = target_info
+        if target_type == "entity":
+            if not self._is_trackable_entity(obj):
+                if self._validate_tracking_target():
+                    speak("This target is no longer available for object tracking.")
+                if self.substates:
+                    self.pop_last_substate()
+                return
+            pos = (obj.x, obj.y, obj.z)
+        self.tracking_target = (target_type, obj, pos)
 
         name = self._get_target_label(target_type, obj)
-        speak(f"Tracking {name}.")
+        dist = math.floor(movement.get_3d_distance(
+            self.player.x, self.player.y, self.player.z, *pos,
+        ))
+        location_str = self._format_target_location(dist, *pos)
+        speak(f"{name}: {location_str}")
         self.tracking_clock = self.game.new_clock()
         self.is_facing_target = False
         if len(self.substates) > 0:
@@ -2009,9 +1996,9 @@ class Gameplay(state.State):
         """Soft-recover active game audio without rebuilding the OpenAL context.
 
         The Options callback runs on the gameplay/audio owner thread.  Existing
-        sources, buffers, SoundGroups and pooled EFX objects are retained; only
-        an individual map loop whose source has already been lost may allocate
-        a replacement.  A full Client restart remains the fallback for a dead
+        sources, buffers, SoundGroups and pooled EFX objects are retained when
+        healthy. Lost map loops or PA sources may be replaced by their owner.
+        A full Client restart remains the fallback for a dead
         device or context because rebuilding the context in place would leave
         voice, jukebox and instrument owners holding invalid OpenAL objects.
         """
@@ -2041,25 +2028,47 @@ class Gameplay(state.State):
 
         self._audio_refresh_in_progress = True
         self._last_audio_refresh_at = now
+        failed = []
+        pending = []
 
-        def safe_call(obj, method_name, *args, **kwargs):
-            method = getattr(obj, method_name, None) if obj is not None else None
-            if not callable(method):
-                return None
+        def attempt(label, action):
+            """False means failed; None is allowed for legacy void methods."""
             try:
-                return method(*args, **kwargs)
+                result = action()
+                if result is False and label not in failed:
+                    failed.append(label)
+                return result
             except Exception:
+                if label not in failed:
+                    failed.append(label)
                 return None
+
+        def recover_loop(obj, *position):
+            obj.recover(*position)
+            # recover() historically returns "changed", not "healthy".
+            # Inspect the result instead of treating an unchanged loop as bad.
+            if (position and not getattr(obj, "playing", False)
+                    and getattr(obj, "current_gain", 1.0) <= 0.0):
+                return True  # An out-of-range spatial source stays silent.
+            source = getattr(getattr(obj, "sound", None), "source", None)
+            return source is not None and source.state == cyal.SourceState.PLAYING
+
+        def refresh_owner(label, owner):
+            if owner is None:
+                return
+            result = attempt(label, lambda: owner.refresh_environment_audio())
+            # These owner APIs explicitly return None for an asynchronous
+            # warm-up/resync, True for ready/idle, and False for a failure.
+            if result is None and label not in failed:
+                pending.append(label)
 
         try:
-            # A focused game can safely resume a device paused by focus loss.
-            device = getattr(context, "device", None)
-            try:
-                if device is not None and device.paused:
-                    device.resume()
-                    audio.muted = False
-            except Exception:
-                pass
+            def resume_device():
+                # cyal versions expose paused as either a property or a
+                # context-manager method. Resuming is safe and idempotent.
+                context.device.resume()
+                audio.muted = False
+            attempt("audio device", resume_device)
 
             focus = getattr(getattr(self, "camera", None), "focus_object", None)
             if focus is None:
@@ -2073,44 +2082,50 @@ class Gameplay(state.State):
                 # Only room ambience/music covering the listener should be
                 # audible. Nearby spatial sources re-run their normal distance
                 # and reverb calculation rather than being forced to play.
-                for ambience in list(map_obj.get_ambiences_at(x, y, z)):
-                    safe_call(ambience, "recover")
-                for music in list(map_obj.get_musics_at(x, y, z)):
-                    safe_call(music, "recover")
-                for source in list(getattr(map_obj, "source_list", ())):
-                    safe_call(source, "recover", x, y, z)
-                for pannable in list(getattr(map_obj, "pannable_list", ())):
-                    safe_call(pannable, "recover")
+                ambiences = attempt("ambience", lambda: list(map_obj.get_ambiences_at(x, y, z))) or []
+                for ambience in ambiences:
+                    attempt("ambience", lambda obj=ambience: recover_loop(obj))
+                musics = attempt("map music", lambda: list(map_obj.get_musics_at(x, y, z))) or []
+                for music in musics:
+                    attempt("map music", lambda obj=music: recover_loop(obj))
+                sources = attempt("map sounds", lambda: list(getattr(map_obj, "source_list", ()))) or []
+                for source in sources:
+                    attempt("map sounds", lambda obj=source: recover_loop(obj, x, y, z))
+                pannables = attempt("map sounds", lambda: list(getattr(map_obj, "pannable_list", ()))) or []
+                for pannable in pannables:
+                    attempt("map sounds", lambda obj=pannable: recover_loop(obj))
 
                 # Rebind the current player and remote voice/music sources to
                 # the room's existing effect slot. Never allocate a new slot.
                 seen_entities = set()
-                for entity in [focus] + list(
-                    getattr(map_obj, "entities", {}).values()
-                ):
+                entities = attempt("room effects", lambda: list(getattr(map_obj, "entities", {}).values())) or []
+                for entity in [focus] + entities:
                     if entity is None or id(entity) in seen_entities:
                         continue
                     seen_entities.add(id(entity))
-                    safe_call(entity, "sync_reverb")
+                    attempt("room effects", lambda obj=entity: obj.sync_reverb())
+            else:
+                failed.append("map sounds")
 
-            music_bot_obj = getattr(self, "music_bot", None)
-            safe_call(music_bot_obj, "refresh_environment_audio")
-
-            jukebox = getattr(self, "jukebox_player", None)
-            safe_call(jukebox, "sync_reverb")
-            safe_call(jukebox, "request_resync", "manual audio refresh")
-
-            safe_call(getattr(self, "megaphone", None), "request_spatial_refresh")
+            refresh_owner("Music Bot", getattr(self, "music_bot", None))
+            refresh_owner("Jukebox", getattr(self, "jukebox_player", None))
+            refresh_owner("Megaphone", getattr(self, "megaphone", None))
 
             # An interrupted fade can leave global gain at zero even though
             # every individual source is healthy. Restore the saved master bus.
-            try:
+            def restore_master():
                 master = audio.volume_categories["master"][0]
                 audio.listener.gain = master / 100
-            except Exception:
-                pass
+            attempt("master volume", restore_master)
 
-            speak("Game audio refresh complete.")
+            if failed:
+                speak("Audio refresh incomplete: " + ", ".join(failed)
+                      + ". Try again or use Restart Client.")
+                return False
+            if pending:
+                speak("Audio refresh requested. Waiting for " + ", ".join(pending) + ".")
+            else:
+                speak("Audio refresh finished. If still silent, use Restart Client.")
             return True
         except Exception:
             speak(

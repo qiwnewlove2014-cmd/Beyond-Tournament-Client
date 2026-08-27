@@ -528,6 +528,13 @@ class EventHandeler:
         except Exception as e:
             log_exception(e, f"spawn_entity name={data['name']!r}")
             return
+        # Tracking is object-only. Refresh this even when map_resync preserves
+        # an entity. Older servers lack the flag; only typed vehicles are safe
+        # to identify locally. Never infer an object's kind from its name.
+        entity.object_tracking = (
+            data.get("object_tracking", getattr(entity, "is_vehicle", False)) is True
+            and not data.get("player", False)
+        )
         if was_camera_focus:
             # A resync can replace an entity with the same name.  Never leave the
             # spectator camera bound to the just-destroyed entity/audio sources.

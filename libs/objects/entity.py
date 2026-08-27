@@ -123,7 +123,7 @@ class Entity(Object):
     def sync_reverb(self):
         """Re-syncs environment Reverb EFX for this entity at current position."""
         if not getattr(self, "map", None):
-            return
+            return True
         try:
             reverb = self.map.get_reverb_at(self.x, self.y, self.z)
             if reverb is None:
@@ -141,8 +141,10 @@ class Entity(Object):
                         self.game.audio_mngr.efx.send(self.vc_source, 0, reverb.reverb, filter=flt)
                     if getattr(self, "music_source", None):
                         self.game.audio_mngr.efx.send(self.music_source, 0, reverb.reverb, filter=flt)
+            return True
         except Exception as e:
             log(f"[ENTITY.AUDIO] Reverb sync skipped for {self.name!r}: {e}")
+            return False
 
     def detach_environment_effects(self):
         """Detach map-owned EFX sends before a map reload releases its slots."""

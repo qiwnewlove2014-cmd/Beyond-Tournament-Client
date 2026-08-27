@@ -1285,7 +1285,7 @@ class JukeboxPlayer:
             http_headers=params.get("http_headers"),
         )
 
-    def request_resync(self, reason="manual recovery"):
+    def request_resync(self, reason="manual recovery", *, raise_errors=False):
         """Ask the server for current jukebox routes and relay warm-up frames.
 
         This is safe after a UI transition: the server remains the playback
@@ -1306,6 +1306,25 @@ class JukeboxPlayer:
             self.game.network.send(consts.CHANNEL_MISC, "jukebox_resync")
             log_line(f"[Jukebox] requested resync: {reason}")
             return True
+        except Exception:
+            if raise_errors:
+                raise
+            return False
+
+    def refresh_environment_audio(self):
+        """True=idle, None=awaiting server sync, False=local/send failure.
+
+        A sent request is not an acknowledgement that playback recovered.
+        Keep existing routes, cooldowns and server-owned song positions.
+        """
+        effects_ok = self.sync_reverb()
+        try:
+            with self._lock:
+                active = bool(self.players)
+            if not active:
+                return True
+            self.request_resync("manual audio refresh", raise_errors=True)
+            return None if effects_ok else False
         except Exception:
             return False
 
@@ -1430,15 +1449,17 @@ class JukeboxPlayer:
         """Re-syncs environment Reverb EFX for all active jukebox streams after map reloads."""
         gameplay = getattr(self.game, "gameplay", None)
         if gameplay is None or getattr(gameplay, "map", None) is None:
-            return
+            return not bool(self.players)
         audio = getattr(self.game, "audio_mngr", None)
         if audio is None:
-            return
+            return not bool(self.players)
+        healthy = True
         with self._lock:
             for jid, p in self.players.items():
                 src_l = p.get("source")
                 src_r = p.get("secondary_source")
                 if src_l is None or src_r is None:
+                    healthy = False
                     continue
                 try:
                     pos = src_l.position
@@ -1459,7 +1480,8 @@ class JukeboxPlayer:
                     audio.efx.send(src_l, 0, reverb, filter=filt)
                     audio.efx.send(src_r, 0, reverb, filter=filt)
                 except Exception:
-                    pass
+                    healthy = False
+        return healthy
 
     def detach_reverb(self):
         """Detach active streams before map reverb slots return to the pool."""

@@ -387,7 +387,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         # avoids another menu transition and does not create competing music.
         items.insert(
             len(endpoint_items) + 1,
-            ("Refresh game audio. Restores room ambience, map music, music bot, megaphone output, and jukebox sync without restarting.", parent.refresh_game_audio),
+            ("Refresh game audio. Try to restore sound.", parent.refresh_game_audio),
         )
     if in_game:
         items.append((

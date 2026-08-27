@@ -14,6 +14,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 class _Recorder:
     def __init__(self):
         self.calls = []
+        self.sound = SimpleNamespace(source=SimpleNamespace(state=cyal.SourceState.PLAYING))
+        self.playing = True
 
     def recover(self, *args):
         self.calls.append(("recover", args))
@@ -80,9 +82,9 @@ class TestGameplayAudioRefresh(unittest.TestCase):
             refresh_environment_audio=mock.Mock(return_value=True)
         )
         gameplay.jukebox_player = SimpleNamespace(
-            sync_reverb=mock.Mock(), request_resync=mock.Mock(return_value=True)
+            refresh_environment_audio=mock.Mock(return_value=True)
         )
-        gameplay.megaphone = SimpleNamespace(request_spatial_refresh=mock.Mock())
+        gameplay.megaphone = SimpleNamespace(refresh_environment_audio=mock.Mock(return_value=True))
         return gameplay, device, listener, (focus, remote, ambience, music, source, pannable)
 
     def test_refresh_recovers_active_sources_effects_streams_and_master_gain(self):
@@ -100,15 +102,12 @@ class TestGameplayAudioRefresh(unittest.TestCase):
         self.assertEqual(focus.calls, [("sync_reverb", ())])
         self.assertEqual(remote.calls, [("sync_reverb", ())])
         gameplay.music_bot.refresh_environment_audio.assert_called_once_with()
-        gameplay.jukebox_player.sync_reverb.assert_called_once_with()
-        gameplay.jukebox_player.request_resync.assert_called_once_with(
-            "manual audio refresh"
-        )
-        gameplay.megaphone.request_spatial_refresh.assert_called_once_with()
+        gameplay.jukebox_player.refresh_environment_audio.assert_called_once_with()
+        gameplay.megaphone.refresh_environment_audio.assert_called_once_with()
         self.assertEqual(device.resume_calls, 1)
         self.assertFalse(gameplay.game.audio_mngr.muted)
         self.assertEqual(listener.gain, 0.65)
-        speak.assert_called_once_with("Game audio refresh complete.")
+        speak.assert_called_once_with("Audio refresh finished. If still silent, use Restart Client.")
 
     def test_refresh_has_five_second_cooldown(self):
         gameplay, _device, _listener, _objects = self.make_gameplay()
@@ -145,7 +144,67 @@ class TestGameplayAudioRefresh(unittest.TestCase):
             self.assertFalse(gameplay.refresh_game_audio())
 
         self.assertFalse(gameplay._audio_refresh_in_progress)
-        self.assertIn("could not complete", speak.call_args.args[0])
+        self.assertIn("incomplete: ambience", speak.call_args.args[0])
+        gameplay.music_bot.refresh_environment_audio.assert_called_once_with()
+        gameplay.megaphone.refresh_environment_audio.assert_called_once_with()
+
+    def test_failed_owner_does_not_skip_other_recovery_or_claim_success(self):
+        for failure in (False, RuntimeError("lost source")):
+            with self.subTest(failure=failure):
+                gp, _, listener, _ = self.make_gameplay()
+                if isinstance(failure, Exception):
+                    gp.music_bot.refresh_environment_audio.side_effect = failure
+                else:
+                    gp.music_bot.refresh_environment_audio.return_value = failure
+                with mock.patch("libs.gameplay.speak") as speak:
+                    self.assertFalse(gp.refresh_game_audio())
+                self.assertIn("incomplete: Music Bot", speak.call_args.args[0])
+                gp.megaphone.refresh_environment_audio.assert_called_once_with()
+                self.assertEqual(listener.gain, 0.65)
+                self.assertFalse(gp._audio_refresh_in_progress)
+
+    def test_failed_device_resume_is_reported_and_does_not_clear_mute(self):
+        gp, device, _, _ = self.make_gameplay()
+        device.resume = mock.Mock(side_effect=RuntimeError("device failed"))
+        with mock.patch("libs.gameplay.speak") as speak:
+            self.assertFalse(gp.refresh_game_audio())
+        self.assertTrue(gp.game.audio_mngr.muted)
+        self.assertIn("audio device", speak.call_args.args[0])
+
+    def test_jukebox_request_is_pending_not_a_playback_confirmation(self):
+        gp, _, _, _ = self.make_gameplay()
+        gp.jukebox_player.refresh_environment_audio.return_value = None
+        with mock.patch("libs.gameplay.speak") as speak:
+            self.assertTrue(gp.refresh_game_audio())
+        speak.assert_called_once_with("Audio refresh requested. Waiting for Jukebox.")
+
+    def test_unchanged_healthy_loop_is_not_reported_as_failure(self):
+        gp, _, _, objects = self.make_gameplay()
+        objects[2].recover = mock.Mock(return_value=False)
+        with mock.patch("libs.gameplay.speak"):
+            self.assertTrue(gp.refresh_game_audio())
+
+    def test_missing_loop_after_recovery_is_reported(self):
+        gp, _, _, objects = self.make_gameplay()
+        objects[2].sound = None
+        with mock.patch("libs.gameplay.speak") as speak:
+            self.assertFalse(gp.refresh_game_audio())
+        self.assertIn("ambience", speak.call_args.args[0])
+
+    def test_silent_out_of_range_source_is_not_forced_audible(self):
+        gp, _, _, objects = self.make_gameplay()
+        objects[4].playing = False
+        objects[4].current_gain = 0.0
+        objects[4].sound = None
+        with mock.patch("libs.gameplay.speak"):
+            self.assertTrue(gp.refresh_game_audio())
+
+    def test_reentrant_call_is_rejected_without_touching_device(self):
+        gp, device, _, _ = self.make_gameplay()
+        gp._audio_refresh_in_progress = True
+        with mock.patch("libs.gameplay.speak"):
+            self.assertFalse(gp.refresh_game_audio())
+        self.assertEqual(device.resume_calls, 0)
 
 
 class _Source:

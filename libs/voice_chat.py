@@ -1408,7 +1408,7 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet,
                             force_concert_mode=None, real_prebuffer_frames=None):
     # DE-CLICK: if this source is (re)starting, ramp only the FIRST queued
     # packet up from zero. With a real-frame prebuffer the source intentionally
-    # remains stopped for several calls; fading every one of those frames would
+    # remains INITIAL for several calls; fading every one of those frames would
     # cause 50 Hz gain modulation when playback begins.
     is_stopped = False
     try:
@@ -1417,6 +1417,21 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet,
         pass
 
     _reclaim_source_buffers(src)
+    if real_prebuffer_frames is not None:
+        try:
+            if src.state == cyal.SourceState.STOPPED:
+                # OpenAL treats NEW buffers on a STOPPED source as processed,
+                # so reclaiming them on each call would prevent the prebuffer
+                # ever reaching its threshold. Drain then rewind to INITIAL,
+                # which preserves new frames until play(). Recheck/drain here
+                # in case playback ran dry during the first reclaim above.
+                _reclaim_source_buffers(src)
+                if src.buffers_queued:
+                    return  # Do not replay stale audio if draining failed.
+                src.rewind()
+                is_stopped = True
+        except Exception:
+            return
     queued_before = 0
     try:
         queued_before = int(src.buffers_queued)

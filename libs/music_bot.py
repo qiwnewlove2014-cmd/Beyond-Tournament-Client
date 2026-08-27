@@ -2535,10 +2535,40 @@ class MapMusicBot:
             return False
 
     def refresh_environment_audio(self):
-        """Soft-recover playback and forcibly restore the current room send."""
-        recovered = self.recover_output()
-        self._sync_map_reverb(force=True)
-        return recovered
+        """Manual recovery: True=ready/idle, None=buffering, False=failed.
+
+        Never restart a decoder/song or override a deliberate pause. The
+        stream owns its buffers; dead decoders require normal replay/restart.
+        """
+        if not self.enabled or not self.playing or self.paused:
+            return True
+        effects_ok = self._sync_map_reverb(force=True)
+        try:
+            streamer = self.streamer
+            if streamer is not None:
+                if not streamer.running:
+                    return False
+                if streamer.paused:
+                    return effects_ok
+                # Unlike the streaming convenience helpers, these reads must
+                # not hide invalid-source errors as an empty warm-up buffer.
+                for source in streamer._all_sources():
+                    source.state
+                    source.buffers_queued
+                streamer.resume_output_if_buffered()
+                if not effects_ok:
+                    return False
+                if streamer._all_playing():
+                    return True
+                return None if streamer._buffers_queued() == 0 else False
+            source = getattr(self.current_local_sound, "source", None)
+            if source is None:
+                return None if self.is_loading_stream else False
+            if source.state != cyal.SourceState.PLAYING:
+                source.play()
+            return effects_ok and source.state == cyal.SourceState.PLAYING
+        except Exception:
+            return False
 
     def performance_timeline_marker(self):
         """Marker attached to this performer's event-driven instruments.
@@ -2583,12 +2613,12 @@ class MapMusicBot:
         while the wet signal from the reverb adds the room's atmosphere.
         """
         if not self.stream_source:
-            return
+            return True
         try:
             gp = self._find_gameplay()
             map_obj = getattr(gp, 'map', None) or getattr(gp, 'world_map', None)
             if not map_obj:
-                return
+                return True
 
             player = gp.player
             reverb = map_obj.get_reverb_at(player.x, player.y, player.z)
@@ -2607,8 +2637,9 @@ class MapMusicBot:
                         self.stream_source, 0, None
                     )
                     self._current_reverb_slot = None
+            return True
         except Exception:
-            pass
+            return False
 
     def _detach_map_reverb(self):
         """Detach the old map slot without interrupting the active stream."""
