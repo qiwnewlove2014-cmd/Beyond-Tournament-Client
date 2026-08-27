@@ -22,6 +22,7 @@ STAGING_NAME = "Beyond Tournament.pending"
 OUTPUT_NAME = "Beyond Tournament"
 DIST_NAME = "beyond_tournament.dist"
 HELPERS = frozenset({"ffmpeg.exe", "oalinst.exe"})
+PLAYER_PATCH_NOTES = ("player_patch_notes.txt", "player_patch_notes_th.txt")
 EXECUTABLE_SUFFIXES = frozenset({".exe", ".dll", ".pyd", ".com", ".scr", ".cpl", ".msi"})
 BLOCKED_HASHES = frozenset({
     "b003c197eee574a1a0b1038b364fccbbbdd6245d0f7d77b75ff4067e7658d769",
@@ -185,11 +186,37 @@ def copy_tree_filtered(source: Path, target: Path) -> None:
                     copy_function=copy_checked_file)
 
 
+def validate_player_notes(root: Path) -> None:
+    """Require both public note files; never substitute the technical changelog."""
+    for name in PLAYER_PATCH_NOTES:
+        path = checked_path(root / name)
+        if not path.is_file():
+            raise BuildSafetyError(f"Player patch notes are missing: {path}")
+        inspect_file(path)
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except UnicodeError as error:
+            raise BuildSafetyError(f"Player patch notes must be UTF-8: {path}") from error
+        if not text.strip():
+            raise BuildSafetyError(f"Player patch notes are empty: {path}")
+
+
+def reject_technical_changelog(package: Path) -> None:
+    # Only the game's root document is private build input. Do not strip
+    # third-party documentation or licenses inside dependency directories.
+    for path in package.iterdir():
+        if path.name.casefold() == "changelog.txt":
+            raise BuildSafetyError(f"Do not package the technical game changelog: {path}")
+
+
 def copy_inputs(project: Path, entries: dict) -> None:
     staging = checked_path(project / STAGING_NAME)
     if not staging.is_dir():
         raise BuildSafetyError("Create the staging directory before copying build inputs")
     scan_tree(staging)
+    reject_technical_changelog(staging)
+    notes = checked_path(project.parent / "server" / "docs")
+    validate_player_notes(notes)
     verify_helpers(project, entries)
     copy_tree_filtered(project / "dlls_windows", staging)
     for pattern in ("*.mhr", "*.dll"):
@@ -200,10 +227,10 @@ def copy_inputs(project: Path, entries: dict) -> None:
             copy_checked_file(path, staging / path.name)
     for name in ("default_keyconfig.json", *sorted(HELPERS)):
         copy_checked_file(project / name, staging / name)
-    copy_checked_file(project.parent / "server/changelog.txt", staging / "changelog.txt")
     # The compiled check remains strict: unexpected $ files in compiler output
     # stop the build, rather than being shipped or automatically deleted.
     scan_tree(project / DIST_NAME)
+    reject_technical_changelog(project / DIST_NAME)
     copy_tree_filtered(project / DIST_NAME, staging)
     game = checked_path(staging / "beyond_tournament.exe")
     renamed = checked_path(staging / "Beyond Tournament.exe")
@@ -214,6 +241,10 @@ def copy_inputs(project: Path, entries: dict) -> None:
         copy_tree_filtered(project / name, staging / name)
     copy_checked_file(project / "tools/build_binary_manifest.json",
                       staging / "third_party/build_binary_manifest.json")
+    # Copy last so stale compiler/runtime copies cannot override Server notes.
+    for name in PLAYER_PATCH_NOTES:
+        copy_checked_file(notes / name, staging / name)
+    reject_technical_changelog(staging)
 
 
 def validate_project(project: Path, entries: dict) -> None:
@@ -233,9 +264,7 @@ def validate_project(project: Path, entries: dict) -> None:
     if any(not any("$" not in path.name for path in project.glob(pattern))
            for pattern in ("*.mhr", "*.dll")):
         raise BuildSafetyError("Project HRTF profiles or runtime DLL files are missing")
-    changelog = checked_path(project.parent / "server" / "changelog.txt")
-    if not changelog.is_file():
-        raise BuildSafetyError(f"Server changelog is missing: {changelog}")
+    validate_player_notes(checked_path(project.parent / "server" / "docs"))
     # Check old generated trees before any build operation can replace them.
     for name in (OUTPUT_NAME, DIST_NAME):
         old = checked_path(project / name)
@@ -248,8 +277,10 @@ def validate_project(project: Path, entries: dict) -> None:
 
 def verify_package(package: Path, entries: dict) -> None:
     scan_tree(package)
+    reject_technical_changelog(package)
+    validate_player_notes(package)
     verify_helpers(package, entries)
-    for name in ("Beyond Tournament.exe", "sounds.dat", "default_keyconfig.json", "changelog.txt", "openal.dll", "opus.dll", "third_party/ffmpeg/LICENSE.txt"):
+    for name in ("Beyond Tournament.exe", "sounds.dat", "default_keyconfig.json", "openal.dll", "opus.dll", "third_party/ffmpeg/LICENSE.txt"):
         path = checked_path(package / name)
         if not path.is_file() or path.stat().st_size == 0:
             raise BuildSafetyError(f"Package file is missing or empty: {path}")

@@ -29,6 +29,7 @@ if errorlevel 1 goto failed
 "%BT_VERIFIED_PYTHON%" -I -X utf8 -S tools\build_safety.py compiled
 if errorlevel 1 goto failed
 echo copying required files, excluding dollar-sign names...
+rem Public EN/Thai patch notes come from server\docs. Never package the technical changelog.
 "%BT_VERIFIED_PYTHON%" -I -X utf8 -S tools\build_safety.py copy-inputs
 if errorlevel 1 goto failed
 "%BT_VERIFIED_PYTHON%" -I -X utf8 -S tools\build_safety.py copy-runtime

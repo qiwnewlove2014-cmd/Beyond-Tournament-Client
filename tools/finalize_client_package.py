@@ -10,6 +10,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / "Beyond Tournament"
+PLAYER_PATCH_NOTES = ("player_patch_notes.txt", "player_patch_notes_th.txt")
 
 
 class PackageValidationError(RuntimeError):
@@ -126,6 +127,19 @@ def verify_package(
     if not output.is_dir():
         raise PackageValidationError(f"Compiled package directory is missing: {output}")
 
+    for path in output.iterdir():
+        if path.name.casefold() == "changelog.txt":
+            failures.append(f"Do not package the technical game changelog: {path}")
+    for name in PLAYER_PATCH_NOTES:
+        path = output / name
+        _require_file("Player patch notes", path, failures)
+        if path.is_file():
+            try:
+                if not path.read_text(encoding="utf-8-sig").strip():
+                    failures.append(f"Player patch notes are empty: {path}")
+            except UnicodeError:
+                failures.append(f"Player patch notes must be UTF-8: {path}")
+
     _require_file(
         "Compiled game executable",
         output / "Beyond Tournament.exe",
@@ -134,7 +148,6 @@ def verify_package(
     )
     for name in (
         "default_keyconfig.json",
-        "changelog.txt",
         "ffmpeg.exe",
         "openal.dll",
         "openal32.dll",
