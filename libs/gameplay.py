@@ -1580,7 +1580,7 @@ class Gameplay(state.State):
             ).upper()
             speak(
                 f"You are at a travel point to {tp.target_map}. "
-                f"Press {key} to travel."
+                f"Press Shift plus {key} to travel."
             )
             return
         zone_name = focus.map.get_zone_at(focus.x, focus.y, focus.z)
