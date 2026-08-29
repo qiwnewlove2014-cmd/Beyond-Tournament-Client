@@ -19,18 +19,20 @@ from .audio_diagnostics import probe as audio_probe
 class EventHandeler:
     # Jam-note/jukebox alignment mode.
     #
-    # False (arrival-time, default): notes play the moment the packet
-    # arrives. Because every listener's jukebox backlog (~160ms by design)
-    # closely matches the performer's own backlog, notes land on the beat
-    # the performer heard — the two buffers cancel each other out. This
-    # was verified by ear against target-time scheduling, which could not
-    # beat it without knowing the performer's backlog and reaction time.
-    # It also keeps live-jam responsiveness at ~ping/2.
+    # True (target-time, default): schedule notes on the shared server clock
+    # (creation time + this listener's own jukebox backlog) so every listener
+    # hears them on the same beat of the song. Required in practice: backlogs
+    # diverge (mid-song map joiners are warmed up with 8 relay frames ≈ 320ms
+    # while song-start listeners sit at the 4-frame prebuffer ≈ 160ms, and the
+    # queue depth never shrinks back), so with arrival-time playback those
+    # listeners heard drum/piano notes land ahead of the song while the
+    # performer's own mix sounded fine. Without music, notes stay immediate
+    # (the low-latency live-jam path).
     #
-    # True: schedule notes on the shared server clock (creation time +
-    # this listener's jukebox backlog) so all listeners hear them at the
-    # same instant — useful if players' backlogs ever diverge badly.
-    SYNC_JAM_NOTES_WITH_JUKEBOX = False
+    # False (arrival-time): notes play the moment the packet arrives. Only
+    # correct while every listener's jukebox backlog closely matches the
+    # performer's own, which warmup joins and underrun resumes break.
+    SYNC_JAM_NOTES_WITH_JUKEBOX = True
     # Only used when SYNC_JAM_NOTES_WITH_JUKEBOX is True: compensates the
     # note's tail latency (playing-frame lead + queue drain).
     JAM_NOTE_ADVANCE_MS = 45
