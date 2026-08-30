@@ -21,6 +21,29 @@ from . import options
 from . import path_utils
 from . import consts
 
+
+def _report_efx_armor_breach(f_id, site, label, finalizing):
+    """EFX armor-breach warning that cannot block interpreter shutdown.
+
+    The normal logger holds a lock and fsyncs every line; a weakref
+    finalizer running during shutdown must never wait on that path — an
+    fsync stalled behind an antivirus scan at process exit once hung the
+    quit until the watchdog raised "Native Deadlock Detected".
+    """
+    try:
+        if finalizing:
+            import sys
+            sys.stderr.write(
+                f"[EFX ARMOR] WARNING: {label} {f_id} (created at {site}) "
+                "was garbage collected during shutdown despite INCREF armor!\n"
+            )
+            return
+        from .logger import log
+        log(f"[EFX ARMOR] WARNING: {label} {f_id} (created at {site}) "
+            "was garbage collected despite INCREF armor!")
+    except Exception:
+        pass
+
 class AudioManager():
     @staticmethod
     def _open_context(cyal_device):
@@ -815,8 +838,8 @@ class AudioManager():
 
             def _armor_broken(f_id=id(filter_obj), s=site, lbl=label):
                 try:
-                    from .logger import log
-                    log(f"[EFX ARMOR] WARNING: {lbl} {f_id} (created at {s}) was garbage collected despite INCREF armor!")
+                    import sys
+                    _report_efx_armor_breach(f_id, s, lbl, sys.is_finalizing())
                 except Exception:
                     pass
 

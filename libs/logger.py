@@ -80,6 +80,9 @@ def log(message):
     Every write is flushed and fsync'd immediately so that a sudden process
     termination (native crash, task-kill, power loss) still leaves the last log
     line on disk — crash_reporting._debug_log_tail() can then recover it.
+    During interpreter shutdown the fsync barrier is skipped: a finalizer
+    logging at exit must never block on the disk, or quitting the game can
+    deadlock.
     """
     timestamp = time.strftime("%H:%M:%S")
     formatted = f"[{timestamp}] {message}"
@@ -101,7 +104,8 @@ def log(message):
             handle.write(formatted + "\n")
             handle.flush()
             try:
-                os.fsync(handle.fileno())
+                if not sys.is_finalizing():
+                    os.fsync(handle.fileno())
             except OSError:
                 pass
     except Exception as e:
