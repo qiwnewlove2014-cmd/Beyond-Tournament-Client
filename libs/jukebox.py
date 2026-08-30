@@ -106,6 +106,10 @@ class JukeboxPlayer:
         self._occlusion_cache = OrderedDict()
         self._occlusion_lock = threading.Lock()
         self._retired_relays = []
+        # Direct tails retired at song advance: the streamer keeps playing to
+        # its natural EOF while the next song resolves and holds for its own
+        # lead-in (see _retire_or_stop).
+        self._retiring_direct = []
 
     def occlusion_tier(self, box_pos, listener, max_distance=40.0):
         """Skip inaudible rays and briefly reuse exact tile-ray results.
@@ -386,6 +390,11 @@ class JukeboxPlayer:
     # Direct stays sticky for this long (or until a map change) so later songs
     # don't re-pay the failing-relay window; relay is then tried again.
     DIRECT_FALLBACK_TTL = 10 * 60.0
+    # Anchored direct playback runs one AudioStreamer.DIRECT_LEAD_IN_S behind
+    # the server's audioStartedAt, so the next song's jukebox_play lands while
+    # the old song still has its final seconds queued locally. A retired tail
+    # may run at most the lead-in plus this margin before the sweep stops it.
+    DIRECT_RETIRE_TAIL_MARGIN_S = 5.0
     # Full parse_map reloads can cross the ordered map channel and the misc
     # response channel.  The observed state reply can arrive just over two
     # seconds later, so do not destroy the healthy receiver prematurely.
@@ -535,7 +544,7 @@ class JukeboxPlayer:
                 )
                 return
 
-        self.stop(jukebox_id, fade=True)
+        self._retire_or_stop(jukebox_id)
         if transport == "relay_pending":
             with self._lock:
                 self.players[jukebox_id] = {
@@ -664,6 +673,7 @@ class JukeboxPlayer:
                     start_offset=start_offset,
                     start_offset_received_at=time.monotonic(),
                     http_headers=http_headers,
+                    timeline_anchor=play_params["duration"] > 0,
                     media_cache=self._media_cache if play_params["duration"] > 0 else None,
                 )
                 streamer.reverb_slot = reverb
@@ -887,6 +897,7 @@ class JukeboxPlayer:
             self.stop(jukebox_id)
         for receiver in list(self._retired_relays):
             receiver.stop()  # Finishes its owner-thread source cleanup too.
+        self._stop_retiring_direct()
         with self._occlusion_lock:
             self._occlusion_cache.clear()
         audio = getattr(self.game, "audio_mngr", None)
@@ -900,6 +911,97 @@ class JukeboxPlayer:
                         audio.release_effect_slot(slot)
                     except Exception:
                         pass
+
+    def _retire_or_stop(self, jukebox_id):
+        """Song advance: let a nearly-finished direct song play out its tail.
+
+        Anchored direct playback runs one lead-in behind the server's
+        audioStartedAt, so the next jukebox_play lands while the old song
+        still has its final seconds queued locally. Stopping on the packet
+        (the old behavior) cut every song's ending short; retiring keeps
+        the tail audible while the new song resolves and holds for its own
+        lead-in. Anything but a short remaining tail falls back to the
+        normal faded stop.
+        """
+        from . import music_bot as mb
+        budget = mb.AudioStreamer.DIRECT_LEAD_IN_S + self.DIRECT_RETIRE_TAIL_MARGIN_S
+        with self._lock:
+            existing = self.players.get(jukebox_id)
+            if existing is not None:
+                streamer = existing.get("streamer")
+                duration = float((existing.get("play_params") or {}).get("duration") or 0)
+                position = None
+                content_position = getattr(streamer, "content_position", None)
+                if duration > 0 and callable(content_position):
+                    try:
+                        position = float(content_position())
+                    except Exception:
+                        position = None
+                remaining = duration - position if position is not None else None
+                if (
+                    existing.get("transport") == "direct"
+                    and streamer is not None
+                    and hasattr(streamer, "is_alive") and streamer.is_alive()
+                    and not getattr(streamer, "failure_reason", None)
+                    and remaining is not None and 0.0 < remaining <= budget
+                ):
+                    self.players.pop(jukebox_id, None)
+                    streamer.reverb_slot = None
+                    self._retiring_direct.append({
+                        "id": jukebox_id,
+                        "streamer": streamer,
+                        "source": existing.get("source"),
+                        "secondary_source": existing.get("secondary_source"),
+                        "deadline": time.monotonic() + remaining + 2.0,
+                    })
+                    log_line(
+                        f"[Jukebox] retire({jukebox_id}): letting "
+                        f"{existing.get('title')!r} finish its last {remaining:.1f}s"
+                    )
+                    return
+        self.stop(jukebox_id, fade=True)
+
+    def _sweep_retiring_direct(self):
+        """Release retired direct tails once they drain (or time out)."""
+        now = time.monotonic()
+        finished = []
+        with self._lock:
+            still = []
+            for entry in self._retiring_direct:
+                streamer = entry.get("streamer")
+                done = (
+                    not hasattr(streamer, "is_alive")
+                    or not streamer.is_alive()
+                    or now >= float(entry.get("deadline") or now)
+                )
+                if done:
+                    finished.append(entry)
+                else:
+                    still.append(entry)
+            self._retiring_direct[:] = still
+        for entry in finished:
+            streamer = entry.get("streamer")
+            try:
+                if streamer is not None and hasattr(streamer, "stop"):
+                    streamer.stop()
+            except Exception:
+                pass
+            self._release_sources([entry.get("source"), entry.get("secondary_source")])
+            log_line(f"[Jukebox] retire({entry.get('id')}): tail finished")
+
+    def _stop_retiring_direct(self):
+        """Hard-stop every retired tail (disconnect / full teardown)."""
+        with self._lock:
+            entries = list(self._retiring_direct)
+            self._retiring_direct.clear()
+        for entry in entries:
+            streamer = entry.get("streamer")
+            try:
+                if streamer is not None and hasattr(streamer, "stop"):
+                    streamer.stop()
+            except Exception:
+                pass
+            self._release_sources([entry.get("source"), entry.get("secondary_source")])
 
     def update(self):
         """Recover a jukebox stream that stopped without a stop packet.
@@ -921,6 +1023,7 @@ class JukeboxPlayer:
           -> resync after 15s.
         """
         now = time.monotonic()
+        self._sweep_retiring_direct()
         rebuilds = []  # [(jukebox_id, reason)]
         stalled_ids = []  # relays relying on a warm-up un-stick this cycle
         needs_resync = False
@@ -1342,6 +1445,13 @@ class JukeboxPlayer:
         for receiver in tuple(self._retired_relays):
             receiver.reverb_slot = None
             sources.extend(source for source in (receiver.source_l, receiver.source_r)
+                           if source is not None)
+        # Retired direct tails (song-advance crossfade) follow the same rule.
+        for entry in tuple(self._retiring_direct):
+            streamer = entry.get("streamer")
+            if streamer is not None:
+                streamer.reverb_slot = None
+            sources.extend(source for source in (entry.get("source"), entry.get("secondary_source"))
                            if source is not None)
         if audio is None or not hasattr(audio, "efx"):
             return

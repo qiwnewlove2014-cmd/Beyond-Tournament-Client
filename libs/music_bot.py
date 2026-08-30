@@ -182,10 +182,32 @@ class AudioStreamer(threading.Thread):
                           # (100ms delay line; was 10/200ms — lowered together
                           # with MusicCompression.PRE_BUFFER_FRAMES so live
                           # music streams stay low-latency on both ends)
+    # Direct-transport jukebox timeline alignment. In direct mode every
+    # listener resolves and starts its own ffmpeg, so without a shared
+    # anchor each machine began the same song seconds apart. All clients
+    # derive ONE wall-clock deadline from the server's jukebox_play
+    # broadcast (arrival instant minus start_offset) and hold the
+    # prebuffered audio until that deadline: resolve variance becomes
+    # wait time, never audible skew. Personal music bots (bot set) and
+    # livestreams (timeline_anchor=False, no stable content position)
+    # never anchor.
+    DIRECT_LEAD_IN_S = 3.5         # fresh song: hold the intro this long after the broadcast
+                                   # (matches the server's end-of-song grace; machines slower
+                                   # than this join late and trail the room for the song)
+    DIRECT_FRESH_MAX_S = 2.0       # a play event this young is a fresh broadcast (start_offset
+                                   # ≈ its age): hold position 0. Older offsets are resumes /
+                                   # reload re-broadcasts whose intro the room already heard —
+                                   # they must seek, never replay.
+    DIRECT_STARTUP_EST_S = 1.5     # mid-song: aim -ss past the projected audible start;
+                                   # arriving early is correctable by an exact wait,
+                                   # arriving late never recovers under '-re' pacing
+    DIRECT_MAX_ALIGN_WAIT_S = DIRECT_LEAD_IN_S + DIRECT_STARTUP_EST_S + 1.0  # clock safety valve
+    DIRECT_LATE_TOLERANCE_S = 0.75 # best-effort: log joins later than this
 
     def __init__(self, game, audio_url, source, volume=50, bot=None, channels=2,
                  spatial_pair=None, start_offset=0.0, http_headers=None,
-                 start_offset_received_at=None, canonical_url=None, media_cache=None):
+                 start_offset_received_at=None, canonical_url=None, media_cache=None,
+                 timeline_anchor=None):
         super().__init__(daemon=True)
         self.game = game
         self.bot = bot
@@ -205,6 +227,18 @@ class AudioStreamer(threading.Thread):
         self.volume = volume
         self.start_offset = float(start_offset or 0.0)
         self.start_offset_received_at = start_offset_received_at
+        # Shared-timeline anchoring: jukebox direct playback only. The
+        # personal music bot never passes start_offset_received_at, and
+        # JukeboxPlayer passes timeline_anchor=False for livestreams.
+        if timeline_anchor is None:
+            timeline_anchor = True
+        self._direct_anchor = bool(
+            bot is None
+            and start_offset_received_at is not None
+            and timeline_anchor
+        )
+        self._direct_seek_to = 0.0        # content position the decode head starts from
+        self._fed_content_seconds = 0.0   # content seconds queued to OpenAL since the seek
         self.http_headers = dict(http_headers or {})
         # Spatial stereo pair (jukeboxes): two MONO sources placed at the same
         # spot minus/plus a small offset, fed with the LEFT and RIGHT channels
@@ -700,6 +734,14 @@ class AudioStreamer(threading.Thread):
 
 
 
+    def _note_fed_content(self, data):
+        """Track the media position already handed to OpenAL (jukebox retire math)."""
+        self._fed_content_seconds += len(data) / (48000.0 * self.channels * 2)
+
+    def content_position(self):
+        """Approximate media position (seconds) of the local decode head."""
+        return self._direct_seek_to + self._fed_content_seconds
+
     def _queue_local(self, data):
         """Queue a chunk of PCM data to the LOCAL OpenAL source(s)."""
         if self.spatial_pair:
@@ -716,6 +758,7 @@ class AudioStreamer(threading.Thread):
             else:
                 buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.STEREO16)
             self.source.queue_buffers(buf)
+            self._note_fed_content(data)
             return True
         except Exception:
             return False
@@ -739,6 +782,7 @@ class AudioStreamer(threading.Thread):
             buf_r.set_data(right, sample_rate=48000, format=cyal.BufferFormat.MONO16)
             self.spatial_src_l.queue_buffers(buf_l)
             self.spatial_src_r.queue_buffers(buf_r)
+            self._note_fed_content(data)
             return True
         except Exception:
             return False
@@ -817,6 +861,76 @@ class AudioStreamer(threading.Thread):
                             self._timeline_delay.append(bytes(data))
         return pre_buffered, leftover
 
+    def _hold_direct_start(self, leftover):
+        """Hold the prebuffered head until the shared wall-clock deadline.
+
+        Drains ffmpeg while waiting ('-re' keeps producing at media rate, so
+        a blocked pipe would stall the decoder and the CDN read behind it)
+        into the normal OpenAL staging deque. Returns the partial chunk so
+        run()'s streaming loop keeps its leftover contract.
+        """
+        deadline = self.direct_start_deadline(
+            self.start_offset, self.start_offset_received_at, self._direct_seek_to)
+        now = time.monotonic()
+        hold = min(self.DIRECT_MAX_ALIGN_WAIT_S, max(0.0, deadline - now))
+        if hold > 0.0:
+            wake_at = now + hold
+            while self.running and self.process is not None:
+                if time.monotonic() >= wake_at:
+                    break
+                try:
+                    chunk = self.process.stdout.read1(
+                        max(1, self.BUFFER_SIZE - len(leftover)))
+                except Exception:
+                    break
+                if chunk:
+                    leftover += chunk
+                    while len(leftover) >= self.BUFFER_SIZE:
+                        self._pause_buffer.append(leftover[:self.BUFFER_SIZE])
+                        leftover = leftover[self.BUFFER_SIZE:]
+                elif self.process.poll() is not None:
+                    break
+                else:
+                    time.sleep(0.02)
+        if self.running:
+            late = time.monotonic() - deadline
+            if late > self.DIRECT_LATE_TOLERANCE_S:
+                logger.log(
+                    "[AudioStreamer] direct sync: audible start "
+                    f"{late:.2f}s past the shared deadline (slow resolve/startup)"
+                )
+        return leftover
+
+    # ---- Direct-transport shared-timeline math (pure, unit-testable) ----
+
+    @staticmethod
+    def direct_start_deadline(start_offset, received_at, seek_to):
+        """Wall-clock instant (received_at's monotonic domain) when the
+        prebuffered head should become audible.
+
+        Every listener derives the same value from the same jukebox_play
+        broadcast: t_zero — when the room's song position was 0 — is the
+        arrival instant minus start_offset, and the room's clock runs one
+        lead-in behind the server's audioStartedAt (the price of hearing
+        the full intro). Fresh songs and mid-song joins must share that
+        shift, otherwise a joiner lands a whole lead-in ahead of the room.
+        """
+        t_zero = received_at - start_offset
+        return t_zero + AudioStreamer.DIRECT_LEAD_IN_S + seek_to
+
+    @staticmethod
+    def direct_seek_seconds(start_offset, received_at, now):
+        """Input seek for an anchored mid-song join, aimed PAST the position
+        projected at audible start.
+
+        Arriving early is corrected by an exact hold at prebuffer-complete;
+        arriving late never recovers, because under '-re' pacing skipping
+        PCM costs the same wall time as the lateness itself.
+        """
+        if received_at is None or start_offset <= 0.0:
+            return start_offset
+        return start_offset + max(0.0, now - received_at) + AudioStreamer.DIRECT_STARTUP_EST_S
+
     def run(self):
         if not FFMPEG_PATH:
             print("[MusicBot] ffmpeg not found!")
@@ -875,12 +989,25 @@ class AudioStreamer(threading.Thread):
             if header_block:
                 cmd.extend(['-headers', header_block])
             effective_offset = getattr(self, "start_offset", 0.0)
-            # Only compensate the client's resolve delay when RESUMING mid-song
-            # (start_offset > 0). A fresh song must start at 0: adding the
-            # yt-dlp resolve time here made the jukebox skip past the intro
-            # every time the direct fallback was used.
+            # Timeline anchoring (jukebox direct only): a fresh song keeps
+            # position 0 and waits out the shared lead-in below (adding
+            # resolve time here is what used to skip the intro), while a
+            # mid-song join seeks PAST the projected audible start and
+            # waits the exact residual at prebuffer-complete. Non-anchored
+            # workers (personal music bot, livestreams) keep legacy behavior.
             if self.start_offset_received_at is not None and effective_offset > 0.0:
-                effective_offset += max(0.0, time.monotonic() - self.start_offset_received_at)
+                if self._direct_anchor and effective_offset <= self.DIRECT_FRESH_MAX_S:
+                    effective_offset = 0.0
+                elif self._direct_anchor:
+                    effective_offset = self.direct_seek_seconds(
+                        effective_offset, self.start_offset_received_at, time.monotonic())
+                else:
+                    # Only compensate the client's resolve delay when RESUMING
+                    # mid-song (start_offset > 0). A fresh song must start at 0:
+                    # adding the yt-dlp resolve time here made the jukebox skip
+                    # past the intro every time the direct fallback was used.
+                    effective_offset += max(0.0, time.monotonic() - self.start_offset_received_at)
+            self._direct_seek_to = effective_offset if effective_offset > 0.5 else 0.0
             # Input authorization must precede seek. YouTube's signed range
             # request can return 403 when -ss is placed before these headers.
             if effective_offset > 0.5:
@@ -1029,6 +1156,13 @@ class AudioStreamer(threading.Thread):
             if not self.running:
                 self._cleanup()
                 return
+            if self._direct_anchor:
+                # Shared-timeline hold: every listener becomes audible at the
+                # same wall-clock instant regardless of resolve/startup time.
+                _pre_leftover = self._hold_direct_start(_pre_leftover)
+                if not self.running:
+                    self._cleanup()
+                    return
             if self.spatial_pair:
                 self._diagnostic_startup_call("direct.spatial", self._update_spatial_gain)
             self._diagnostic_startup_call("direct.first_play", self._play_all)
