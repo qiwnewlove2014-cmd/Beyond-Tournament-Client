@@ -48,6 +48,10 @@ class EventHandeler:
         self._last_note_seq = {}
         # Clock synchronization: server_time - local_time offset (ms).
         self._clock_offset_ms = 0.0
+        # Number of server_time samples folded into the offset; the first
+        # three seed it directly instead of crawling in via the EMA.
+        self._clock_offset_samples = 0
+        self._last_jam_sync_log = 0.0
 
     def _is_stale_jam_note(self, data):
         """Drop jam notes that arrive out of order (uint16 wrap-aware)."""
@@ -1433,6 +1437,13 @@ class EventHandeler:
             rtt = 40.0
         one_way = rtt / 2.0
         instant_offset = (server_time_ms + one_way) - local_ms
+        self._clock_offset_samples += 1
+        if self._clock_offset_samples <= 3:
+            # Seed immediately. A cold EMA starts at 0, so with a large
+            # server/player clock skew every early note computed a wildly
+            # wrong target and sat at the scheduling cap for seconds.
+            self._clock_offset_ms = instant_offset
+            return
         # Exponential moving average (alpha=0.3) to smooth jitter.
         alpha = 0.3
         self._clock_offset_ms = alpha * instant_offset + (1 - alpha) * self._clock_offset_ms
@@ -1479,9 +1490,12 @@ class EventHandeler:
         instead of spawning a thread per note.
         """
         buffer_ms = self._active_jukebox_buffer_ms()
-        if buffer_ms is None or not self.SYNC_JAM_NOTES_WITH_JUKEBOX:
+        if (buffer_ms is None or not self.SYNC_JAM_NOTES_WITH_JUKEBOX
+                or self._clock_offset_samples < 3):
             # Arrival-time jamming (see SYNC_JAM_NOTES_WITH_JUKEBOX): no
-            # music playing, or alignment disabled — play immediately.
+            # music playing, alignment disabled, or the clock offset is not
+            # seeded yet — scheduling against an unseeded offset holds notes
+            # at the cap. Play immediately until the clocks are known.
             enqueue()
             return
         server_time = data.get("server_time")
@@ -1500,11 +1514,31 @@ class EventHandeler:
             - self.JAM_NOTE_ADVANCE_MS
         )
         delay = target_local - time.time() * 1000
+        if delay > 600:
+            # Steady-state holds are bounded by the jukebox backlog
+            # (<=~400ms); anything larger means clock skew or a drifting
+            # offset. Log the components (rate-limited) so a live server
+            # report pinpoints the cause, then clamp.
+            self._log_jam_sync_anomaly(delay, buffer_ms)
         if delay <= 0:
             enqueue()
         else:
-            # Cap guards against a wildly wrong offset stalling notes.
-            self.game.call_after(min(int(delay), 1500), enqueue)
+            # Cap guards against a wildly wrong offset stalling notes; the
+            # intended hold never exceeds the jukebox backlog.
+            self.game.call_after(min(int(delay), 500), enqueue)
+
+    def _log_jam_sync_anomaly(self, delay, buffer_ms):
+        """Rate-limited diagnostic when a jam-note hold exceeds 600ms."""
+        now = time.time()
+        if now - self._last_jam_sync_log < 5.0:
+            return
+        self._last_jam_sync_log = now
+        from .logger import log
+        log(
+            f"[JAM.SYNC] long hold {int(delay)}ms: buffer={int(buffer_ms)}ms "
+            f"offset={int(self._clock_offset_ms)}ms "
+            f"samples={self._clock_offset_samples}"
+        )
 
     def _schedule_music_synced(self, data, callback):
         """Schedule an instrument action on its performer's audible music clock.
