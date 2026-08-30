@@ -167,6 +167,14 @@ def install_and_restart(zip_path, extract_dir=None):
         ['cmd', '/c', bat_path],
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
     )
+    try:
+        # os._exit ข้าม finally/atexit ทั้งหมด จึงต้องลบ session marker ของ
+        # ตัวเองก่อน ไม่งั้นการเปิดเกมครั้งถัดไปรายงาน unclean_exit ไปเซิร์ฟเวอร์
+        # ทุกครั้งที่อัปเดต (ใช้แนวทางเดียวกับปุ่ม Restart Client)
+        from . import crash_reporting
+        crash_reporting.mark_expected_shutdown("client_update")
+    except Exception:
+        pass
     os._exit(0)
 
 
