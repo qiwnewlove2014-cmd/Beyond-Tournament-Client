@@ -230,6 +230,7 @@ class AudioManager():
             "ui/warn.ogg", "ui/kick.ogg", "ui/broadcast.ogg",
             "ui/online.ogg", "ui/offline.ogg", "ui/chat.ogg",
             "ui/pm.ogg", "ui/kill.ogg", "ui/notify1.ogg", "ui/notify2.ogg",
+            "ui/unread.ogg",
         ]
         for snd in ui_sounds:
             snd_path = os.path.join(consts.SOUNDPREPEND, snd)

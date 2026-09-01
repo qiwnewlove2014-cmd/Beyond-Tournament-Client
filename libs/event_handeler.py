@@ -46,6 +46,9 @@ class EventHandeler:
         # Last instrument-note sequence number seen per performer (jam notes
         # arrive on the unreliable channel; late/reordered ones are dropped).
         self._last_note_seq = {}
+        # Server-authoritative instrument mutes. These affect only remote
+        # instrument replication; the performer keeps local prediction.
+        self._instrument_silenced_peers = set()
         # Clock synchronization: server_time - local_time offset (ms).
         self._clock_offset_ms = 0.0
         # Number of server_time samples folded into the offset; the first
@@ -66,6 +69,37 @@ class EventHandeler:
         delta = (seq - last) & 0xFFFF
         # zero => exact duplicate; huge backwards delta => old packet after wrap
         return delta == 0 or delta > 0x8000
+
+    def _instrument_peer_is_silenced(self, data):
+        if not isinstance(data, dict):
+            return False
+        peer_id = data.get("peer_id")
+        return (peer_id is not None
+                and str(peer_id).lower() in getattr(self, "_instrument_silenced_peers", set()))
+
+    def _run_if_instrument_audible(self, data, callback):
+        # Re-check at execution time because a synchronized note may already
+        # be queued when the Server sends the mute event.
+        if not self._instrument_peer_is_silenced(data):
+            callback()
+
+    def instrument_peer_silenced(self, data):
+        peer_id = data.get("peer_id") if isinstance(data, dict) else None
+        if peer_id is None:
+            return
+        peer_id = str(peer_id)
+        if not hasattr(self, "_instrument_silenced_peers"):
+            self._instrument_silenced_peers = set()
+        self._instrument_silenced_peers.add(peer_id.lower())
+        self.game.put(lambda peer_id=peer_id: (
+            self.game.audio_mngr.piano.remove_peer(peer_id),
+            self.game.audio_mngr.drums.remove_peer(peer_id),
+        ))
+
+    def instrument_peer_unsilenced(self, data):
+        peer_id = data.get("peer_id") if isinstance(data, dict) else None
+        if peer_id is not None:
+            getattr(self, "_instrument_silenced_peers", set()).discard(str(peer_id).lower())
 
     def create_fail(self, data):
         msg = "Account creation failed. Press Enter to return."
@@ -736,6 +770,9 @@ class EventHandeler:
         )
 
     def play_unbound(self, data):
+        if ((data.get("piano_note") or data.get("guitar_note"))
+                and self._instrument_peer_is_silenced(data)):
+            return
         # Jam notes (piano/guitar) carry a seq number on the unreliable
         # channel — drop duplicates/reordered packets before doing any work.
         if (data.get("piano_note") or data.get("guitar_note")) and self._is_stale_jam_note(data):
@@ -756,14 +793,20 @@ class EventHandeler:
             # queue so PA speakers / occlusion apply exactly like piano.
             if not self._schedule_music_synced(
                 data,
-                lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+                lambda data=data: self._run_if_instrument_audible(
+                    data,
+                    lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+                ),
             ):
                 # Latency compensation: aligned with the jukebox song when
                 # music is playing (target-time on the server clock), or
                 # immediate for live jamming without music.
                 self._schedule_remote_note(
                     data,
-                    lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+                    lambda data=data: self._run_if_instrument_audible(
+                        data,
+                        lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+                    ),
                 )
             return
         # ALL remaining unbound sounds (zombie splashes/summons, foley,
@@ -839,11 +882,19 @@ class EventHandeler:
         current on the main thread. enqueue_remote_note validates and copies the
         packet; PianoAudio.update() drains and plays on the main thread.
         """
+        if self._instrument_peer_is_silenced(data):
+            return
         if not self._schedule_music_synced(
             data,
-            lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+            lambda data=data: self._run_if_instrument_audible(
+                data,
+                lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+            ),
         ):
-            self.game.audio_mngr.piano.enqueue_remote_note(data)
+            self._run_if_instrument_audible(
+                data,
+                lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
+            )
 
     def stop_piano_note(self, data):
         """Queue a remote piano note-off for main-thread processing."""
@@ -916,6 +967,8 @@ class EventHandeler:
 
     def play_drum_hit(self, data):
         """Queue a validated remote one-shot for main-thread audio playback."""
+        if self._instrument_peer_is_silenced(data):
+            return
         if self._is_stale_jam_note(data):
             return
         # Update clock offset from server_time (latency compensation).
@@ -924,14 +977,20 @@ class EventHandeler:
             self._update_clock_offset(server_time)
         if not self._schedule_music_synced(
             data,
-            lambda data=data: self.game.audio_mngr.drums.enqueue_remote_hit(data),
+            lambda data=data: self._run_if_instrument_audible(
+                data,
+                lambda data=data: self.game.audio_mngr.drums.enqueue_remote_hit(data),
+            ),
         ):
             # Latency compensation: aligned with the jukebox song when
             # music is playing (target-time on the server clock), or
             # immediate for live jamming without music.
             self._schedule_remote_note(
                 data,
-                lambda data=data: self.game.audio_mngr.drums.enqueue_remote_hit(data),
+                lambda data=data: self._run_if_instrument_audible(
+                    data,
+                    lambda data=data: self.game.audio_mngr.drums.enqueue_remote_hit(data),
+                ),
             )
 
     def set_game_mode(self, data):

@@ -25,6 +25,7 @@ from . import options
 from .speech import speak
 from . import logger
 from .audio_diagnostics import probe
+from .music_downloader import MusicDownloadManager, is_supported_music_url
 
 # Try to find ffmpeg path
 def _is_youtube_watch_url(value):
@@ -1535,6 +1536,11 @@ class MapMusicBot:
         # Personal Playlist & Favorites Manager (Stored locally on Client)
         from .playlist_manager import PlaylistManager
         self.playlist_mgr = PlaylistManager()
+        self.download_mgr = MusicDownloadManager(
+            game,
+            self._find_gameplay,
+            ffmpeg_path=FFMPEG_PATH,
+        )
         self.current_target = ""
         self.current_source = "youtube"
 
@@ -1704,6 +1710,10 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._show_personal_feed_menu()
 
+        def go_downloads():
+            gp.pop_last_substate()
+            self._open_download_menu()
+
         def go_help():
             gp.pop_last_substate()
             self._show_help_menu()
@@ -1714,6 +1724,7 @@ class MapMusicBot:
             ("Choose Local File", go_local),
             ("My Playlists & Favorites", go_playlists),
             ("Personal Music Feed", go_personal_feed),
+            ("Download Music", go_downloads),
         ]
         
         # Show the megaphone routing option only when the server explicitly granted
@@ -1879,6 +1890,87 @@ class MapMusicBot:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
+    def _open_download_menu(self):
+        """Open private Client-only download sources and job controls."""
+        from . import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+        self.download_mgr.show_progress_bar()
+
+        items = []
+        if (self.current_source != "local"
+                and is_supported_music_url(self.current_target)):
+            def download_current():
+                gp.pop_last_substate()
+                self.download_mgr.configure(
+                    [{"title": self.current_title, "target": self.current_target}],
+                    self.current_title or "current song",
+                )
+            items.append(("Download Current Song", download_current))
+
+        favorites = self.playlist_mgr.get_favorites()
+        if favorites:
+            def download_favorites():
+                gp.pop_last_substate()
+                self.download_mgr.configure(favorites, "Favorites")
+            items.append(("Download All Favorites", download_favorites))
+
+        if self.playlist_mgr.get_playlist_names():
+            def choose_playlist():
+                gp.pop_last_substate()
+                self._open_download_playlist_menu()
+            items.append(("Download a Saved Playlist", choose_playlist))
+
+        items.append((
+            self.download_mgr.parallel_menu_label,
+            self.download_mgr.cycle_parallel_downloads,
+        ))
+        items.append((
+            self.download_mgr.notification_menu_label,
+            self.download_mgr.toggle_file_notifications,
+        ))
+
+        items.append((
+            self.download_mgr.progress_menu_label,
+            self.download_mgr.speak_status,
+        ))
+        if self.download_mgr.is_active():
+            items.append(("Cancel Active Download", self.download_mgr.cancel))
+        items.append(("Back", lambda: (gp.pop_last_substate(), self._show_mode_menu())))
+
+        download_mgr = self.download_mgr
+
+        class DownloadMusicMenu(menu_mod.Menu):
+            def exit(menu_self):
+                download_mgr.hide_progress_bar()
+                super().exit()
+
+        m = DownloadMusicMenu(self.game, "Download Music", parrent=gp)
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_download_playlist_menu(self):
+        from . import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+        m = menu_mod.Menu(self.game, "Select Playlist to Download", parrent=gp)
+        items = []
+        for name in self.playlist_mgr.get_playlist_names():
+            def choose(playlist_name=name):
+                gp.pop_last_substate()
+                self.download_mgr.configure(
+                    self.playlist_mgr.get_playlist_tracks(playlist_name),
+                    f"playlist {playlist_name}",
+                )
+            items.append((name, choose))
+        items.append(("Back", lambda: (gp.pop_last_substate(), self._open_download_menu())))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
     def _show_favorites_menu(self):
         """Show menu of favorite tracks"""
         from . import menu as menu_mod, menus
@@ -1972,6 +2064,15 @@ class MapMusicBot:
             self.play_single_track(title, target, source)
 
         items.append(("Play Now", play_now))
+
+        if source != "local" and is_supported_music_url(target):
+            def download_track():
+                gp.pop_last_substate()
+                self.download_mgr.configure(
+                    [{"title": title, "target": target}],
+                    title,
+                )
+            items.append(("Download This Track", download_track))
 
         if is_favorite:
             def remove_fav():
@@ -2392,7 +2493,15 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._prompt_add_track_to_playlist(title, target, "youtube")
 
+        def download_song():
+            gp.pop_last_substate()
+            self.download_mgr.configure(
+                [{"title": title, "target": target}],
+                title,
+            )
+
         items.append(("Play Now", play_now))
+        items.append(("Download Song", download_song))
         items.append(("Save to Favorites", save_fav))
         items.append(("Add to Playlist...", save_playlist))
         items.append(("Cancel", lambda: gp.pop_last_substate()))
@@ -2865,6 +2974,7 @@ class MapMusicBot:
         self._current_reverb_slot = None
 
     def destroy(self):
+        self.download_mgr.close()
         self.stop()
         if getattr(self, 'live_relay_streamer', None):
             self.live_relay_streamer.stop()
