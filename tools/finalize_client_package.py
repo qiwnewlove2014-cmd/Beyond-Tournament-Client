@@ -11,6 +11,8 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / "Beyond Tournament"
 PLAYER_PATCH_NOTES = ("player_patch_notes.txt", "player_patch_notes_th.txt")
+PLAYER_GUIDES = ("docs.txt", "docs_th.txt")
+PLAYER_DOCUMENTS = (*PLAYER_GUIDES, *PLAYER_PATCH_NOTES)
 
 
 class PackageValidationError(RuntimeError):
@@ -130,15 +132,16 @@ def verify_package(
     for path in output.iterdir():
         if path.name.casefold() == "changelog.txt":
             failures.append(f"Do not package the technical game changelog: {path}")
-    for name in PLAYER_PATCH_NOTES:
+    for name in PLAYER_DOCUMENTS:
         path = output / name
-        _require_file("Player patch notes", path, failures)
+        label = "Player guide" if name in PLAYER_GUIDES else "Player patch notes"
+        _require_file(label, path, failures)
         if path.is_file():
             try:
                 if not path.read_text(encoding="utf-8-sig").strip():
-                    failures.append(f"Player patch notes are empty: {path}")
+                    failures.append(f"{label} is empty: {path}")
             except UnicodeError:
-                failures.append(f"Player patch notes must be UTF-8: {path}")
+                failures.append(f"{label} must be UTF-8: {path}")
 
     _require_file(
         "Compiled game executable",

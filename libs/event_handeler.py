@@ -9,7 +9,7 @@ import functools
 import contextlib
 import webbrowser
 import cyal
-from . import audio_manager, buffer, gameplay, menu, menus, options, consts
+from . import audio_manager, buffer, gameplay, local_player_documents, menu, menus, options, consts
 from .speech import speak
 from .weapons import weapon
 from . import tickets
@@ -1107,6 +1107,16 @@ class EventHandeler:
         def on_select(value, close, index):
             if is_memory_enabled:
                 self.game.menu_memory[menu_id] = index
+            # /docs and /patchnotes are shipped with this Client. Read the
+            # fixed local file first; if an older/incomplete package lacks it,
+            # fall back to the existing Server reader below.
+            if local_player_documents.handle_server_language_selection(
+                self.game,
+                self.gameplay,
+                data.get("event", ""),
+                value,
+            ):
+                return
             if close:
                 self.gameplay.pop_last_substate()
             self.client.send(consts.CHANNEL_MENUS, data["event"], {"value": value})
@@ -1449,18 +1459,24 @@ class EventHandeler:
         self._clock_offset_ms = alpha * instant_offset + (1 - alpha) * self._clock_offset_ms
 
     def _active_jukebox_buffer_ms(self):
-        """How far behind the live stream our jukebox audio is (ms), or None.
+        """How far behind the song's shared clock our jukebox audio is (ms), or None.
 
-        Returns None when no jukebox relay is actively playing, so live
+        Returns None when no jukebox song is actively playing, so live
         jamming without background music keeps the low-latency immediate
-        path. With music playing, the queued 40ms OpenAL frames are exactly
-        the backlog between what the server is sending and what we hear.
+        path. A relay receiver reports its queued 40ms OpenAL frames — the
+        backlog between what the server is sending and what we hear. An
+        anchored direct stream runs exactly one lead-in behind the server's
+        song clock: the audible head starts at the shared wall-clock
+        deadline and advances at real time, so the lead-in IS the
+        listener's distance behind that clock (the OpenAL queue is only
+        underrun runway and never shifts the audible head).
         """
         try:
             jp = getattr(self.gameplay, "jukebox_player", None)
             if jp is None:
                 return None
             from .jukebox import JukeboxRelayReceiver
+            from .music_bot import AudioStreamer
             for entry in list(getattr(jp, "players", {}).values()):
                 streamer = entry.get("streamer") if isinstance(entry, dict) else None
                 if (isinstance(streamer, JukeboxRelayReceiver)
@@ -1474,6 +1490,14 @@ class EventHandeler:
                     # OpenAL plays the queue at 40ms per frame; the queue depth
                     # is the listener's current distance behind the live edge.
                     return max(queued, 1) * 40
+                if (getattr(streamer, "_direct_anchor", False)
+                        and getattr(streamer, "running", False)
+                        and streamer.ready_event.is_set()):
+                    # Anchored direct playback (no relay available): without
+                    # this branch the buffer reads None and every remote note
+                    # played on arrival — late by a full round trip and audibly
+                    # off the beat the room is hearing.
+                    return int(AudioStreamer.DIRECT_LEAD_IN_S * 1000)
             return None
         except Exception:
             return None
@@ -1514,18 +1538,19 @@ class EventHandeler:
             - self.JAM_NOTE_ADVANCE_MS
         )
         delay = target_local - time.time() * 1000
-        if delay > 600:
-            # Steady-state holds are bounded by the jukebox backlog
-            # (<=~400ms); anything larger means clock skew or a drifting
-            # offset. Log the components (rate-limited) so a live server
-            # report pinpoints the cause, then clamp.
+        if delay > buffer_ms + 600:
+            # Steady-state holds sit just under this listener's jukebox
+            # backlog (relay queue depth or the direct lead-in); anything
+            # beyond it means clock skew or a drifting offset. Log the
+            # components (rate-limited) so a live server report pinpoints
+            # the cause, then clamp.
             self._log_jam_sync_anomaly(delay, buffer_ms)
         if delay <= 0:
             enqueue()
         else:
             # Cap guards against a wildly wrong offset stalling notes; the
-            # intended hold never exceeds the jukebox backlog.
-            self.game.call_after(min(int(delay), 500), enqueue)
+            # intended hold never exceeds the backlog plus skew slack.
+            self.game.call_after(min(int(delay), int(buffer_ms + 1000)), enqueue)
 
     def _log_jam_sync_anomaly(self, delay, buffer_ms):
         """Rate-limited diagnostic when a jam-note hold exceeds 600ms."""

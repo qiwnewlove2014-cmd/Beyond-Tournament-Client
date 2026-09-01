@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 class _QueuedGame:
@@ -255,6 +256,30 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
         self.assertFalse(existing.destroyed)
         self.assertEqual(existing.moves, [(4, 5, 6, False)])
         self.assertEqual(existing.hp, 100)  # resync packet carries no HP authority
+
+    def test_fresh_stationary_entity_syncs_room_reverb_on_spawn(self):
+        from libs.world_map import Map
+
+        class Spawned:
+            is_vehicle = False
+
+            def __init__(self):
+                self.sync_calls = 0
+
+            def sync_reverb(self):
+                self.sync_calls += 1
+                return True
+
+        spawned = Spawned()
+        map_obj = Map.__new__(Map)
+        map_obj.game = object()
+        map_obj.entities = {}
+        with patch("libs.world_map.entity.Entity", return_value=spawned):
+            result = map_obj.spawn_entity("stationary-animal", 4, 5, 6)
+
+        self.assertIs(result, spawned)
+        self.assertIs(map_obj.entities["stationary-animal"], spawned)
+        self.assertEqual(spawned.sync_calls, 1)
 
     def test_fifty_resyncs_keep_the_same_voice_and_music_sources(self):
         from libs.world_map import Map

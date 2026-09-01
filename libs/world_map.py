@@ -827,6 +827,10 @@ class Map:
         else:
             spawned = entity.Entity(self.game, self, x, y, z, hp, name=name)
         self.entities[name] = spawned
+        # Entity sounds (animals, monsters and bosses included) must inherit
+        # the room effect at their authoritative spawn position. Waiting for
+        # the first move packet leaves stationary creatures completely dry.
+        spawned.sync_reverb()
         return self.entities[name]
 
     def get_entities_at(self, x, y, z):

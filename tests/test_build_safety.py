@@ -58,14 +58,14 @@ class BuildSafetyTests(unittest.TestCase):
         for name in ("beyond_tournament.py", "CyalPlugin.py", "default_keyconfig.json", "tools/pack_data.py",
                      "profile.mhr", "openal.dll"):
             self.write(self.project / name)
-        for name in safety.PLAYER_PATCH_NOTES:
-            self.write(self.base / "server/docs" / name, ("Public notes: " + name).encode())
+        for name in safety.PLAYER_DOCUMENTS:
+            self.write(self.base / "server/docs" / name, ("Public document: " + name).encode())
 
     def package_fixture(self):
         package = self.project / safety.STAGING_NAME
         for name in safety.HELPERS:
             self.write(package / name, (self.project / name).read_bytes())
-        for name in ("Beyond Tournament.exe", "sounds.dat", "default_keyconfig.json", *safety.PLAYER_PATCH_NOTES,
+        for name in ("Beyond Tournament.exe", "sounds.dat", "default_keyconfig.json", *safety.PLAYER_DOCUMENTS,
                      "openal.dll", "opus.dll", "third_party/ffmpeg/LICENSE.txt", "yt_dlp/__init__.py",
                      "urlextract/__init__.py"):
             self.write(package / name)
@@ -213,25 +213,25 @@ class BuildSafetyTests(unittest.TestCase):
     def test_valid_package(self):
         safety.verify_package(self.package_fixture(), self.entries)
 
-    def test_preflight_requires_both_server_notes_without_legacy_fallback(self):
+    def test_preflight_requires_all_server_documents_without_legacy_fallback(self):
         self.project_fixture()
         self.write(self.base / "server/changelog.txt", b"Technical notes")
-        for name in safety.PLAYER_PATCH_NOTES:
+        for name in safety.PLAYER_DOCUMENTS:
             with self.subTest(name=name):
                 self.write(self.project / name, b"Stale client copy")
                 path = self.base / "server/docs" / name
                 saved = path.read_bytes()
                 path.unlink()
                 before = self.snapshot()
-                with self.assertRaisesRegex(safety.BuildSafetyError, "Player patch notes are missing"):
+                with self.assertRaisesRegex(safety.BuildSafetyError, "Player (?:guide|patch notes) is missing"):
                     safety.validate_project(self.project, self.entries)
                 self.assertEqual(before, self.snapshot())
                 self.write(path, saved)
 
-    def test_source_and_package_notes_reject_empty_or_invalid_utf8_read_only(self):
+    def test_source_and_package_documents_reject_empty_or_invalid_utf8_read_only(self):
         self.project_fixture()
         package = self.package_fixture()
-        for name in safety.PLAYER_PATCH_NOTES:
+        for name in safety.PLAYER_DOCUMENTS:
             for invalid in (b"", b" \r\n\t", b"\xff"):
                 for root in (self.base / "server/docs", package):
                     with self.subTest(name=name, invalid=invalid, root=root):
@@ -240,18 +240,18 @@ class BuildSafetyTests(unittest.TestCase):
                         self.write(path, invalid)
                         before = self.snapshot()
                         with self.assertRaises(safety.BuildSafetyError):
-                            safety.validate_player_notes(root)
+                            safety.validate_player_documents(root)
                         self.assertEqual(before, self.snapshot())
                         self.write(path, saved)
 
-    def test_final_package_requires_both_languages(self):
+    def test_final_package_requires_both_languages_of_each_document(self):
         package = self.package_fixture()
-        for name in safety.PLAYER_PATCH_NOTES:
+        for name in safety.PLAYER_DOCUMENTS:
             with self.subTest(name=name):
                 path = package / name
                 saved = path.read_bytes()
                 path.unlink()
-                with self.assertRaisesRegex(safety.BuildSafetyError, "Player patch notes are missing"):
+                with self.assertRaisesRegex(safety.BuildSafetyError, "Player (?:guide|patch notes) is missing"):
                     safety.verify_package(package, self.entries)
                 self.write(path, saved)
 
@@ -460,9 +460,9 @@ class BuildSafetyTests(unittest.TestCase):
         self.write(self.project / safety.STAGING_NAME / "sounds.dat")
         self.write(self.base / "server/changelog.txt", b"Technical server history")
         self.write(self.project / "changelog.txt", b"Legacy client history")
-        for name in safety.PLAYER_PATCH_NOTES:
-            self.write(self.project / name, b"Stale client notes")
-            self.write(self.project / safety.DIST_NAME / name, b"Stale compiler notes")
+        for name in safety.PLAYER_DOCUMENTS:
+            self.write(self.project / name, b"Stale client document")
+            self.write(self.project / safety.DIST_NAME / name, b"Stale compiler document")
         runtime = self.base / "site-packages"
         self.write(runtime / "yt_dlp/__init__.py", b"raise RuntimeError('do not import')")
         self.write(runtime / "yt_dlp/old$.exe")
@@ -475,7 +475,7 @@ class BuildSafetyTests(unittest.TestCase):
         package = self.project / safety.STAGING_NAME
         safety.verify_package(package, self.entries)
         self.assertFalse((package / "changelog.txt").exists())
-        for name in safety.PLAYER_PATCH_NOTES:
+        for name in safety.PLAYER_DOCUMENTS:
             self.assertEqual((package / name).read_bytes(), (self.base / "server/docs" / name).read_bytes())
         self.assertFalse(any("$" in str(path.relative_to(package)) for path in package.rglob("*")))
         for relative, contents in before.items():

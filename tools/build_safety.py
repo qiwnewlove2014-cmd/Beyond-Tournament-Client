@@ -23,6 +23,8 @@ OUTPUT_NAME = "Beyond Tournament"
 DIST_NAME = "beyond_tournament.dist"
 HELPERS = frozenset({"ffmpeg.exe", "oalinst.exe"})
 PLAYER_PATCH_NOTES = ("player_patch_notes.txt", "player_patch_notes_th.txt")
+PLAYER_GUIDES = ("docs.txt", "docs_th.txt")
+PLAYER_DOCUMENTS = (*PLAYER_GUIDES, *PLAYER_PATCH_NOTES)
 EXECUTABLE_SUFFIXES = frozenset({".exe", ".dll", ".pyd", ".com", ".scr", ".cpl", ".msi"})
 BLOCKED_HASHES = frozenset({
     "b003c197eee574a1a0b1038b364fccbbbdd6245d0f7d77b75ff4067e7658d769",
@@ -186,19 +188,28 @@ def copy_tree_filtered(source: Path, target: Path) -> None:
                     copy_function=copy_checked_file)
 
 
-def validate_player_notes(root: Path) -> None:
-    """Require both public note files; never substitute the technical changelog."""
-    for name in PLAYER_PATCH_NOTES:
+def player_document_label(name: str) -> str:
+    return "Player guide" if name in PLAYER_GUIDES else "Player patch notes"
+
+
+def validate_player_documents(root: Path) -> None:
+    """Require both languages of each public document; never use the changelog."""
+    for name in PLAYER_DOCUMENTS:
         path = checked_path(root / name)
+        label = player_document_label(name)
         if not path.is_file():
-            raise BuildSafetyError(f"Player patch notes are missing: {path}")
+            raise BuildSafetyError(f"{label} is missing: {path}")
         inspect_file(path)
         try:
             text = path.read_text(encoding="utf-8-sig")
         except UnicodeError as error:
-            raise BuildSafetyError(f"Player patch notes must be UTF-8: {path}") from error
+            raise BuildSafetyError(f"{label} must be UTF-8: {path}") from error
         if not text.strip():
-            raise BuildSafetyError(f"Player patch notes are empty: {path}")
+            raise BuildSafetyError(f"{label} is empty: {path}")
+
+
+# Retained for local tooling that imported the old helper name.
+validate_player_notes = validate_player_documents
 
 
 def reject_technical_changelog(package: Path) -> None:
@@ -216,7 +227,7 @@ def copy_inputs(project: Path, entries: dict) -> None:
     scan_tree(staging)
     reject_technical_changelog(staging)
     notes = checked_path(project.parent / "server" / "docs")
-    validate_player_notes(notes)
+    validate_player_documents(notes)
     verify_helpers(project, entries)
     copy_tree_filtered(project / "dlls_windows", staging)
     for pattern in ("*.mhr", "*.dll"):
@@ -241,8 +252,9 @@ def copy_inputs(project: Path, entries: dict) -> None:
         copy_tree_filtered(project / name, staging / name)
     copy_checked_file(project / "tools/build_binary_manifest.json",
                       staging / "third_party/build_binary_manifest.json")
-    # Copy last so stale compiler/runtime copies cannot override Server notes.
-    for name in PLAYER_PATCH_NOTES:
+    # Copy last so stale compiler/runtime copies cannot override Server-owned
+    # public guides or patch notes.
+    for name in PLAYER_DOCUMENTS:
         copy_checked_file(notes / name, staging / name)
     reject_technical_changelog(staging)
 
@@ -264,7 +276,7 @@ def validate_project(project: Path, entries: dict) -> None:
     if any(not any("$" not in path.name for path in project.glob(pattern))
            for pattern in ("*.mhr", "*.dll")):
         raise BuildSafetyError("Project HRTF profiles or runtime DLL files are missing")
-    validate_player_notes(checked_path(project.parent / "server" / "docs"))
+    validate_player_documents(checked_path(project.parent / "server" / "docs"))
     # Check old generated trees before any build operation can replace them.
     for name in (OUTPUT_NAME, DIST_NAME):
         old = checked_path(project / name)
@@ -278,7 +290,7 @@ def validate_project(project: Path, entries: dict) -> None:
 def verify_package(package: Path, entries: dict) -> None:
     scan_tree(package)
     reject_technical_changelog(package)
-    validate_player_notes(package)
+    validate_player_documents(package)
     verify_helpers(package, entries)
     for name in ("Beyond Tournament.exe", "sounds.dat", "default_keyconfig.json", "openal.dll", "opus.dll", "third_party/ffmpeg/LICENSE.txt"):
         path = checked_path(package / name)

@@ -1,4 +1,4 @@
-"""Public-note contract for the legacy validator; only temporary files are used."""
+"""Public-document contract for the legacy validator; only temporary files are used."""
 import contextlib
 import importlib.util
 import io
@@ -22,14 +22,14 @@ class PackageNotesTests(unittest.TestCase):
         self.project = Path(self.temp.name) / "client"
         self.package.mkdir()
         self.project.mkdir()
-        for name in ("player_patch_notes.txt", "player_patch_notes_th.txt"):
-            (self.package / name).write_text("Public player notes", encoding="utf-8")
+        for name in finalizer.PLAYER_DOCUMENTS:
+            (self.package / name).write_text("Public player document", encoding="utf-8")
 
     def verify(self):
         # Other runtime validation is outside this text-packaging regression.
         require = finalizer._require_file
         def notes_only(label, path, failures, minimum_size=1):
-            if label == "Player patch notes":
+            if label in ("Player guide", "Player patch notes"):
                 require(label, path, failures, minimum_size)
         with mock.patch.object(finalizer, "_require_file", side_effect=notes_only), \
                 mock.patch.object(finalizer, "_require_glob"), \
@@ -38,21 +38,21 @@ class PackageNotesTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             finalizer.verify_package(self.package, self.project, yt_dlp_source=self.project)
 
-    def test_notes_without_technical_changelog_are_accepted(self):
+    def test_documents_without_technical_changelog_are_accepted(self):
         self.verify()
 
     def test_each_language_is_required_without_changelog_fallback(self):
-        for name in finalizer.PLAYER_PATCH_NOTES:
+        for name in finalizer.PLAYER_DOCUMENTS:
             with self.subTest(name=name):
                 path = self.package / name
                 saved = path.read_bytes()
                 path.unlink()
-                with self.assertRaisesRegex(finalizer.PackageValidationError, "Player patch notes"):
+                with self.assertRaisesRegex(finalizer.PackageValidationError, "Player (?:guide|patch notes)"):
                     self.verify()
                 path.write_bytes(saved)
 
     def test_empty_and_invalid_text_are_rejected(self):
-        for name in finalizer.PLAYER_PATCH_NOTES:
+        for name in finalizer.PLAYER_DOCUMENTS:
             path = self.package / name
             saved = path.read_bytes()
             for data in (b"", b" \n\t", b"\xff"):
