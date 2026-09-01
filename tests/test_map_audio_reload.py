@@ -172,6 +172,7 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
         def make_handler(previous_name):
             handler = EventHandeler.__new__(EventHandeler)
             cache_events = []
+            illusion_events = []
             samples = SimpleNamespace(clear=lambda: cache_events.append("clear"))
             handler.game = SimpleNamespace(
                 automations=[],
@@ -186,10 +187,14 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
                 voice_channels={},
                 map_name=previous_name,
                 jukebox_state={},
+                warlock_intro_illusion=SimpleNamespace(
+                    destroy=lambda: illusion_events.append("destroy")
+                ),
                 player=SimpleNamespace(move=lambda *args, **kwargs: None),
                 parser=SimpleNamespace(load=lambda *args, **kwargs: cache_events.append("parse")),
             )
             handler.cache_events = cache_events
+            handler.illusion_events = illusion_events
             handler._begin_map_audio_reload = lambda: None
             handler._finish_map_audio_reload = lambda: None
             handler._reset_instruments_for_map_change = lambda: None
@@ -205,6 +210,7 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
         )
         self.assertEqual(marks, [False])
         self.assertEqual(handler.cache_events, ["clear", "parse"])
+        self.assertEqual(handler.illusion_events, ["destroy"])
 
         marks = []
         handler = make_handler("oldmap")
@@ -213,6 +219,7 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
         )
         self.assertEqual(marks, [True])
         self.assertEqual(handler.cache_events, ["parse"])
+        self.assertEqual(handler.illusion_events, [])
         # The new map name is remembered for the next comparison.
         self.assertEqual(handler.gameplay.map_name, "oldmap")
 
@@ -226,6 +233,7 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
         self.assertEqual(marks, [False])
         self.assertEqual(handler.gameplay.map_name, "first")
         self.assertEqual(handler.cache_events, ["clear", "parse"])
+        self.assertEqual(handler.illusion_events, ["destroy"])
 
     def test_resync_preserves_existing_entity_and_continuous_sources(self):
         from libs.world_map import Map

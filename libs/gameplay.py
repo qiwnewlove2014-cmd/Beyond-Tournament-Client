@@ -8,6 +8,7 @@ import cyal.exceptions
 from .systems.megaphone_system import MegaphoneManager
 from .systems.wall_tone_system import WallToneSystem
 from .systems.compass_turn_cue import CompassTurnCue
+from .systems.warlock_intro_illusion import WarlockIntroIllusion
 from .midi.profiles import DRUM_MIDI_PROFILE
 from .drum_handler import DrumHandler
 from .guitar_handler import GuitarHandler
@@ -74,6 +75,7 @@ class Gameplay(state.State):
         self.map.player = self.player
         self.wall_tone = WallToneSystem(self)
         self.compass_turn_cue = CompassTurnCue(self)
+        self.warlock_intro_illusion = WarlockIntroIllusion(self)
         self.camera = camera.Camera(self.game)
         self.camera.set_focus_object(self.player)
         self.music_volume = options.get("volume_music", 25)
@@ -706,6 +708,8 @@ class Gameplay(state.State):
             self.wall_tone.destroy()
         if hasattr(self, 'compass_turn_cue') and self.compass_turn_cue:
             self.compass_turn_cue.destroy()
+        if hasattr(self, 'warlock_intro_illusion') and self.warlock_intro_illusion:
+            self.warlock_intro_illusion.destroy()
         self.map.destroy()
 
                     
@@ -767,6 +771,9 @@ class Gameplay(state.State):
         audio_probe.call("gp.megaphone", self.megaphone.update_megaphone_audio, 0, None)
         audio_probe.call("gp.wall_tone", self.wall_tone.update)
         audio_probe.call("gp.compass", self.compass_turn_cue.update)
+        warlock_intro = getattr(self, "warlock_intro_illusion", None)
+        if warlock_intro is not None:
+            audio_probe.call("gp.warlock_intro", warlock_intro.update)
         if self.guitar.active and self.guitar.instrument_input and not self.spectator_mode:
             # Guitar audio is raw-only: the player's own strums play back 3D
             # through the local monitor, and nearby players hear the real

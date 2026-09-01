@@ -391,6 +391,12 @@ class EventHandeler:
             incoming_map_name
             and getattr(self.gameplay, "map_name", None) == incoming_map_name
         )
+        # A same-map rebuild must preserve the moving intro source just like
+        # the other continuous audio routes. A real map transition owns a new
+        # listener context, so discard every old-map illusion immediately.
+        illusion = getattr(self.gameplay, "warlock_intro_illusion", None)
+        if not same_map and illusion is not None:
+            illusion.destroy()
         samples = getattr(self.game.audio_mngr, "instrument_samples", None)
         if not same_map and samples is not None:
             samples.clear()
@@ -633,6 +639,9 @@ class EventHandeler:
     def _apply_remove_entity(self, data):
         target_name = data.get("name")
         target_entity = self.gameplay.map.entities.get(target_name)
+        illusion = getattr(self.gameplay, "warlock_intro_illusion", None)
+        if illusion is not None and target_name is not None:
+            illusion.stop(str(target_name), immediate=True)
         if target_name is not None:
             piano = self.game.audio_mngr.piano
             if (
@@ -682,6 +691,10 @@ class EventHandeler:
                 lambda sound_data=sound_data: self.play_sound(sound_data)
             )
             return
+        illusion = getattr(self.gameplay, "warlock_intro_illusion", None)
+        if data.get("illusion") is not None and illusion is not None:
+            if illusion.handle_packet(data):
+                return
         entity = (
             self.gameplay.player
             if data["name"] == self.gameplay.player.name

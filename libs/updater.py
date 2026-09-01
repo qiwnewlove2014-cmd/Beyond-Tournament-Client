@@ -10,6 +10,7 @@ import pySmartDL as dl
 from . import state, menu, version
 from .speech import speak
 from . import path_utils
+from .accessible_progress import AccessibleProgressBar
 
 nothing = lambda: None
 
@@ -283,6 +284,11 @@ class Updater(state.State):
         self.downloading = False
         self.smart_dl = None  # อ้างอิง SmartDL object สำหรับดูสถานะ
         self.last_pct = -1  # ติดตามเปอร์เซ็นต์ดาวน์โหลดล่าสุด
+        self.last_spoken_decile = 0
+        # Native Windows progress control. It is created, updated and
+        # destroyed only by the main game thread; the download worker never
+        # touches Pygame or Win32 UI state.
+        self.progress_bar = AccessibleProgressBar()
 
     def _is_dl_finished(self):
         """เช็กสถานะการดาวน์โหลดอย่างปลอดภัย ป้องกัน AttributeError จาก pySmartDL thread cleanup"""
@@ -358,6 +364,7 @@ class Updater(state.State):
                 return
 
     def exit(self):
+        self._close_progress_bar()
         super().exit()
 
     def update(self, events):
@@ -397,15 +404,22 @@ class Updater(state.State):
                 pct = int(self.smart_dl.get_progress() * 100)
                 if pct != self.last_pct:
                     self.last_pct = pct
-                    # 1. Update Window Title Bar so NVDA/JAWS auto-detect percentage and play progress beeps
+                    # Update a real accessible progress control. The title is
+                    # retained as a visual/fallback status, but captions alone
+                    # are not progress bars and do not trigger NVDA tones.
+                    self._ensure_progress_bar()
+                    self.progress_bar.set_value(pct)
                     try:
                         pygame.display.set_caption(f"[{pct}%] Downloading Update... - Beyond Tournament")
                     except Exception:
                         pass
 
-                    # 2. Verbal Speech Announcement every 10%
-                    if pct % 10 == 0 and pct > 0:
-                        speak(f"{pct} percent", False)
+                    # Announce the latest crossed ten-percent boundary even
+                    # when a fast download jumps from (for example) 9% to 11%.
+                    decile = min(100, (pct // 10) * 10)
+                    if decile >= 10 and decile > self.last_spoken_decile:
+                        self.last_spoken_decile = decile
+                        speak(f"{decile} percent", False)
             except Exception:
                 pass
 
@@ -466,9 +480,20 @@ class Updater(state.State):
 
     # === Download & Install ===
 
+    def _ensure_progress_bar(self):
+        if not self.progress_bar.active:
+            self.progress_bar.create()
+
+    def _close_progress_bar(self):
+        self.progress_bar.destroy()
+
     def _start_download(self):
         """เริ่มดาวน์โหลดใน background thread เพื่อไม่บล็อกตัวเกม"""
         import threading
+        self.last_pct = -1
+        self.last_spoken_decile = 0
+        self._ensure_progress_bar()
+        self.progress_bar.set_value(0)
         # เฟดเพลงลงก่อนเริ่มอัปเดต
         try:
             pygame.mixer.music.fadeout(1000)
@@ -513,6 +538,8 @@ class Updater(state.State):
         self.smart_dl = None
 
         def _notify_extraction():
+            self._ensure_progress_bar()
+            self.progress_bar.set_value(100)
             try:
                 pygame.display.set_caption("[Extracting...] Installing Update... - Beyond Tournament")
             except Exception:
@@ -535,6 +562,7 @@ class Updater(state.State):
 
         # ขยายไฟล์เสร็จเรียบร้อย → สั่งสลับไฟล์บน main thread (<1ms)
         def _finish_update():
+            self._close_progress_bar()
             try:
                 pygame.display.set_caption("Beyond Tournament")
             except Exception:
@@ -546,6 +574,7 @@ class Updater(state.State):
     def _on_download_failed(self, msg):
         """ดาวน์โหลดล้มเหลว → แจ้งแล้วไป main menu"""
         from . import menus
+        self._close_progress_bar()
         try:
             pygame.display.set_caption("Beyond Tournament")
         except Exception:
