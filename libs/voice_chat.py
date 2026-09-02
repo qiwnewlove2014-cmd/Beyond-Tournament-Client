@@ -964,6 +964,23 @@ class VoiceChatRecord(threading.Thread):
         self.recording = False
         self.running = True
         self.start()
+
+    def _find_music_bot(self, gameplay=None):
+        """Resolve the map-owned Music Bot independently of open submenus."""
+        gp = gameplay or getattr(self.player, 'gameplay', None)
+        direct = getattr(gp, 'music_bot', None) if gp else None
+        if direct is not None:
+            return direct
+        if hasattr(self.game, 'stack'):
+            try:
+                stack_snapshot = tuple(self.game.stack)
+            except Exception:
+                stack_snapshot = ()
+            for state in reversed(stack_snapshot):
+                candidate = getattr(state, 'music_bot', None)
+                if candidate is not None:
+                    return candidate
+        return None
     
 
     def run(self):
@@ -1002,16 +1019,11 @@ class VoiceChatRecord(threading.Thread):
                 voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
 
                 # Check if Music Bot is streaming to Megaphone
-                music_bot = None
-                if hasattr(self.game, 'stack'):
-                    try:
-                        stack_snap2 = tuple(self.game.stack)
-                    except Exception:
-                        stack_snap2 = ()
-                    for st in reversed(stack_snap2):
-                        if hasattr(st, 'music_bot') and st.music_bot:
-                            music_bot = st.music_bot
-                            break
+                # Gameplay owns MapMusicBot for the whole map session. Resolve
+                # it directly first: game.stack may currently expose only a
+                # nested menu, which made the recorder microphone hook vanish
+                # as soon as the player left the Music Bot menu.
+                music_bot = self._find_music_bot(gp)
 
                 # When the mic is routed into the music bot's broadcast mix, the
                 # mixed stream is fed to the local PA sidechain by the streamer
@@ -1027,6 +1039,19 @@ class VoiceChatRecord(threading.Thread):
                     and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone
                     and voice_using_mega
                 )
+
+                # The private game recorder normally captures only audio that
+                # the Client renders. Normal outgoing Voice Chat is not played
+                # back locally, so optionally hand its mono PCM to the recorder
+                # without doing any file or mixing work on this capture thread.
+                # Megaphone voice is already rendered through the local PA
+                # sidechain and must not be overlaid a second time.
+                audio_recorder = getattr(music_bot, 'audio_recorder', None) if music_bot else None
+                if audio_recorder is not None:
+                    audio_recorder.feed_transmitted_microphone(
+                        chunk,
+                        locally_rendered=bool(voice_using_mega),
+                    )
 
                 # Feed local sidechain immediately with 10ms chunk for zero-latency response
                 if voice_using_mega and gp and not route_to_bot:
@@ -1061,16 +1086,7 @@ class VoiceChatRecord(threading.Thread):
         self.audio_input.capture_samples(buf)
         
         # Check if Music Bot is streaming to Megaphone
-        music_bot = None
-        if hasattr(self.game, 'stack'):
-            try:
-                stack_snap3 = tuple(self.game.stack)
-            except Exception:
-                stack_snap3 = ()
-            for st in reversed(stack_snap3):
-                if hasattr(st, 'music_bot') and st.music_bot:
-                    music_bot = st.music_bot
-                    break
+        music_bot = self._find_music_bot()
 
         # Voice is mixed into the music bot broadcast only when this recording
         # session actually used the megaphone channel - otherwise a music bot
@@ -1082,6 +1098,15 @@ class VoiceChatRecord(threading.Thread):
             and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone
             and getattr(self.vc_compression, 'channel', None) == consts.CHANNEL_MEGAPHONE
         )
+
+        audio_recorder = getattr(music_bot, 'audio_recorder', None) if music_bot else None
+        if audio_recorder is not None:
+            audio_recorder.feed_transmitted_microphone(
+                buf,
+                locally_rendered=(
+                    getattr(self.vc_compression, 'channel', None) == consts.CHANNEL_MEGAPHONE
+                ),
+            )
 
         if route_to_bot:
             if not hasattr(music_bot, 'mic_pcm_queue'):

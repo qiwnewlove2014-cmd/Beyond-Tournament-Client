@@ -1730,7 +1730,7 @@ class MapMusicBot:
             ("Choose Local File", go_local),
             ("My Playlists & Favorites", go_playlists),
             ("Personal Music Feed", go_personal_feed),
-            ("Download Music", go_downloads),
+            ("Music Download Center", go_downloads),
             ("Record Audio", go_record_audio),
         ]
         
@@ -1915,16 +1915,80 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._show_mode_menu()
 
+        def go_settings():
+            gp.pop_last_substate()
+            self._open_recording_settings_menu()
+
         m = menu_mod.Menu(self.game, "Record Audio", parrent=gp)
         items = [
             (self.audio_recorder.folder_menu_label, self.audio_recorder.speak_folder),
             ("Set Recording Folder", self.audio_recorder.choose_folder),
             (self.audio_recorder.menu_label, start_or_stop),
             (self.audio_recorder.status_menu_label, self.audio_recorder.speak_status),
+            ("Recording Settings", go_settings),
             ("Open Recording Folder", self.audio_recorder.open_folder),
         ]
         items.append(("Back", go_back))
         m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_recording_settings_menu(self):
+        """Open accessible, persistent settings that are safe for final-mix capture."""
+        from . import menu as menu_mod, menus
+
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_recording_menu()
+
+        def confirm_restore():
+            gp.pop_last_substate()
+            self._open_recording_reset_confirmation()
+
+        m = menu_mod.Menu(self.game, "Audio Recording Settings", parrent=gp)
+        m.add_items([
+            (self.audio_recorder.capture_scope_label, self.audio_recorder.speak_capture_scope),
+            (self.audio_recorder.computer_audio_setting_label, self.audio_recorder.toggle_computer_audio),
+            (self.audio_recorder.microphone_setting_label, self.audio_recorder.toggle_microphone),
+            (self.audio_recorder.countdown_setting_label, self.audio_recorder.cycle_countdown),
+            (self.audio_recorder.split_setting_label, self.audio_recorder.cycle_split_minutes),
+            (self.audio_recorder.announce_setting_label, self.audio_recorder.toggle_announce_details),
+            ("Restore Recording Defaults", confirm_restore),
+            ("Back", go_back),
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_recording_reset_confirmation(self):
+        """Require an explicit second action before restoring recording defaults."""
+        from . import menu as menu_mod, menus
+
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def restore():
+            gp.pop_last_substate()
+            self.audio_recorder.restore_setting_defaults()
+            self._open_recording_settings_menu()
+
+        def cancel():
+            gp.pop_last_substate()
+            self._open_recording_settings_menu()
+
+        m = menu_mod.Menu(
+            self.game,
+            "Restore all audio recording settings to their defaults?",
+            parrent=gp,
+        )
+        m.add_items([
+            ("Yes, Restore Recording Defaults", restore),
+            ("Cancel and Keep Current Settings", cancel),
+        ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
@@ -1936,7 +2000,12 @@ class MapMusicBot:
             return
         self.download_mgr.show_progress_bar()
 
-        items = []
+        items = [
+            (self.download_mgr.folder_menu_label, self.download_mgr.speak_folder),
+            ("Set Download Folder", self.download_mgr.choose_default_folder),
+        ]
+        if self.download_mgr.has_saved_folder_setting():
+            items.append(("Clear Saved Download Folder", self.download_mgr.clear_default_folder))
         if (self.current_source != "local"
                 and is_supported_music_url(self.current_target)):
             def download_current():
@@ -1984,7 +2053,7 @@ class MapMusicBot:
                 download_mgr.hide_progress_bar()
                 super().exit()
 
-        m = DownloadMusicMenu(self.game, "Download Music", parrent=gp)
+        m = DownloadMusicMenu(self.game, "Music Download Center", parrent=gp)
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)

@@ -12,6 +12,7 @@ import time
 from urllib.parse import urlparse
 
 from . import logger
+from . import options
 from .accessible_progress import AccessibleProgressBar
 from .speech import speak
 
@@ -100,10 +101,65 @@ class MusicDownloadManager:
         self._progress_completed = 0
         self._parallel_downloads = 2
         self._notify_each_file = True
+        self._folder_dialog_open = False
 
     def is_active(self):
         with self._lock:
             return bool(self._worker and self._worker.is_alive())
+
+    @staticmethod
+    def _saved_folder_value():
+        value = options.get("music_bot_download_folder", "")
+        if not isinstance(value, str) or not value.strip():
+            return ""
+        return os.path.abspath(os.path.expanduser(value.strip()))
+
+    def configured_folder(self):
+        folder = self._saved_folder_value()
+        return folder if folder and os.path.isdir(folder) else ""
+
+    def has_saved_folder_setting(self):
+        return bool(self._saved_folder_value())
+
+    def folder_menu_label(self):
+        folder = self._saved_folder_value()
+        if not folder:
+            return "Download folder: Not set"
+        if not os.path.isdir(folder):
+            return "Download folder: Saved folder is unavailable"
+        return f"Download folder: {folder}"
+
+    def speak_folder(self):
+        speak(self.folder_menu_label())
+
+    def choose_default_folder(self):
+        if self.is_active():
+            speak("Wait for the current download to finish before changing its folder.")
+            return
+        self._open_folder_selector(
+            self._accept_default_folder,
+            "Download folder was not changed.",
+        )
+
+    def _accept_default_folder(self, folder):
+        if self._closed:
+            return
+        if self.is_active():
+            speak("A download started before the folder choice was completed. The saved folder was not changed.")
+            return
+        if not os.path.isdir(folder):
+            speak("The selected download folder is no longer available.")
+            return
+        folder = os.path.abspath(folder)
+        options.set("music_bot_download_folder", folder)
+        speak(f"Download folder set to {folder}.")
+
+    def clear_default_folder(self):
+        if self.is_active():
+            speak("Wait for the current download to finish before clearing its folder.")
+            return
+        options.set("music_bot_download_folder", "")
+        speak("Saved download folder cleared. The next download will ask for a folder.")
 
     def speak_status(self):
         with self._lock:
@@ -166,7 +222,7 @@ class MusicDownloadManager:
         speak(f"Per-file notifications {'on' if enabled else 'off'}.{suffix}")
 
     def show_progress_bar(self):
-        """Main-thread entry point used when opening the Download Music menu."""
+        """Main-thread entry point used when opening Music Download Center."""
         with self._lock:
             active = bool(self._worker and self._worker.is_alive())
             percent = self._progress_percent
@@ -198,6 +254,11 @@ class MusicDownloadManager:
         if self.is_active():
             speak("A Music Bot download is already active. Check its status or cancel it first.")
             return
+        with self._lock:
+            folder_dialog_open = self._folder_dialog_open
+        if folder_dialog_open:
+            speak("Finish selecting the download folder first.")
+            return
         request = {
             "tracks": tracks,
             "label": str(label or "music")[:200],
@@ -217,7 +278,7 @@ class MusicDownloadManager:
                 next_request = dict(request, output_format=fmt)
                 if fmt in LOSSLESS_FORMATS:
                     next_request["quality"] = None
-                    self._choose_folder(next_request)
+                    self._use_saved_folder_or_choose(next_request)
                 else:
                     self._show_quality_menu(next_request)
             items.append((label, choose))
@@ -236,15 +297,39 @@ class MusicDownloadManager:
         for label, value in QUALITY_CHOICES:
             def choose(quality=value):
                 parent.pop_last_substate()
-                self._choose_folder(dict(request, quality=quality))
+                self._use_saved_folder_or_choose(dict(request, quality=quality))
             items.append((label, choose))
         items.append(("Back", lambda: (parent.pop_last_substate(), self._show_format_menu(request))))
         menu.add_items(items)
         menus.set_default_sounds(menu)
         parent.add_substate(menu)
 
+    def _use_saved_folder_or_choose(self, request):
+        folder = self.configured_folder()
+        if folder:
+            self._start(request, folder)
+            return
+        if self.has_saved_folder_setting():
+            options.set("music_bot_download_folder", "")
+            speak("The saved download folder is no longer available.")
+        self._choose_folder(request)
+
     def _choose_folder(self, request):
+        self._open_folder_selector(
+            lambda folder: self._start(request, folder),
+            "Music download cancelled. No folder was selected.",
+        )
+
+    def _open_folder_selector(self, selected_callback, cancel_message):
+        with self._lock:
+            already_open = self._folder_dialog_open
+            if not already_open:
+                self._folder_dialog_open = True
+        if already_open:
+            speak("The download folder selector is already open.")
+            return
         speak("Opening folder selector.")
+        initial_folder = self.configured_folder()
 
         def select_folder():
             root = None
@@ -254,19 +339,24 @@ class MusicDownloadManager:
                 root = tk.Tk()
                 root.withdraw()
                 root.attributes("-topmost", True)
-                folder = filedialog.askdirectory(
-                    title="Select Music Download Folder",
-                    mustexist=True,
-                )
+                dialog_options = {
+                    "title": "Select Music Download Folder",
+                    "mustexist": True,
+                }
+                if initial_folder:
+                    dialog_options["initialdir"] = initial_folder
+                folder = filedialog.askdirectory(**dialog_options)
                 if folder:
                     folder = os.path.abspath(folder)
-                    self.game.put(lambda folder=folder: self._start(request, folder))
+                    self.game.put(lambda folder=folder: selected_callback(folder))
                 else:
-                    self.game.put(lambda: speak("Music download cancelled. No folder was selected."))
+                    self.game.put(lambda: speak(cancel_message))
             except Exception as exc:
                 logger.log(f"[MusicDownload] Folder selector failed: {exc}")
                 self.game.put(lambda: speak("Could not open the folder selector."))
             finally:
+                with self._lock:
+                    self._folder_dialog_open = False
                 if root is not None:
                     try:
                         root.destroy()

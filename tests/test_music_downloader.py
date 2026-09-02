@@ -92,6 +92,64 @@ class MusicDownloaderTests(unittest.TestCase):
         )
         self.assertNotIn("%(id)", options["outtmpl"])
 
+    def test_saved_download_folder_is_used_without_opening_selector(self):
+        request = {"tracks": [], "label": "Song", "output_format": "mp3", "quality": "192"}
+        with tempfile.TemporaryDirectory() as temp, \
+                patch(
+                    "libs.music_downloader.options.get",
+                    side_effect=lambda key, default=None: (
+                        temp if key == "music_bot_download_folder" else default
+                    ),
+                ), patch.object(self.manager, "_start") as start, \
+                patch.object(self.manager, "_choose_folder") as choose_folder:
+            self.manager._use_saved_folder_or_choose(request)
+        start.assert_called_once_with(request, os.path.abspath(temp))
+        choose_folder.assert_not_called()
+
+    def test_missing_saved_folder_is_cleared_then_selector_opens(self):
+        missing = os.path.abspath("missing download folder")
+        request = {"tracks": [], "label": "Song"}
+        with patch("libs.music_downloader.options.get", return_value=missing), \
+                patch("libs.music_downloader.options.set") as save_option, \
+                patch.object(self.manager, "_choose_folder") as choose_folder, \
+                patch("libs.music_downloader.speak") as spoken:
+            self.manager._use_saved_folder_or_choose(request)
+        save_option.assert_called_once_with("music_bot_download_folder", "")
+        choose_folder.assert_called_once_with(request)
+        self.assertIn("no longer available", spoken.call_args.args[0].lower())
+
+    def test_no_saved_folder_preserves_per_download_selector_fallback(self):
+        request = {"tracks": [], "label": "Song"}
+        with patch("libs.music_downloader.options.get", return_value=""), \
+                patch("libs.music_downloader.options.set") as save_option, \
+                patch.object(self.manager, "_choose_folder") as choose_folder:
+            self.manager._use_saved_folder_or_choose(request)
+        save_option.assert_not_called()
+        choose_folder.assert_called_once_with(request)
+
+    def test_explicit_folder_choice_is_persisted_and_can_be_cleared(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("libs.music_downloader.options.set") as save_option, \
+                patch("libs.music_downloader.speak"):
+            self.manager._accept_default_folder(temp)
+            save_option.assert_called_once_with(
+                "music_bot_download_folder",
+                os.path.abspath(temp),
+            )
+            save_option.reset_mock()
+            self.manager.clear_default_folder()
+            save_option.assert_called_once_with("music_bot_download_folder", "")
+
+    def test_active_download_blocks_default_folder_changes(self):
+        with patch.object(self.manager, "is_active", return_value=True), \
+                patch("libs.music_downloader.options.set") as save_option, \
+                patch.object(self.manager, "_open_folder_selector") as open_selector, \
+                patch("libs.music_downloader.speak"):
+            self.manager.choose_default_folder()
+            self.manager.clear_default_folder()
+        save_option.assert_not_called()
+        open_selector.assert_not_called()
+
     def test_unsaved_search_result_downloads_as_one_song(self):
         request = {
             "tracks": [{"title": "Search Result", "target": "https://youtube.com/watch?v=abc"}],
@@ -314,8 +372,9 @@ class MusicDownloaderTests(unittest.TestCase):
     def test_music_bot_exposes_every_requested_download_source(self):
         source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot.py").read_text(encoding="utf-8")
         for label in (
-            "Download Music", "Download Current Song", "Download Song",
+            "Music Download Center", "Download Current Song", "Download Song",
             "Download All Favorites", "Download a Saved Playlist", "Download This Track",
+            "Set Download Folder", "Clear Saved Download Folder",
         ):
             self.assertIn(label, source)
         self.assertIn("class DownloadMusicMenu", source)
