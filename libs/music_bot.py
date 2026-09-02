@@ -25,6 +25,7 @@ from . import options
 from .speech import speak
 from . import logger
 from .audio_diagnostics import probe
+from .game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
 
 # Try to find ffmpeg path
@@ -1541,6 +1542,7 @@ class MapMusicBot:
             self._find_gameplay,
             ffmpeg_path=FFMPEG_PATH,
         )
+        self.audio_recorder = GameAudioRecorderManager(game, self._find_gameplay)
         self.current_target = ""
         self.current_source = "youtube"
 
@@ -1714,6 +1716,10 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._open_download_menu()
 
+        def go_record_audio():
+            gp.pop_last_substate()
+            self._open_recording_menu()
+
         def go_help():
             gp.pop_last_substate()
             self._show_help_menu()
@@ -1725,6 +1731,7 @@ class MapMusicBot:
             ("My Playlists & Favorites", go_playlists),
             ("Personal Music Feed", go_personal_feed),
             ("Download Music", go_downloads),
+            ("Record Audio", go_record_audio),
         ]
         
         # Show the megaphone routing option only when the server explicitly granted
@@ -1886,6 +1893,37 @@ class MapMusicBot:
             items.append((f"Playlist: {p_name}", make_p_cb(p_name)))
 
         items.append(("Back", lambda: (gp.pop_last_substate(), self._show_mode_menu())))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_recording_menu(self):
+        """Open the persistent folder and game-audio recording controls."""
+        from . import menu as menu_mod, menus
+
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def start_or_stop():
+            # The user returns to gameplay for the countdown/recording. Opening
+            # Record Audio again exposes the current status and Stop action.
+            gp.pop_last_substate()
+            self.audio_recorder.menu_action()
+
+        def go_back():
+            gp.pop_last_substate()
+            self._show_mode_menu()
+
+        m = menu_mod.Menu(self.game, "Record Audio", parrent=gp)
+        items = [
+            (self.audio_recorder.folder_menu_label, self.audio_recorder.speak_folder),
+            ("Set Recording Folder", self.audio_recorder.choose_folder),
+            (self.audio_recorder.menu_label, start_or_stop),
+            (self.audio_recorder.status_menu_label, self.audio_recorder.speak_status),
+            ("Open Recording Folder", self.audio_recorder.open_folder),
+        ]
+        items.append(("Back", go_back))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -2975,6 +3013,7 @@ class MapMusicBot:
 
     def destroy(self):
         self.download_mgr.close()
+        self.audio_recorder.close()
         self.stop()
         if getattr(self, 'live_relay_streamer', None):
             self.live_relay_streamer.stop()
