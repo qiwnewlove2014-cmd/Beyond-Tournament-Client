@@ -43,6 +43,7 @@ class Menu(state.State):
         self.music_volume = None
         self.preview_volume = 100
         self.sound_browse_mode = False
+        self.environmental_preview = False
         self.block_space = False
         # === ASYNC PREVIEW DECODER ===
         # Decodes Vorbis preview sounds on a background thread so the main thread
@@ -56,6 +57,8 @@ class Menu(state.State):
         self._preview_latest_path = None                   # newest requested path (stale decodes are dropped)
         self._preview_source = None                        # reused OpenAL source
         self._preview_buffer = None                        # last buffer bound (kept for gain tweaks)
+        self._preview_reverb_slot = None
+        self._preview_reverb_position = None
         # Menu context for builder copy/paste shortcuts (set by make_menu).
         self.menu_event = ""
         self.menu_values = []
@@ -169,6 +172,41 @@ class Menu(state.State):
         except Exception:
             pass
 
+    def _sync_preview_reverb(self, force=False):
+        """Keep a Wallbuy preview in the builder's current room acoustics.
+
+        The decoder worker never calls this method. OpenAL EFX is changed only
+        from the Menu's main-thread poll/update path. Outside every authored
+        Reverb area, send 0 is explicitly detached so the preview is dry.
+        """
+        src = self._preview_source
+        if src is None:
+            return
+
+        slot = None
+        position = None
+        if self.environmental_preview:
+            gp = getattr(self, "parrent", None) or getattr(self.game, "gameplay", None)
+            player = getattr(gp, "player", None) if gp is not None else None
+            map_obj = getattr(gp, "map", None) if gp is not None else None
+            if player is not None and map_obj is not None:
+                position = (player.x, player.y, player.z)
+                if not force and position == self._preview_reverb_position:
+                    return
+                try:
+                    zone = map_obj.get_reverb_at(*position)
+                    slot = getattr(zone, "reverb", None) if zone is not None else None
+                except Exception:
+                    slot = None
+
+        if force or slot is not self._preview_reverb_slot:
+            try:
+                self.game.audio_mngr.efx.send(src, 0, slot)
+            except Exception:
+                pass
+        self._preview_reverb_slot = slot
+        self._preview_reverb_position = position
+
     def _poll_preview_result(self):
         """Called every frame from update(): if a decoded buffer is ready and is
         still the latest request, bind it to the reused source and play it."""
@@ -188,6 +226,7 @@ class Menu(state.State):
                 src.buffer = buffer
                 self._preview_buffer = buffer
                 self._apply_preview_gain()
+                self._sync_preview_reverb(force=True)
                 src.play()
         except Exception:
             pass
@@ -242,11 +281,17 @@ class Menu(state.State):
         self._preview_buffer = None
         if src is not None:
             try:
+                # The map owns the shared Reverb slot. Detach this source from
+                # it before source deletion, but never release the slot here.
+                with contextlib.suppress(Exception):
+                    self.game.audio_mngr.efx.send(src, 0, None)
                 src.stop()
                 src.buffer = None
                 src.delete()
             except Exception:
                 pass
+        self._preview_reverb_slot = None
+        self._preview_reverb_position = None
         # Remove the label mapping we created.
         with contextlib.suppress(KeyError):
             self.direct_soundgroup.labeled_sources.pop("menu_preview", None)
@@ -361,6 +406,7 @@ class Menu(state.State):
         super().update(events)
         # Drain any decoded preview so it can play this frame (non-blocking).
         self._poll_preview_result()
+        self._sync_preview_reverb()
 
         # Stop active voice chat if player entered menu while holding Push-to-Talk
         target_gp = getattr(self, "parrent", None) or getattr(self.game, "gameplay", None)

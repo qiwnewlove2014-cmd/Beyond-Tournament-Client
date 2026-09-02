@@ -1751,9 +1751,10 @@ class Gameplay(state.State):
         speak(f"music volume: {str(self.music_volume)} percent. ")
 
     def _can_use_music_bot(self):
-        """Music Bot is staff-only now that the Jukebox serves regular players."""
+        """Use the Server snapshot; Staff retain their existing permanent access."""
         return (
-            getattr(self, "is_staff", False)
+            getattr(self, "can_use_music_bot", False)
+            or getattr(self, "is_staff", False)
             or getattr(self, "is_builder", False)
             or getattr(self, "is_technician", False)
         )

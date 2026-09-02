@@ -23,6 +23,9 @@ class FakeMusicBot:
     def next_feed_track(self):
         self.calls.append("next_feed_track")
 
+    def stop(self):
+        self.calls.append("stop")
+
 
 def make_gp(**role_flags):
     gp = Gameplay.__new__(Gameplay)
@@ -65,6 +68,30 @@ class TestMusicBotGating(unittest.TestCase):
         gp = make_gp(is_technician=True)
         gp.music_bot_control(0)
         self.assertEqual(gp.music_bot.calls, ["open_search"])
+
+    def test_server_granted_player_can_open_search(self):
+        gp = make_gp(can_use_music_bot=True)
+        gp.music_bot_control(0)
+        self.assertEqual(gp.music_bot.calls, ["open_search"])
+
+    def test_revoked_permission_stops_active_bot_on_main_thread(self):
+        from types import SimpleNamespace
+        from libs.event_handeler import EventHandeler
+
+        gp = make_gp(can_use_music_bot=True)
+        handler = SimpleNamespace(
+            gameplay=gp,
+            game=SimpleNamespace(put=lambda callback: callback()),
+        )
+        EventHandeler.staff_permissions(handler, {
+            "is_staff": False,
+            "is_builder": False,
+            "is_technician": False,
+            "can_broadcast_megaphone": False,
+            "can_use_music_bot": False,
+        })
+        self.assertFalse(gp._can_use_music_bot())
+        self.assertEqual(gp.music_bot.calls, ["stop"])
 
     def test_staff_volume_and_feed_work(self):
         gp = make_gp(is_staff=True)

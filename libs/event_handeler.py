@@ -143,11 +143,18 @@ class EventHandeler:
             # canBroadcastMegaphone() also gates the spectator lock; mirroring it client-side
             # keeps the menu and the server lock perfectly in sync.
             self.gameplay.can_broadcast_megaphone = bool(data.get("can_broadcast_megaphone", False))
+            self.gameplay.can_use_music_bot = bool(data.get(
+                "can_use_music_bot",
+                self.gameplay.is_staff
+                or self.gameplay.is_builder
+                or self.gameplay.is_technician,
+            ))
         except Exception:
             self.gameplay.is_staff = False
             self.gameplay.is_builder = False
             self.gameplay.is_technician = False
             self.gameplay.can_broadcast_megaphone = False
+            self.gameplay.can_use_music_bot = False
             
         # Reset PA Test Mode state
         if hasattr(self.gameplay, 'pa_test_mode'):
@@ -1252,6 +1259,9 @@ class EventHandeler:
             m.pos = 0
 
         m.sound_browse_mode = bool(data.get("sound_browse_mode", False))
+        # Only Wallbuy weapon/shield previews inherit the builder's current
+        # room acoustics. Generic file browsers remain dry UI previews.
+        m.environmental_preview = data.get("event", "") == "builder_weapon_select"
         m.block_space = data.get("event", "").startswith("builder_")
         # Store menu context so Ctrl+C / Ctrl+V shortcuts know which event and
         # selected value to act on (used by the builder copy/paste clipboard).
@@ -2016,12 +2026,32 @@ class EventHandeler:
         gp = self.gameplay
         if gp is None:
             return
+        could_use_music_bot = bool(
+            getattr(gp, "can_use_music_bot", False)
+            or getattr(gp, "is_staff", False)
+            or getattr(gp, "is_builder", False)
+            or getattr(gp, "is_technician", False)
+        )
         gp.is_staff = bool(data.get("is_staff", False))
         gp.is_builder = bool(data.get("is_builder", False))
         gp.is_technician = bool(data.get("is_technician", False))
         gp.can_broadcast_megaphone = bool(
             data.get("can_broadcast_megaphone", False)
         )
+        gp.can_use_music_bot = bool(data.get(
+            "can_use_music_bot",
+            gp.is_staff or gp.is_builder or gp.is_technician,
+        ))
+        can_use_music_bot = bool(
+            gp.can_use_music_bot
+            or gp.is_staff
+            or gp.is_builder
+            or gp.is_technician
+        )
+        if could_use_music_bot and not can_use_music_bot:
+            bot = getattr(gp, "music_bot", None)
+            if bot is not None:
+                self.game.put(bot.stop)
 
     def jukebox_hint(self, data):
         """Walk-in hint near a jukebox. Rendered here so it can name the
