@@ -31,4 +31,4 @@ CHANNEL_MEGAPHONE = 30
 SOUNDSPREPEND="/data/"
 
 # Update this variable to force clients to update their game
-CLIENT_VERSION = "BT-1.8.3"
+CLIENT_VERSION = "BT-1.8.4"
