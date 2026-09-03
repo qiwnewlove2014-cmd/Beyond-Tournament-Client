@@ -1604,11 +1604,12 @@ class EventHandeler:
 
         With a jukebox relay playing, every listener schedules the note on
         the shared server clock (note creation time + THIS listener's own
-        jukebox backlog), so the note lands on the same beat of the song for
-        everyone regardless of ping — proper target-time scheduling, not a
-        fixed delay. Without music, notes play immediately (the low-latency
-        live-jam path). Uses game.call_after (one main-loop scheduler)
-        instead of spawning a thread per note.
+        jukebox backlog − the performer's reported lag), so the note lands
+        on the same beat of the song for everyone regardless of ping or how
+        late the performer's own song started — proper target-time
+        scheduling, not a fixed delay. Without music, notes play immediately
+        (the low-latency live-jam path). Uses game.call_after (one main-loop
+        scheduler) instead of spawning a thread per note.
         """
         buffer_ms = self._active_jukebox_buffer_ms()
         if (buffer_ms is None or not self.SYNC_JAM_NOTES_WITH_JUKEBOX
@@ -1630,9 +1631,22 @@ class EventHandeler:
         # (game-frame waits + piano/drum queue drain before the speaker),
         # which the continuous jukebox stream does not have — without it
         # notes sit a touch behind the song.
+        # The performer's own song may trail the room clock (slow
+        # resolve/startup, or a mid-song join that had to resolve + seek):
+        # they strike when THEY hear the beat, so their server_time runs
+        # late by that lag. The sender attaches sender_lag_ms (its own
+        # _active_jukebox_buffer_ms) and we subtract it here, landing the
+        # note on the shared beat instead of trailing the performer's
+        # lateness. Mixed-version packets without the field keep the old
+        # behavior (lag 0).
+        try:
+            sender_lag_ms = float(data.get("sender_lag_ms") or 0.0)
+            sender_lag_ms = max(0.0, min(sender_lag_ms, 30000.0))
+        except (TypeError, ValueError):
+            sender_lag_ms = 0.0
         target_local = (
             server_time - self._clock_offset_ms + buffer_ms
-            - self.JAM_NOTE_ADVANCE_MS
+            - sender_lag_ms - self.JAM_NOTE_ADVANCE_MS
         )
         delay = target_local - time.time() * 1000
         if delay > buffer_ms + 600:

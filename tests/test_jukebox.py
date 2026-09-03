@@ -1809,5 +1809,184 @@ class TestAudioStreamerMidSongDeath(unittest.TestCase):
         self.assertIsNone(streamer.failure_reason)
 
 
+class TestDirectOutputStallWatchdog(unittest.TestCase):
+    """A direct (no-relay) jukebox stream whose speakers stop consuming
+    buffers must be rebuilt even while its thread is alive — ffmpeg can
+    hang without exiting and OpenAL can lose its sink, and the old
+    thread-death check could never see either (the cabinet went silent
+    for that listener until the next song)."""
+
+    def _player(self):
+        import time
+        from types import SimpleNamespace
+        sent = []
+        game = SimpleNamespace(
+            network=SimpleNamespace(send=lambda *args: sent.append(args)),
+            audio_mngr=None,
+        )
+        player = jukebox.JukeboxPlayer(game)
+        # Fresh enough that created_at never trips other watchdogs.
+        player._last_recovery_request_at = 0.0
+        return player, sent, time
+
+    def _direct_entry(self, time, *, alive=True, ready=True, running=True,
+                      output_age=None, failure=None):
+        import threading
+        from types import SimpleNamespace
+        ready_ev = threading.Event()
+        if ready:
+            ready_ev.set()
+        streamer = SimpleNamespace(
+            is_alive=lambda: alive,
+            ready_event=ready_ev,
+            running=running,
+            failure_reason=failure,
+        )
+        if output_age is None:
+            streamer.last_output_at = None
+        else:
+            streamer.last_output_at = time.monotonic() - output_age
+        return {
+            "source": None, "secondary_source": None, "streamer": streamer,
+            "transport": "direct",
+            # Old entry so created_at never affects the direct checks.
+            "created_at": time.monotonic() - 60,
+        }
+
+    def test_stalled_output_rebuilds_despite_alive_thread(self):
+        player, sent, time = self._player()
+        entry = self._direct_entry(
+            time, output_age=jukebox.JukeboxPlayer.DIRECT_OUTPUT_STALL_TIMEOUT + 1)
+        player.players["box"] = entry
+        player.update()
+        # The stalled route was torn down and a recovery resync went out so
+        # the server re-offers the song at its current position.
+        self.assertNotIn("box", player.players)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1], "jukebox_resync")
+
+    def test_healthy_output_does_not_rebuild(self):
+        player, sent, time = self._player()
+        player.players["box"] = self._direct_entry(time, output_age=0.2)
+        player.update()
+        self.assertIn("box", player.players)
+        self.assertEqual(sent, [])
+
+    def test_stream_still_starting_is_not_rebuilt(self):
+        # Still resolving / holding the lead-in: ready_event is unset and
+        # nothing has played yet, so no output stamp exists. A slow resolve
+        # legitimately takes many seconds; never rebuild a stream that has
+        # not begun.
+        player, sent, time = self._player()
+        player.players["box"] = self._direct_entry(time, ready=False)
+        player.update()
+        self.assertIn("box", player.players)
+        self.assertEqual(sent, [])
+
+    def test_dead_direct_stream_with_failure_still_rebuilds(self):
+        # Existing behavior preserved: an explicit mid-song failure (ffmpeg
+        # exited early, resolve failed) rebuilds even without the stall path.
+        player, sent, time = self._player()
+        player.players["box"] = self._direct_entry(
+            time, alive=False, failure="ffmpeg exited early (code 1)")
+        player.update()
+        self.assertNotIn("box", player.players)
+        self.assertEqual(len(sent), 1)
+
+    def test_finished_direct_stream_is_left_alone(self):
+        # Natural end: thread finished with no failure_reason — await the
+        # server's next-song timer, exactly as before the stall watchdog.
+        player, sent, time = self._player()
+        player.players["box"] = self._direct_entry(
+            time, alive=False, ready=True, output_age=0.0)
+        player.update()
+        self.assertIn("box", player.players)
+        self.assertEqual(sent, [])
+
+    def test_stream_in_cleanup_is_not_rebuilt_as_stall(self):
+        # A streamer whose thread finished sets running=False in _cleanup;
+        # even with a stale stamp it must not be misread as an output stall.
+        player, sent, time = self._player()
+        player.players["box"] = self._direct_entry(
+            time, alive=False, running=False,
+            output_age=jukebox.JukeboxPlayer.DIRECT_OUTPUT_STALL_TIMEOUT + 5)
+        player.update()
+        self.assertIn("box", player.players)
+        self.assertEqual(sent, [])
+
+
+class TestDirectReclaimOutputStamp(unittest.TestCase):
+    """AudioStreamer._reclaim_processed stamps audible progress only for
+    jukebox direct streams (jukebox_player set) and only when the speakers
+    actually consumed a buffer."""
+
+    class _Buf:
+        def set_data(self, data, sample_rate=None, format=None):
+            self.data = data
+
+    class _Ctx:
+        def gen_buffer(self):
+            return TestDirectReclaimOutputStamp._Buf()
+
+    class _Src:
+        def __init__(self, processed):
+            self._processed = processed
+            self.state = None
+
+        @property
+        def buffers_queued(self):
+            return self._processed
+
+        @property
+        def buffers_processed(self):
+            return self._processed
+
+        def unqueue_buffers(self):
+            if self._processed:
+                self._processed -= 1
+                return TestDirectReclaimOutputStamp._Buf()
+            return None
+
+        def play(self):
+            pass
+
+        def stop(self):
+            pass
+
+    @staticmethod
+    def _streamer(processed):
+        from types import SimpleNamespace
+        from libs import music_bot as mb
+        game = SimpleNamespace(
+            audio_mngr=SimpleNamespace(context=TestDirectReclaimOutputStamp._Ctx())
+        )
+        return mb.AudioStreamer(
+            game, "https://example.com/audio.mp3",
+            TestDirectReclaimOutputStamp._Src(processed), bot=None,
+        )
+
+    def test_consumed_buffer_stamps_output_for_jukebox_direct(self):
+        import time
+        streamer = self._streamer(processed=3)
+        streamer.jukebox_player = object()
+        before = time.monotonic()
+        streamer._reclaim_processed()
+        self.assertIsNotNone(streamer.last_output_at)
+        self.assertGreaterEqual(streamer.last_output_at, before)
+
+    def test_no_consumption_keeps_stamp_none(self):
+        streamer = self._streamer(processed=0)
+        streamer.jukebox_player = object()
+        streamer._reclaim_processed()
+        self.assertIsNone(streamer.last_output_at)
+
+    def test_non_jukebox_stream_is_not_stamped(self):
+        # Personal Music Bot direct streams never set jukebox_player; their
+        # output is not watched by the jukebox watchdog, so no stamp.
+        streamer = self._streamer(processed=2)
+        streamer._reclaim_processed()
+        self.assertIsNone(streamer.last_output_at)
+
+
 if __name__ == "__main__":
     unittest.main()

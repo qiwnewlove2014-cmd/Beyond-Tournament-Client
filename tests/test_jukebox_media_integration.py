@@ -78,7 +78,8 @@ class JukeboxMediaIntegrationTests(unittest.TestCase):
         # Elapsed compensation (45 + 3) plus the anchored aim-ahead
         # (DIRECT_STARTUP_EST_S): the prebuffer-complete hold trims the
         # residual, so the audible head lands on the shared timeline.
-        self.assertEqual(command[command.index("-ss") + 1], "49.50")
+        expected = "%.2f" % (48.0 + AudioStreamer.DIRECT_STARTUP_EST_S)
+        self.assertEqual(command[command.index("-ss") + 1], expected)
 
     def test_expired_entry_resolves_again_without_resetting_server_offset(self):
         self.cache.put(PAGE, media())
@@ -92,7 +93,8 @@ class JukeboxMediaIntegrationTests(unittest.TestCase):
         self.assertEqual(resolver.call_count, 1)
         command = launch.call_args.args[0]
         # Same anchored aim-ahead rule: 45 + resolve-elapsed (3) + estimate.
-        self.assertEqual(command[command.index("-ss") + 1], "49.50")
+        expected = "%.2f" % (48.0 + AudioStreamer.DIRECT_STARTUP_EST_S)
+        self.assertEqual(command[command.index("-ss") + 1], expected)
         self.assertEqual(self.cache.get(PAGE).info(), media("fresh"))
 
     def test_bad_cached_link_retries_fresh_immediately_with_exact_new_headers(self):

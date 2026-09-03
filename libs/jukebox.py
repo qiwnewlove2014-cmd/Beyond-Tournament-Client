@@ -362,6 +362,12 @@ class JukeboxPlayer:
     # queue, yet the listener hears silence or a stutter loop. Only real
     # output consumption proves otherwise.
     RELAY_OUTPUT_STALL_TIMEOUT = 8.0
+    # Direct playback has no server relay to announce a mid-song death, and
+    # ffmpeg can hang without exiting (frozen CDN read, dead OpenAL sink).
+    # When the speakers consume no buffer for this long while the stream
+    # thread is alive and playing, rebuild — a silent-but-alive direct
+    # stream is the one stall the thread-death check can never see.
+    DIRECT_OUTPUT_STALL_TIMEOUT = 8.0
     # Frame-rate starvation: a trickling channel (a few frames every few
     # seconds) passes every liveness check above — packets arrive, buffers
     # queue, speakers consume the tiny bursts — while the listener hears a
@@ -1152,13 +1158,37 @@ class JukeboxPlayer:
                     if age >= self.RELAY_PENDING_TIMEOUT:
                         needs_resync = True
                 elif transport == "direct" and streamer is not None:
+                    alive = streamer.is_alive() if hasattr(streamer, "is_alive") else True
                     # Direct fallback has no server relay to signal a mid-song
                     # decoder failure.  Restart only an explicit failure; a
                     # normally completed stream is allowed to await the server's
                     # next-song timer.
-                    if (hasattr(streamer, "is_alive") and not streamer.is_alive()
+                    if (not alive
                             and getattr(streamer, "failure_reason", None)):
                         rebuilds.append((jukebox_id, "direct streamer failed"))
+                    else:
+                        # Output-stall watchdog: the thread can stay alive
+                        # while OpenAL stops consuming (dead audio sink,
+                        # ffmpeg hang that never exits). ready_event means
+                        # local playback began; last_output_at only advances
+                        # when the speakers actually finish a buffer, so a
+                        # stream that has made no audible progress for the
+                        # timeout is rebuilt even though every packet-style
+                        # liveness check would call it healthy. A naturally
+                        # finished stream exits its thread within a second of
+                        # its last output, so this never fires on a clean end.
+                        has_started = bool(
+                            getattr(streamer, "ready_event", None)
+                            and streamer.ready_event.is_set())
+                        last_output = getattr(streamer, "last_output_at", None)
+                        if (alive and has_started
+                                and getattr(streamer, "running", False)
+                                and last_output is not None
+                                and now - float(last_output)
+                                >= self.DIRECT_OUTPUT_STALL_TIMEOUT):
+                            rebuilds.append(
+                                (jukebox_id,
+                                 "direct output stalled (speaker not consuming)"))
         if rebuilds:
             needs_resync = True
         if needs_resync:

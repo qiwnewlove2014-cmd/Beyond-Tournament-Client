@@ -200,9 +200,17 @@ class AudioStreamer(threading.Thread):
                                    # ≈ its age): hold position 0. Older offsets are resumes /
                                    # reload re-broadcasts whose intro the room already heard —
                                    # they must seek, never replay.
-    DIRECT_STARTUP_EST_S = 1.5     # mid-song: aim -ss past the projected audible start;
+    DIRECT_STARTUP_EST_S = 4.5     # mid-song: aim -ss past the projected audible start;
                                    # arriving early is correctable by an exact wait,
-                                   # arriving late never recovers under '-re' pacing
+                                   # arriving late never recovers under '-re' pacing.
+                                   # This estimate IS the alignment slack (LEAD_IN +
+                                   # EST after resolve): a machine whose seek+
+                                   # prebuffer outruns it starts late and trails the
+                                   # room for the whole song — its jam notes then land
+                                   # off the beat for everyone. 4.5s keeps typical
+                                   # seeks (network download to the keyframe) inside
+                                   # the slack at the cost of skipping ~3s more of the
+                                   # song for joiners/resumes.
     DIRECT_MAX_ALIGN_WAIT_S = DIRECT_LEAD_IN_S + DIRECT_STARTUP_EST_S + 1.0  # clock safety valve
     DIRECT_LATE_TOLERANCE_S = 0.75 # best-effort: log joins later than this
 
@@ -270,6 +278,12 @@ class AudioStreamer(threading.Thread):
         self.ready_event = threading.Event()
         self.failure_reason = None
         self.completed_normally = False
+        # Monotonic instant the speakers last consumed an OpenAL buffer
+        # (jukebox direct streams only — see _reclaim_processed). The
+        # jukebox watchdog rebuilds a stream whose OUTPUT stalls even
+        # though its thread is alive, since direct playback has no server
+        # relay to announce a mid-song death.
+        self.last_output_at = None
         self.process = None
         self._buffer_pool = []       # Reusable buffer objects
         self._pause_buffer = deque() # Store data read while paused
@@ -496,11 +510,13 @@ class AudioStreamer(threading.Thread):
         CRITICAL: cyal's unqueue_buffers() returns a SINGLE Buffer object by default,
         not a list. Handle both cases robustly. Spatial pairs drain both sources.
         """
+        reclaimed = False
         try:
             for src in self._all_sources():
                 while src.buffers_processed > 0:
                     result = src.unqueue_buffers()
                     if result is not None:
+                        reclaimed = True
                         try:
                             for buf in result:
                                 self._buffer_pool.append(buf)
@@ -509,6 +525,12 @@ class AudioStreamer(threading.Thread):
                             self._buffer_pool.append(result)
         except Exception:
             pass
+        if reclaimed and getattr(self, "jukebox_player", None) is not None:
+            # A buffer finished on the speaker: audible progress. Only
+            # jukebox direct streams feed the jukebox watchdog (jukebox.py
+            # reads this stamp); personal Music Bot streams never set
+            # jukebox_player, so their output is not watched here.
+            self.last_output_at = time.monotonic()
 
     def _claim_timeline_marker(self):
         with self._timeline_lock:

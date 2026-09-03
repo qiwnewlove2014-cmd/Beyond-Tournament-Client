@@ -114,10 +114,13 @@ class ActiveJukeboxBufferTests(unittest.TestCase):
 
 
 class ScheduleRemoteNoteTests(unittest.TestCase):
-    def _schedule(self, handler, server_time_ms_ahead, buffer_ms):
+    def _schedule(self, handler, server_time_ms_ahead, buffer_ms,
+                  sender_lag_ms=None):
         enqueue = mock.Mock()
         now_ms = time.time() * 1000.0
         data = {"server_time": now_ms + server_time_ms_ahead}
+        if sender_lag_ms is not None:
+            data["sender_lag_ms"] = sender_lag_ms
         with mock.patch.object(EventHandeler, "_active_jukebox_buffer_ms",
                                return_value=buffer_ms), \
                 mock.patch("libs.event_handeler.time.time", return_value=now_ms / 1000.0), \
@@ -176,6 +179,30 @@ class ScheduleRemoteNoteTests(unittest.TestCase):
                                     buffer_ms=100)
         enqueue.assert_called_once_with()
         self.assertEqual(handler.game.after_calls, [])
+
+    def test_trailing_sender_note_plays_immediately(self):
+        # A performer whose audible song trails the room (mid-song join
+        # whose seek ran past the alignment slack) strikes after the beat;
+        # the note is already due when it arrives, so the listener must NOT
+        # hold it further. sender_lag_ms makes that explicit.
+        handler = _handler_with_jukebox(_direct_entry(queued=5))
+        enqueue, _ = self._schedule(handler, server_time_ms_ahead=0,
+                                    buffer_ms=100, sender_lag_ms=1500)
+        enqueue.assert_called_once_with()
+        self.assertEqual(handler.game.after_calls, [])
+
+    def test_sender_lag_inside_listener_backlog_holds_to_own_beat(self):
+        # The listener's own song trails the room by 2.0s while the sender
+        # trails by 1.5s: the note waits the DIFFERENCE so it lands on the
+        # listener's heard beat, not the sender's.
+        handler = _handler_with_jukebox(_direct_entry(queued=5))
+        enqueue, _ = self._schedule(handler, server_time_ms_ahead=0,
+                                    buffer_ms=2000, sender_lag_ms=1500)
+        enqueue.assert_not_called()
+        scheduled_ms, _ = handler.game.after_calls[0]
+        # 2000 − 1500 − JAM_NOTE_ADVANCE_MS, no extra clamp.
+        self.assertGreater(scheduled_ms, 300)
+        self.assertLess(scheduled_ms, 600)
 
     def test_relay_hold_stays_uncapped_below_its_backlog(self):
         handler = _handler_with_jukebox(_relay_entry(queued=4))

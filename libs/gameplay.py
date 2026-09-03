@@ -331,13 +331,38 @@ class Gameplay(state.State):
         return name in getattr(mega, 'lock_owners', set())
 
     def _attach_music_timeline(self, packet):
-        """Attach the current audible Music Bot frame when one is available."""
+        """Attach the current audible Music Bot frame when one is available.
+
+        Also stamps how far THIS machine's audible jukebox song trails the
+        room's shared clock (``sender_lag_ms``): a note is struck when the
+        performer HEARS the beat, so if their local song started late (slow
+        resolve/startup, or a mid-song join that had to resolve + seek) their
+        server_time runs late by exactly that lag. Listeners subtract it when
+        landing the note, so a replacement performer mid-song lands on the
+        beat like the original one instead of trailing its own lateness.
+        """
         try:
             marker = self.music_bot.performance_timeline_marker()
         except Exception:
             marker = None
         if marker:
             packet["music_sync"] = marker
+        return self._attach_jukebox_sender_lag(packet)
+
+    def _attach_jukebox_sender_lag(self, packet):
+        """Attach this machine's audible jukebox trail behind the room clock.
+
+        Reuses the listener-side measurement (queue depth + audible-start
+        lateness for direct; relay frame backlog for relay), so sender and
+        listener always agree on what "behind the room" means.
+        """
+        try:
+            eh = getattr(getattr(self.game, "network", None), "event_handeler", None)
+            lag = eh._active_jukebox_buffer_ms() if eh is not None else None
+        except Exception:
+            lag = None
+        if lag is not None and lag > 0:
+            packet["sender_lag_ms"] = int(lag)
         return packet
 
     def _send_jam_note(self, event, packet):

@@ -12,9 +12,14 @@ that carries that listener's own late-start.
 
 Invariant under test: the note becomes audible at (almost) the same song
 position the performer played it, for every listener — regardless of ping,
-yt-dlp resolve time or ffmpeg startup. The lead-in is held by EVERY machine,
-so it cancels out of note timing; holding notes for the whole lead-in (the
-pre-fix behavior) put them ~DIRECT_LEAD_IN_S behind the beat.
+yt-dlp resolve time or ffmpeg startup, as long as the performer's own song
+started on the room's clock (startup inside the alignment slack). The lead-in
+is held by EVERY machine, so it cancels out of note timing; holding notes for
+the whole lead-in (the pre-fix behavior) put them ~DIRECT_LEAD_IN_S behind
+the beat. A machine whose mid-song seek ran past the slack starts late and
+plays behind the room by construction — its notes are struck late and cannot
+be pulled back (documented in the beyond-slack test); the sender-lag report
+at least stops listeners stacking their own hold on top.
 
 No game, OpenAL, ffmpeg or network is required.
 """
@@ -70,6 +75,12 @@ class DirectMachine:
         """Wall instant this machine hears content_position (seconds)."""
         return self.audible_at + (content_position - self.seek_to)
 
+    def trail_ms(self, queued=5):
+        """What the real sender attaches as sender_lag_ms: its OpenAL
+        staging queue (20ms per buffer) plus audible-start lateness — the
+        exact _active_jukebox_buffer_ms() formula for a direct stream."""
+        return int((self.late_s + queued * 0.020) * 1000)
+
 
 def _fake_direct_streamer(late_s, queued=5):
     ready = threading.Event()
@@ -84,12 +95,16 @@ def _fake_direct_streamer(late_s, queued=5):
     )
 
 
-def _note_error(performer, listener, beat, buffer_override=None):
+def _note_error(performer, listener, beat, buffer_override=None,
+                sender_lag_ms=None):
     """Song-position error (seconds) of a remote note at the listener.
 
     Performer presses the note at the beat they HEAR; the server re-stamps
     it after performer.latency; the listener schedules it through the real
-    _schedule_remote_note. Returns heard position minus intended beat.
+    _schedule_remote_note. sender_lag_ms mirrors what the real sender
+    attaches (its own _active_jukebox_buffer_ms) when present; without it
+    the packet behaves like a mixed-version / legacy sender. Returns heard
+    position minus intended beat.
     """
     t_press = performer.hear_time(beat)
     t_stamp = t_press + performer.latency
@@ -118,7 +133,10 @@ def _note_error(performer, listener, beat, buffer_override=None):
     with contextlib.ExitStack() as stack:
         for patch in patches:
             stack.enter_context(patch)
-        handler._schedule_remote_note({"server_time": t_stamp * 1000.0}, enqueue)
+        packet = {"server_time": t_stamp * 1000.0}
+        if sender_lag_ms is not None:
+            packet["sender_lag_ms"] = sender_lag_ms
+        handler._schedule_remote_note(packet, enqueue)
 
     if enqueue.called or not game.after_calls:
         play_at = t_arrive
@@ -175,21 +193,85 @@ class TestDirectJamBeatPlacement(unittest.TestCase):
         error = _note_error(performer, joiner, 230.0)
         self.assertLess(abs(error), 0.30)
 
-    def test_slow_performer_shifts_the_room_but_is_irreducible(self):
+    def test_slow_performer_reports_lag_and_is_not_held_further(self):
         # A performer whose own song started late plays behind the room by
-        # construction; no listener-side scheduling can know it. This test
-        # documents that the error is the performer's own lateness (not the
-        # listener's buffer) and nothing more.
+        # construction — the note is physically struck late, so no listener
+        # can pull it back onto the beat. What the sender's lag report DOES
+        # guarantee is that the note plays at arrival instead of collecting
+        # the listener's staging hold on top: the error is the performer's
+        # own trail and nothing more.
+        performer, listener = self._fresh_room(
+            performer_kwargs={"latency": 0.03, "resolve": 6.5, "startup": 1.0},
+            listener_kwargs={"latency": 0.05},
+        )
+        self.assertGreater(performer.late_s, 2.0)
+        error = _note_error(performer, listener, self.BEAT,
+                            sender_lag_ms=performer.trail_ms())
+        self.assertLess(abs(error - performer.late_s), 0.40)
+
+    def test_slow_performer_without_lag_report_trails_its_lateness(self):
+        # Regression: a mixed-version sender that does not attach
+        # sender_lag_ms keeps the old behavior — notes land late by about
+        # the performer's own lateness (documented, not a lead-in on top).
         performer, listener = self._fresh_room(
             performer_kwargs={"latency": 0.03, "resolve": 6.5, "startup": 1.0},
             listener_kwargs={"latency": 0.05},
         )
         self.assertGreater(performer.late_s, 2.0)
         error = _note_error(performer, listener, self.BEAT)
-        # Notes land late by about the performer's own lateness, never by a
-        # lead-in on top of it.
         self.assertGreater(error, 0.0)
         self.assertLess(error, performer.late_s + 0.50)
+
+    def test_mid_song_replacement_performer_lands_on_the_room_beat(self):
+        # The reported scenario: player A played the drums from the song
+        # start; A leaves and player B takes over mid-song. B's machine
+        # joined at 240s and had to resolve + seek — but with the current
+        # alignment slack (LEAD_IN + DIRECT_STARTUP_EST_S after resolve)
+        # its startup fits, so B's song starts exactly on the room's clock
+        # and B's notes land on the same beat everyone hears. This machine
+        # would have trailed the room under the old 5s slack.
+        server_now = 1000.0
+        first = DirectMachine(latency=0.03, resolve=2.0, startup=0.8)
+        first.receive(server_now, 0.0)
+        listeners = [
+            DirectMachine(latency=0.05, resolve=2.2, startup=0.9),
+            DirectMachine(latency=0.25, resolve=6.5, startup=1.0),
+        ]
+        for machine in listeners:
+            machine.receive(server_now, 0.0)
+        # 6.5s of seek+startup: over the old 5.0s slack, inside the new one.
+        self.assertGreater(
+            6.5, AudioStreamer.DIRECT_LEAD_IN_S + 1.5,
+            "test no longer covers the old-slack failure region")
+        replacement = DirectMachine(latency=0.10, resolve=4.0, startup=6.5)
+        replacement.receive(server_now + 240.0, 240.0)
+        self.assertEqual(replacement.late_s, 0.0)
+        beat = 230.0
+        # The original performer's note (on-time machine) stays put.
+        first_error = _note_error(first, listeners[0], beat)
+        self.assertLess(abs(first_error), 0.30)
+        # The replacement's notes land on the same beat for every listener.
+        for machine in listeners:
+            error = _note_error(replacement, machine, beat,
+                                sender_lag_ms=replacement.trail_ms())
+            self.assertLess(abs(error), 0.30, msg=f"listener lag={machine.late_s:.2f}")
+
+    def test_mid_song_join_beyond_slack_documents_residual_trail(self):
+        # A joiner whose seek+startup outruns even the new slack starts its
+        # song late and trails the room for the rest of the song. Its notes
+        # are struck late by construction; listeners play them at arrival
+        # (thanks to sender_lag_ms) and the residual error is exactly the
+        # machine's own trail — physics, not a scheduling bug.
+        server_now = 1000.0
+        listener = DirectMachine(latency=0.05, resolve=2.2, startup=0.9)
+        listener.receive(server_now, 0.0)
+        replacement = DirectMachine(latency=0.10, resolve=4.0, startup=11.0)
+        replacement.receive(server_now + 240.0, 240.0)
+        self.assertGreater(replacement.late_s, 2.0)
+        error = _note_error(replacement, listener, 230.0,
+                            sender_lag_ms=replacement.trail_ms())
+        self.assertGreater(error, replacement.late_s - 0.30)
+        self.assertLess(error, replacement.late_s + 0.40)
 
     def test_room_of_three_listeners_hears_the_note_together(self):
         room = [
