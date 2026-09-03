@@ -591,6 +591,16 @@ class JukeboxPlayer:
                     src.gain = base_gain
         except Exception:
             pass
+        # A song that starts while the listener is underwater inherits the
+        # active global water filter (camera.py pushes it onto
+        # audio_mngr.filter) so it is muffled from its first frame.
+        try:
+            active = getattr(audio, "filter", None)
+            if active and active[-1] is not None:
+                src_l.direct_filter = active[-1]
+                src_r.direct_filter = active[-1]
+        except Exception:
+            pass
         # Initial wall occlusion check:
         filt = None
         try:
@@ -1250,23 +1260,6 @@ class JukeboxPlayer:
         except Exception:
             if raise_errors:
                 raise
-            return False
-
-    def refresh_environment_audio(self):
-        """True=idle, None=awaiting server sync, False=local/send failure.
-
-        A sent request is not an acknowledgement that playback recovered.
-        Keep existing routes, cooldowns and server-owned song positions.
-        """
-        effects_ok = self.sync_reverb()
-        try:
-            with self._lock:
-                active = bool(self.players)
-            if not active:
-                return True
-            self.request_resync("manual audio refresh", raise_errors=True)
-            return None if effects_ok else False
-        except Exception:
             return False
 
     def stop_all_if_serial(self, serial):

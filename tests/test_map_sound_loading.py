@@ -192,24 +192,24 @@ class MapSoundIntegrationTests(unittest.TestCase):
         source.sound.source.play.assert_called_once()
         self.groups[0].play.assert_called_once()
 
-    def test_source_destroy_blocks_late_decode_and_recovery(self):
+    def test_source_destroy_blocks_late_decode(self):
         source = self.source()
         source.destroy()
         self.cache.ready["area.ogg"] = object()
         source.loop(1, 1, 0)
-        self.assertFalse(source.recover(1, 1, 0))
         self.assertIsNone(source.sound)
         self.assertFalse(source.audio_pending)
 
-    def test_failed_asset_stays_failed_until_explicit_refresh(self):
+    def test_failed_asset_stays_failed_without_explicit_retry(self):
         ambient = self.ambience()
         ambient.enter()
         self.cache.failed.add("forest.ogg")
         ambient.poll_audio()
         self.assertFalse(ambient.audio_pending)
-        ambient.recover()
-        self.assertTrue(ambient.audio_pending)
-        self.assertTrue(ambient.playing)
+        # The manual refresh action is gone, so nothing revives a failed
+        # asset: repeated polls keep it failed instead of claiming audio.
+        ambient.poll_audio()
+        self.assertFalse(ambient.audio_pending)
 
     def test_pannable_polls_then_preserves_source_and_position(self):
         obj = Pannable(self.game, 1, 2, 3, "point.ogg", 90)

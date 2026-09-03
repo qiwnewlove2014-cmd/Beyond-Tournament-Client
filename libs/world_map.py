@@ -26,11 +26,6 @@ def _map_loop_pending(audio, path):
     return cache is not None and cache.status(path) in ("cold", "pending")
 
 
-def _retry_map_loop(audio, path):
-    cache = getattr(audio, "map_sounds", None)
-    if cache is not None:
-        cache.retry(path)
-
 class Map:
     def __init__(self, game, minx=0, miny=0, minz=0, maxx=0, maxy=0, maxz=0):
         """Constructs a basic map:
@@ -1121,63 +1116,6 @@ class MinigameTable(BaseMapObj):
 
 
 class Ambience(BaseMapObj):
-    def recover(self):
-        """Restore this map-owned loop without replacing its SoundGroup.
-
-        Native recovery stays on the gameplay thread. A missing buffer is
-        prepared asynchronously; poll_audio resumes it when ready. A valid
-        source is kept in place, preserving the map's effect/filter ownership.
-        """
-        if getattr(self, "_destroyed", False):
-            return False
-        _retry_map_loop(self.map.game.audio_mngr, self.file)
-        repaired = False
-        source = getattr(self.sound, "source", None) if self.sound else None
-        if source is None:
-            if self.sound:
-                with contextlib.suppress(Exception):
-                    self.sound.destroy()
-            self.sound = _play_map_loop(self.map.game.audio_mngr, self.soundgroup,
-                self.file, True, cat=self.type, volume=self.volume, initial_gain=0.0
-            )
-            source = getattr(self.sound, "source", None) if self.sound else None
-            repaired = True
-        if source is None:
-            self.playing = self.audio_pending
-            return False
-        try:
-            if source.state != cyal.SourceState.PLAYING:
-                source.play()
-                repaired = True
-            category_volume = self.map.game.audio_mngr.volume_categories.get(
-                self.type, [100]
-            )[0]
-            source.gain = (self.volume / 100) * (category_volume / 100)
-            self.sound.muted = False
-            self.playing = True
-            return repaired
-        except Exception:
-            with contextlib.suppress(Exception):
-                self.sound.destroy()
-            self.sound = _play_map_loop(self.map.game.audio_mngr, self.soundgroup,
-                self.file, True, cat=self.type, volume=self.volume, initial_gain=0.0
-            )
-            source = getattr(self.sound, "source", None) if self.sound else None
-            if source is None:
-                self.playing = self.audio_pending
-                return False
-            try:
-                category_volume = self.map.game.audio_mngr.volume_categories.get(
-                    self.type, [100]
-                )[0]
-                source.gain = (self.volume / 100) * (category_volume / 100)
-                self.sound.muted = False
-                self.playing = True
-                return True
-            except Exception:
-                self.playing = False
-                return False
-
     def __init__(
         self,
         map,
@@ -1389,33 +1327,6 @@ class Pannable(BaseMapObj):
             self.sound = _play_map_loop(self.game.audio_mngr, self.soundgroup,
                                        self.path, looping=True, volume=self.volume)
 
-    def recover(self):
-        """Resume this positional map loop, replacing only a lost source."""
-        if getattr(self, "_destroyed", False):
-            return False
-        _retry_map_loop(self.game.audio_mngr, self.path)
-        source = getattr(self.sound, "source", None) if self.sound else None
-        if source is None:
-            if self.sound:
-                with contextlib.suppress(Exception):
-                    self.sound.destroy()
-            self.sound = _play_map_loop(self.game.audio_mngr, self.soundgroup,
-                self.path, looping=True, volume=self.volume
-            )
-            return bool(self.sound and getattr(self.sound, "source", None))
-        try:
-            if source.state != cyal.SourceState.PLAYING:
-                source.play()
-                return True
-        except Exception:
-            with contextlib.suppress(Exception):
-                self.sound.destroy()
-            self.sound = _play_map_loop(self.game.audio_mngr, self.soundgroup,
-                self.path, looping=True, volume=self.volume
-            )
-            return bool(self.sound and getattr(self.sound, "source", None))
-        return False
-
     def destroy(self):
         self._destroyed = True
         with contextlib.suppress(Exception):
@@ -1553,34 +1464,6 @@ class SoundSource(BaseMapObj):
         if self.minz <= z <= self.maxz:
             return z
         return self.minz if z < self.minz else self.maxz
-
-    def recover(self, player_x, player_y, player_z):
-        """Re-evaluate and resume a nearby source on the gameplay thread."""
-        if getattr(self, "_destroyed", False):
-            return False
-        _retry_map_loop(self.map.game.audio_mngr, self.path)
-        repaired = False
-        source = getattr(self.sound, "source", None) if self.sound else None
-        if self.sound and source is None:
-            with contextlib.suppress(Exception):
-                self.sound.destroy()
-            self.sound = None
-            self.playing = False
-            repaired = True
-        elif source is not None:
-            try:
-                if source.state != cyal.SourceState.PLAYING:
-                    source.play()
-                    self.playing = True
-                    repaired = True
-            except Exception:
-                with contextlib.suppress(Exception):
-                    self.sound.destroy()
-                self.sound = None
-                self.playing = False
-                repaired = True
-        self.loop(player_x, player_y, player_z)
-        return repaired
 
     def destroy(self):
         self._destroyed = True

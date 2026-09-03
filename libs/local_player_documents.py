@@ -54,25 +54,65 @@ SERVER_LANGUAGE_EVENTS = {
 
 
 def document_root():
-    """Return the source/package root without trusting the process CWD."""
+    """Return the primary source/package root without trusting the process CWD."""
 
     if getattr(sys, "frozen", False) or "__compiled__" in globals():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
 
 
+def _source_document_roots():
+    """Candidate roots while running from source.
+
+    A full checkout keeps the four public documents in the sibling server/docs
+    directory (never duplicated into the client tree).  Source runs therefore
+    read those files locally, so /docs and /pn behave exactly like the packaged
+    game and always reflect the current server-side texts.
+    """
+
+    client_root = Path(__file__).resolve().parents[1]
+    roots = [client_root]
+    server_docs = client_root.parent / "server" / "docs"
+    if server_docs.is_dir():
+        roots.append(server_docs)
+    return roots
+
+
+def document_roots():
+    """Ordered candidate roots for the fixed packaged player documents."""
+
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+        return [Path(sys.executable).resolve().parent]
+    return _source_document_roots()
+
+
 def read_document(kind, language, root=None):
-    """Return a fixed document title and lines, or raise a safe read error."""
+    """Return a fixed document title and lines, or raise a safe read error.
+
+    The first candidate root that contains a non-empty file wins, so a source
+    checkout falls back from the client root to the sibling server/docs copy.
+    """
 
     document = DOCUMENTS.get(kind)
     selected = document and document["languages"].get(language)
     if selected is None:
         raise ValueError("Unsupported player document selection")
-    path = (Path(root) if root is not None else document_root()) / selected["filename"]
-    text = path.read_text(encoding="utf-8-sig").strip()
-    if not text:
-        raise ValueError("Player document is empty")
-    return selected["title"], text.splitlines()
+    roots = [Path(root)] if root is not None else document_roots()
+    last_error = None
+    for base in roots:
+        path = base / selected["filename"]
+        try:
+            text = path.read_text(encoding="utf-8-sig").strip()
+        except OSError as error:
+            last_error = error
+            continue
+        if not text:
+            last_error = ValueError("Player document is empty")
+            continue
+        return selected["title"], text.splitlines()
+    if last_error is None:
+        last_error = FileNotFoundError("Player document is missing")
+    raise last_error
 
 
 def _show(gameplay, screen, replace):

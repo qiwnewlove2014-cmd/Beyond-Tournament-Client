@@ -4,6 +4,45 @@ from .speech import speak
 from .logger import log
 
 
+def _music_water_sources(game):
+    """Raw OpenAL sources of the private music bot and every active jukebox.
+
+    The music bot's streaming path and jukebox playback create their sources
+    with ``context.gen_source()`` (music_bot.py / jukebox.py), so the
+    soundgroup/unbound registries the water filter sweeps never see them.
+    While the listener is submerged these must be filtered explicitly;
+    songs that start mid-dive inherit the active filter at creation time.
+    """
+    gp = getattr(game, "gameplay", None)
+    if gp is None:
+        return
+    bot = getattr(gp, "music_bot", None)
+    stream_src = getattr(bot, "stream_source", None)
+    if stream_src is not None:
+        yield stream_src
+    jp = getattr(gp, "jukebox_player", None)
+    if jp is None:
+        return
+    for entry in list(getattr(jp, "players", {}).values()):
+        if not isinstance(entry, dict):
+            continue
+        for key in ("source", "secondary_source"):
+            src = entry.get(key)
+            if src is not None:
+                yield src
+
+
+def _apply_music_water_filter(game, flt):
+    """Attach (or detach, when flt is None) the water filter on music sources."""
+    for src in _music_water_sources(game):
+        if flt is not None:
+            with contextlib.suppress(Exception):
+                src.direct_filter = flt
+        else:
+            with contextlib.suppress(Exception):
+                del src.direct_filter
+
+
 class Camera:
     def __init__(self, game):
         self.game = game
@@ -175,10 +214,12 @@ class Camera:
             # Same depth->GAINHF curve as Entity.water_muffling, so the world
             # (this filter) and the player's own sounds (Entity's filter) un-
             # muffle at the same rate instead of one clearing before the other.
-            # Realism pass: surface submersion (d=1.0) now lands at 0.35 — far
-            # duller than the old gentle 0.50 half-muffle — while the bottom
-            # still goes fully dead at 0.02.
-            return 0.02 + 0.33 * max(0.0, min(1.0, d))
+            # Surface submersion (d=1.0) lands at 0.35 — far duller than the
+            # old gentle 0.50 half-muffle — while the bottom still goes fully
+            # dead at 0.02. The ^1.5 exponent makes the deeper half of the
+            # column fall off much harder than the old straight line, so the
+            # deepest dive sounds properly swallowed, not just slightly duller.
+            return 0.02 + 0.33 * max(0.0, min(1.0, d)) ** 1.5
 
         def cancel_water_task():
             if self._water_automation is not None:
@@ -197,14 +238,20 @@ class Camera:
             if flt is None:
                 return
             flt.set("GAINHF", value)
-            # Water swallows loudness too, not just highs — derive a gentle
-            # gain dip from the same animated value (neutral when clear,
-            # ~0.56 at full depth) so the existing ramp drives both axes of
-            # the muffle with no extra automation task.
-            flt.set("GAIN", 0.55 + 0.45 * value)
+            # Water swallows loudness too, not just highs — derive a gain dip
+            # from the same animated value (neutral when clear, ~0.36 at full
+            # depth) so the existing ramp drives both axes of the muffle with
+            # no extra automation task. Hardened so deep dives sink well below
+            # the old ~0.56 floor instead of hovering at half volume.
+            flt.set("GAIN", 0.35 + 0.65 * value)
             self.game.audio_mngr.apply_filter(flt, self.game.exclude_water, replace=True)
             if hasattr(self.focus_object, "vc_source") and self.focus_object.vc_source:
                 self.focus_object.vc_source.direct_filter = flt
+            # Private music-bot stream and jukebox playback use raw OpenAL
+            # sources the apply_filter sweep never visits — muffle them with
+            # the SAME shared filter so diving dulls the music too (cleared
+            # again in on_exit_complete below).
+            _apply_music_water_filter(self.game, flt)
 
         def start_water_task(target, duration, start_value, callback=None):
             # Only one water task may run at a time: two automations animating
@@ -238,6 +285,9 @@ class Camera:
                 if hasattr(self.focus_object, "vc_source") and self.focus_object.vc_source:
                     with contextlib.suppress(Exception):
                         del self.focus_object.vc_source.direct_filter
+                # Clear the shared filter from music sources before the filter
+                # object is released below.
+                _apply_music_water_filter(self.game, None)
                 self.release_water_filter()
             start_water_task(1.0, 500, self._water_gainhf, callback=on_exit_complete)
             self.focus_object.in_water=False

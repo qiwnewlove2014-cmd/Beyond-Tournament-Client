@@ -261,8 +261,14 @@ class JukeboxRelayReceiver(threading.Thread):
                 if filt is not None:
                     source.direct_filter = filt
                 else:
-                    with contextlib.suppress(Exception):
-                        del source.direct_filter
+                    # A wall clearing must not strip an active global filter
+                    # (the underwater muffle): restore it instead of deleting.
+                    active = getattr(audio, "filter", None)
+                    if active and active[-1] is not None:
+                        source.direct_filter = active[-1]
+                    else:
+                        with contextlib.suppress(Exception):
+                            del source.direct_filter
                 if getattr(audio, "efx", None) is not None:
                     if self.reverb_slot is not None:
                         audio.efx.send(source, 0, self.reverb_slot, filter=filt)

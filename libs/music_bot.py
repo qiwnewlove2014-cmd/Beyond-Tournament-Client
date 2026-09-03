@@ -411,8 +411,15 @@ class AudioStreamer(threading.Thread):
                                 if filt is not None:
                                     s.direct_filter = filt
                                 else:
-                                    with contextlib.suppress(Exception):
-                                        del s.direct_filter
+                                    # A wall clearing must not strip an active
+                                    # global filter (the underwater muffle):
+                                    # restore it instead of deleting it.
+                                    active = getattr(audio, "filter", None)
+                                    if active and active[-1] is not None:
+                                        s.direct_filter = active[-1]
+                                    else:
+                                        with contextlib.suppress(Exception):
+                                            del s.direct_filter
                                 if getattr(audio, "efx", None) is not None:
                                     if hasattr(self, "reverb_slot") and self.reverb_slot is not None:
                                         audio.efx.send(s, 0, self.reverb_slot, filter=filt)
@@ -1604,6 +1611,11 @@ class MapMusicBot:
             src.spatialize = False
             music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
             src.gain = (self.volume / 100) * music_vol
+            # A track started while the listener is underwater inherits the
+            # active global water filter so it is dull from its first frame.
+            active = getattr(self.game.audio_mngr, "filter", None)
+            if active and active[-1] is not None:
+                src.direct_filter = active[-1]
             self.stream_source = src
             # Apply current map reverb immediately
             self._sync_map_reverb()
@@ -2967,42 +2979,6 @@ class MapMusicBot:
             return False
         try:
             return bool(streamer.resume_output_if_buffered())
-        except Exception:
-            return False
-
-    def refresh_environment_audio(self):
-        """Manual recovery: True=ready/idle, None=buffering, False=failed.
-
-        Never restart a decoder/song or override a deliberate pause. The
-        stream owns its buffers; dead decoders require normal replay/restart.
-        """
-        if not self.enabled or not self.playing or self.paused:
-            return True
-        effects_ok = self._sync_map_reverb(force=True)
-        try:
-            streamer = self.streamer
-            if streamer is not None:
-                if not streamer.running:
-                    return False
-                if streamer.paused:
-                    return effects_ok
-                # Unlike the streaming convenience helpers, these reads must
-                # not hide invalid-source errors as an empty warm-up buffer.
-                for source in streamer._all_sources():
-                    source.state
-                    source.buffers_queued
-                streamer.resume_output_if_buffered()
-                if not effects_ok:
-                    return False
-                if streamer._all_playing():
-                    return True
-                return None if streamer._buffers_queued() == 0 else False
-            source = getattr(self.current_local_sound, "source", None)
-            if source is None:
-                return None if self.is_loading_stream else False
-            if source.state != cyal.SourceState.PLAYING:
-                source.play()
-            return effects_ok and source.state == cyal.SourceState.PLAYING
         except Exception:
             return False
 

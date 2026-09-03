@@ -59,7 +59,6 @@ class _ExitFadeState(state.State):
 
 
 class Gameplay(state.State):
-    _AUDIO_REFRESH_COOLDOWN_SECONDS = 5.0
     _DRUM_MIDI_MIN_VOLUME = 60
     _DRUM_MIDI_MAX_VOLUME = 300
     _DRUM_MIDI_CHROMATIC_FIRST_NOTE = DRUM_MIDI_PROFILE.CHROMATIC_FIRST_NOTE
@@ -102,8 +101,6 @@ class Gameplay(state.State):
         # 🎵 Music jukebox: server-side queue playback anchored at jukebox elements.
         self.jukebox_player = None
         self.jukebox_state = {"jukeboxes": {}}
-        self._audio_refresh_in_progress = False
-        self._last_audio_refresh_at = -self._AUDIO_REFRESH_COOLDOWN_SECONDS
         # Name of the currently parsed map (from parse_map), so a real map
         # transition can be told apart from a same-name reparse for jukebox
         # teardown (immediate stop vs. seamless mark-and-sweep).
@@ -618,38 +615,6 @@ class Gameplay(state.State):
 
 
 
-    def _check_speaker_occlusion(self, speaker_pos, player_pos):
-        """Check if any solid tile blocks the path from speaker to player.
-        Uses simple line-of-sight raycast to detect walls blocking sound."""
-        
-        # Simple implementation: check a few points along the line
-        # from speaker to player for solid tiles
-        try:
-            sx, sy, sz = speaker_pos
-            px, py, pz = player_pos
-            
-            # Get direction vector
-            dx = px - sx
-            dy = py - sy
-            dz = pz - sz
-            
-            # Check 5 points along the line
-            for i in range(1, 5):
-                t = i / 5.0
-                check_x = sx + dx * t
-                check_y = sy + dy * t
-                check_z = sz + dz * t
-                
-                # Check if there's a solid tile at this position
-                tile = self.map.get_tile_at(int(check_x), int(check_y), int(check_z))
-                if tile and hasattr(tile, 'solid') and tile.solid:
-                    return True  # Blocked by wall
-                    
-            return False  # Clear line of sight
-        except Exception:
-            return False  # On error, assume not blocked
-    
-
     def exit(self):
         super().exit()
         if getattr(self, "piano_mode", False):
@@ -715,48 +680,6 @@ class Gameplay(state.State):
                     
         # Note: EQ is currently fixed in initialization, 
         # but could be updated here if audio_manager supports parameter updates.
-
-    def _check_speaker_occlusion(self, speaker_pos, player_pos):
-        """Check if there's a solid wall/platform blocking line-of-sight between speaker and player.
-        Uses a simple ray-march algorithm to check for solid tiles along the path.
-        Returns True if blocked, False if clear line-of-sight."""
-        
-        # Get integer positions
-        x1, y1, z1 = int(speaker_pos[0]), int(speaker_pos[1]), int(speaker_pos[2])
-        x2, y2, z2 = int(player_pos[0]), int(player_pos[1]), int(player_pos[2])
-        
-        # Calculate distance and step count
-        dx = x2 - x1
-        dy = y2 - y1
-        dz = z2 - z1
-        distance = int(math.sqrt(dx*dx + dy*dy + dz*dz))
-        
-        if distance == 0:
-            return False  # Same position, no occlusion
-        
-        # Step along the ray with a step size of 2.0 to reduce lookup count (walls are thick)
-        # Cap max steps to 15 to prevent long-distance lookup lag spikes
-        step_size = 2.0
-        steps = max(1, int(distance / step_size))
-        if steps > 15:
-            steps = 15
-        
-        for i in range(1, steps):  # Skip start point (speaker), check middle points
-            t = i / steps
-            check_x = int(x1 + dx * t)
-            check_y = int(y1 + dy * t)
-            check_z = int(z1 + dz * t)
-            
-            # Get tile at this position
-            tile = self.map.get_tile_at(check_x, check_y, check_z)
-            
-            # Check if tile is solid (wall or solid floor that blocks sound)
-            if tile.startswith("wall"):
-                return True  # Blocked by wall
-            # Note: We don't block on regular floors (concrete, wood, etc.)
-            # as sound can travel over/around them. Only explicit walls block.
-        
-        return False  # Clear line-of-sight
 
     def update_megaphone_settings(self, volume, bass, mid, high):
         """Forwarder for the megaphone settings menu (megaphone_settings.py calls
@@ -2005,156 +1928,6 @@ class Gameplay(state.State):
             except Exception:
                 pass
 
-    def refresh_game_audio(self):
-        """Soft-recover active game audio without rebuilding the OpenAL context.
-
-        The Options callback runs on the gameplay/audio owner thread.  Existing
-        sources, buffers, SoundGroups and pooled EFX objects are retained when
-        healthy. Lost map loops or PA sources may be replaced by their owner.
-        A full Client restart remains the fallback for a dead
-        device or context because rebuilding the context in place would leave
-        voice, jukebox and instrument owners holding invalid OpenAL objects.
-        """
-        now = time.monotonic()
-        if getattr(self, "_audio_refresh_in_progress", False):
-            speak("Audio refresh is already running.")
-            return False
-        last_refresh = getattr(
-            self, "_last_audio_refresh_at", -self._AUDIO_REFRESH_COOLDOWN_SECONDS
-        )
-        if now - last_refresh < self._AUDIO_REFRESH_COOLDOWN_SECONDS:
-            speak("Audio refresh is cooling down. Please wait a moment.")
-            return False
-
-        audio = getattr(self.game, "audio_mngr", None)
-        context = getattr(audio, "context", None) if audio is not None else None
-        try:
-            connected = context is not None and context.is_connected
-        except Exception:
-            connected = False
-        if not connected:
-            speak(
-                "The audio device is unavailable. Wait for automatic recovery, "
-                "or use Restart Client from the main menu."
-            )
-            return False
-
-        self._audio_refresh_in_progress = True
-        self._last_audio_refresh_at = now
-        failed = []
-        pending = []
-
-        def attempt(label, action):
-            """False means failed; None is allowed for legacy void methods."""
-            try:
-                result = action()
-                if result is False and label not in failed:
-                    failed.append(label)
-                return result
-            except Exception:
-                if label not in failed:
-                    failed.append(label)
-                return None
-
-        def recover_loop(obj, *position):
-            obj.recover(*position)
-            # recover() historically returns "changed", not "healthy".
-            # Inspect the result instead of treating an unchanged loop as bad.
-            audible_at = getattr(obj, "is_audible_at", None)
-            if (position and not getattr(obj, "playing", False)
-                    and getattr(obj, "current_gain", 1.0) <= 0.0
-                    and (not callable(audible_at) or not audible_at(*position))):
-                return True  # An out-of-range spatial source stays silent.
-            source = getattr(getattr(obj, "sound", None), "source", None)
-            if source is None and getattr(obj, "audio_pending", False):
-                if "map sounds" not in pending:
-                    pending.append("map sounds")
-                return None
-            return source is not None and source.state == cyal.SourceState.PLAYING
-
-        def refresh_owner(label, owner):
-            if owner is None:
-                return
-            result = attempt(label, lambda: owner.refresh_environment_audio())
-            # These owner APIs explicitly return None for an asynchronous
-            # warm-up/resync, True for ready/idle, and False for a failure.
-            if result is None and label not in failed:
-                pending.append(label)
-
-        try:
-            def resume_device():
-                # cyal versions expose paused as either a property or a
-                # context-manager method. Resuming is safe and idempotent.
-                context.device.resume()
-                audio.muted = False
-            attempt("audio device", resume_device)
-
-            focus = getattr(getattr(self, "camera", None), "focus_object", None)
-            if focus is None:
-                focus = getattr(self, "player", None)
-            x = getattr(focus, "x", 0.0)
-            y = getattr(focus, "y", 0.0)
-            z = getattr(focus, "z", 0.0)
-            map_obj = getattr(self, "map", None)
-
-            if map_obj is not None:
-                # Only room ambience/music covering the listener should be
-                # audible. Nearby spatial sources re-run their normal distance
-                # and reverb calculation rather than being forced to play.
-                ambiences = attempt("ambience", lambda: list(map_obj.get_ambiences_at(x, y, z))) or []
-                for ambience in ambiences:
-                    attempt("ambience", lambda obj=ambience: recover_loop(obj))
-                musics = attempt("map music", lambda: list(map_obj.get_musics_at(x, y, z))) or []
-                for music in musics:
-                    attempt("map music", lambda obj=music: recover_loop(obj))
-                sources = attempt("map sounds", lambda: list(getattr(map_obj, "source_list", ()))) or []
-                for source in sources:
-                    attempt("map sounds", lambda obj=source: recover_loop(obj, x, y, z))
-                pannables = attempt("map sounds", lambda: list(getattr(map_obj, "pannable_list", ()))) or []
-                for pannable in pannables:
-                    attempt("map sounds", lambda obj=pannable: recover_loop(obj))
-
-                # Rebind the current player and remote voice/music sources to
-                # the room's existing effect slot. Never allocate a new slot.
-                seen_entities = set()
-                entities = attempt("room effects", lambda: list(getattr(map_obj, "entities", {}).values())) or []
-                for entity in [focus] + entities:
-                    if entity is None or id(entity) in seen_entities:
-                        continue
-                    seen_entities.add(id(entity))
-                    attempt("room effects", lambda obj=entity: obj.sync_reverb())
-            else:
-                failed.append("map sounds")
-
-            refresh_owner("Music Bot", getattr(self, "music_bot", None))
-            refresh_owner("Jukebox", getattr(self, "jukebox_player", None))
-            refresh_owner("Megaphone", getattr(self, "megaphone", None))
-
-            # An interrupted fade can leave global gain at zero even though
-            # every individual source is healthy. Restore the saved master bus.
-            def restore_master():
-                master = audio.volume_categories["master"][0]
-                audio.listener.gain = master / 100
-            attempt("master volume", restore_master)
-
-            if failed:
-                speak("Audio refresh incomplete: " + ", ".join(failed)
-                      + ". Try again or use Restart Client.")
-                return False
-            if pending:
-                speak("Audio refresh requested. Waiting for " + ", ".join(pending) + ".")
-            else:
-                speak("Audio refresh finished. If still silent, use Restart Client.")
-            return True
-        except Exception:
-            speak(
-                "Audio refresh could not complete. Please wait a moment and try "
-                "again, or use Restart Client from the main menu."
-            )
-            return False
-        finally:
-            self._audio_refresh_in_progress = False
-    
     def handle_o_key(self, mod):
         """Handle O key: PA Test Mode (no modifier) or Options Menu (ALT+O)"""
         if mod & pygame.KMOD_ALT:

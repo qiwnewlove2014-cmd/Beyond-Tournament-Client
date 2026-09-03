@@ -137,11 +137,11 @@ class FakeEntity:
     @property
     def water_muffling(self):
         # Mirrors Entity.water_muffling exactly.
-        return 0.02 + 0.33 * max(0.0, min(1.0, self.depth))
+        return 0.02 + 0.33 * max(0.0, min(1.0, self.depth)) ** 1.5
 
 
 def muffling_at(d):
-    return 0.02 + 0.33 * max(0.0, min(1.0, d))
+    return 0.02 + 0.33 * max(0.0, min(1.0, d)) ** 1.5
 
 
 class TestEntityWaterCheck(unittest.TestCase):
@@ -176,7 +176,7 @@ class TestEntityWaterCheck(unittest.TestCase):
         # Highs are cut AND overall loudness dips, both driven by one value:
         # realism pass makes submersion quieter as well as duller.
         self.assertAlmostEqual(flt.values["GAINHF"], muffling_at(1.0))
-        self.assertAlmostEqual(flt.values["GAIN"], 0.55 + 0.45 * muffling_at(1.0))
+        self.assertAlmostEqual(flt.values["GAIN"], 0.35 + 0.65 * muffling_at(1.0))
 
         # Fully clear again (surfaced) must be perfectly neutral loudness.
         task.step_callback(1.0)
@@ -391,6 +391,73 @@ class TestCameraWaterTasks(unittest.TestCase):
         # the old half-muffle (0.50).
         ent.depth = 1.0
         self.assertAlmostEqual(ent.water_muffling, 0.35)
+        # Deep-dive pass: the ^1.5 curve must sink far harder than the old
+        # straight line halfway down, so deep dives actually feel swallowed.
+        # (Old linear value at 0.5 was 0.185.)
+        ent.depth = 0.5
+        self.assertAlmostEqual(ent.water_muffling, 0.02 + 0.33 * 0.5 ** 1.5)
+        self.assertLess(ent.water_muffling, 0.15)
+        ent.depth = 0.25
+        self.assertLess(ent.water_muffling, 0.09)
+
+
+class TestWaterMusicSources(unittest.TestCase):
+    """The private music bot and jukeboxes use raw context.gen_source()
+    sources that the apply_filter() sweep never sees — the camera's water
+    filter must reach them explicitly (and new songs inherit it at birth).
+    """
+
+    def _camera_with_music(self):
+        cam, focus = TestCameraWaterTasks().make_camera("underwater")
+        game = cam.game
+        stream_src = FakeSource()
+        box_l = FakeSource()
+        box_r = FakeSource()
+        pending = object()  # placeholder entry with no sources yet
+        game.gameplay.music_bot = SimpleNamespace(stream_source=stream_src)
+        game.gameplay.jukebox_player = SimpleNamespace(players={
+            "box1": {"transport": "direct",
+                     "source": box_l, "secondary_source": box_r},
+            "box2": {"transport": "relay_pending", "streamer": pending},
+        })
+        sources = [stream_src, box_l, box_r]
+        return cam, focus, sources
+
+    def test_dive_attaches_the_shared_filter_to_music_sources(self):
+        cam, focus, sources = self._camera_with_music()
+        cam.move(0, 0, 0)
+        self.assertEqual(len(cam.game.automations), 1)
+        cam.game.automations[0].step_callback(0.3)
+        water = cam.get_water_filter()
+        for src in sources:
+            self.assertIs(src.direct_filter, water)
+
+    def test_placeholder_entry_without_sources_does_not_crash(self):
+        cam, focus, sources = self._camera_with_music()
+        cam.move(0, 0, 0)
+        cam.game.automations[0].step_callback(0.3)  # must not raise
+        water = cam.get_water_filter()
+        for src in sources:
+            self.assertIs(src.direct_filter, water)
+
+    def test_no_music_bot_returns_none(self):
+        # Music-bot / jukebox-player attributes absent entirely (old state).
+        cam, focus = TestCameraWaterTasks().make_camera("underwater")
+        cam.move(0, 0, 0)
+        cam.game.automations[0].step_callback(0.3)  # must not raise
+
+    def test_surfacing_clears_the_filter_from_music_sources(self):
+        from libs.camera import _apply_music_water_filter
+        cam, focus, sources = self._camera_with_music()
+        cam.move(0, 0, 0)
+        cam.game.automations[0].step_callback(0.3)
+        water = cam.get_water_filter()
+        for src in sources:
+            self.assertIs(src.direct_filter, water)
+        # The camera's exit path clears the filter before releasing it.
+        _apply_music_water_filter(cam.game, None)
+        for src in sources:
+            self.assertFalse(hasattr(src, "direct_filter"))
 
 
 if __name__ == "__main__":

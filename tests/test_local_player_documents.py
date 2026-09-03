@@ -41,10 +41,10 @@ class LocalPlayerDocumentTests(unittest.TestCase):
         ):
             (self.root / name).write_text(f"First line of {name}\n\nLast line", encoding="utf-8")
 
-    def open(self, event_name, language):
-        with patch.object(documents, "document_root", return_value=self.root), patch.object(
-            documents, "set_default_sounds"
-        ):
+    def open(self, event_name, language, roots=None):
+        with patch.object(
+            documents, "document_roots", return_value=roots if roots is not None else [self.root]
+        ), patch.object(documents, "set_default_sounds"):
             return documents.handle_server_language_selection(
                 self.game, self.gameplay, event_name, language
             )
@@ -70,6 +70,22 @@ class LocalPlayerDocumentTests(unittest.TestCase):
         self.assertFalse(self.open("docs_language_select", "en"))
         self.assertEqual(self.gameplay.replacements, [])
 
+    def test_source_fallback_reads_document_from_sibling_server_docs(self):
+        # Running from source, the client root normally has no packaged files;
+        # the sibling server/docs copy is the local source of truth.
+        empty = Path(self.temp.name) / "client"
+        empty.mkdir()
+        server_docs = Path(self.temp.name) / "server" / "docs"
+        server_docs.mkdir(parents=True)
+        (server_docs / "player_patch_notes.txt").write_text(
+            "Local server/docs patch notes", encoding="utf-8"
+        )
+        self.assertTrue(self.open(
+            "patchnotes_language_select", "en", roots=[empty, server_docs]
+        ))
+        reader = self.gameplay.replacements[-1]
+        self.assertEqual(reader.items[0][0], "Local server/docs patch notes")
+
     def test_network_values_cannot_select_a_path(self):
         before = list(self.gameplay.replacements)
         self.assertFalse(self.open("docs_language_select", "../secret.txt"))
@@ -77,7 +93,7 @@ class LocalPlayerDocumentTests(unittest.TestCase):
         self.assertEqual(self.gameplay.replacements, before)
 
     def test_back_replaces_reader_with_local_language_menu(self):
-        with patch.object(documents, "document_root", return_value=self.root), patch.object(
+        with patch.object(documents, "document_roots", return_value=[self.root]), patch.object(
             documents, "set_default_sounds"
         ):
             self.assertTrue(documents.open_reader(
