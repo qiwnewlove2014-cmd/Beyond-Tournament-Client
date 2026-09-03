@@ -1,10 +1,14 @@
 """Offline tests: jam-note scheduling against relay and direct jukebox clocks.
 
 Remote instrument notes must land on the beat of the song the listener is
-HEARING. A relay receiver aligns via its 40ms OpenAL frame backlog; an
-anchored direct stream runs exactly one DIRECT_LEAD_IN_S behind the
-server's song clock — and without that branch every direct-mode note used
-to play on arrival, late by a full round trip and audibly off the beat.
+HEARING. A relay receiver aligns via its 40ms OpenAL frame backlog. An
+anchored direct stream holds the same lead-in as every other listener, so
+the lead-in cancels out of note timing: a direct-mode note waits only for
+this machine's own residual distance behind the room clock — its 20ms OpenAL
+staging queue plus any audible start that ran past the shared deadline
+(slow yt-dlp/ffmpeg startup makes the local song trail the room). Holding
+notes for the whole lead-in used to put them ~DIRECT_LEAD_IN_S behind the
+beat.
 """
 
 import os
@@ -52,7 +56,7 @@ def _relay_entry(queued=4, started=True):
     return {"transport": "relay", "streamer": streamer}
 
 
-def _direct_entry(anchor=True, started=True):
+def _direct_entry(anchor=True, started=True, queued=5, late_s=0.0):
     ready = threading.Event()
     if started:
         ready.set()
@@ -60,6 +64,11 @@ def _direct_entry(anchor=True, started=True):
         _direct_anchor=anchor,
         running=True,
         ready_event=ready,
+        direct_late_s=late_s,
+        # Anchored direct workers stage one 20ms OpenAL buffer per frame on
+        # their spatial pair (jukeboxes always use the stereo pair).
+        spatial_src_l=SimpleNamespace(buffers_queued=queued),
+        source=SimpleNamespace(buffers_queued=queued),
     )
     return {"transport": "direct", "streamer": streamer}
 
@@ -74,11 +83,20 @@ class ActiveJukeboxBufferTests(unittest.TestCase):
         handler = _handler_with_jukebox(_relay_entry(queued=4))
         self.assertEqual(handler._active_jukebox_buffer_ms(), 160)
 
-    def test_anchored_direct_reports_the_lead_in(self):
-        handler = _handler_with_jukebox(_direct_entry(anchor=True, started=True))
-        self.assertEqual(
-            handler._active_jukebox_buffer_ms(),
-            int(AudioStreamer.DIRECT_LEAD_IN_S * 1000))
+    def test_anchored_direct_reports_queue_plus_lateness(self):
+        # Five staged 20ms buffers = 100ms of underrun runway, no lateness.
+        handler = _handler_with_jukebox(_direct_entry(queued=5, late_s=0.0))
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 100)
+
+    def test_anchored_direct_adds_own_late_start(self):
+        # A machine whose ffmpeg/yt-dlp startup ran 1.5s past the shared
+        # deadline hears the song 1.5s behind the room; its notes must wait.
+        handler = _handler_with_jukebox(_direct_entry(queued=5, late_s=1.5))
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 1600)
+
+    def test_anchored_direct_queue_never_reports_less_than_one_frame(self):
+        handler = _handler_with_jukebox(_direct_entry(queued=0, late_s=0.0))
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 20)
 
     def test_direct_before_audible_start_reports_none(self):
         handler = _handler_with_jukebox(_direct_entry(anchor=True, started=False))
@@ -116,36 +134,46 @@ class ScheduleRemoteNoteTests(unittest.TestCase):
         enqueue.assert_called_once_with()
         self.assertEqual(handler.game.after_calls, [])
 
-    def test_direct_note_holds_for_the_lead_in_without_clamping(self):
-        handler = _handler_with_jukebox(_direct_entry())
-        lead_ms = int(AudioStreamer.DIRECT_LEAD_IN_S * 1000)
-        # A note hit ~now: the hold sits just under the lead-in (minus the
-        # one-way travel already elapsed). The old flat 500ms cap would have
-        # clamped this and played the note ~3s early against the heard song.
+    def test_direct_note_hold_is_the_small_queue_not_the_lead_in(self):
+        handler = _handler_with_jukebox(_direct_entry(queued=5))
+        # A note hit ~now: the hold sits just under the 100ms staging queue
+        # (minus the advance). It must NEVER approach the shared lead-in,
+        # which every machine holds and which therefore cancels.
         enqueue, log_mock = self._schedule(handler, server_time_ms_ahead=0,
-                                           buffer_ms=lead_ms)
+                                           buffer_ms=100)
         enqueue.assert_not_called()
         self.assertEqual(len(handler.game.after_calls), 1)
         scheduled_ms, _ = handler.game.after_calls[0]
-        self.assertGreater(scheduled_ms, lead_ms - 500)
-        self.assertLessEqual(scheduled_ms, lead_ms + 1000)
+        self.assertGreater(scheduled_ms, 0)
+        self.assertLess(scheduled_ms, int(AudioStreamer.DIRECT_LEAD_IN_S * 1000))
+        self.assertLessEqual(scheduled_ms, 100 + 1000)
+        log_mock.assert_not_called()
+
+    def test_direct_late_start_widens_the_note_hold(self):
+        # A machine that started 1.5s late hears the song 1.5s behind the
+        # room; its remote notes wait out that lateness to hit the beat.
+        handler = _handler_with_jukebox(_direct_entry(queued=5, late_s=1.5))
+        enqueue, log_mock = self._schedule(handler, server_time_ms_ahead=0,
+                                           buffer_ms=1600)
+        enqueue.assert_not_called()
+        scheduled_ms, _ = handler.game.after_calls[0]
+        self.assertGreater(scheduled_ms, 1000)
+        self.assertLess(scheduled_ms, 1600 + 1000)
         log_mock.assert_not_called()
 
     def test_far_future_note_is_clamped_relative_to_the_buffer(self):
-        handler = _handler_with_jukebox(_direct_entry())
-        lead_ms = int(AudioStreamer.DIRECT_LEAD_IN_S * 1000)
+        handler = _handler_with_jukebox(_direct_entry(queued=5))
         enqueue, log_mock = self._schedule(handler, server_time_ms_ahead=90_000,
-                                           buffer_ms=lead_ms)
+                                           buffer_ms=100)
         enqueue.assert_not_called()
         scheduled_ms, _ = handler.game.after_calls[0]
-        self.assertEqual(scheduled_ms, lead_ms + 1000)
+        self.assertEqual(scheduled_ms, 100 + 1000)
         log_mock.assert_called_once()
 
     def test_past_due_note_plays_immediately(self):
-        handler = _handler_with_jukebox(_direct_entry())
-        lead_ms = int(AudioStreamer.DIRECT_LEAD_IN_S * 1000)
+        handler = _handler_with_jukebox(_direct_entry(queued=5))
         enqueue, _ = self._schedule(handler, server_time_ms_ahead=-90_000,
-                                    buffer_ms=lead_ms)
+                                    buffer_ms=100)
         enqueue.assert_called_once_with()
         self.assertEqual(handler.game.after_calls, [])
 

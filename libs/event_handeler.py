@@ -1547,18 +1547,18 @@ class EventHandeler:
         jamming without background music keeps the low-latency immediate
         path. A relay receiver reports its queued 40ms OpenAL frames — the
         backlog between what the server is sending and what we hear. An
-        anchored direct stream runs exactly one lead-in behind the server's
-        song clock: the audible head starts at the shared wall-clock
-        deadline and advances at real time, so the lead-in IS the
-        listener's distance behind that clock (the OpenAL queue is only
-        underrun runway and never shifts the audible head).
+        anchored direct stream holds the SAME lead-in as every other
+        listener, so that lead-in cancels out of note timing; what remains
+        is this machine's own residual distance behind the room clock — its
+        small OpenAL staging queue (20ms buffers) plus any audible start
+        that ran past the shared wall-clock deadline (slow yt-dlp/ffmpeg
+        startup makes the local song trail the room).
         """
         try:
             jp = getattr(self.gameplay, "jukebox_player", None)
             if jp is None:
                 return None
             from .jukebox import JukeboxRelayReceiver
-            from .music_bot import AudioStreamer
             for entry in list(getattr(jp, "players", {}).values()):
                 streamer = entry.get("streamer") if isinstance(entry, dict) else None
                 if (isinstance(streamer, JukeboxRelayReceiver)
@@ -1575,11 +1575,26 @@ class EventHandeler:
                 if (getattr(streamer, "_direct_anchor", False)
                         and getattr(streamer, "running", False)
                         and streamer.ready_event.is_set()):
-                    # Anchored direct playback (no relay available): without
-                    # this branch the buffer reads None and every remote note
-                    # played on arrival — late by a full round trip and audibly
-                    # off the beat the room is hearing.
-                    return int(AudioStreamer.DIRECT_LEAD_IN_S * 1000)
+                    # Anchored direct playback (no relay available). Every
+                    # listener shares the same lead-in hold, so the lead-in
+                    # cancels between performer and listener — holding remote
+                    # notes for the whole lead-in put them ~DIRECT_LEAD_IN_S
+                    # behind the beat. A note only waits out THIS listener's
+                    # residual distance behind the room clock: the small
+                    # OpenAL staging queue (20ms buffers) plus how late this
+                    # machine's audible start ran past the shared deadline
+                    # (slow resolve/startup makes the local song trail the
+                    # room, so its notes must wait for it to catch up).
+                    try:
+                        src = getattr(streamer, "spatial_src_l", None)
+                        if src is None:
+                            src = getattr(streamer, "source", None)
+                        queued = int(src.buffers_queued) if src is not None else 0
+                    except Exception:
+                        queued = 0
+                    late_ms = int(
+                        max(0.0, float(getattr(streamer, "direct_late_s", 0.0) or 0.0)) * 1000)
+                    return max(queued, 1) * 20 + late_ms
             return None
         except Exception:
             return None

@@ -241,6 +241,10 @@ class AudioStreamer(threading.Thread):
         )
         self._direct_seek_to = 0.0        # content position the decode head starts from
         self._fed_content_seconds = 0.0   # content seconds queued to OpenAL since the seek
+        # Seconds the audible start ran past the shared wall-clock deadline
+        # (slow yt-dlp resolve / ffmpeg startup). Jam-note scheduling reads
+        # this so remote notes wait out a local stream that trails the room.
+        self.direct_late_s = 0.0
         self.http_headers = dict(http_headers or {})
         # Spatial stereo pair (jukeboxes): two MONO sources placed at the same
         # spot minus/plus a small offset, fed with the LEFT and RIGHT channels
@@ -896,6 +900,10 @@ class AudioStreamer(threading.Thread):
                     time.sleep(0.02)
         if self.running:
             late = time.monotonic() - deadline
+            # Expose how far the audible start ran past the shared deadline:
+            # jam-note scheduling adds this so notes stay on the beat of the
+            # (trailing) music a slow-starting machine actually hears.
+            self.direct_late_s = max(0.0, late)
             if late > self.DIRECT_LATE_TOLERANCE_S:
                 logger.log(
                     "[AudioStreamer] direct sync: audible start "
