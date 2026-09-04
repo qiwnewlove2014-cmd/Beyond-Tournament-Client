@@ -73,10 +73,15 @@ class TestAudioStreamerPausedStart(unittest.TestCase):
 
 
 class FakeStreamer:
-    def __init__(self, position=100.0, alive=True):
+    def __init__(self, position=100.0, alive=True,
+                 audio_url="", http_headers=None):
         self._position = position
         self._alive = alive
         self.stopped = False
+        # Mirror AudioStreamer's seek-reuse surface: an empty audio_url keeps
+        # every pre-existing test on the slow re-resolve path.
+        self.audio_url = audio_url
+        self.http_headers = dict(http_headers or {})
 
     def is_alive(self):
         return self._alive
@@ -104,7 +109,7 @@ def make_bot(**overrides):
     bot.is_loading_stream = False
     bot.current_title = "Test Track"
     bot.current_target = os.path.abspath(os.path.join(
-        os.path.dirname(__file__), "..", "libs", "music_bot.py"))
+        os.path.dirname(__file__), "..", "libs", "music_bot", "controller.py"))
     bot.current_source = "local"
     bot.searching = False
     bot.stream_source = None
@@ -144,7 +149,7 @@ def make_bot(**overrides):
 
 class TestMapMusicBotSeekGuards(unittest.TestCase):
     def _seek(self, bot, delta):
-        with mock.patch("libs.music_bot.speak") as speak:
+        with mock.patch("libs.music_bot.controller.speak") as speak:
             bot.seek_by(delta)
         return speak
 
@@ -217,7 +222,7 @@ class TestMapMusicBotLocalSeek(unittest.TestCase):
                 current_target=path,
                 current_source="local",
             )
-            speak = mock.patch("libs.music_bot.speak")
+            speak = mock.patch("libs.music_bot.controller.speak")
             with speak as sp:
                 bot.seek_by(25)
             start = bot.starts[0]
@@ -236,7 +241,7 @@ class TestMapMusicBotLocalSeek(unittest.TestCase):
                                         "definitely_missing_xyz.mp4"),
             current_source="local",
         )
-        with mock.patch("libs.music_bot.speak") as speak:
+        with mock.patch("libs.music_bot.controller.speak") as speak:
             bot.seek_by(10)
         self.assertEqual(bot.starts, [])
         speak.assert_any_call("File not found.")
@@ -272,7 +277,7 @@ class TestMapMusicBotRemoteSeek(unittest.TestCase):
 
         info = {"url": "https://googlevideo.com/signed?x=1",
                 "http_headers": {"User-Agent": "agent"}}
-        with mock.patch("libs.music_bot.speak"):
+        with mock.patch("libs.music_bot.controller.speak"):
             with mock.patch.object(
                     music_bot.YouTubeSearcher, "get_stream_info",
                     return_value=info):
@@ -294,7 +299,7 @@ class TestMapMusicBotRemoteSeek(unittest.TestCase):
 
     def test_remote_seek_resolution_failure_clears_loading(self):
         bot = self._remote_bot()
-        with mock.patch("libs.music_bot.speak"):
+        with mock.patch("libs.music_bot.controller.speak"):
             with mock.patch.object(
                     music_bot.YouTubeSearcher, "get_stream_info",
                     return_value=None):
@@ -305,6 +310,44 @@ class TestMapMusicBotRemoteSeek(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertFalse(bot.is_loading_stream)
+
+    def test_remote_seek_reuses_live_signed_url_without_resolution(self):
+        # A seek while the streamer holds a direct signed URL + headers must
+        # restart straight from them - no yt-dlp worker round trip - so the
+        # seek is fast. Resolution never runs and no worker thread is spawned.
+        bot = self._remote_bot()
+        bot.streamer = FakeStreamer(
+            audio_url="https://rr1.googlevideo.com/videoplayback?expire=999",
+            http_headers={"Authorization": "Bearer live"},
+        )
+        results = []
+
+        def fake_start(audio_url, title, playback_generation=None,
+                       http_headers=None, canonical_url=None,
+                       start_offset=0.0, start_paused=False):
+            results.append({
+                "url": audio_url,
+                "title": title,
+                "canonical_url": canonical_url,
+                "start_offset": start_offset,
+                "http_headers": http_headers,
+            })
+
+        bot._start_youtube_stream = fake_start
+        bot.game = SimpleNamespace(put=lambda fn: fn())
+        with mock.patch("libs.music_bot.controller.speak"):
+            with mock.patch("libs.music_bot.controller.threading.Thread",
+                            side_effect=AssertionError("worker must not spawn")):
+                bot.seek_by(-10)
+        # Fast path is synchronous - results are already there, no thread wait.
+        self.assertEqual(len(results), 1)
+        result = results[0]
+        self.assertEqual(result["url"],
+                         "https://rr1.googlevideo.com/videoplayback?expire=999")
+        self.assertEqual(result["http_headers"], {"Authorization": "Bearer live"})
+        self.assertEqual(result["canonical_url"],
+                         "https://www.youtube.com/watch?v=abc")
+        self.assertEqual(result["start_offset"], 90.0)
 
 
 class FakeMusicBot:

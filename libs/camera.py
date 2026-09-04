@@ -8,7 +8,7 @@ def _music_water_sources(game):
     """Raw OpenAL sources of the private music bot and every active jukebox.
 
     The music bot's streaming path and jukebox playback create their sources
-    with ``context.gen_source()`` (music_bot.py / jukebox.py), so the
+    with ``context.gen_source()`` (music_bot package / jukebox.py), so the
     soundgroup/unbound registries the water filter sweeps never see them.
     While the listener is submerged these must be filtered explicitly;
     songs that start mid-dive inherit the active filter at creation time.

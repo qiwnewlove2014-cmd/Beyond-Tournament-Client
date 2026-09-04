@@ -17,7 +17,7 @@ CLIENT_ROOT = Path(__file__).resolve().parents[1]
 if str(CLIENT_ROOT) not in sys.path:
     sys.path.insert(0, str(CLIENT_ROOT))
 
-from libs.music_downloader import MusicDownloadManager  # noqa: E402
+from libs.music_bot.music_downloader import MusicDownloadManager  # noqa: E402
 
 
 # A short, stable public video keeps the live smoke test fast while still

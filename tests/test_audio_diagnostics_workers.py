@@ -189,10 +189,10 @@ class WorkerDiagnosticTests(unittest.TestCase):
         stream._play_all = first_play
         stream._route_aligned_network_frame = step("route", 0)
         stream._cleanup = step("cleanup", 0)
-        with patch("libs.music_bot.FFMPEG_PATH", "never-executed"), \
+        with patch("libs.music_bot.streaming.FFMPEG_PATH", "never-executed"), \
              patch("libs.music_bot.YouTubeSearcher.get_stream_info", side_effect=step(
                  "resolve", .025, {"url": "https://example.invalid/private", "http_headers": {}})), \
-             patch("libs.music_bot.subprocess.Popen", side_effect=step("launch", .01, process)) as popen:
+             patch("libs.music_bot.streaming.subprocess.Popen", side_effect=step("launch", .01, process)) as popen:
             self.in_worker(stream.run)
         self.assertEqual(order, ["resolve", "buffers", "launch"] + ["read", "queue"] * 5
                          + ["spatial", "play", "route", "cleanup"])

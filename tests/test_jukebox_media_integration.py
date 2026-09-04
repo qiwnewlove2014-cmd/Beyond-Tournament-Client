@@ -40,12 +40,12 @@ class JukeboxMediaIntegrationTests(unittest.TestCase):
                                poll=lambda: exit_code, kill=Mock(), wait=Mock())
 
     def run_stream(self, stream, *, resolve=None, processes=None):
-        with patch("libs.music_bot.FFMPEG_PATH", "never-executed"), \
+        with patch("libs.music_bot.streaming.FFMPEG_PATH", "never-executed"), \
              patch.object(YouTubeSearcher, "get_stream_info", side_effect=resolve or (lambda *a, **kw: media())) as resolver, \
-             patch("libs.music_bot.subprocess.Popen", side_effect=processes or [self.process()]) as launch, \
-             patch("libs.music_bot.time.monotonic", side_effect=lambda: self.now), \
-             patch("libs.music_bot.time.sleep") as sleep, \
-             patch("libs.music_bot.logger.log"), patch("libs.music_bot.speak") as speak:
+             patch("libs.music_bot.streaming.subprocess.Popen", side_effect=processes or [self.process()]) as launch, \
+             patch("libs.music_bot.streaming.time.monotonic", side_effect=lambda: self.now), \
+             patch("libs.music_bot.streaming.time.sleep") as sleep, \
+             patch("libs.music_bot.streaming.logger.log"), patch("libs.music_bot.streaming.speak") as speak:
             stream.run()
         return resolver, launch, sleep, speak
 

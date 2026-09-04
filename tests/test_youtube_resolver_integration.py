@@ -36,9 +36,9 @@ class ResolverIntegrationTests(unittest.TestCase):
             stream.running = False
             self.assertTrue(cancelled())
             return {"url": "https://media.invalid/audio", "http_headers": {}}
-        with patch("libs.music_bot.FFMPEG_PATH", "not-executed"), \
+        with patch("libs.music_bot.streaming.FFMPEG_PATH", "not-executed"), \
              patch.object(YouTubeSearcher, "get_stream_info", side_effect=resolve), \
-             patch("libs.music_bot.subprocess.Popen") as launch:
+             patch("libs.music_bot.streaming.subprocess.Popen") as launch:
             stream.run()
         launch.assert_not_called()
         stream._init_buffer_pool.assert_not_called()
@@ -48,9 +48,9 @@ class ResolverIntegrationTests(unittest.TestCase):
 
     def test_resolve_failure_does_not_launch_ffmpeg_with_empty_input(self):
         stream = self.stream()
-        with patch("libs.music_bot.FFMPEG_PATH", "not-executed"), \
+        with patch("libs.music_bot.streaming.FFMPEG_PATH", "not-executed"), \
              patch.object(YouTubeSearcher, "get_stream_info", return_value=None), \
-             patch("libs.music_bot.subprocess.Popen") as launch:
+             patch("libs.music_bot.streaming.subprocess.Popen") as launch:
             stream.run()
         launch.assert_not_called()
         stream._init_buffer_pool.assert_not_called()
@@ -71,10 +71,10 @@ class ResolverIntegrationTests(unittest.TestCase):
         def launch(*args, **kwargs):
             process.stderr.seek(0)
             return process
-        with patch("libs.music_bot.FFMPEG_PATH", "not-executed"), \
+        with patch("libs.music_bot.streaming.FFMPEG_PATH", "not-executed"), \
              patch.object(YouTubeSearcher, "get_stream_info", side_effect=resolve), \
-             patch("libs.music_bot.subprocess.Popen", side_effect=launch) as popen, \
-             patch("libs.music_bot.time.sleep"):
+             patch("libs.music_bot.streaming.subprocess.Popen", side_effect=launch) as popen, \
+             patch("libs.music_bot.streaming.time.sleep"):
             stream.run()
         self.assertEqual(len(calls), 2)
         self.assertEqual(popen.call_count, 2)
@@ -98,7 +98,7 @@ class ResolverIntegrationTests(unittest.TestCase):
         def thread(*, target, **kwargs):
             return SimpleNamespace(start=target)
         with patch.object(YouTubeSearcher, "get_stream_info", side_effect=resolve), \
-             patch("libs.music_bot.threading.Thread", side_effect=thread), patch("libs.speech.speak"):
+             patch("libs.music_bot.controller.threading.Thread", side_effect=thread), patch("libs.speech.speak"):
             bot._start_youtube_stream_from_search("old", "https://youtube.com/watch?v=fixture",
                                                  "https://media.invalid/stale")
         bot.game.put.assert_not_called()

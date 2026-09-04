@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 import tempfile
 import threading
 
-from libs.music_downloader import (
+from libs.music_bot.music_downloader import (
     MusicDownloadManager,
     SOURCE_FORMATS,
     filter_download_tracks,
@@ -96,7 +96,7 @@ class MusicDownloaderTests(unittest.TestCase):
         request = {"tracks": [], "label": "Song", "output_format": "mp3", "quality": "192"}
         with tempfile.TemporaryDirectory() as temp, \
                 patch(
-                    "libs.music_downloader.options.get",
+                    "libs.music_bot.music_downloader.options.get",
                     side_effect=lambda key, default=None: (
                         temp if key == "music_bot_download_folder" else default
                     ),
@@ -109,10 +109,10 @@ class MusicDownloaderTests(unittest.TestCase):
     def test_missing_saved_folder_is_cleared_then_selector_opens(self):
         missing = os.path.abspath("missing download folder")
         request = {"tracks": [], "label": "Song"}
-        with patch("libs.music_downloader.options.get", return_value=missing), \
-                patch("libs.music_downloader.options.set") as save_option, \
+        with patch("libs.music_bot.music_downloader.options.get", return_value=missing), \
+                patch("libs.music_bot.music_downloader.options.set") as save_option, \
                 patch.object(self.manager, "_choose_folder") as choose_folder, \
-                patch("libs.music_downloader.speak") as spoken:
+                patch("libs.music_bot.music_downloader.speak") as spoken:
             self.manager._use_saved_folder_or_choose(request)
         save_option.assert_called_once_with("music_bot_download_folder", "")
         choose_folder.assert_called_once_with(request)
@@ -120,8 +120,8 @@ class MusicDownloaderTests(unittest.TestCase):
 
     def test_no_saved_folder_preserves_per_download_selector_fallback(self):
         request = {"tracks": [], "label": "Song"}
-        with patch("libs.music_downloader.options.get", return_value=""), \
-                patch("libs.music_downloader.options.set") as save_option, \
+        with patch("libs.music_bot.music_downloader.options.get", return_value=""), \
+                patch("libs.music_bot.music_downloader.options.set") as save_option, \
                 patch.object(self.manager, "_choose_folder") as choose_folder:
             self.manager._use_saved_folder_or_choose(request)
         save_option.assert_not_called()
@@ -129,8 +129,8 @@ class MusicDownloaderTests(unittest.TestCase):
 
     def test_explicit_folder_choice_is_persisted_and_can_be_cleared(self):
         with tempfile.TemporaryDirectory() as temp, \
-                patch("libs.music_downloader.options.set") as save_option, \
-                patch("libs.music_downloader.speak"):
+                patch("libs.music_bot.music_downloader.options.set") as save_option, \
+                patch("libs.music_bot.music_downloader.speak"):
             self.manager._accept_default_folder(temp)
             save_option.assert_called_once_with(
                 "music_bot_download_folder",
@@ -142,9 +142,9 @@ class MusicDownloaderTests(unittest.TestCase):
 
     def test_active_download_blocks_default_folder_changes(self):
         with patch.object(self.manager, "is_active", return_value=True), \
-                patch("libs.music_downloader.options.set") as save_option, \
+                patch("libs.music_bot.music_downloader.options.set") as save_option, \
                 patch.object(self.manager, "_open_folder_selector") as open_selector, \
-                patch("libs.music_downloader.speak"):
+                patch("libs.music_bot.music_downloader.speak"):
             self.manager.choose_default_folder()
             self.manager.clear_default_folder()
         save_option.assert_not_called()
@@ -157,7 +157,7 @@ class MusicDownloaderTests(unittest.TestCase):
             "output_format": "m4a", "quality": "192",
         }
         fake_module = SimpleNamespace(YoutubeDL=FakeYoutubeDL)
-        with patch.dict(sys.modules, {"yt_dlp": fake_module}), patch("libs.music_downloader.speak") as spoken:
+        with patch.dict(sys.modules, {"yt_dlp": fake_module}), patch("libs.music_bot.music_downloader.speak") as spoken:
             self.manager._run_download(request, os.path.abspath("music"))
         self.assertEqual(len(FakeYoutubeDL.instances), 1)
         self.assertTrue(FakeYoutubeDL.instances[0].options["noplaylist"])
@@ -176,7 +176,7 @@ class MusicDownloaderTests(unittest.TestCase):
             "output_format": "ogg", "quality": "128",
         }
         fake_module = SimpleNamespace(YoutubeDL=FakeYoutubeDL)
-        with patch.dict(sys.modules, {"yt_dlp": fake_module}), patch("libs.music_downloader.speak"):
+        with patch.dict(sys.modules, {"yt_dlp": fake_module}), patch("libs.music_bot.music_downloader.speak"):
             self.manager._run_download(request, os.path.abspath("music"))
         self.assertEqual(len(FakeYoutubeDL.instances), 2)
         self.assertTrue(all(instance.options["noplaylist"] for instance in FakeYoutubeDL.instances))
@@ -241,7 +241,7 @@ class MusicDownloaderTests(unittest.TestCase):
             "output_format": "mp3", "quality": "192",
         }
         self.manager._cancel_event.set()
-        with patch("libs.music_downloader.speak") as spoken:
+        with patch("libs.music_bot.music_downloader.speak") as spoken:
             self.manager._run_download(request, os.path.abspath("music"))
         self.sound.assert_called_once_with("ui/warn.ogg", cat="ui")
         self.assertIn("cancelled", spoken.call_args.args[0].lower())
@@ -254,8 +254,8 @@ class MusicDownloaderTests(unittest.TestCase):
         fake_thread = Mock()
         fake_thread.is_alive.return_value = False
         with tempfile.TemporaryDirectory() as folder, \
-                patch("libs.music_downloader.threading.Thread", return_value=fake_thread), \
-                patch("libs.music_downloader.speak"):
+                patch("libs.music_bot.music_downloader.threading.Thread", return_value=fake_thread), \
+                patch("libs.music_bot.music_downloader.speak"):
             self.manager._start(request, folder)
         fake_thread.start.assert_called_once_with()
         self.manager._progress_bar.create.assert_not_called()
@@ -283,7 +283,7 @@ class MusicDownloaderTests(unittest.TestCase):
             self.manager._progress_track_count = 4
             self.manager._track_progress = {1: 1.0}
             self.manager._progress_completed = 1
-        with patch("libs.music_downloader.time.monotonic", return_value=1.0):
+        with patch("libs.music_bot.music_downloader.time.monotonic", return_value=1.0):
             self.manager._progress_hook({
                 "status": "downloading",
                 "downloaded_bytes": 50,
@@ -333,7 +333,7 @@ class MusicDownloaderTests(unittest.TestCase):
         }
         fake_module = SimpleNamespace(YoutubeDL=ConcurrentYoutubeDL)
         with patch.dict(sys.modules, {"yt_dlp": fake_module}), \
-                patch("libs.music_downloader.speak") as spoken:
+                patch("libs.music_bot.music_downloader.speak") as spoken:
             self.manager._run_download(request, os.path.abspath("music"))
         self.assertEqual(ConcurrentYoutubeDL.maximum, 2)
         self.assertEqual(self.sound.call_count, 3)
@@ -351,7 +351,7 @@ class MusicDownloaderTests(unittest.TestCase):
         with self.manager._lock:
             self.manager._progress_track_index = 1
             self.manager._progress_track_count = 1
-        with patch("libs.music_downloader.time.monotonic", side_effect=(1.0, 1.01, 1.2)):
+        with patch("libs.music_bot.music_downloader.time.monotonic", side_effect=(1.0, 1.01, 1.2)):
             for downloaded in (10, 11, 12):
                 self.manager._progress_hook({
                     "status": "downloading",
@@ -370,7 +370,7 @@ class MusicDownloaderTests(unittest.TestCase):
         self.manager._progress_bar.destroy.assert_called_once_with()
 
     def test_music_bot_exposes_every_requested_download_source(self):
-        source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot" / "controller.py").read_text(encoding="utf-8")
         for label in (
             "Music Download Center", "Download Current Song", "Download Song",
             "Download All Favorites", "Download a Saved Playlist", "Download This Track",

@@ -1,7 +1,7 @@
 """Verify whether the music-bot mix path clips (causes the 'slightly broken'
 megaphone sound) by simulating the exact gain math the code applies.
 
-Path being simulated (client/libs/music_bot.py, AudioStreamer + LiveRelayStreamer):
+Path being simulated (client/libs/music_bot/streaming.py, AudioStreamer + LiveRelayStreamer):
     mono_data = music  (already scaled by volume/100 * duck)
     mono_data *= 0.75                       # music headroom
     mono_data += mic  * 0.85                # audioop.add

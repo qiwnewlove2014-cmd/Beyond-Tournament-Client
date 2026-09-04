@@ -9,6 +9,8 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import jukebox
+from libs.music_bot import streaming as mb_stream
+from libs.music_bot import controller as mb_ctrl
 
 
 class FakePlayer:
@@ -320,8 +322,8 @@ class TestAudioStreamerNetworkGuard(unittest.TestCase):
 
         with mock.patch.object(streamer, "_init_buffer_pool"), \
                 mock.patch.object(streamer, "_read_prebuffer", side_effect=cancel_during_prebuffer), \
-                mock.patch("libs.music_bot.subprocess.Popen", return_value=Process()), \
-                mock.patch("libs.music_bot.speak") as speak_mock:
+                mock.patch("libs.music_bot.streaming.subprocess.Popen", return_value=Process()), \
+                mock.patch("libs.music_bot.streaming.speak") as speak_mock:
             streamer.run()
         speak_mock.assert_not_called()
         self.assertIsNone(streamer.failure_reason)
@@ -364,7 +366,7 @@ class TestAudioStreamerNetworkGuard(unittest.TestCase):
         )
         with mock.patch.object(fresh, "_init_buffer_pool"), \
                 mock.patch.object(fresh, "_read_prebuffer", side_effect=lambda: fake_prebuffer(fresh)), \
-                mock.patch("libs.music_bot.subprocess.Popen", side_effect=fake_popen):
+                mock.patch("libs.music_bot.streaming.subprocess.Popen", side_effect=fake_popen):
             fresh.run()
         self.assertFalse(any("-ss" in c for c in captured_cmds),
                          "fresh song must not seek: %s" % captured_cmds)
@@ -378,7 +380,7 @@ class TestAudioStreamerNetworkGuard(unittest.TestCase):
         )
         with mock.patch.object(resume, "_init_buffer_pool"), \
                 mock.patch.object(resume, "_read_prebuffer", side_effect=lambda: fake_prebuffer(resume)), \
-                mock.patch("libs.music_bot.subprocess.Popen", side_effect=fake_popen):
+                mock.patch("libs.music_bot.streaming.subprocess.Popen", side_effect=fake_popen):
             resume.run()
         self.assertTrue(any("-ss" in c for c in captured_cmds),
                         "resume must seek: %s" % captured_cmds)
@@ -1317,10 +1319,10 @@ class TestAudioStreamerFailureSurfacing(unittest.TestCase):
             start_offset=start_offset,
             http_headers=http_headers,
         )
-        with mock.patch.object(mb, "subprocess") as sp, \
+        with mock.patch.object(mb_stream, "subprocess") as sp, \
                 mock.patch.object(streamer, "_init_buffer_pool") as init_pool, \
-                mock.patch.object(mb, "speak") as speak, \
-                mock.patch.object(mb.logger, "log") as log_line:
+                mock.patch.object(mb_stream, "speak") as speak, \
+                mock.patch.object(mb_stream.logger, "log") as log_line:
             sp.Popen = mock.Mock(return_value=proc)
             streamer.run()
         command = sp.Popen.call_args.args[0]
@@ -1491,10 +1493,10 @@ class TestAudioStreamerFailureSurfacing(unittest.TestCase):
             bot=None,
             http_headers={"User-Agent": "Exact Agent"},
         )
-        with mock.patch.object(mb.subprocess, "Popen", side_effect=[denied, playable]) as popen, \
-                mock.patch.object(mb.time, "sleep"), \
-                mock.patch.object(mb, "speak"), \
-                mock.patch.object(mb.logger, "log"):
+        with mock.patch.object(mb_stream.subprocess, "Popen", side_effect=[denied, playable]) as popen, \
+                mock.patch.object(mb_stream.time, "sleep"), \
+                mock.patch.object(mb_stream, "speak"), \
+                mock.patch.object(mb_stream.logger, "log"):
             streamer.run()
 
         self.assertEqual(popen.call_count, 2)
@@ -1617,7 +1619,7 @@ class TestMusicBotStreamMetadata(unittest.TestCase):
         bot._ensure_live_relay_streamer = lambda: None
         bot._advance_track_queue = lambda: False
 
-        with mock.patch.object(mb, "speak") as speak:
+        with mock.patch.object(mb_ctrl, "speak") as speak:
             bot.loop()
         speak.assert_called_once_with("Could not load track.")
 
@@ -1810,10 +1812,10 @@ class TestAudioStreamerMidSongDeath(unittest.TestCase):
             FakeSource(),
             bot=None,
         )
-        with mock.patch.object(mb.subprocess, "Popen", return_value=proc) as popen, \
-                mock.patch.object(mb.time, "sleep"), \
-                mock.patch.object(mb, "speak"), \
-                mock.patch.object(mb.logger, "log"):
+        with mock.patch.object(mb_stream.subprocess, "Popen", return_value=proc) as popen, \
+                mock.patch.object(mb_stream.time, "sleep"), \
+                mock.patch.object(mb_stream, "speak"), \
+                mock.patch.object(mb_stream.logger, "log"):
             streamer.run()
         return streamer
 

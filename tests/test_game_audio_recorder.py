@@ -104,7 +104,7 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
             manager.close()
 
     def test_dynamic_menu_uses_separate_recording_action(self):
-        source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot" / "controller.py").read_text(encoding="utf-8")
         self.assertIn("(\"Record Audio\", go_record_audio)", source)
         self.assertIn("def _open_recording_menu(self):", source)
         self.assertIn("(\"Set Recording Folder\", self.audio_recorder.choose_folder)", source)

@@ -287,7 +287,7 @@ class TestMusicBotDeadlinePacing(unittest.TestCase):
 
         streamer._send_to_network_actual = capture
         with mock.patch.object(
-            music_bot.time, "perf_counter", side_effect=(1.000, 1.021, 1.041)
+            music_bot.streaming.time, "perf_counter", side_effect=(1.000, 1.021, 1.041)
         ):
             streamer._network_sender_loop()
 

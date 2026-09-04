@@ -11,10 +11,10 @@ import threading
 import time
 from urllib.parse import urlparse
 
-from . import logger
-from . import options
-from .accessible_progress import AccessibleProgressBar
-from .speech import speak
+from .. import logger
+from .. import options
+from ..accessible_progress import AccessibleProgressBar
+from ..speech import speak
 
 
 FORMAT_CHOICES = (
@@ -266,7 +266,7 @@ class MusicDownloadManager:
         self._show_format_menu(request)
 
     def _show_format_menu(self, request):
-        from . import menu as menu_mod, menus
+        from .. import menu as menu_mod, menus
         parent = self._parent_provider()
         if not parent:
             return
@@ -288,7 +288,7 @@ class MusicDownloadManager:
         parent.add_substate(menu)
 
     def _show_quality_menu(self, request):
-        from . import menu as menu_mod, menus
+        from .. import menu as menu_mod, menus
         parent = self._parent_provider()
         if not parent:
             return
