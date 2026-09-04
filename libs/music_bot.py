@@ -83,6 +83,26 @@ DEFAULT_MAP_MUSIC = {
 FALLBACK_PLAYLIST = ["1.ogg", "2.ogg", "3.ogg", "4.ogg", "5.ogg", "6.ogg", "7.ogg", "8.ogg", "9.ogg"]
 
 
+def format_track_position(seconds):
+    """Render a track position in seconds as m:ss for speech output."""
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def clamp_seek_position(position, delta):
+    """Clamp a seek target to the valid range [0, inf).
+
+    Returns None when the requested jump is a no-op (the stream is already
+    sitting at the very start and the jump would only move backward).  A jump
+    from a positive position back to 0 is legal: it restarts the intro.
+    """
+    position = max(0.0, float(position or 0.0))
+    target = max(0.0, position + float(delta))
+    if target <= 0.0 and position <= 0.0:
+        return None
+    return target
+
+
 class YouTubeSearcher:
     """Search YouTube using yt-dlp and extract audio stream URLs."""
 
@@ -217,7 +237,7 @@ class AudioStreamer(threading.Thread):
     def __init__(self, game, audio_url, source, volume=50, bot=None, channels=2,
                  spatial_pair=None, start_offset=0.0, http_headers=None,
                  start_offset_received_at=None, canonical_url=None, media_cache=None,
-                 timeline_anchor=None):
+                 timeline_anchor=None, start_paused=False):
         super().__init__(daemon=True)
         self.game = game
         self.bot = bot
@@ -271,7 +291,9 @@ class AudioStreamer(threading.Thread):
             self.channels = int(channels)
         self.BUFFER_SIZE = self.SAMPLES_PER_BUFFER * self.channels * 2
         self.running = True
-        self.paused = False
+        # A stream can be created already paused (a seek performed while the
+        # bot was paused): its pre-buffered head stays silent until resume.
+        self.paused = bool(start_paused)
         self._lock = threading.Lock()
         self._cleanup_lock = threading.Lock()
         self._cleaned_up = False
@@ -1054,6 +1076,7 @@ class AudioStreamer(threading.Thread):
             cmd.extend([
                 '-re',  # Read/decode at media rate; network and OpenAL consume 20 ms frames.
                 '-i', target_url,
+                '-vn',  # Video containers (mp4/mkv/...) must decode audio only.
                 '-f', 's16le',
                 '-ar', '48000',
                 '-ac', str(self.channels),
@@ -1202,13 +1225,17 @@ class AudioStreamer(threading.Thread):
                 if not self.running:
                     self._cleanup()
                     return
-            if self.spatial_pair:
-                self._diagnostic_startup_call("direct.spatial", self._update_spatial_gain)
-            self._diagnostic_startup_call("direct.first_play", self._play_all)
-            self.ready_event.set()
-            # Frame zero leaves at the same instant local OpenAL begins frame
-            # zero. Subsequent decoded frames advance this fixed delay line.
-            self._route_aligned_network_frame()
+            if not self.paused:
+                if self.spatial_pair:
+                    self._diagnostic_startup_call("direct.spatial", self._update_spatial_gain)
+                self._diagnostic_startup_call("direct.first_play", self._play_all)
+                self.ready_event.set()
+                # Frame zero leaves at the same instant local OpenAL begins
+                # frame zero. Subsequent decoded frames advance this fixed
+                # delay line.
+                self._route_aligned_network_frame()
+            # A stream created paused (seek while paused) holds its prebuffer
+            # silently; set_pause(False) starts it and announces it later.
 
         # === Streaming loop ===
         eof = False
@@ -1408,6 +1435,9 @@ class AudioStreamer(threading.Thread):
                     self.source.pause()
                 else:
                     self.source.play()
+                    # A stream created paused never set ready at prebuffer
+                    # (nothing is audible yet) — announce on first resume.
+                    self.ready_event.set()
             except Exception:
                 pass
 
@@ -2412,6 +2442,8 @@ class MapMusicBot:
             ("Personal Music Feed: Ctrl left bracket for previous; Ctrl right bracket for next", lambda: None),
             (f"{volume_down_key}: Decrease volume", lambda: None),
             (f"{volume_up_key}: Increase volume", lambda: None),
+            (f"Ctrl + {volume_down_key}: Rewind 10 seconds (add Shift for 60)", lambda: None),
+            (f"Ctrl + {volume_up_key}: Fast-forward 10 seconds (add Shift for 60)", lambda: None),
             ("Back", go_back)
         ]
         m.add_items(items)
@@ -2432,10 +2464,20 @@ class MapMusicBot:
                 root.withdraw()  # Hide the main tk window
                 root.attributes("-topmost", True)  # Bring file dialog to front
                 
+                # Audio AND video containers: the music bot decodes whatever
+                # ffmpeg can demux (movies, music videos, podcasts...).
+                media_types = (
+                    "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.opus *.wma *.mka "
+                    "*.mp4 *.mkv *.webm *.mov *.m4v *.avi *.mpg *.mpeg *.wmv "
+                    "*.flv *.ts *.m2ts *.mts *.3gp *.3g2 *.ogv *.vob *.rmvb "
+                    "*.asf *.f4v *.aiff *.ape *.mid *.midi"
+                )
                 filepath = filedialog.askopenfilename(
-                    title="Select Audio File",
+                    title="Select Audio or Video File",
                     filetypes=[
-                        ("Audio Files", "*.ogg *.mp3 *.wav *.flac"),
+                        ("All Media Files", media_types),
+                        ("Audio Files", "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.opus *.wma *.mka *.aiff *.ape *.mid *.midi"),
+                        ("Video Files", "*.mp4 *.mkv *.webm *.mov *.m4v *.avi *.mpg *.mpeg *.wmv *.flv *.ts *.m2ts *.mts *.3gp *.3g2 *.ogv *.vob *.rmvb *.asf *.f4v"),
                         ("All Files", "*.*")
                     ]
                 )
@@ -2721,8 +2763,14 @@ class MapMusicBot:
         t.start()
 
     def _start_youtube_stream(self, audio_url, title, playback_generation=None,
-                              http_headers=None, canonical_url=None):
-        """Start streaming from YouTube audio URL"""
+                              http_headers=None, canonical_url=None,
+                              start_offset=0.0, start_paused=False):
+        """Start streaming from a YouTube audio URL or a local media file.
+
+        start_offset seeks the new decode head to a content position in
+        seconds (ffmpeg input seek, like the jukebox mid-song path);
+        start_paused keeps the pre-buffered head silent until resume.
+        """
         if (playback_generation is not None
                 and not self._is_current_playback_generation(playback_generation)):
             return
@@ -2736,14 +2784,106 @@ class MapMusicBot:
             self.game, audio_url, self.stream_source, self.volume, bot=self,
             http_headers=http_headers,
             canonical_url=canonical_url,
+            start_offset=start_offset,
+            start_paused=start_paused,
         )
         self.streamer.start()
 
         self.mode = "youtube"
         self.playing = True
-        self.paused = False
+        # A seek performed while paused stays paused: the new streamer starts
+        # silent and only becomes audible when the bot is resumed.
+        self.paused = bool(start_paused)
         self.current_title = title
         self._stream_announced = False
+
+    # === Seeking (fast-forward / rewind) ===
+
+    def track_position(self):
+        """Approximate audible position (seconds) of the current stream."""
+        streamer = self.streamer
+        if streamer is None or not streamer.is_alive():
+            return None
+        try:
+            return max(0.0, float(streamer.content_position() or 0.0))
+        except Exception:
+            return None
+
+    def seek_by(self, delta):
+        """Seek the current Music Bot stream by delta seconds (negative = backward).
+
+        Works for both YouTube links and local files: the current track is
+        restarted at the target position via an ffmpeg input seek, so the
+        same code path serves movies, video files and songs.  A seek while
+        paused keeps the new stream paused.
+        """
+        if self.is_loading_stream:
+            speak("Please wait, the track is still loading.")
+            return
+        if not self.playing or self.streamer is None or not self.streamer.is_alive():
+            speak("No active Music Bot track to seek.")
+            return
+        position = self.track_position()
+        if position is None:
+            speak("No active Music Bot track to seek.")
+            return
+        target = clamp_seek_position(position, delta)
+        if target is None:
+            speak("Already at the start of the track.")
+            return
+        self._seek_restart(target)
+
+    def _seek_restart(self, position):
+        """Restart the current track at an absolute position (seconds)."""
+        title = self.current_title
+        target = self.current_target
+        source = self.current_source
+        was_paused = bool(self.paused)
+        if not title or not target:
+            speak("Nothing to seek.")
+            return
+        if source == "local" and not os.path.exists(target):
+            speak("File not found.")
+            return
+
+        playback_generation = self._begin_playback_generation()
+        speak(f"Seeking to {format_track_position(position)}.")
+        # Hard cut (no fade) so the new decode head starts at the target
+        # position immediately; the track queue and feed survive the seek.
+        self.stop(clear_queue=False, clear_feed=False, invalidate_pending=False)
+        self.is_loading_stream = True
+
+        if source == "local":
+            # Local files restart directly — no URL resolution needed.
+            self._start_youtube_stream(
+                target, title, playback_generation,
+                start_offset=position,
+                start_paused=was_paused,
+            )
+            return
+
+        # Remote (YouTube) tracks re-resolve so the seeked range request uses
+        # a fresh signed stream URL (an expired googlevideo URL 403s forever).
+        def do_seek():
+            stream_info = YouTubeSearcher.get_stream_info(
+                target,
+                cancelled=lambda: not self._is_current_playback_generation(playback_generation))
+            if not self._is_current_playback_generation(playback_generation):
+                return
+            if not stream_info:
+                if self._is_current_playback_generation(playback_generation):
+                    speak("Failed to get audio stream.")
+                    self.is_loading_stream = False
+                return
+            self.game.put(lambda: self._start_youtube_stream(
+                stream_info['url'], title, playback_generation,
+                http_headers=stream_info.get('http_headers'),
+                canonical_url=target,
+                start_offset=position,
+                start_paused=was_paused,
+            ))
+
+        threading.Thread(target=do_seek, daemon=True).start()
 
     def has_last_track(self):
         """Check if any track has been played and is available for replay"""

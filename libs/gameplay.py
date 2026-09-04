@@ -220,8 +220,8 @@ class Gameplay(state.State):
             # Megaphone Settings moved to Builder Menu (press B)
             # === Music Bot Controls ===
             kc.get("music_bot_toggle", pygame.K_m): self.music_bot_control,
-            kc.get("music_bot_vol_down", pygame.K_F9): lambda mod: self.music_bot_volume(-10),
-            kc.get("music_bot_vol_up", pygame.K_F10): lambda mod: self.music_bot_volume(10),
+            kc.get("music_bot_vol_down", pygame.K_F9): lambda mod: self.music_bot_volume_key(-1, mod),
+            kc.get("music_bot_vol_up", pygame.K_F10): lambda mod: self.music_bot_volume_key(1, mod),
             kc.get("guitar_play", pygame.K_u): self.toggle_guitar_mode,
             kc.get("raise_shield", pygame.K_s): self.start_raise_shield,
         }
@@ -1753,6 +1753,22 @@ class Gameplay(state.State):
         new_vol = max(0, min(100, self.music_bot.volume + delta))
         self.music_bot.set_volume(new_vol)
         speak(f"Music Bot volume: {new_vol} percent.")
+
+    def music_bot_volume_key(self, direction, mod=0):
+        """Music Bot F9/F10 keys: plain press changes volume (10% steps).
+        Ctrl+F9/F10 seek the active track by 10 seconds (rewind/forward);
+        add Shift for 60-second jumps. Works for YouTube links and local
+        audio/video files alike.
+        """
+        if not hasattr(self, 'music_bot') or not self.music_bot:
+            return
+        if not self._can_use_music_bot():
+            return
+        if mod & pygame.KMOD_CTRL:
+            step = 60 if (mod & pygame.KMOD_SHIFT) else 10
+            self.music_bot.seek_by(direction * step)
+            return
+        self.music_bot_volume(direction * 10)
 
     def reset_pitch(self, mod):
         if mod & pygame.KMOD_CTRL:
