@@ -47,6 +47,22 @@ class Entity(Object):
     def player(self):
         return self._player
 
+    def _party_sync_direct_volume(self):
+        """Live gain for a Party Sync guest feed.
+
+        Reads the guest's own Volume Mixer "music" slider every frame so they
+        can lower or raise the host's music at any moment (the feed is a raw
+        source the mixer cannot reach by itself). Falls back to the volume
+        captured when the session started if the audio manager is unavailable.
+        """
+        try:
+            vol = self.game.audio_mngr.volume_categories.get("music", [100])[0]
+        except Exception:
+            vol = None
+        if vol is None:
+            vol = getattr(self, "_party_sync_direct_gain", 1.0) * 100.0
+        return max(0.0, float(vol) / 100.0)
+
     @property
     def water_muffling(self):
         # Maps self.depth (0.0 to 1.0) to GAINHF (0.35 at surface down to
@@ -173,7 +189,10 @@ class Entity(Object):
         if self.player:
             try:
                 self.vc_source.position = (self.x, self.y, self.z)
-                self.music_source.position = (self.x, self.y, self.z)
+                # Party Sync guest: the host's music arrives as a direct
+                # non-positional "headphones" feed, never placed in the world.
+                if not getattr(self, "_party_sync_direct", False):
+                    self.music_source.position = (self.x, self.y, self.z)
                 if not self.is_user:
                     dist = movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position)
                     max_dist = self.game.audio_mngr.max_distance
@@ -186,14 +205,17 @@ class Entity(Object):
                         gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
                     self.vc_source.gain = gain
 
-                    music_max = 50.0
-                    if dist <= min_dist:
-                        music_gain = 1.0
-                    elif dist >= music_max:
-                        music_gain = 0.0
+                    if getattr(self, "_party_sync_direct", False):
+                        self.music_source.gain = self._party_sync_direct_volume()
                     else:
-                        music_gain = 1.0 - ((dist - min_dist) / (music_max - min_dist))
-                    self.music_source.gain = music_gain
+                        music_max = 50.0
+                        if dist <= min_dist:
+                            music_gain = 1.0
+                        elif dist >= music_max:
+                            music_gain = 0.0
+                        else:
+                            music_gain = 1.0 - ((dist - min_dist) / (music_max - min_dist))
+                        self.music_source.gain = music_gain
             except (cyal.exceptions.InvalidAlValueError, cyal.exceptions.InvalidOperationError) as e:
                 log(f"[ENTITY.AUDIO] Voice position update skipped for {self.name!r}: {e}")
         try:
@@ -346,13 +368,18 @@ class Entity(Object):
             with self.soundgroup.parent.context.batch():
                 if not self.is_user:
                     self.vc_source.position = (self.x, self.y, self.z)
-                    self.music_source.position = (self.x, self.y, self.z)
+                    # Party Sync guest: direct non-positional host-music feed.
+                    if not getattr(self, "_party_sync_direct", False):
+                        self.music_source.position = (self.x, self.y, self.z)
                     dist = movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position)
                     max_dist = self.game.audio_mngr.max_distance
                     min_dist = 5.0
                     if getattr(self, "muted_by_spectator", False):
                         gain = 0.0
                         music_gain = 0.0
+                    elif getattr(self, "_party_sync_direct", False):
+                        gain = 1.0
+                        music_gain = self._party_sync_direct_volume()
                     else:
                         if dist <= min_dist:
                             gain = 1.0
@@ -422,7 +449,13 @@ class Entity(Object):
                             # real audio and can leave the source stopped/silent after a
                             # broadcaster stop/restart.  The window mirrors the session
                             # reset gap used by MusicCompression.
-                            if time.time() - getattr(self, '_music_last_recv', 0) < 2.0:  # Increased from 0.5s to prevent silent buffer interference
+                            # Party Sync direct mode never queues the MONO16
+                            # keep-alive: a source holding a mono idle buffer
+                            # rejects the STEREO16 frames with
+                            # AL_INVALID_OPERATION, and MusicCompression resets
+                            # sessions itself.
+                            if (time.time() - getattr(self, '_music_last_recv', 0) < 2.0
+                                    or getattr(self, '_party_sync_direct', False)):
                                 pass
                             else:
                                 buffer = self.game.audio_mngr.context.gen_buffer()

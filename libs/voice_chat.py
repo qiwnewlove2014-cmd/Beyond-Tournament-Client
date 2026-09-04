@@ -1155,6 +1155,16 @@ class MusicCompression(threading.Thread):
             self.decoder = OpusDecoder()
             self.decoder.set_channels(1)
             self.decoder.set_sampling_frequency(48000)
+            # Party Sync guests receive TRUE STEREO frames from the host; the
+            # decoder/source format follows the entity's direct-mode flag.
+            self._stereo = False
+            # Format-switch coordination (see set_output_stereo): the decoder
+            # generation lets _play_music_frame drop frames decoded with a
+            # stale format, and the pending flag performs the source flush on
+            # the main thread exactly when the first new-format frame lands
+            # (the source may not even exist yet when the switch runs).
+            self._format_generation = 0
+            self._pending_format_flush = False
             self._has_started = False
             self._last_recv_time = None
             self._timeline_epoch = None
@@ -1198,6 +1208,63 @@ class MusicCompression(threading.Thread):
         if music_source is None:
             return
         self.put(lambda: self.recieve_actual(data, music_source, radio_source, channelID, gameplay))
+
+    def set_output_stereo(self, stereo):
+        """Switch this music feed between mono and true stereo output.
+
+        Called by the receive path when the entity enters/leaves Party Sync
+        direct mode. The decoder swap happens on the compression worker
+        (decode thread) and queued buffers are flushed on the main thread.
+        """
+        stereo = bool(stereo)
+        if getattr(self, "_stereo", False) == stereo:
+            return
+        self.put(lambda: self._switch_output_stereo(stereo))
+
+    def _switch_output_stereo(self, stereo):
+        self._stereo = stereo
+        self._format_generation += 1
+        self._pending_format_flush = True
+        try:
+            from pyogg import OpusDecoder
+            decoder = OpusDecoder()
+            decoder.set_channels(2 if stereo else 1)
+            decoder.set_sampling_frequency(48000)
+            self.decoder = decoder
+        except Exception:
+            return
+
+    def _flush_source(self, src):
+        """MAIN THREAD ONLY: empty a source that may hold old-format buffers.
+
+        OpenAL sources refuse to queue a buffer whose format differs from
+        buffers still queued (AL_INVALID_OPERATION). A source that never
+        played can hold the entity's MONO16 idle silence buffer, and
+        alSourceStop has NO effect on an INITIAL source, so
+        unqueue_buffers (processed-only) cannot remove it. The reliable way
+        to flush it is to play (buffers become processed), stop, then unqueue
+        everything. Verified against the bundled OpenAL: without play, the
+        stereo queue fails with Invalid Operation on every frame.
+        """
+        if src is None:
+            return
+        try:
+            src.gain = 0.0  # silent flush: never audibly click
+            src.play()
+            src.stop()
+            guard = 0
+            while getattr(src, 'buffers_processed', 0) > 0 and guard < 512:
+                src.unqueue_buffers()
+                guard += 1
+        except Exception:
+            pass
+        self._has_started = False
+        self._timeline_first_queued_seq = None
+        self._timeline_anchor_seq = None
+        self._timeline_anchor_time = None
+        self._timeline_epoch = None
+        self._timeline_last_received_seq = None
+        self._last_recv_time = None
 
     def recieve_timeline(self, data, music_source, radio_source, channelID,
                          gameplay, epoch, frame_seq):
@@ -1270,7 +1337,6 @@ class MusicCompression(threading.Thread):
         if music_source is None:
             return
 
-
         # Decode Opus packet OUTSIDE the batch lock to prevent GIL/OpenAL deadlocks!
         try:
             pcm = bytearray(self.decoder.decode(bytearray(data)))
@@ -1286,11 +1352,17 @@ class MusicCompression(threading.Thread):
         # stays on this worker thread. _dispatch_timeline_events is deferred
         # to the main thread as well, keeping the _timeline_pending state
         # single-threaded with this method.
+        generation = self._format_generation
+        stereo = self._stereo
         self.game.audio_mngr.defer_audio(
-            lambda: self._play_music_frame(music_source, pcm, epoch, frame_seq, gameplay)
+            lambda: self._play_music_frame(
+                music_source, pcm, epoch, frame_seq, gameplay,
+                generation=generation, stereo=stereo,
+            )
         )
 
-    def _play_music_frame(self, music_source, pcm, epoch, frame_seq, gameplay):
+    def _play_music_frame(self, music_source, pcm, epoch, frame_seq, gameplay,
+                          generation=None, stereo=None):
         """MAIN THREAD ONLY: session recovery + buffer queue/play for one
         decoded music-bot frame. Runs via AudioManager.defer_audio() inside
         the main thread's frame batch; the batch below nests safely because
@@ -1299,6 +1371,18 @@ class MusicCompression(threading.Thread):
             with self.game.audio_mngr.context.batch():
                 if gameplay.player.dead:
                     return
+
+                # A frame decoded before a mono/stereo format switch carries
+                # the old format; drop it so it can never queue beside
+                # new-format buffers (OpenAL rejects mixed formats with
+                # AL_INVALID_OPERATION).
+                if generation is not None and generation != self._format_generation:
+                    return
+                if getattr(self, "_pending_format_flush", False):
+                    self._pending_format_flush = False
+                    self._flush_source(music_source)
+                if stereo is None:
+                    stereo = self._stereo
 
                 now = time.time()
                 timeline_changed = (
@@ -1394,7 +1478,11 @@ class MusicCompression(threading.Thread):
 
                 # Fill and queue
                 try:
-                    buf.set_data(bytes(pcm), sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                    buf.set_data(
+                        bytes(pcm), sample_rate=48000,
+                        format=(cyal.BufferFormat.STEREO16 if stereo
+                                else cyal.BufferFormat.MONO16),
+                    )
                     music_source.queue_buffers(buf)
                     if epoch is not None and self._timeline_first_queued_seq is None:
                         self._timeline_first_queued_seq = frame_seq

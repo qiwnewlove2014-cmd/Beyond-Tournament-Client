@@ -416,6 +416,17 @@ class EventHandeler:
         # Clear it here (on CHANNEL_MAP) so subsequent spawn_entity packets on
         # that same ordered channel rebuild only valid mappings for the new map.
         self.gameplay.voice_channels.clear()
+        # Party Sync sessions are map-scoped server-side (they end when the
+        # host or a guest leaves the map). A fresh map therefore always starts
+        # without a session: clear the mirror and stop any forced upload so a
+        # stale host flag cannot leak audio into the new map.
+        ps = getattr(self.gameplay, "party_sync", None)
+        if ps is not None:
+            ps.end_session()
+        bot = getattr(self.gameplay, "music_bot", None)
+        if bot is not None:
+            bot.party_sync_force_upload = False
+        self._party_sync_prompt_menu = None
         # Release preloaded instrument buffers and live voices from the previous
         # map so memory does not accumulate. Must run on the main thread because
         # reset() touches OpenAL sources/filters.
@@ -1748,6 +1759,10 @@ class EventHandeler:
                 # Stamp the last receive time so entity.loop() can avoid pushing
                 # silent keep-alive buffers that would interleave with real audio.
                 entity._music_last_recv = time.time()
+                if hasattr(entity.music_compression, "set_output_stereo"):
+                    entity.music_compression.set_output_stereo(
+                        bool(getattr(entity, "_party_sync_direct", False))
+                    )
                 try:
                     entity.music_compression.recieve(opus_data, music_src, None, entity_channel_id, self.gameplay)
                 except Exception as e:
@@ -1775,6 +1790,10 @@ class EventHandeler:
         if not getattr(entity, "music_compression", None):
             from .voice_chat import MusicCompression
             entity.music_compression = MusicCompression(self.game)
+        if hasattr(entity.music_compression, "set_output_stereo"):
+            entity.music_compression.set_output_stereo(
+                bool(getattr(entity, "_party_sync_direct", False))
+            )
         entity._music_last_recv = time.time()
         entity.music_compression.recieve_timeline(
             bytes(opus_data), music_src, None, entity_channel_id,
@@ -1789,7 +1808,275 @@ class EventHandeler:
     
     def has_radio_self(self, data):
         self.gameplay.player.has_radio = data["enable"]
-    
+
+    # ── Party Sync (private "listen together" sessions) ──────────────
+    # The server (libs/party_sync.ts) is authoritative: it runs the session,
+    # re-validates every step and gates the host's music relay to session
+    # guests only. These handlers only mirror the state for menus/prompts and
+    # keep the host's upload running while a session is active. Guests hear
+    # the host through the existing music-source receive leg (host
+    # voice_channel -> entity music_source), so no guest audio code is needed.
+
+    def _party_sync(self):
+        """Lazily create the PartySyncState mirror on the gameplay object."""
+        ps = getattr(self.gameplay, "party_sync", None)
+        if ps is None:
+            from .party_sync import PartySyncState
+            ps = PartySyncState()
+            self.gameplay.party_sync = ps
+        return ps
+
+    def _party_sync_own_name(self):
+        from . import options as _options
+        return _options.get("username", "")
+
+    def _party_sync_send(self, event, data=None):
+        self.game.network.send(
+            consts.CHANNEL_MISC, event, data if data is not None else {}
+        )
+
+    def _sync_party_sync_upload(self):
+        """While THIS client hosts a session its music bot must upload so the
+        guests hear it; any other state restores the normal toggle-only rule.
+        """
+        ps = self._party_sync()
+        bot = getattr(self.gameplay, "music_bot", None)
+        force = bool(bot) and ps.role == "host"
+        if bot is not None:
+            bot.party_sync_force_upload = force
+
+    def _sync_party_sync_direct_audio(self):
+        """Schedule (main thread) all Party Sync direct-to-ear audio modes.
+
+        1. Music (guest role): the host entity's music source stops being a
+           3D boombox and becomes a fixed, direct-to-ear feed.
+        2. Voice (any member): every OTHER member entity's voice source also
+           becomes direct-to-ear, so Party Sync doubles as a private
+           "team talk" room — members hear each other at any distance, and
+           leaving the session restores every source to positional behavior.
+        """
+        ps = self._party_sync()
+        target_voice = ps.host_voice_channel if ps.role == "guest" else None
+        in_session = getattr(ps, "role", None) in ("host", "guest")
+
+        def apply():
+            from .party_sync import (
+                clear_direct_mode,
+                clear_voice_direct_mode,
+                party_member_channels,
+                set_direct_mode,
+                set_voice_direct_mode,
+            )
+            gp = self.gameplay
+            vc = getattr(gp, "voice_channels", None) or {}
+            local_entity = getattr(gp, "player", None)
+            # 1) Music direct (existing guest rule).
+            enable_entity = vc.get(target_voice) if target_voice is not None else None
+            flagged = [
+                e for e in vc.values()
+                if e is not enable_entity and getattr(e, "_party_sync_direct", False)
+            ]
+            for e in flagged:
+                clear_direct_mode(e)
+            if enable_entity is not None:
+                try:
+                    music_vol = (
+                        gp.game.audio_mngr.volume_categories.get("music", [100])[0]
+                        / 100.0
+                    )
+                except Exception:
+                    music_vol = 1.0
+                set_direct_mode(enable_entity, music_vol)
+            # 2) Voice direct for every session member (except my own entity).
+            member_channels = party_member_channels(ps) if in_session else set()
+            for ch, e in list(vc.items()):
+                if e is local_entity:
+                    continue
+                if ch in member_channels:
+                    if not getattr(e, "_party_sync_voice_direct", False):
+                        set_voice_direct_mode(e)
+                elif getattr(e, "_party_sync_voice_direct", False):
+                    clear_voice_direct_mode(e)
+
+        self.game.put(apply)
+
+    def _close_party_sync_prompt(self):
+        """Remove an open invitation prompt menu, if any."""
+        m = getattr(self, "_party_sync_prompt_menu", None)
+        if m is None:
+            return
+        self._party_sync_prompt_menu = None
+        gp = self.gameplay
+        substates = getattr(gp, "substates", None)
+        if not substates:
+            return
+        while m in substates:
+            try:
+                substates.remove(m)
+            except ValueError:
+                break
+
+    def _open_party_sync_invite_menu(self, invite):
+        """Main-thread prompt shown to the invited player (accept/decline)."""
+        gp = self.gameplay
+        ps = self._party_sync()
+        if not ps.pending_valid():
+            speak("Your Party Sync invitation expired.")
+            return
+        host = invite.get("host_name", "")
+        m = menu.Menu(
+            self.game,
+            f"Party Sync invitation from {host}",
+            parrent=gp,
+        )
+
+        def close_top():
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+
+        def accept():
+            ps.clear_pending()
+            close_top()
+            self._party_sync_send("party_sync_accept")
+
+        def decline():
+            ps.clear_pending()
+            close_top()
+            self._party_sync_send("party_sync_decline")
+
+        def dismiss():
+            close_top()
+            speak(f"Invitation from {host} stays for a moment; it expires on its own.")
+
+        m.add_items([
+            (f"Accept and listen with {host}", accept),
+            ("Decline invitation", decline),
+            ("Close this prompt", dismiss),
+        ])
+        menus.set_default_sounds(m)
+        self._close_party_sync_prompt()
+        self._party_sync_prompt_menu = m
+        gp.add_substate(m)
+
+    def party_sync_invite_request(self, data):
+        from .party_sync import parse_invite_request
+        invite = parse_invite_request(data)
+        if invite is None:
+            return
+        self._party_sync().set_pending(invite)
+        self.game.put(
+            lambda invite=invite: self._open_party_sync_invite_menu(invite)
+        )
+
+    def party_sync_state(self, data):
+        ps = self._party_sync()
+        if ps.apply_state(data, self._party_sync_own_name()) is None:
+            return
+        self._sync_party_sync_upload()
+        self._sync_party_sync_direct_audio()
+
+    def party_sync_joined(self, data):
+        from .party_sync import parse_session_event
+        ev = parse_session_event(data)
+        if ev is None:
+            return
+        ps = self._party_sync()
+        ps.session_id = ev["session_id"]
+        ps.host_name = ev["host_name"]
+        ps.role = "guest"
+        ps.clear_pending()
+        self._close_party_sync_prompt()
+        self._sync_party_sync_upload()
+        self._sync_party_sync_direct_audio()
+        # Tell the guest how to stop listening on their own (regular players
+        # have no Music Bot menu, so the hotkey is their leave control).
+        hint = "ctrl+f8"
+        name_fn = getattr(self.gameplay, "party_sync_leave_key_name", None)
+        if callable(name_fn):
+            try:
+                hint = name_fn()
+            except Exception:
+                pass
+        speak(
+            f"You are now listening to {ev['host_name']}'s music. "
+            f"Press {hint} to leave this session at any time."
+        )
+
+    def party_sync_kicked(self, data):
+        self._party_sync().end_session()
+        self._close_party_sync_prompt()
+        self._sync_party_sync_upload()
+        self._sync_party_sync_direct_audio()
+
+    def party_sync_ended(self, data):
+        ps = self._party_sync()
+        was_guest = ps.role == "guest"
+        ps.end_session()
+        self._close_party_sync_prompt()
+        self._sync_party_sync_upload()
+        self._sync_party_sync_direct_audio()
+        if was_guest:
+            speak("The Party Sync session ended.")
+
+    def party_sync_roster_change(self, data):
+        # A listener left. The server broadcasts a fresh party_sync_state
+        # right after this (see removeGuest -> sendState), and the state
+        # handler re-syncs the direct-to-ear sources so the departed member's
+        # entity returns to positional voice. Nothing to do here.
+        return
+
+    def party_sync_player_list(self, data):
+        from .party_sync import parse_player_list
+        players = parse_player_list(data)
+        self._party_sync().invite_players = players
+        self.game.put(lambda players=players: self._open_party_sync_invite_list(players))
+
+    def _open_party_sync_invite_list(self, players):
+        """Main-thread host picker of inviteable players on the map."""
+        gp = self.gameplay
+        ps = self._party_sync()
+        if ps.role != "host":
+            return
+        if not players:
+            speak("Nobody on this map can be invited right now.")
+            return
+        m = menu.Menu(self.game, "Invite a player to listen", parrent=gp)
+        items = []
+
+        def close_top():
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+
+        def back_to_party():
+            close_top()
+            # The invite list can be opened from the Music Bot Party menu or
+            # from the Ctrl+F8 quick menu; whoever requested it leaves a
+            # one-shot Back target so we return to the same place.
+            back = getattr(gp, "_party_sync_invite_back", None)
+            if callable(back):
+                try:
+                    gp._party_sync_invite_back = None
+                except Exception:
+                    pass
+                back()
+                return
+            bot = getattr(gp, "music_bot", None)
+            if bot is not None and hasattr(bot, "_open_party_sync_menu"):
+                bot._open_party_sync_menu()
+
+        for name in players:
+            def make_invite(target=name):
+                def cb():
+                    ps.invite_players = []
+                    close_top()
+                    self._party_sync_send("party_sync_invite", {"name": target})
+                return cb
+            items.append((f"Invite {name}", make_invite()))
+        items.append(("Back", back_to_party))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
     def megaphone_settings_response(self, data):
         """Handle server response for megaphone settings permission"""
         if data.get("allowed", False):

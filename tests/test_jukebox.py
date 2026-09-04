@@ -1283,7 +1283,7 @@ class TestAudioStreamerFailureSurfacing(unittest.TestCase):
     silently: jukebox streams speak a clear error and the process is killed."""
 
     def _run_streamer(self, bot, speak_calls, start_offset=0.0,
-                      http_headers=None):
+                      http_headers=None, audio_url="http://example.com/a.mp3"):
         from unittest import mock
         from libs import music_bot as mb
 
@@ -1310,7 +1310,7 @@ class TestAudioStreamerFailureSurfacing(unittest.TestCase):
         proc = FakeProc()
         streamer = mb.AudioStreamer(
             None,
-            "http://example.com/a.mp3",
+            audio_url,
             object(),
             volume=50,
             bot=bot,
@@ -1347,6 +1347,34 @@ class TestAudioStreamerFailureSurfacing(unittest.TestCase):
         self.assertFalse(speak.called)  # menu layer gives its own feedback
         self.assertTrue(log_line.called)
         self.assertIn("-re", command)
+
+    def test_googlevideo_streams_get_reconnect_flags(self):
+        # A CDN drop near the end of a song used to kill ffmpeg outright
+        # (no reconnect flags on googlevideo) and cut the ending off.
+        # Verified: with reconnect, ffmpeg resumes at the last byte offset
+        # (range requests) and the song plays out in full.
+        proc, speak, log_line, command = self._run_streamer(
+            None, [], start_offset=0.0,
+            audio_url="https://rr3---sn-a5mekn7e.googlevideo.com/videoplayback?foo=1",
+        )
+        self.assertIn("-reconnect", command)
+        self.assertIn("-reconnect_streamed", command)
+        # googlevideo keeps a SHORT reconnect budget so the startup-403 path
+        # (stale signed URL) re-resolves a fresh URL quickly instead of
+        # burning the full backoff window.
+        self.assertEqual(
+            command[command.index("-reconnect_delay_total_max") + 1], "6"
+        )
+
+    def test_regular_http_streams_keep_full_reconnect_budget(self):
+        _, _, _, command = self._run_streamer(
+            None, [], start_offset=0.0,
+            audio_url="https://cdn.example.com/song.mp3",
+        )
+        self.assertIn("-reconnect", command)
+        self.assertEqual(
+            command[command.index("-reconnect_delay_total_max") + 1], "12"
+        )
 
     def test_ffmpeg_receives_paired_ytdlp_headers_before_input(self):
         _, _, _, command = self._run_streamer(

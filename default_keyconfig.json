@@ -8,6 +8,7 @@
         "move_down": "page down",
         "move_up": "page up",
         "map_chat": "/",
+        "party_sync_chat": "/",
         "chat": "'",
         "move_left_in_buffer": ",",
         "move_right_in_buffer": ".",
@@ -51,6 +52,7 @@
         "guitar_play": "u",
         "music_bot_vol_down": "f9",
         "music_bot_vol_up": "f10",
+        "party_sync_leave": "f8",
         "raise_shield": "s",
         "spectator_switch_player": "tab",
         "spectator_cycle_camera": "p"

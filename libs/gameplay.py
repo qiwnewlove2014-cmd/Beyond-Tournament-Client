@@ -247,6 +247,52 @@ class Gameplay(state.State):
             (kc.get("spectator_switch_player", pygame.K_TAB), self.spectator_switch_player),
             (kc.get("spectator_cycle_camera", pygame.K_p), self.cycle_spectator_camera_if_active),
         ]
+
+        # Party Sync Leave is a modifier chord by default (Ctrl+F8) because F8
+        # already belongs to the Staff Menu. When the configured leave key
+        # shares a keycode with another action, Ctrl must be held to leave and
+        # a plain press keeps the other action (mirroring Ctrl+M / Ctrl+F9
+        # chord handling elsewhere). When it is rebound to an unused key, a
+        # plain press leaves directly.
+        leave_key = kc.get("party_sync_leave", pygame.K_F8)
+        base_action = self.keys_pressed.get(leave_key)
+
+        def dispatch_party_sync_leave(mod=0, base_action=base_action):
+            if base_action is None or (
+                mod & pygame.KMOD_CTRL
+                and not (mod & (pygame.KMOD_ALT | pygame.KMOD_SHIFT))
+            ):
+                self.party_sync_leave_key()
+            elif base_action is not None:
+                base_action(mod)
+
+        self.keys_pressed[leave_key] = dispatch_party_sync_leave
+
+        # Party Sync text chat rides Shift+Slash (the map-chat key). A plain
+        # press keeps map chat; holding Shift (no Ctrl/Alt) opens the typed
+        # input for the private Party Sync room. Rebound to an unused key, a
+        # plain press opens party chat directly. The fallback default matters:
+        # saved user keyconfig files written BEFORE party_sync_chat existed do
+        # not contain the action, and without the fallback the chord below
+        # would silently never register (Shift+/ would stay map chat). Fall
+        # back to whatever key map chat uses so the two stay on one physical
+        # key even for older saved configs.
+        party_chat_key = kc.get(
+            "party_sync_chat", kc.get("map_chat", pygame.K_SLASH)
+        )
+        if party_chat_key is not None:
+            base_chat_action = self.keys_pressed.get(party_chat_key)
+
+            def dispatch_party_sync_chat(mod=0, base_chat_action=base_chat_action):
+                if base_chat_action is None or (
+                    mod & pygame.KMOD_SHIFT
+                    and not (mod & (pygame.KMOD_CTRL | pygame.KMOD_ALT))
+                ):
+                    self.party_sync_chat_key()
+                elif base_chat_action is not None:
+                    base_chat_action(mod)
+
+            self.keys_pressed[party_chat_key] = dispatch_party_sync_chat
         self.turn_mod = False
 
     def set_vehicle_session(self, data):
@@ -818,6 +864,17 @@ class Gameplay(state.State):
             return
         elif isinstance(should_block, list):
             events = should_block
+        # A Ctrl+chord that opens a menu/substate (e.g. Ctrl+F8 Party Sync
+        # menu, Ctrl+R language channel) has its Ctrl KEYUP consumed by the
+        # open menu, so the snap-turn latch (turn_mod) never sees the release
+        # and stays on: after closing the menu, movement keys still snap-turn
+        # or spin until Ctrl is tapped again. Trust the keyboard's live
+        # modifier state instead of the KEYUP event that a substate may have
+        # eaten, and clear the latch the moment Ctrl is physically up.
+        if getattr(self, "turn_mod", False) and not (
+            pygame.key.get_mods() & pygame.KMOD_CTRL
+        ):
+            self.turn_mod = False
         key = audio_probe.call("gp.input_poll", pygame.key.get_pressed)
         is_concert = getattr(self, 'concert_spectator_mode', False)
         if not self.spectator_mode or is_concert:
@@ -829,6 +886,13 @@ class Gameplay(state.State):
             audio_probe.call("gp.input_instrument", self._poll_piano_midi)
         elif getattr(self, "drum_mode", False):
             audio_probe.call("gp.input_instrument", self._poll_drum_midi)
+        # A Ctrl+chord that opens a menu/substate (e.g. Ctrl+F8 Party Sync
+        # menu, Ctrl+R language channel) has its Ctrl KEYUP consumed by the
+        # open menu, so the snap-turn latch (turn_mod) never sees the release
+        # and stays on: after closing the menu, movement keys still snap-turn
+        # or spin until Ctrl is tapped again. Trust the keyboard's live
+        # modifier state instead of the KEYUP event that a substate may have
+        # eaten, and clear the latch the moment Ctrl is physically up.
         for event in events:
             if getattr(self, "drum_mode", False):
                 if audio_probe.call("gp.input_instrument", self.drum.handle_event, event):
@@ -1769,6 +1833,173 @@ class Gameplay(state.State):
             self.music_bot.seek_by(direction * step)
             return
         self.music_bot_volume(direction * 10)
+
+    def party_sync_leave_key(self, mod=0):
+        """Open the Party Sync quick menu from free gameplay.
+
+        Never leaves instantly: the menu shows who is listening plus a
+        Leave/End action, so a stray Ctrl+F8 press cannot silently kick
+        the player out of (or end) a session.
+        """
+        ps = getattr(self, "party_sync", None)
+        if not ps or not getattr(ps, "role", None):
+            speak("You are not in a Party Sync session.")
+            return
+        self._open_party_sync_quick_menu(ps)
+
+    def _open_party_sync_quick_menu(self, ps):
+        """Roster + Leave/End prompt shown from free gameplay (Ctrl+F8).
+
+        Hosts see their listeners and an End action; guests see who else is
+        listening and a Leave action. Both use the same server events as the
+        Music Bot menu path (party_sync_leave / party_sync_end).
+        """
+        try:
+            from . import menu as menu_mod, menus
+        except Exception:
+            return
+        from .party_sync import session_roster
+        gp = self
+        is_host = getattr(ps, "role", None) == "host"
+        title = (
+            "Party Sync session"
+            if is_host else f"Party Sync — listening to {ps.host_name}"
+        )
+        m = menu_mod.Menu(self.game, title, parrent=gp)
+        items = []
+
+        def close_top():
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+
+        roster = session_roster(ps)
+        if is_host:
+            items.append((
+                f"Listeners ({max(0, len(roster) - 1)}): " + (
+                    ", ".join(name for name, _role in roster[1:])
+                    if len(roster) > 1 else "nobody yet"
+                ),
+                lambda: None,
+            ))
+        own_name = ""
+        try:
+            own_name = str(getattr(self.player, "name", "") or "")
+        except Exception:
+            pass
+        for name, _role in roster:
+            mark = " (you)" if own_name and name == own_name else ""
+            items.append((f"{name}{mark}", lambda: None))
+        if not roster and is_host:
+            items.append(("Nobody is listening yet", lambda: None))
+
+        def do_invite():
+            """Request the inviteable-player list; Back in that picker returns
+            to this quick menu (the Music Bot path uses its own menu)."""
+            close_top()
+            gp._party_sync_invite_back = (
+                lambda: gp._open_party_sync_quick_menu(gp.party_sync)
+            )
+            self.game.network.send(consts.CHANNEL_MISC, "party_sync_list", {})
+
+        def do_leave():
+            close_top()
+            self.game.network.send(consts.CHANNEL_MISC, "party_sync_leave", {})
+            ps.end_session()
+            from .party_sync import clear_all_party_direct
+            clear_all_party_direct(self)
+            bot = getattr(self, "music_bot", None)
+            if bot is not None:
+                bot.party_sync_force_upload = False
+
+        def confirm_then_leave(action_label, prompt, do_action):
+            """Yes/No guard so a stray keypress can never end or leave the
+            session silently. Yes runs do_action; No returns to this menu."""
+            confirm_m = menu_mod.Menu(self.game, prompt, parrent=gp)
+
+            def yes():
+                if gp.substates and gp.substates[-1] is confirm_m:
+                    gp.pop_last_substate()
+                close_top()
+                do_action()
+
+            def no():
+                if gp.substates and gp.substates[-1] is confirm_m:
+                    gp.pop_last_substate()
+
+            confirm_m.add_items([(action_label, yes), ("No, go back", no)])
+            menus.set_default_sounds(confirm_m)
+            gp.add_substate(confirm_m)
+
+        if is_host:
+            items.append(("Invite players from this map", do_invite))
+            items.append((
+                "End Party Sync session",
+                lambda: confirm_then_leave(
+                    "Yes, end the session",
+                    "Are you sure you want to end the Party Sync "
+                    "session? Your listeners will be disconnected.",
+                    do_leave,
+                ),
+            ))
+        else:
+            items.append((
+                "Leave Party Sync session",
+                lambda: confirm_then_leave(
+                    "Yes, leave the session",
+                    "Are you sure you want to stop listening and leave "
+                    "the Party Sync session?",
+                    do_leave,
+                ),
+            ))
+        items.append(("Close", close_top))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def party_sync_chat_key(self, mod=0):
+        """Open the typed input for the private Party Sync room chat.
+
+        Bound as Shift+Slash by default (plain Slash stays map chat). Only
+        session members can use it; the server routes the message to the
+        room and plays the arenachat sound for the other members.
+        """
+        ps = getattr(self, "party_sync", None)
+        if not ps or not getattr(ps, "role", None):
+            speak("You are not in a Party Sync session.")
+            return
+        self.add_substate(
+            self.game.input.run(
+                "Type a message for your Party Sync room",
+                handeler=self.party_sync_chat2,
+            )
+        )
+
+    def party_sync_chat2(self, message):
+        if len(message) > 1000:
+            return speak("Message too long (max 1000 characters).")
+        if not message.lstrip().rstrip():
+            return self.cancel()
+        if len(message) <= 1:
+            return self.cancel("Message is too short.")
+        self.game.network.send(
+            consts.CHANNEL_MISC, "party_sync_chat", {"message": message}
+        )
+        self.pop_last_substate()
+
+    def party_sync_leave_key_name(self):
+        """Human-readable name of the configured Party Sync Leave key.
+
+        The default shares F8 with the Staff Menu, so the action is a chord:
+        "ctrl+f8". A leave key rebound to an unshared key is announced plain.
+        """
+        try:
+            leave_key = self.kc.get("party_sync_leave", pygame.K_F8)
+            name = pygame.key.name(leave_key)
+            if leave_key == self.kc.get("open_staff_menu", None):
+                return f"ctrl+{name}"
+            return name
+        except Exception:
+            return "ctrl+f8"
 
     def reset_pitch(self, mod):
         if mod & pygame.KMOD_CTRL:

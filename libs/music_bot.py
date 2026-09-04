@@ -24,6 +24,7 @@ from .string_utils import friendly_key_name
 from . import options
 from .speech import speak
 from . import logger
+from .party_sync import stereo_upload_eligible
 from .audio_diagnostics import probe
 from .game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
@@ -310,13 +311,21 @@ class AudioStreamer(threading.Thread):
         self._buffer_pool = []       # Reusable buffer objects
         self._pause_buffer = deque() # Store data read while paused
         self.encoder = None
+        self.encoder_stereo = None
         if bot is not None:
             # Listening-only jukebox streams never broadcast PCM back out.
             from pyogg import OpusEncoder
             self.encoder = OpusEncoder()
             self.encoder.set_application('audio')
-            self.encoder.set_channels(1)  # Opus network stream is ALWAYS MONO
+            self.encoder.set_channels(1)  # public/PA network stream is MONO
             self.encoder.set_sampling_frequency(48000)
+            # Party Sync private leg can carry true stereo (see
+            # stereo_upload_eligible) so guests hear real left/right instead
+            # of a mono downmix of the host's music.
+            self.encoder_stereo = OpusEncoder()
+            self.encoder_stereo.set_application('audio')
+            self.encoder_stereo.set_channels(2)
+            self.encoder_stereo.set_sampling_frequency(48000)
         self.last_send_time = None
         # Keep broadcast latency bounded.  A network hiccup must discard stale
         # music frames instead of building an ever-growing backlog that later
@@ -691,12 +700,16 @@ class AudioStreamer(threading.Thread):
             # Check if the stream is being broadcast: the music bot broadcast
             # is on, OR the performer enabled "Broadcast to Megaphone" (the
             # PA/megaphone routing is an independent toggle - exactly like
-            # piano/drums, so guitar and music reach the PA on their own).
-            # A stream WITHOUT a bot (jukebox playback, bot=None) NEVER sends:
-            # otherwise the jukebox audio would be re-broadcast to the whole map
-            # as the player's own music bot stream (double audio everywhere).
+            # piano/drums, so guitar and music reach the PA on their own), OR
+            # the player hosts an active Party Sync session (private upload;
+            # the server relays only to session guests). A stream WITHOUT a
+            # bot (jukebox playback, bot=None) NEVER sends: otherwise the
+            # jukebox audio would be re-broadcast to the whole map as the
+            # player's own music bot stream (double audio everywhere).
             if not self.bot or not (
-                self.bot.broadcast_enabled or self.bot.broadcast_to_megaphone
+                self.bot.broadcast_enabled
+                or self.bot.broadcast_to_megaphone
+                or getattr(self.bot, "party_sync_force_upload", False)
             ):
                 return
 
@@ -717,7 +730,12 @@ class AudioStreamer(threading.Thread):
 
             from . import consts
             target_channel = consts.CHANNEL_MUSICBOT
-            if self.bot and self.bot.broadcast_to_megaphone:
+            # A Party Sync session shares the bot privately with its guests:
+            # always use the private MUSICBOT leg (never the PA megaphone),
+            # regardless of the user's megaphone toggle, while the session is
+            # active. The server relays that leg only to session guests.
+            if (self.bot and self.bot.broadcast_to_megaphone
+                    and not getattr(self.bot, "party_sync_force_upload", False)):
                 target_channel = consts.CHANNEL_MEGAPHONE
 
             # Mix queued live input (voice mic and/or line-in guitar) into the
@@ -759,8 +777,10 @@ class AudioStreamer(threading.Thread):
             # When routing through the megaphone, feed the mixed stream into the
             # local PA sidechain (main thread) so the broadcaster hears their own
             # music/instruments through the speakers with zero latency - the server
-            # no longer echoes the broadcast back to the sender.
-            if self.bot and self.bot.broadcast_to_megaphone:
+            # no longer echoes the broadcast back to the sender. Skipped while a
+            # Party Sync session is active (that leg is private-to-guests).
+            if (self.bot and self.bot.broadcast_to_megaphone
+                    and not getattr(self.bot, "party_sync_force_upload", False)):
                 try:
                     gp = self.bot._find_gameplay()
                     if gp is not None:
@@ -773,7 +793,31 @@ class AudioStreamer(threading.Thread):
                 except Exception:
                     pass
 
-            encoded = self.encoder.encode(bytearray(mono_data))
+            # Party Sync private leg carries TRUE STEREO so guests hear real
+            # left/right separation instead of the mono downmix; public
+            # broadcasts and the PA megaphone keep the proven mono path.
+            # Live-input (mic/guitar) mixes stay mono (built as one channel).
+            use_stereo = stereo_upload_eligible(
+                self.bot,
+                getattr(self, "channels", 2),
+                live_input_pending=bool(
+                    mic_data is not None or guitar_data is not None
+                ),
+            )
+            if use_stereo:
+                enc = self.encoder_stereo or self.encoder
+                payload = bytes(data) if data is not None else b""
+                if current_volume_scale != 1.0 and payload:
+                    try:
+                        payload = audioop.mul(payload, 2, current_volume_scale)
+                    except Exception:
+                        pass
+            else:
+                enc = self.encoder
+                payload = mono_data
+            if enc is None or not payload:
+                return
+            encoded = enc.encode(bytearray(payload))
             if (target_channel == consts.CHANNEL_MUSICBOT
                     and getattr(self.game, 'music_timeline_supported', False)
                     and timeline_epoch is not None and timeline_seq is not None):
@@ -1025,15 +1069,35 @@ class AudioStreamer(threading.Thread):
 
         def _build_cmd():
             cmd = [FFMPEG_PATH]
-            if (target_url.startswith(("http://", "https://"))
-                    and "googlevideo.com" not in target_url.lower()):
-                cmd.extend([
-                    '-reconnect', '1',
-                    '-reconnect_streamed', '1',
-                    '-reconnect_on_http_error', '403,429,5xx',
-                    '-reconnect_delay_max', '5',
-                    '-reconnect_delay_total_max', '12',
-                ])
+            if target_url.startswith(("http://", "https://")):
+                # Reconnect on mid-stream drops for EVERY network source,
+                # including googlevideo. A CDN connection close near the end
+                # of a song used to kill ffmpeg outright (no reconnect flags)
+                # and the song ended early — verified locally: ffmpeg exits
+                # with an I/O error on a dropped connection, but with
+                # reconnect flags it reconnects at the last byte offset
+                # (range requests) and the full song plays out. YouTube's
+                # signed URLs remain valid for this machine, so reconnecting
+                # with the same URL + yt-dlp headers works.
+                if "googlevideo.com" in target_url.lower():
+                    # Shorter budget: the startup 403 path (stale signed URL)
+                    # must re-resolve a fresh URL quickly instead of burning
+                    # the full backoff window before giving up.
+                    cmd.extend([
+                        '-reconnect', '1',
+                        '-reconnect_streamed', '1',
+                        '-reconnect_on_http_error', '403,429,5xx',
+                        '-reconnect_delay_max', '2',
+                        '-reconnect_delay_total_max', '6',
+                    ])
+                else:
+                    cmd.extend([
+                        '-reconnect', '1',
+                        '-reconnect_streamed', '1',
+                        '-reconnect_on_http_error', '403,429,5xx',
+                        '-reconnect_delay_max', '5',
+                        '-reconnect_delay_total_max', '12',
+                    ])
             user_agent = next(
                 (str(value).strip() for name, value in input_headers.items()
                  if str(name).lower() == 'user-agent'),
@@ -1465,6 +1529,7 @@ class LiveRelayStreamer(threading.Thread):
         while self.running and self.bot and (
             getattr(self.bot, 'broadcast_enabled', False)
             or getattr(self.bot, 'broadcast_to_megaphone', False)
+            or getattr(self.bot, 'party_sync_force_upload', False)
         ):
             # If main AudioStreamer MP3 thread is active, let it handle the network stream
             if self.bot.streamer and self.bot.streamer.is_alive():
@@ -1506,11 +1571,17 @@ class LiveRelayStreamer(threading.Thread):
                 if current_volume_scale != 1.0:
                     mono_data = audioop.mul(mono_data, 2, current_volume_scale)
 
-                target_channel = consts.CHANNEL_MEGAPHONE if self.bot.broadcast_to_megaphone else consts.CHANNEL_MUSICBOT
+                party_private = bool(getattr(self.bot, 'party_sync_force_upload', False))
+                target_channel = (
+                    consts.CHANNEL_MUSICBOT
+                    if (not self.bot.broadcast_to_megaphone or party_private)
+                    else consts.CHANNEL_MEGAPHONE
+                )
 
                 # Local zero-latency PA monitoring (the server no longer echoes
-                # the megaphone broadcast back to the sender).
-                if self.bot.broadcast_to_megaphone:
+                # the megaphone broadcast back to the sender). Skipped while a
+                # Party Sync session is active (private-to-guests leg).
+                if self.bot.broadcast_to_megaphone and not party_private:
                     try:
                         gp = self.bot._find_gameplay()
                         if gp is not None:
@@ -1596,6 +1667,11 @@ class MapMusicBot:
         self.enabled = options.get("music_bot_enabled", True)
         self.broadcast_enabled = False  # Disabled by default (Private listening mode)
         self.broadcast_to_megaphone = False
+        # Party Sync host session forces an upload so the session guests hear
+        # the bot; the server narrows the relay to the guests only, so this
+        # stays private even when the public broadcast toggle is off. It never
+        # flips the user's own broadcast toggles.
+        self.party_sync_force_upload = False
         # Line-in guitar raw PCM queue: the instrument input appends 20 ms
         # mono16 frames while guitar mode is on and this broadcast is enabled;
         # AudioStreamer mixes them into the outgoing stream.
@@ -1796,6 +1872,10 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._show_help_menu()
 
+        def go_party_sync():
+            gp.pop_last_substate()
+            self._open_party_sync_menu()
+
         m = menu_mod.Menu(self.game, "Music Bot Mode", parrent=gp)
         items = [
             ("Search YouTube", go_search),
@@ -1804,6 +1884,7 @@ class MapMusicBot:
             ("Personal Music Feed", go_personal_feed),
             ("Music Download Center", go_downloads),
             ("Record Audio", go_record_audio),
+            ("Party Sync (Listen Together)", go_party_sync),
         ]
         
         # Show the megaphone routing option only when the server explicitly granted
@@ -1840,6 +1921,146 @@ class MapMusicBot:
             ("Help", go_help),
             ("Cancel", lambda: gp.pop_last_substate())
         ])
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    # === Party Sync (listen together with invited friends) ===
+    # The server (libs/party_sync.ts) runs the session and gates the relay to
+    # session guests only. Host-side, the client only needs to keep uploading
+    # its stream while a session is active (party_sync_force_upload) and drive
+    # the invite/kick/end controls below. Guests receive the stream through the
+    # normal music-source receive leg (host voice_channel -> entity
+    # music_source), so no special guest audio code is needed.
+
+    def _party_sync_pair(self):
+        """(gameplay, PartySyncState) pair, creating the state lazily."""
+        gp = self._find_gameplay()
+        if gp is None:
+            return None, None
+        ps = getattr(gp, "party_sync", None)
+        if ps is None:
+            from .party_sync import PartySyncState
+            ps = PartySyncState()
+            gp.party_sync = ps
+        return gp, ps
+
+    def _party_sync_send(self, event, data=None):
+        from . import consts
+        self.game.network.send(
+            consts.CHANNEL_MISC, event, data if data is not None else {}
+        )
+
+    def _clear_party_sync_direct(self):
+        """Restore any entity left in Party Sync direct-to-ear audio mode
+        (host-music feed AND party team-talk voice)."""
+        from .party_sync import clear_all_party_direct
+        gp, _ = self._party_sync_pair()
+        if gp is None:
+            return
+        clear_all_party_direct(gp)
+
+    def _open_party_sync_menu(self):
+        """Host/guest Party Sync controls (entry from the Music Bot menu)."""
+        from . import menu as menu_mod, menus
+        from .speech import speak
+        gp, ps = self._party_sync_pair()
+        if gp is None:
+            return
+
+        m = menu_mod.Menu(self.game, "Party Sync", parrent=gp)
+        items = []
+
+        def close_top():
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+
+        def back_to_bot_menu():
+            close_top()
+            self._show_mode_menu()
+
+        if ps is None or ps.role is None:
+            def do_start():
+                close_top()
+                self._party_sync_send("party_sync_start")
+            items.append(("Start Party Sync session", do_start))
+            items.append((
+                "Invite friends on this map to hear your music privately",
+                lambda: None,
+            ))
+        elif ps.role == "host":
+            def guests_label():
+                names = ", ".join(
+                    g["name"] for g in ps.guests
+                ) if ps.guests else "nobody yet"
+                return f"Listeners ({len(ps.guests)}): {names}"
+            items.append((guests_label, lambda: None))
+            if ps.guests:
+                def do_kick():
+                    close_top()
+                    self._open_party_kick_menu(ps)
+                items.append(("Kick a listener", do_kick))
+            def do_invite():
+                close_top()
+                # Back in the invite picker returns to this Party controls
+                # menu (the Ctrl+F8 quick menu sets its own target).
+                gp._party_sync_invite_back = (
+                    lambda: self._open_party_sync_menu()
+                )
+                self._party_sync_send("party_sync_list")
+            items.append(("Invite players from this map", do_invite))
+            def do_end():
+                close_top()
+                self._party_sync_send("party_sync_end")
+                ps.end_session()
+                self.party_sync_force_upload = False
+                self._clear_party_sync_direct()
+            items.append(("End Party Sync session", do_end))
+        elif ps.role == "guest":
+            def do_leave():
+                close_top()
+                self._party_sync_send("party_sync_leave")
+                ps.end_session()
+                self._clear_party_sync_direct()
+            items.append((f"Listening to {ps.host_name}", lambda: None))
+            items.append(("Leave Party Sync session", do_leave))
+
+        items.append(("Back", back_to_bot_menu))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_party_kick_menu(self, ps):
+        """Pick which listener to kick (host only)."""
+        from . import menu as menu_mod, menus
+        from .speech import speak
+        gp, _ = self._party_sync_pair()
+        if gp is None:
+            return
+        if not ps or not ps.guests:
+            speak("Nobody is listening right now.")
+            self._open_party_sync_menu()
+            return
+        m = menu_mod.Menu(self.game, "Kick a Party Sync listener", parrent=gp)
+        items = []
+
+        def close_top():
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+
+        def back_to_party():
+            close_top()
+            self._open_party_sync_menu()
+
+        for g in ps.guests:
+            name = g["name"]
+            def make_kick(target=name):
+                def cb():
+                    close_top()
+                    self._party_sync_send("party_sync_kick", {"name": target})
+                return cb
+            items.append((f"Kick {name}", make_kick()))
+        items.append(("Back", back_to_party))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)

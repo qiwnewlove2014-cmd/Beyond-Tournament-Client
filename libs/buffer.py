@@ -176,8 +176,41 @@ def export_buffers():
     )
 
 
+# Buffer tab order.  Chat-family rooms stay adjacent: the language
+# "chat" is followed by the per-room "map chat" and private "party chat"
+# buffers instead of them being appended to the tail the first time a
+# message arrives.  Names not listed keep the historical behavior of
+# arriving at the end in order of first use.
+buffer_tab_order = [
+    "main",
+    "chat",
+    "map chat",
+    "party chat",
+    "tell",
+    "players",
+]
+
+
 def add_buffer(*args):
-    buffers.append(buffer(*args))
+    name = args[0] if args else ""
+    insert_at = len(buffers)
+    if name in buffer_tab_order:
+        # Insert right after the nearest earlier tab in the preferred order
+        # that already exists (e.g. "map chat" lands directly after "chat",
+        # "party chat" after "map chat").
+        anchor = None
+        for candidate in reversed(
+            buffer_tab_order[: buffer_tab_order.index(name)]
+        ):
+            for pos, existing in enumerate(buffers):
+                if existing.name == candidate:
+                    anchor = pos
+                    break
+            if anchor is not None:
+                break
+        if anchor is not None:
+            insert_at = anchor + 1
+    buffers.insert(insert_at, buffer(*args))
 
 
 def add_item(game, name, text, speak=True, sound=""):
