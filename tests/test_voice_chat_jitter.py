@@ -27,7 +27,14 @@ class TestMegaphoneJitterBuffer(unittest.TestCase):
         self.jb = MegaphoneJitterBuffer(FakeGame())
 
     def test_pa_uses_stable_v16_reserve(self):
-        self.assertEqual(MegaphoneJitterBuffer.PRE_BUFFER_FRAMES, 3)
+        # Stable PA reserve: six 20ms pre-buffer frames (120ms) plus the
+        # fixed six-frame source margin absorb real-network ENet
+        # retransmission pauses without the rapid re-underrun chop the old
+        # 3-frame reserve produced (see f092214, stutter fix). RESUME_FRAMES
+        # is pinned with it — the same fix raised it from 2 to stop
+        # re-underrun cycles right after a stall.
+        self.assertEqual(MegaphoneJitterBuffer.PRE_BUFFER_FRAMES, 6)
+        self.assertEqual(MegaphoneJitterBuffer.RESUME_FRAMES, 4)
         self.assertEqual(vc._megaphone_margin_frames(7), 6)
 
     def test_prebuffers_before_first_playback(self):

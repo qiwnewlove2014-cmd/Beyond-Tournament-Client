@@ -10,6 +10,9 @@ class FakeMusicBot:
     def __init__(self):
         self.volume = 50
         self.calls = []
+        self.playing = False
+        self.paused = False
+        self.last_stop_clear_queue = True
 
     def open_search(self):
         self.calls.append("open_search")
@@ -23,8 +26,15 @@ class FakeMusicBot:
     def next_feed_track(self):
         self.calls.append("next_feed_track")
 
-    def stop(self):
+    def stop(self, clear_queue=True):
         self.calls.append("stop")
+        self.last_stop_clear_queue = clear_queue
+
+    def toggle_pause(self):
+        self.calls.append("toggle_pause")
+
+    def has_last_track(self):
+        return False
 
 
 def make_gp(**role_flags):
@@ -102,6 +112,25 @@ class TestMusicBotGating(unittest.TestCase):
         self.assertIn(("set_volume", 60), gp.music_bot.calls)
         self.assertIn("previous_feed_track", gp.music_bot.calls)
         self.assertIn("next_feed_track", gp.music_bot.calls)
+
+    def test_ctrl_m_stop_preserves_play_queue(self):
+        gp = make_gp(is_staff=True)
+        gp.music_bot.playing = True
+        with mock.patch("libs.gameplay.speak") as speak:
+            gp.music_bot_control(pygame.KMOD_CTRL)
+        self.assertEqual(gp.music_bot.calls, ["stop"])
+        self.assertFalse(
+            gp.music_bot.last_stop_clear_queue,
+            "Ctrl+M stop must keep the queued songs (clear_queue=False)",
+        )
+        speak.assert_called_once_with("Music stopped.")
+
+    def test_shift_m_pause_does_not_stop_or_clear(self):
+        gp = make_gp(is_staff=True)
+        with mock.patch("libs.gameplay.speak"):
+            gp.music_bot_control(pygame.KMOD_SHIFT)
+        self.assertEqual(gp.music_bot.calls, ["toggle_pause"])
+        self.assertNotIn("stop", gp.music_bot.calls)
 
     def test_no_music_bot_is_safe(self):
         gp = Gameplay.__new__(Gameplay)  # no music_bot attribute at all

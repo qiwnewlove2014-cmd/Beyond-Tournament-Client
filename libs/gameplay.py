@@ -1791,7 +1791,10 @@ class Gameplay(state.State):
         elif mod & pygame.KMOD_CTRL:
             # Ctrl+M → Stop / Replay (toggle)
             if self.music_bot.playing:
-                self.music_bot.stop()
+                # Keep the play queue (Queue Mode) and favorites/playlist
+                # intact: Stop only halts playback, Ctrl+M again replays the
+                # last track and the queued songs still follow afterwards.
+                self.music_bot.stop(clear_queue=False)
                 speak("Music stopped.")
             elif self.music_bot.has_last_track():
                 speak(f"Replaying: {self.music_bot.last_track_title or self.music_bot.last_youtube_title}")

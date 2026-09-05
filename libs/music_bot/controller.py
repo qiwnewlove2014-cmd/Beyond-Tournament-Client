@@ -2,6 +2,7 @@
 favorites, downloads, recording and every menu / keybinding hook that glues
 the media + streaming layers into the game."""
 
+import contextlib
 import os
 import queue
 import random
@@ -68,6 +69,17 @@ class MapMusicBot:
         self.play_queue = []
         self.play_queue_index = -1
         self.play_queue_label = ""
+
+        # Play-next queue (Queue Mode). Search results selected while Queue
+        # Mode is ON (or via "Play Next (Add to Queue)") land here and play
+        # automatically when the current track ends, BEFORE the favorites /
+        # playlist queue continues. Explicit Stop clears it too.
+        self.next_up_queue = []
+
+        # Music Bot settings (persisted in client options)
+        self.queue_mode = options.get("music_bot_queue_mode", False)
+        self.water_muffle_enabled = options.get("music_bot_water_muffle", True)
+        self.reverb_enabled = options.get("music_bot_reverb", True)
 
         # A shuffled Favorites feed. It preserves the user's current broadcast
         # routing and never changes saved playlists.
@@ -152,9 +164,11 @@ class MapMusicBot:
             music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
             src.gain = (self.volume / 100) * music_vol
             # A track started while the listener is underwater inherits the
-            # active global water filter so it is dull from its first frame.
+            # active global water filter so it is dull from its first frame
+            # (unless the player disabled the underwater muffle in settings).
             active = getattr(self.game.audio_mngr, "filter", None)
-            if active and active[-1] is not None:
+            if (active and active[-1] is not None
+                    and getattr(self, "water_muffle_enabled", True)):
                 src.direct_filter = active[-1]
             self.stream_source = src
             # Apply current map reverb immediately
@@ -288,6 +302,29 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._open_party_sync_menu()
 
+        def go_queue():
+            gp.pop_last_substate()
+            self._open_queue_menu()
+
+        def go_settings():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def get_queue_mode_label():
+            status = "ON" if self.queue_mode else "OFF"
+            return f"Queue Mode: {status}"
+
+        def toggle_queue_mode():
+            self.queue_mode = not self.queue_mode
+            options.set("music_bot_queue_mode", self.queue_mode)
+            status_text = "enabled" if self.queue_mode else "disabled"
+            speak(f"Queue mode {status_text}. Search results will be added to the play queue.")
+            m.speak_current_item()
+
+        def get_queue_count_label():
+            n = len(self.next_up_queue)
+            return f"Play Queue ({n} waiting)" if n else "Play Queue (empty)"
+
         m = menu_mod.Menu(self.game, "Music Bot Mode", parrent=gp)
         items = [
             ("Search YouTube", go_search),
@@ -330,6 +367,9 @@ class MapMusicBot:
             items.append((get_megaphone_label, toggle_megaphone_routing))
 
         items.extend([
+            (get_queue_mode_label, toggle_queue_mode),
+            (get_queue_count_label, go_queue),
+            ("Music Bot Settings", go_settings),
             ("Help", go_help),
             ("Cancel", lambda: gp.pop_last_substate())
         ])
@@ -1001,7 +1041,11 @@ class MapMusicBot:
         )
 
     def _advance_track_queue(self):
-        from ..speech import speak
+        # Songs the player queued explicitly (Queue Mode / Add to Queue) play
+        # BEFORE the favorites/playlist queue continues.
+        if self.next_up_queue:
+            self._play_queued_next()
+            return True
         if not self.play_queue:
             return False
         self.play_queue_index += 1
@@ -1011,6 +1055,174 @@ class MapMusicBot:
             return False
         self._play_queued_track()
         return True
+
+    def _enqueue_track(self, title, target, source="youtube", http_headers=None,
+                       webpage_url="", direct_url=""):
+        """Queue a track to play next (Queue Mode / Add to Queue).
+
+        When nothing is playing the earliest possible "next" is right now, so
+        the track starts immediately; otherwise it is appended and auto-plays
+        when the current track ends.        Returns how many tracks are waiting (0
+        when it started right away).
+        """
+        if not target:
+            speak("Cannot queue this track.")
+            return 0
+        self.next_up_queue.append({
+            "title": title,
+            "target": target,
+            "source": source,
+            "http_headers": dict(http_headers or {}),
+            "webpage_url": webpage_url,
+            "direct_url": direct_url,
+        })
+        if not self.playing and not self.is_loading_stream:
+            self._play_queued_next()
+            return 0
+        speak(f"Added {title} to the queue. {len(self.next_up_queue)} waiting.")
+        return len(self.next_up_queue)
+
+    def _play_queued_next(self, track=None):
+        """Start the first queued track (or a specific one) and remove it from
+        the queue, preserving any favorites/playlist queue underneath so it
+        resumes after the queued song ends."""
+        if track is None:
+            if not self.next_up_queue:
+                return False
+            track = self.next_up_queue.pop(0)
+        elif self.next_up_queue and self.next_up_queue[0] is track:
+            self.next_up_queue.pop(0)
+        source = track.get("source", "youtube")
+        title = track.get("title", "Unknown")
+        target = track.get("target", "")
+        if source == "local":
+            self.play_single_track(title, target, "local", preserve_queue=True)
+        else:
+            self._start_youtube_stream_from_search(
+                title,
+                track.get("webpage_url") or target,
+                track.get("direct_url", ""),
+                track.get("http_headers") or {},
+                preserve_queue=True,
+            )
+        return True
+
+    def _clear_next_up_queue(self):
+        self.next_up_queue = []
+
+    def _open_queue_menu(self):
+        """View / clear the play-next queue (Queue Mode).
+
+        Every queued song is its own menu item so the player scrolls through
+        them one at a time with the arrow keys / wheel — the menu speaks each
+        item as it is highlighted, instead of reading the whole list at once.
+        Enter on a song re-reads its title.
+        """
+        from .. import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._show_mode_menu()
+
+        def clear_queue():
+            self._clear_next_up_queue()
+            speak("Queue cleared.")
+            # Rebuild the menu so the removed song items disappear.
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+            self._open_queue_menu()
+
+        def queue_count():
+            n = len(self.next_up_queue)
+            return f"Play Queue ({n} waiting)" if n else "Play Queue (empty)"
+
+        m = menu_mod.Menu(self.game, "Play Queue", parrent=gp)
+        items = [(queue_count, lambda: None)]
+        for i, t in enumerate(self.next_up_queue, 1):
+            title = t.get("title", "Unknown")
+
+            def read_song(idx=i, song_title=title):
+                speak(f"{idx}. {song_title}")
+
+            items.append((f"{i}. {title}", read_song))
+        items.append(("Clear Queue", clear_queue))
+        items.append(("Back", go_back))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_settings_menu(self):
+        """Music Bot settings: underwater muffle and room reverb.
+
+        Broadcast to Others is deliberately NOT here — it has its own keyboard
+        shortcut, and duplicating it in the menu caused confusion about which
+        one is the source of truth.
+        Every toggle here is persisted in client options, so a player sets it
+        once and the game remembers it across restarts.
+        """
+        from .. import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._show_mode_menu()
+
+        def get_water_label():
+            status = "ON" if self.water_muffle_enabled else "OFF"
+            return f"Underwater Muffle: {status}"
+
+        def toggle_water():
+            self.water_muffle_enabled = not self.water_muffle_enabled
+            options.set("music_bot_water_muffle", self.water_muffle_enabled)
+            self._reapply_bot_water_filter()
+            speak("Underwater muffle enabled." if self.water_muffle_enabled
+                  else "Underwater muffle disabled.")
+            m.speak_current_item()
+
+        def get_reverb_label():
+            status = "ON" if self.reverb_enabled else "OFF"
+            return f"Room Reverb (Realism): {status}"
+
+        def toggle_reverb():
+            self.reverb_enabled = not self.reverb_enabled
+            options.set("music_bot_reverb", self.reverb_enabled)
+            if not self.reverb_enabled:
+                self._detach_map_reverb()
+            speak("Room reverb enabled." if self.reverb_enabled
+                  else "Room reverb disabled.")
+            m.speak_current_item()
+
+        m = menu_mod.Menu(self.game, "Music Bot Settings", parrent=gp)
+        m.add_items([
+            (get_water_label, toggle_water),
+            (get_reverb_label, toggle_reverb),
+            ("Back", go_back),
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _reapply_bot_water_filter(self):
+        """Apply the underwater-muffle setting to the bot's live stream source.
+
+        Matters when the toggle flips while the listener is underwater at a
+        constant depth — no camera automation tick runs then to re-apply it.
+        """
+        src = self.stream_source
+        if src is None:
+            return
+        audio = self.game.audio_mngr
+        with contextlib.suppress(Exception):
+            if self.water_muffle_enabled:
+                active = getattr(audio, "filter", None)
+                if active and active[-1] is not None:
+                    src.direct_filter = active[-1]
+            else:
+                del src.direct_filter
 
     def _play_playlist_all(self, playlist_name):
         """Play all tracks in a custom playlist sequentially"""
@@ -1282,7 +1494,8 @@ class MapMusicBot:
         gp.add_substate(m)
 
     def _on_result_selected(self, index, gp):
-        """User selected a search result -> Show options (Play Now / Save to Favorites / Save to Playlist)"""
+        """User selected a search result -> Queue (Queue Mode) or show options
+        (Play Now / Play Next / Download / Save to Favorites / Playlist)."""
         gp.pop_last_substate()
 
         if index >= len(self.search_results):
@@ -1295,6 +1508,16 @@ class MapMusicBot:
         http_headers = result.get('http_headers') or {}
         target = webpage_url or direct_url
 
+        # Queue Mode: pressing Enter on a result queues it to play next
+        # without opening the options menu. Toggle Queue Mode off to reach
+        # Download / Favorites / Playlist again.
+        if self.queue_mode:
+            self._enqueue_track(
+                title, target, "youtube", http_headers=http_headers,
+                webpage_url=webpage_url, direct_url=direct_url,
+            )
+            return
+
         from .. import menu as menu_mod, menus
         m = menu_mod.Menu(self.game, title, parrent=gp)
         items = []
@@ -1303,6 +1526,13 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._start_youtube_stream_from_search(
                 title, webpage_url, direct_url, http_headers
+            )
+
+        def add_to_queue():
+            gp.pop_last_substate()
+            self._enqueue_track(
+                title, target, "youtube", http_headers=http_headers,
+                webpage_url=webpage_url, direct_url=direct_url,
             )
 
         def save_fav():
@@ -1325,6 +1555,7 @@ class MapMusicBot:
             )
 
         items.append(("Play Now", play_now))
+        items.append(("Play Next (Add to Queue)", add_to_queue))
         items.append(("Download Song", download_song))
         items.append(("Save to Favorites", save_fav))
         items.append(("Add to Playlist...", save_playlist))
@@ -1335,7 +1566,7 @@ class MapMusicBot:
         gp.add_substate(m)
 
     def _start_youtube_stream_from_search(self, title, webpage_url, direct_url,
-                                          http_headers=None):
+                                          http_headers=None, preserve_queue=False):
         from ..speech import speak
         if self.is_loading_stream:
             speak("Please wait, already loading a track.")
@@ -1358,8 +1589,10 @@ class MapMusicBot:
         self.last_youtube_title = title
         self.is_loading_stream = True
 
-        # Stop any current playback
-        self.stop(invalidate_pending=False, fade=True)
+        # Stop any current playback (preserve the favorites/playlist queue
+        # when this track came from the play-next queue).
+        self.stop(invalidate_pending=False, fade=True,
+                  clear_queue=not preserve_queue)
         self.is_loading_stream = True
 
         # Get stream URL in background
@@ -1651,6 +1884,7 @@ class MapMusicBot:
         self._current_reverb_slot = None
         if clear_queue:
             self._clear_track_queue()
+            self._clear_next_up_queue()
         if clear_feed:
             self._clear_personal_feed()
 
@@ -1841,8 +2075,16 @@ class MapMusicBot:
         This gives the music an environmental feel — cave echo, outdoor ambience, etc.
         The dry signal stays stereo-direct (headphone quality),
         while the wet signal from the reverb adds the room's atmosphere.
+        Skipped entirely when the player disabled Room Reverb in settings.
         """
         if not self.stream_source:
+            return True
+        if not getattr(self, "reverb_enabled", True):
+            # Setting off — detach any slot that was applied before it flipped.
+            if force or self._current_reverb_slot is not None:
+                with contextlib.suppress(Exception):
+                    self.game.audio_mngr.efx.send(self.stream_source, 0, None)
+                self._current_reverb_slot = None
             return True
         try:
             gp = self._find_gameplay()

@@ -34,7 +34,17 @@ def _music_water_sources(game):
 
 def _apply_music_water_filter(game, flt):
     """Attach (or detach, when flt is None) the water filter on music sources."""
+    gp = getattr(game, "gameplay", None)
+    bot = getattr(gp, "music_bot", None) if gp is not None else None
+    bot_muffle_on = bool(getattr(bot, "water_muffle_enabled", True))
     for src in _music_water_sources(game):
+        if (bot is not None and src is getattr(bot, "stream_source", None)
+                and not bot_muffle_on):
+            # The player disabled the underwater muffle for the private music
+            # bot (Music Bot settings); jukebox playback keeps the muffle.
+            with contextlib.suppress(Exception):
+                del src.direct_filter
+            continue
         if flt is not None:
             with contextlib.suppress(Exception):
                 src.direct_filter = flt
