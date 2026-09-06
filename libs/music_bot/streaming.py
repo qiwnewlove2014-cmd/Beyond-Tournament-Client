@@ -73,7 +73,8 @@ class AudioStreamer(threading.Thread):
     def __init__(self, game, audio_url, source, volume=50, bot=None, channels=2,
                  spatial_pair=None, start_offset=0.0, http_headers=None,
                  start_offset_received_at=None, canonical_url=None, media_cache=None,
-                 timeline_anchor=None, start_paused=False):
+                 timeline_anchor=None, start_paused=False, room_lead_in_s=None,
+                 join_playing_room=False):
         super().__init__(daemon=True)
         self.game = game
         self.bot = bot
@@ -103,6 +104,26 @@ class AudioStreamer(threading.Thread):
             and start_offset_received_at is not None
             and timeline_anchor
         )
+        # Lead-in the ROOM holds before a fresh song becomes audible. Every
+        # machine that anchors to the same broadcast holds the same lead-in,
+        # so it cancels out of note timing. A machine that plays direct
+        # while the rest of the room hears the server RELAY must anchor with
+        # 0.0 instead: the relay room holds no lead-in, and holding one
+        # leaves that machine exactly DIRECT_LEAD_IN_S behind the room for
+        # the whole song (its jam notes then land ~3.5s off the beat for
+        # everyone, with no lag report to fix it — its own anchor says it
+        # started on time).
+        self.room_lead_in_s = (
+            AudioStreamer.DIRECT_LEAD_IN_S if room_lead_in_s is None
+            else float(room_lead_in_s)
+        )
+        # Per-listener direct fallback into a room that is ALREADY playing
+        # (server relay). The song position advances from the broadcast
+        # instant, so even a zero-offset event must seek PAST the projected
+        # audible start — starting at position 0 would trail the room by
+        # this machine's whole resolve+startup (seconds off the beat for
+        # everyone, with no lag report to fix it).
+        self._join_playing_room = bool(join_playing_room)
         self._direct_seek_to = 0.0        # content position the decode head starts from
         self._fed_content_seconds = 0.0   # content seconds queued to OpenAL since the seek
         # Seconds the audible start ran past the shared wall-clock deadline
@@ -134,8 +155,22 @@ class AudioStreamer(threading.Thread):
         self._cleanup_lock = threading.Lock()
         self._cleaned_up = False
         self.ready_event = threading.Event()
+        # Set as soon as the startup pre-buffer has been queued, whether or
+        # not playback actually started (a stream created start_paused=True
+        # never sets ready_event). Crossfade pre-rolls poll this event so the
+        # next track's decoder is ready before its audible hand-over.
+        self.prebuffer_event = threading.Event()
         self.failure_reason = None
         self.completed_normally = False
+        # Crossfade bookkeeping: a retired outgoing stream whose network leg
+        # must go silent the instant the next track takes over (two Music Bot
+        # streams must never overlap on the PA / broadcast channel).
+        self.network_muted = False
+        # Network-leg crossfade state: (partner_streamer, monotonic start,
+        # seconds). While set, the network sender blends this stream's own
+        # frames with the partner's (fade-out / fade-in) so broadcast and PA
+        # listeners hear the same overlap as the local performer.
+        self._network_mix = None
         # Monotonic instant the speakers last consumed an OpenAL buffer
         # (jukebox direct streams only — see _reclaim_processed). The
         # jukebox watchdog rebuilds a stream whose OUTPUT stalls even
@@ -450,21 +485,104 @@ class AudioStreamer(threading.Thread):
             epoch, seq = self._claim_timeline_marker()
             self._send_to_network(aligned, epoch, seq)
 
+    def begin_network_crossfade(self, partner, seconds):
+        """Blend this stream's network leg with `partner`'s for `seconds`.
+
+        Each outgoing frame is mixed with the partner's frame (this stream
+        fading out, the partner fading in) so broadcast / PA listeners hear
+        the same crossfade the local performer hears. When the window
+        elapses this stream retires its network leg (network_muted) and the
+        partner's own leg takes over.
+        """
+        self._network_mix = (partner, time.monotonic(), max(0.1, float(seconds)))
+
+    def _mix_network_frames(self, own, partner, own_gain, partner_gain):
+        """Convex blend of two stereo int16 PCM frames (gains sum to ~1).
+
+        A convex combination can never exceed the loudest input sample, so
+        the blend cannot clip; audioop clips to int16 anyway as a backstop.
+        """
+        try:
+            import audioop
+            own_gain = max(0.0, min(1.0, own_gain))
+            partner_gain = max(0.0, min(1.0, partner_gain))
+            if own is None:
+                return audioop.mul(partner, 2, partner_gain)
+            if partner is None:
+                return audioop.mul(own, 2, own_gain)
+            n = min(len(own), len(partner))
+            out = audioop.add(
+                audioop.mul(own[:n], 2, own_gain),
+                audioop.mul(partner[:n], 2, partner_gain),
+                2,
+            )
+            if len(partner) > n:
+                out += audioop.mul(partner[n:], 2, partner_gain)
+            return out
+        except Exception:
+            return own if own is not None else partner
+
     def _network_sender_loop(self):
         """Paced network sending loop running in a separate thread.
         Decouples network scheduling sleeps from local OpenAL playback.
         """
         while self.running:
-            try:
-                # Wait for a packet, with timeout so we check self.running regularly
-                item = self.network_queue.get(timeout=0.1)
-                if isinstance(item, tuple) and len(item) == 3:
-                    data, timeline_epoch, timeline_seq = item
-                else:
-                    data, timeline_epoch, timeline_seq = item, None, None
-            except queue.Empty:
-                data = None
-                timeline_epoch = timeline_seq = None
+            if getattr(self, "network_muted", False):
+                # Retired during a crossfade: drop everything (music, live
+                # guitar/mic mix, PA monitor) so listeners never hear the old
+                # song under the new one. Poll slowly to keep the thread alive
+                # in case it is ever unmuted before being stopped.
+                time.sleep(0.05)
+                continue
+
+            data = None
+            timeline_epoch = timeline_seq = None
+            mix = getattr(self, "_network_mix", None)
+            if mix is not None:
+                partner, mix_started, mix_seconds = mix
+                progress = (time.monotonic() - mix_started) / mix_seconds
+                if progress >= 1.0:
+                    # The overlap is over: retire this network leg; the
+                    # incoming stream takes over the broadcast on its own now.
+                    self._network_mix = None
+                    self.network_muted = True
+                    continue
+                try:
+                    item = self.network_queue.get(timeout=0.1)
+                    if isinstance(item, tuple) and len(item) == 3:
+                        data = item[0]
+                    else:
+                        data = item
+                except queue.Empty:
+                    data = None
+                partner_data = None
+                partner_queue = getattr(partner, "network_queue", None)
+                if partner_queue is not None:
+                    try:
+                        partner_item = partner_queue.get_nowait()
+                        if isinstance(partner_item, tuple) and len(partner_item) == 3:
+                            partner_data = partner_item[0]
+                        else:
+                            partner_data = partner_item
+                    except Exception:
+                        partner_data = None
+                if data is not None or partner_data is not None:
+                    data = self._mix_network_frames(
+                        data, partner_data, 1.0 - progress, progress)
+                    # The outgoing track still owns the room timeline until
+                    # the hand-over; the blend keeps its markers.
+                    timeline_epoch, timeline_seq = self._claim_timeline_marker()
+            else:
+                try:
+                    # Wait for a packet, with timeout so we check self.running regularly
+                    item = self.network_queue.get(timeout=0.1)
+                    if isinstance(item, tuple) and len(item) == 3:
+                        data, timeline_epoch, timeline_seq = item
+                    else:
+                        data, timeline_epoch, timeline_seq = item, None, None
+                except queue.Empty:
+                    data = None
+                    timeline_epoch = timeline_seq = None
 
             # Do not leak pre-pause PCM into the next broadcast segment unless live input is present.
             if self.paused:
@@ -806,7 +924,8 @@ class AudioStreamer(threading.Thread):
         run()'s streaming loop keeps its leftover contract.
         """
         deadline = self.direct_start_deadline(
-            self.start_offset, self.start_offset_received_at, self._direct_seek_to)
+            self.start_offset, self.start_offset_received_at,
+            self._direct_seek_to, self.room_lead_in_s)
         now = time.monotonic()
         hold = min(self.DIRECT_MAX_ALIGN_WAIT_S, max(0.0, deadline - now))
         if hold > 0.0:
@@ -844,7 +963,7 @@ class AudioStreamer(threading.Thread):
     # ---- Direct-transport shared-timeline math (pure, unit-testable) ----
 
     @staticmethod
-    def direct_start_deadline(start_offset, received_at, seek_to):
+    def direct_start_deadline(start_offset, received_at, seek_to, lead_in=None):
         """Wall-clock instant (received_at's monotonic domain) when the
         prebuffered head should become audible.
 
@@ -854,9 +973,16 @@ class AudioStreamer(threading.Thread):
         lead-in behind the server's audioStartedAt (the price of hearing
         the full intro). Fresh songs and mid-song joins must share that
         shift, otherwise a joiner lands a whole lead-in ahead of the room.
+
+        ``lead_in`` overrides the room's shared lead-in hold. A machine
+        that switched itself to direct playback while the room still hears
+        the server relay must pass 0.0: the relay room holds no lead-in, so
+        holding one would leave it a full lead-in behind the room.
         """
+        if lead_in is None:
+            lead_in = AudioStreamer.DIRECT_LEAD_IN_S
         t_zero = received_at - start_offset
-        return t_zero + AudioStreamer.DIRECT_LEAD_IN_S + seek_to
+        return t_zero + lead_in + seek_to
 
     @staticmethod
     def direct_seek_seconds(start_offset, received_at, now):
@@ -955,18 +1081,28 @@ class AudioStreamer(threading.Thread):
             # mid-song join seeks PAST the projected audible start and
             # waits the exact residual at prebuffer-complete. Non-anchored
             # workers (personal music bot, livestreams) keep legacy behavior.
-            if self.start_offset_received_at is not None and effective_offset > 0.0:
-                if self._direct_anchor and effective_offset <= self.DIRECT_FRESH_MAX_S:
-                    effective_offset = 0.0
-                elif self._direct_anchor:
+            if self.start_offset_received_at is not None:
+                if self._join_playing_room:
+                    # Joining a room that is already playing (per-listener
+                    # direct fallback into a relay room): always seek — the
+                    # seek formula cancels the offset entirely and lands this
+                    # machine on the room's clock (position = room position +
+                    # startup estimate at the audible start).
+                    effective_offset = max(0.001, effective_offset)
                     effective_offset = self.direct_seek_seconds(
                         effective_offset, self.start_offset_received_at, time.monotonic())
-                else:
-                    # Only compensate the client's resolve delay when RESUMING
-                    # mid-song (start_offset > 0). A fresh song must start at 0:
-                    # adding the yt-dlp resolve time here made the jukebox skip
-                    # past the intro every time the direct fallback was used.
-                    effective_offset += max(0.0, time.monotonic() - self.start_offset_received_at)
+                elif effective_offset > 0.0:
+                    if self._direct_anchor and effective_offset <= self.DIRECT_FRESH_MAX_S:
+                        effective_offset = 0.0
+                    elif self._direct_anchor:
+                        effective_offset = self.direct_seek_seconds(
+                            effective_offset, self.start_offset_received_at, time.monotonic())
+                    else:
+                        # Only compensate the client's resolve delay when RESUMING
+                        # mid-song (start_offset > 0). A fresh song must start at 0:
+                        # adding the yt-dlp resolve time here made the jukebox skip
+                        # past the intro every time the direct fallback was used.
+                        effective_offset += max(0.0, time.monotonic() - self.start_offset_received_at)
             self._direct_seek_to = effective_offset if effective_offset > 0.5 else 0.0
             # Input authorization must precede seek. YouTube's signed range
             # request can return 403 when -ss is placed before these headers.
@@ -1113,6 +1249,7 @@ class AudioStreamer(threading.Thread):
         # Start local playback after pre-buffering (spatial pairs also need
         # their distance fade computed before the first audible sample).
         if pre_buffered > 0:
+            self.prebuffer_event.set()
             self._remember_prebuffered_media()
             if not self.running:
                 self._cleanup()

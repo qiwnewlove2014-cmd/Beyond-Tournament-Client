@@ -77,7 +77,15 @@ def _validated_info(info):
     hostname = urlsplit(info["url"]).hostname.lower()
     if (hostname == "googlevideo.com" or hostname.endswith(".googlevideo.com")) and not validated:
         return None  # Signed Google media URLs cannot lose their paired headers.
-    return {"url": info["url"], "http_headers": validated}
+    result = {"url": info["url"], "http_headers": validated}
+    # Optional track duration (seconds). Used by the personal Music Bot to
+    # schedule crossfades; ignored by the jukebox media cache. Malformed or
+    # out-of-range values are dropped, never fatal.
+    duration = info.get("duration")
+    if type(duration) in (int, float) and not isinstance(duration, bool):
+        if 0.0 < float(duration) <= 86400.0:
+            result["duration"] = float(duration)
+    return result
 
 
 def _check(deadline, cancelled=None):
@@ -267,7 +275,11 @@ def _extract(url, ydl_factory=None):
             # paired header values intact. Do not copy unbounded header sets.
             if isinstance(headers, dict) and len(headers) <= _MAX_HEADERS:
                 headers = dict(headers)
-            return _validated_info({"url": info.get("url"), "http_headers": headers})
+            return _validated_info({
+                "url": info.get("url"),
+                "http_headers": headers,
+                "duration": info.get("duration"),
+            })
     except Exception:
         return None
 

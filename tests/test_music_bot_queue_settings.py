@@ -66,6 +66,14 @@ def make_bot(**overrides):
     bot.reverb_enabled = True
     bot.broadcast_enabled = False
     bot.broadcast_to_megaphone = False
+    bot.eq_profile = "normal"
+    bot.eq_values = {"bass": 50, "mid": 50, "treble": 50}
+    bot._eq_slots = {}
+    bot._custom_eq_slot = None
+    bot.crossfade_enabled = False
+    bot.current_duration = None
+    bot._known_durations = {}
+    bot._crossfade = None
     bot.game = SimpleNamespace(put=lambda fn: None)
     bot._stop_local = lambda: None
     bot._destroy_stream_source = lambda: None

@@ -118,6 +118,14 @@ def make_bot(**overrides):
     bot.mode = "youtube"
     bot._stream_announced = False
     bot._current_reverb_slot = None
+    bot.eq_profile = "normal"
+    bot.eq_values = {"bass": 50, "mid": 50, "treble": 50}
+    bot._eq_slots = {}
+    bot._custom_eq_slot = None
+    bot.crossfade_enabled = False
+    bot.current_duration = None
+    bot._known_durations = {}
+    bot._crossfade = None
     bot.feed_tracks = []
     bot.play_queue = []
     bot.stop_calls = []

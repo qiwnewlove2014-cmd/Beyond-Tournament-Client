@@ -15,6 +15,7 @@ import cyal.exceptions
 import pygame
 
 from .. import options
+from .. import state
 from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
@@ -31,6 +32,65 @@ class MapMusicBot:
     Controls are resolved from the player's key bindings in gameplay.py.
     Modifier combinations continue to use the configured Music Bot key.
     """
+
+    # Crossfade window (seconds): the outgoing outro fades down while the
+    # next track's intro fades up. Tuning this only shifts the overlap, never
+    # the audio pipeline.
+    CROSSFADE_SECONDS = 3.0
+    # How long before the end of the current track we begin resolving the
+    # NEXT track's fresh stream URL (the slow, variable part).
+    CROSSFADE_PREP_SECONDS = 3.5
+    # Once resolved, the next streamer is launched this close to the end so
+    # its ffmpeg + pre-buffer finishes right around the fade window.
+    CROSSFADE_LAUNCH_SECONDS = 1.2
+
+    # Equalizer profiles shown in the Music Bot Equalizer menu. "normal"
+    # means flat (no effect slot). Preset tuples mirror the jukebox's
+    # OpenAL EQUALIZER parameter pairs.
+    EQ_PROFILES = (
+        ("normal", "Normal (Flat)"),
+        ("bass_boost", "Bass Boost"),
+        ("vocal_boost", "Vocal Boost"),
+        ("treble_boost", "Treble Boost"),
+        ("custom", "Custom (Bass/Mid/Treble)"),
+    )
+    EQ_PRESETS = {
+        "bass_boost": (
+            ("low_gain", 7.0),
+            ("low_cutoff", 260.0),
+            ("mid1_gain", 0.9),
+            ("high_gain", 1.0),
+            ("high_cutoff", 4000.0),
+        ),
+        "vocal_boost": (
+            ("mid1_gain", 3.2),
+            ("mid1_center", 500.0),
+            ("mid1_width", 1.0),
+            ("mid2_gain", 3.2),
+            ("mid2_center", 3000.0),
+            ("mid2_width", 1.0),
+        ),
+        "treble_boost": (
+            ("high_gain", 3.5),
+            ("high_cutoff", 4000.0),
+            ("mid2_gain", 1.4),
+            ("mid2_center", 3000.0),
+            ("mid2_width", 1.0),
+        ),
+    }
+
+    @classmethod
+    def _normalize_eq_values(cls, values):
+        """Clamp arbitrary custom-EQ input into the 0-100 bass/mid/treble map."""
+        values = values if isinstance(values, dict) else {}
+        normalized = {}
+        for band in ("bass", "mid", "treble"):
+            try:
+                value = int(values.get(band, 50))
+            except (TypeError, ValueError):
+                value = 50
+            normalized[band] = max(0, min(100, value))
+        return normalized
 
     def __init__(self, game):
         self.game = game
@@ -126,6 +186,24 @@ class MapMusicBot:
         # Environmental reverb tracking
         self._current_reverb_slot = None
 
+        # Equalizer (per-listener, mirrors the jukebox's OpenAL EQUALIZER
+        # slots). "normal" detaches the send entirely; every other profile
+        # owns one cached effect slot mutated in place.
+        self.eq_profile = str(options.get("music_bot_eq_profile", "normal")).lower()
+        self.eq_values = self._normalize_eq_values(options.get("music_bot_eq_values"))
+        self._eq_slots = {}   # preset profile -> effect slot
+        self._custom_eq_slot = None  # custom profile's single live slot
+
+        # Crossfade between auto-advanced tracks (queue / playlists). A
+        # smooth transition needs the CURRENT track's duration so the next
+        # stream can be pre-rolled and faded in while the outro still plays;
+        # it is remembered per YouTube page URL whenever a resolve or a
+        # search result exposes it.
+        self.crossfade_enabled = bool(options.get("music_bot_crossfade", True))
+        self.current_duration = None       # seconds, when known (None = no crossfade)
+        self._known_durations = {}         # youtube page URL -> duration seconds
+        self._crossfade = None             # active roll/fade state (see _update_crossfade)
+
     def toggle_broadcast(self):
         """Toggle network broadcasting on/off."""
         if getattr(self.game, 'pong_mode', False) and not getattr(self.game, 'pong_arcade', False):
@@ -151,46 +229,65 @@ class MapMusicBot:
                     {"locked": False}
                 )
 
+    def _new_bot_source(self):
+        """Build a configured OpenAL source for Music Bot playback.
+        Uses direct_channels=True for clear stereo, plus the EQ aux send and
+        an inherited underwater filter when the player is submerged.
+        """
+        try:
+            audio = self.game.audio_mngr
+            src = audio.context.gen_source()
+            src.direct_channels = True
+            src.spatialize = False
+            music_vol = audio.volume_categories.get("music", [100])[0] / 100
+            src.gain = (self.volume / 100) * music_vol
+            # A track started while the listener is underwater inherits the
+            # active global water filter so it is dull from its first frame
+            # (unless the player disabled the underwater muffle in settings).
+            active = getattr(audio, "filter", None)
+            if (active and active[-1] is not None
+                    and getattr(self, "water_muffle_enabled", True)):
+                src.direct_filter = active[-1]
+            self._apply_eq_to_source(src)
+            return src
+        except Exception as ex:
+            print(f"[MusicBot] Error creating source: {ex}")
+            return None
+
+    def _delete_source(self, src):
+        """Stop, drain and delete one OpenAL source (never the live stream)."""
+        if src is None:
+            return
+        try:
+            src.stop()
+            drain_limit = 64
+            while src.buffers_processed > 0 and drain_limit > 0:
+                src.unqueue_buffers()
+                drain_limit -= 1
+            drain_limit = 64
+            while src.buffers_queued > 0 and drain_limit > 0:
+                src.unqueue_buffers()
+                drain_limit -= 1
+            src.delete()
+        except Exception:
+            pass
+
     def _create_stream_source(self):
         """Create a fresh OpenAL source for streaming.
         Uses direct_channels=True for clear stereo, plus EFX reverb send
         for environmental atmosphere.
         """
         self._destroy_stream_source()
-        try:
-            src = self.game.audio_mngr.context.gen_source()
-            src.direct_channels = True
-            src.spatialize = False
-            music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
-            src.gain = (self.volume / 100) * music_vol
-            # A track started while the listener is underwater inherits the
-            # active global water filter so it is dull from its first frame
-            # (unless the player disabled the underwater muffle in settings).
-            active = getattr(self.game.audio_mngr, "filter", None)
-            if (active and active[-1] is not None
-                    and getattr(self, "water_muffle_enabled", True)):
-                src.direct_filter = active[-1]
-            self.stream_source = src
-            # Apply current map reverb immediately
-            self._sync_map_reverb()
-        except Exception as ex:
-            print(f"[MusicBot] Error creating source: {ex}")
+        src = self._new_bot_source()
+        if src is None:
+            return
+        self.stream_source = src
+        # Apply current map reverb immediately
+        self._sync_map_reverb()
 
     def _destroy_stream_source(self):
         if self.stream_source:
-            try:
-                self.stream_source.stop()
-                drain_limit = 64
-                while self.stream_source.buffers_processed > 0 and drain_limit > 0:
-                    self.stream_source.unqueue_buffers()
-                    drain_limit -= 1
-                drain_limit = 64
-                while self.stream_source.buffers_queued > 0 and drain_limit > 0:
-                    self.stream_source.unqueue_buffers()
-                    drain_limit -= 1
-                self.stream_source.delete()
-            except Exception:
-                pass
+            self._delete_source(self.stream_source)
             self.stream_source = None
 
     def _fade_out_source(self, source, streamer=None, duration=0.5):
@@ -964,6 +1061,7 @@ class MapMusicBot:
         self.current_title = title
         self.current_target = target
         self.current_source = source
+        self.current_duration = None  # refreshed by the resolve below
 
         # Save for replay
         self.last_track_title = title
@@ -1001,6 +1099,7 @@ class MapMusicBot:
                             speak("Failed to get audio stream.")
                             self.is_loading_stream = False
                         return
+                    self._note_track_duration(target, stream_info.get("duration"))
                     self.game.put(lambda: self._start_youtube_stream(
                         stream_info['url'], title, playback_generation,
                         http_headers=stream_info.get('http_headers'),
@@ -1110,6 +1209,311 @@ class MapMusicBot:
     def _clear_next_up_queue(self):
         self.next_up_queue = []
 
+    # === Crossfade between auto-advanced tracks ===
+    # When the current track's duration is known, the NEXT queued track is
+    # pre-rolled (URL resolve + a paused ffmpeg streamer on its own source)
+    # during the last seconds of the current song. Right before the outro
+    # runs out the candidate is unpaused under gain 0 and both sources ramp
+    # against each other over CROSSFADE_SECONDS — a real overlapping
+    # fade-out/fade-in instead of a silent gap while the next track loads.
+
+    def _remaining_seconds(self):
+        """Seconds left on the current track, when its duration is known."""
+        if not self.current_duration:
+            return None
+        position = self.track_position()
+        if position is None:
+            return None
+        return float(self.current_duration) - position
+
+    def _peek_next_track(self):
+        """The track the normal end-of-song path would play next (no consume)."""
+        if self.next_up_queue:
+            return self.next_up_queue[0]
+        if self.play_queue and 0 <= self.play_queue_index + 1 < len(self.play_queue):
+            return self.play_queue[self.play_queue_index + 1]
+        return None
+
+    def _consume_next_track(self):
+        """Consume the next track exactly like the end-of-song advance does."""
+        if self.next_up_queue:
+            return self.next_up_queue.pop(0)
+        if self.play_queue and 0 <= self.play_queue_index + 1 < len(self.play_queue):
+            self.play_queue_index += 1
+            return self.play_queue[self.play_queue_index]
+        return None
+
+    def _cancel_crossfade(self):
+        """Abandon any pre-roll / in-progress fade and free its resources.
+
+        Never touches the CURRENT streamer/source (the caller owns those); it
+        only tears down the extra candidate pipeline and, when a fade was
+        already underway, the retired outgoing stream that was being faded.
+        """
+        state = getattr(self, "_crossfade", None)
+        if not state:
+            return False
+        self._crossfade = None
+        pairs = (
+            (state.get("candidate"), state.get("candidate_source")),
+            (state.get("old_streamer"), state.get("old_source")),
+        )
+        for streamer, source in pairs:
+            if streamer is not None and streamer is not self.streamer:
+                try:
+                    streamer.stop()
+                except Exception:
+                    pass
+            if source is not None and source is not self.stream_source:
+                self._delete_source(source)
+        return True
+
+    def _start_crossfade_roll(self):
+        """Begin pre-rolling the next queued track (called each frame)."""
+        if not self.crossfade_enabled or self.is_loading_stream:
+            return
+        remaining = self._remaining_seconds()
+        if remaining is None or remaining <= 0.0:
+            return
+        if remaining > self.CROSSFADE_SECONDS + self.CROSSFADE_PREP_SECONDS:
+            return
+        streamer = self.streamer
+        if streamer is None or not streamer.is_alive():
+            return
+        track = self._peek_next_track()
+        if not track or not track.get("target"):
+            return
+        state = {
+            "phase": "resolving",
+            "track": dict(track),
+            "old_streamer": streamer,
+            "old_source": self.stream_source,
+            "stream_info": None,
+            "resolve_done": False,
+            "candidate": None,
+            "candidate_source": None,
+            "duration": None,
+            "fade_started_at": None,
+            "old_gain0": None,
+        }
+        self._crossfade = state
+        source = track.get("source", "youtube")
+        target = str(track.get("target", ""))
+        if source != "local" and not target.startswith(("http://", "https://")):
+            self._crossfade = None
+            return
+        if source != "local":
+            webpage = str(track.get("webpage_url") or target)
+
+            def do_resolve():
+                info = YouTubeSearcher.get_stream_info(
+                    webpage,
+                    cancelled=lambda: self._crossfade is not state,
+                )
+                if self._crossfade is not state:
+                    return
+                state["stream_info"] = info if info else None
+                if info:
+                    self._note_track_duration(webpage, info.get("duration"))
+                    state["duration"] = self._known_durations.get(
+                        webpage) or info.get("duration")
+                state["resolve_done"] = True
+
+            threading.Thread(target=do_resolve, daemon=True).start()
+        else:
+            # Local files need no URL resolution; launch straight away.
+            state["resolve_done"] = True
+            state["stream_info"] = {"url": target, "http_headers": {}}
+
+    def _create_crossfade_candidate(self, state):
+        """Launch the pre-rolled next streamer, silent and network-muted."""
+        src = self._new_bot_source()
+        if src is None:
+            self._cancel_crossfade()
+            return
+        info = state.get("stream_info") or {}
+        track = state["track"]
+        source = track.get("source", "youtube")
+        url = info.get("url") or track.get("target", "")
+        canonical = None
+        headers = {}
+        if source != "local":
+            canonical = str(track.get("webpage_url") or track.get("target", ""))
+            headers = dict(info.get("http_headers") or {})
+        try:
+            cand = AudioStreamer(
+                self.game, url, src, self.volume, bot=self,
+                http_headers=headers,
+                canonical_url=canonical,
+                start_paused=True,
+            )
+        except Exception:
+            self._delete_source(src)
+            self._cancel_crossfade()
+            return
+        cand.network_muted = True  # silent until the fade actually hands over
+        cand.start()
+        state["candidate"] = cand
+        state["candidate_source"] = src
+        # Keep the candidate source silent while it pre-rolls.
+        with contextlib.suppress(Exception):
+            src.gain = 0.0
+
+    def _commit_crossfade(self, state):
+        """Make the pre-rolled candidate the current track and fade it in
+        while the outgoing stream fades out. Returns True on success."""
+        cand = state.get("candidate")
+        cand_src = state.get("candidate_source")
+        old_streamer = state.get("old_streamer")
+        old_source = state.get("old_source")
+        if cand is None or cand_src is None:
+            return False
+        if self.streamer is not old_streamer or self.stream_source is not old_source:
+            return False
+        if not cand.prebuffer_event.is_set():
+            return False
+        track = self._consume_next_track()
+        if track is None:
+            self._cancel_crossfade()
+            return False
+        self._begin_playback_generation()
+        title = track.get("title", "Unknown")
+        target = str(track.get("target", ""))
+        source = track.get("source", "youtube")
+        webpage = target if source != "local" else ""
+        self.current_title = title
+        self.current_target = webpage or target
+        self.current_source = source
+        self.last_track_title = title
+        self.last_track_target = webpage or target
+        self.last_track_source = source
+        if source != "local":
+            self.last_youtube_url = webpage
+            self.last_youtube_title = title
+        self.current_duration = state.get("duration")
+        self.mode = "youtube"
+        self.playing = True
+        self.paused = False
+        self._stream_announced = False
+        self._current_reverb_slot = None
+        self.streamer = cand
+        self.stream_source = cand_src
+        self._apply_eq_to_source(cand_src)
+        state["old_gain0"] = 0.0
+        if old_source is not None:
+            with contextlib.suppress(Exception):
+                state["old_gain0"] = float(getattr(old_source, "gain", 0.0) or 0.0)
+        # Hand the room the same overlap the performer hears: the outgoing
+        # network leg blends into the incoming one (old fades out, new fades
+        # in) instead of hard-switching. The candidate stays network-muted
+        # while the blend runs and only takes over the leg when the fade ends.
+        if old_streamer is not None:
+            # Drop any frames the candidate queued while pre-rolling so the
+            # blend starts at the live position, not seconds behind.
+            try:
+                while True:
+                    cand.network_queue.get_nowait()
+            except Exception:
+                pass
+            if hasattr(old_streamer, "begin_network_crossfade"):
+                old_streamer.begin_network_crossfade(
+                    cand, self.CROSSFADE_SECONDS)
+            else:
+                old_streamer.network_muted = True
+        with contextlib.suppress(Exception):
+            cand_src.gain = 0.0
+        cand.set_pause(False)
+        state["phase"] = "fading"
+        state["fade_started_at"] = time.monotonic()
+        return True
+
+    def _update_fade_gains(self, base_gain):
+        """Per-frame gain ramp during the overlap (main thread only)."""
+        state = self._crossfade
+        if state is None or state.get("phase") != "fading":
+            return
+        elapsed = time.monotonic() - (state.get("fade_started_at") or time.monotonic())
+        progress = min(1.0, max(0.0, elapsed / self.CROSSFADE_SECONDS))
+        src = self.stream_source
+        old_source = state.get("old_source")
+        if src is not None:
+            with contextlib.suppress(Exception):
+                src.gain = base_gain * progress
+        if old_source is not None:
+            with contextlib.suppress(Exception):
+                old_source.gain = (state.get("old_gain0") or 0.0) * (1.0 - progress)
+        if progress >= 1.0:
+            if src is not None:
+                with contextlib.suppress(Exception):
+                    src.gain = base_gain
+            old_streamer = state.get("old_streamer")
+            if old_streamer is not None and old_streamer is not self.streamer:
+                with contextlib.suppress(Exception):
+                    old_streamer.stop()
+            # The blend is over: the incoming stream's own network leg takes
+            # over the broadcast now (it stayed muted through the overlap).
+            if self.streamer is not None:
+                with contextlib.suppress(Exception):
+                    self.streamer.network_muted = False
+            self._delete_source(old_source)
+            self._crossfade = None
+
+    def _update_crossfade(self):
+        """Drive the crossfade state machine (called every frame while playing)."""
+        streamer = self.streamer
+        if streamer is None or not streamer.is_alive():
+            # The song ended while we were pre-rolling: abandon the candidate;
+            # the normal end-of-song advance plays the next track instead.
+            self._cancel_crossfade()
+            return
+        if not self.crossfade_enabled or self.is_loading_stream:
+            return
+        state = self._crossfade
+        if state is None:
+            self._start_crossfade_roll()
+            state = self._crossfade
+            if state is None:
+                return
+        if state.get("phase") == "fading":
+            # The overlap is already underway; the gain ramp in
+            # _update_fade_gains drives the rest of the transition.
+            return
+        remaining = self._remaining_seconds()
+        if remaining is None or remaining <= 0.0:
+            return
+        if state.get("phase") == "resolving":
+            if not state.get("resolve_done"):
+                return
+            if not state.get("stream_info"):
+                # Resolution failed: let the normal end-of-song retry it.
+                self._cancel_crossfade()
+                return
+            if (state.get("candidate") is None
+                    and remaining <= self.CROSSFADE_SECONDS + self.CROSSFADE_LAUNCH_SECONDS):
+                self._create_crossfade_candidate(state)
+                if state.get("candidate") is not None:
+                    # Pre-roll launched: wait for its pre-buffer, then hand over.
+                    state["phase"] = "waiting"
+            return
+        cand = state.get("candidate")
+        if cand is None:
+            return
+        if cand.failure_reason is not None and not cand.prebuffer_event.is_set():
+            # The candidate stream failed to start; fall back to the normal
+            # end-of-song path so the next track still plays.
+            self._cancel_crossfade()
+            return
+        if cand.prebuffer_event.is_set() and remaining <= self.CROSSFADE_SECONDS:
+            if not self._commit_crossfade(state):
+                self._cancel_crossfade()
+
+    def _set_crossfade_enabled(self, enabled):
+        """Persist the crossfade toggle; abort any roll started under it."""
+        self.crossfade_enabled = bool(enabled)
+        options.set("music_bot_crossfade", self.crossfade_enabled)
+        if not self.crossfade_enabled:
+            self._cancel_crossfade()
+
     def _open_queue_menu(self):
         """View / clear the play-next queue (Queue Mode).
 
@@ -1197,14 +1601,80 @@ class MapMusicBot:
                   else "Room reverb disabled.")
             m.speak_current_item()
 
+        def get_crossfade_label():
+            status = "ON" if getattr(self, "crossfade_enabled", False) else "OFF"
+            return f"Crossfade Between Songs: {status}"
+
+        def toggle_crossfade():
+            enabled = not getattr(self, "crossfade_enabled", False)
+            self._set_crossfade_enabled(enabled)
+            speak("Crossfade between songs enabled. Tracks overlap smoothly."
+                  if enabled else "Crossfade between songs disabled.")
+            m.speak_current_item()
+
+        def get_eq_label():
+            return f"Equalizer: {self._eq_profile_label()}"
+
+        def go_eq():
+            gp.pop_last_substate()
+            self._open_eq_menu()
+
         m = menu_mod.Menu(self.game, "Music Bot Settings", parrent=gp)
         m.add_items([
             (get_water_label, toggle_water),
             (get_reverb_label, toggle_reverb),
+            (get_crossfade_label, toggle_crossfade),
+            (get_eq_label, go_eq),
             ("Back", go_back),
         ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
+
+    def _open_eq_menu(self):
+        """Pick the Music Bot equalizer profile (or open the Custom sliders).
+        Profiles apply immediately so the change is heard while browsing.
+        """
+        from .. import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def make_label(profile, label):
+            def label_fn():
+                return f"{label} (active)" if self.eq_profile == profile else label
+            return label_fn
+
+        def make_pick(profile, label):
+            def pick():
+                if profile == "custom":
+                    gp.pop_last_substate()
+                    self._open_custom_eq_sliders()
+                    return
+                self.set_eq_profile(profile)
+                speak(f"{label} equalizer applied.")
+                m.speak_current_item()
+            return pick
+
+        m = menu_mod.Menu(self.game, "Music Bot Equalizer", parrent=gp)
+        items = []
+        for profile, label in self.EQ_PROFILES:
+            items.append((make_label(profile, label), make_pick(profile, label)))
+        items.append(("Back", go_back))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_custom_eq_sliders(self):
+        """Open the Bass/Mid/Treble sliders for the Custom profile."""
+        gp = self._find_gameplay()
+        if not gp:
+            return
+        self.set_eq_profile("custom", self.eq_values)
+        gp.add_substate(_MusicBotEqSlider(self.game, self))
 
     def _reapply_bot_water_filter(self):
         """Apply the underwater-muffle setting to the bot's live stream source.
@@ -1223,6 +1693,136 @@ class MapMusicBot:
                     src.direct_filter = active[-1]
             else:
                 del src.direct_filter
+
+    # === Equalizer (personal Music Bot) ===
+    # Same OpenAL EQUALIZER approach as the jukebox: preset slots are cached
+    # per profile, the custom profile owns one slot that is mutated in place
+    # while its sliders move (no slot leaks, audible in real time), and
+    # "normal" detaches the aux send so the stream stays perfectly flat.
+
+    def _eq_profile_label(self):
+        for profile, label in self.EQ_PROFILES:
+            if profile == self.eq_profile:
+                return label
+        return "Normal (Flat)"
+
+    def _get_bot_eq_slot(self, profile, eq_values=None):
+        """Return the cached effect slot for a profile (None = flat)."""
+        profile = str(profile or "normal").lower()
+        if profile not in ("normal",) and profile not in self.EQ_PRESETS \
+                and profile != "custom":
+            return None
+        if profile == "normal":
+            return None
+        audio = getattr(self.game, "audio_mngr", None)
+        if audio is None or getattr(audio, "efx", None) is None \
+                or not hasattr(audio, "gen_effect"):
+            return None
+        if profile == "custom":
+            values = self._normalize_eq_values(eq_values)
+            params = self._custom_eq_parameters(values)
+            slot = self._custom_eq_slot
+            if slot is None:
+                try:
+                    slot = audio.gen_effect("EQUALIZER", *params)
+                except Exception:
+                    slot = None
+                self._custom_eq_slot = slot
+            elif slot is not None:
+                effect = getattr(slot, "effect", None)
+                if effect is not None:
+                    for param in params:
+                        try:
+                            effect.set(*param)
+                        except Exception:
+                            pass
+                    try:
+                        # EFX implementations may snapshot parameters when an
+                        # effect is attached; reattach the same object so the
+                        # in-place edits become audible without a new slot.
+                        slot.effect = effect
+                    except Exception:
+                        pass
+            return slot
+        if profile not in self._eq_slots:
+            try:
+                self._eq_slots[profile] = audio.gen_effect(
+                    "EQUALIZER", *self.EQ_PRESETS[profile])
+            except Exception:
+                self._eq_slots[profile] = None
+        return self._eq_slots.get(profile)
+
+    @staticmethod
+    def _custom_eq_parameters(values):
+        """Map accessible 0-100 Bass/Mid/Treble sliders to OpenAL EQUALIZER
+        gains. Kept identical to the jukebox's curve (one shared implementation
+        so both EQs always sound the same)."""
+        from ..jukebox import JukeboxPlayer
+        return JukeboxPlayer._custom_eq_parameters(values)
+
+    def set_eq_profile(self, profile, eq_values=None):
+        """Switch the Music Bot equalizer and re-apply the EFX send live."""
+        profile = str(profile or "normal").lower()
+        allowed = {p for p, _ in self.EQ_PROFILES}
+        if profile not in allowed:
+            profile = "normal"
+        was_custom = str(getattr(self, "eq_profile", "normal")) == "custom"
+        self.eq_profile = profile
+        self.eq_values = self._normalize_eq_values(eq_values)
+        options.set("music_bot_eq_profile", profile)
+        options.set("music_bot_eq_values", dict(self.eq_values))
+        slot = self._get_bot_eq_slot(profile, self.eq_values)
+        self._apply_bot_eq(slot)
+        if was_custom and profile != "custom":
+            old_slot = self._custom_eq_slot
+            self._custom_eq_slot = None
+            if old_slot is not None:
+                audio = getattr(self.game, "audio_mngr", None)
+                if audio is not None and hasattr(audio, "release_effect_slot"):
+                    with contextlib.suppress(Exception):
+                        audio.release_effect_slot(old_slot)
+
+    def _apply_eq_to_source(self, src):
+        """Attach (or detach, when flat) the EQ aux send on one source."""
+        if src is None:
+            return
+        audio = getattr(self.game, "audio_mngr", None)
+        if audio is None or getattr(audio, "efx", None) is None:
+            return
+        slot = self._get_bot_eq_slot(self.eq_profile, self.eq_values)
+        with contextlib.suppress(Exception):
+            audio.efx.send(src, 1, slot)
+
+    def _apply_bot_eq(self, slot=None):
+        """Re-apply the current EQ to every live bot source."""
+        if slot is None:
+            slot = self._get_bot_eq_slot(self.eq_profile, self.eq_values)
+        audio = getattr(self.game, "audio_mngr", None)
+        if audio is None or getattr(audio, "efx", None) is None:
+            return
+        sources = [getattr(self, "stream_source", None)]
+        state = getattr(self, "_crossfade", None)
+        if state:
+            sources.append(state.get("candidate_source"))
+        local_sound = getattr(self, "current_local_sound", None)
+        if local_sound is not None:
+            sources.append(getattr(local_sound, "source", None))
+        for src in sources:
+            if src is None:
+                continue
+            with contextlib.suppress(Exception):
+                audio.efx.send(src, 1, slot)
+
+    def _note_track_duration(self, target, duration):
+        """Remember a resolved/search duration for a canonical target URL."""
+        if not target:
+            return
+        try:
+            value = float(duration)
+        except (TypeError, ValueError):
+            return
+        if value > 0.0 and value <= 86400.0:
+            self._known_durations[str(target)] = value
 
     def _play_playlist_all(self, playlist_name):
         """Play all tracks in a custom playlist sequentially"""
@@ -1427,6 +2027,11 @@ class MapMusicBot:
             results = YouTubeSearcher.search(query, count=5)
             self.search_results = results
             self.searching = False
+            # Remember search durations so queued / replayed songs can later
+            # crossfade even before their own URL is resolved.
+            for r in results or ():
+                target = r.get("webpage_url") or r.get("url") or ""
+                self._note_track_duration(target, r.get("duration"))
             # Show results menu on main thread
             self.game.put(lambda: self._show_results_menu(results))
 
@@ -1587,6 +2192,7 @@ class MapMusicBot:
         self.last_track_source = "youtube"
         self.last_youtube_url = webpage_url
         self.last_youtube_title = title
+        self.current_duration = None  # refreshed by the resolve below
         self.is_loading_stream = True
 
         # Stop any current playback (preserve the favorites/playlist queue
@@ -1618,6 +2224,8 @@ class MapMusicBot:
                     speak("Failed to get audio stream.")
                     self.is_loading_stream = False
                 return
+            self._note_track_duration(webpage_url or direct_url,
+                                      stream_info.get("duration"))
             # Start streaming on main thread
             self.game.put(lambda: self._start_youtube_stream(
                 stream_info['url'], title, playback_generation,
@@ -1646,6 +2254,10 @@ class MapMusicBot:
             speak("Audio error.")
             return
 
+        self.current_duration = (
+            self._known_durations.get(canonical_url)
+            if canonical_url else None
+        )
         self.streamer = AudioStreamer(
             self.game, audio_url, self.stream_source, self.volume, bot=self,
             http_headers=http_headers,
@@ -1764,6 +2376,7 @@ class MapMusicBot:
                     speak("Failed to get audio stream.")
                     self.is_loading_stream = False
                 return
+            self._note_track_duration(target, stream_info.get("duration"))
             self.game.put(lambda: self._start_youtube_stream(
                 stream_info['url'], title, playback_generation,
                 http_headers=stream_info.get('http_headers'),
@@ -1858,6 +2471,7 @@ class MapMusicBot:
 
     def stop(self, clear_queue=True, clear_feed=True, invalidate_pending=True, fade=False):
         """Stop all playback and cancel any pending search"""
+        self._cancel_crossfade()
         if invalidate_pending:
             self._begin_playback_generation()
         # Cancel any ongoing search
@@ -1982,11 +2596,17 @@ class MapMusicBot:
         # Ensure live instrument / mic relay streamer is active if needed
         self._ensure_live_relay_streamer()
 
-        # Apply updated gain to local stream source
+        # Apply updated gain to local stream source. During a crossfade the
+        # two overlapping sources are ramped against each other instead.
         if self.stream_source and (self.playing or self.paused):
             try:
                 music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
-                self.stream_source.gain = (self.volume / 100) * music_vol * self.duck_multiplier
+                base_gain = (self.volume / 100) * music_vol * self.duck_multiplier
+                fade = getattr(self, "_crossfade", None)
+                if fade is not None and fade.get("phase") == "fading":
+                    self._update_fade_gains(base_gain)
+                else:
+                    self.stream_source.gain = base_gain
             except Exception:
                 pass
 
@@ -1996,6 +2616,10 @@ class MapMusicBot:
 
         if not self.playing or self.paused:
             return
+
+        # Crossfade state machine: pre-roll and overlap the next queued track
+        # when the current one is about to end.
+        self._update_crossfade()
 
         # Announce playback only after ffmpeg produced PCM and OpenAL accepted
         # the pre-buffer. This prevents the misleading sequence
@@ -2014,6 +2638,9 @@ class MapMusicBot:
                 pass
         elif self.streamer and not self.streamer.is_alive():
             # Keep startup failures distinct from a real end-of-track.
+            # Any pre-rolled crossfade candidate is abandoned here: the normal
+            # advance below consumes the next queue entry itself.
+            self._cancel_crossfade()
             finished_streamer = self.streamer
             self.streamer = None
             self.playing = False
@@ -2135,3 +2762,85 @@ class MapMusicBot:
             self.soundgroup.destroy()
         except Exception:
             pass
+
+
+class _MusicBotEqSlider(state.State):
+    """Accessible Bass/Mid/Treble sliders for the personal Music Bot EQ.
+
+    The Custom profile owns one effect slot that is mutated in place on every
+    tick, so adjustments are audible immediately and no EFX slots leak.
+    """
+
+    BANDS = (("bass", "Bass"), ("mid", "Mid"), ("treble", "Treble"))
+
+    def __init__(self, game, bot):
+        super().__init__(game, parrent=bot)
+        self.bot = bot
+        self.values = dict(MapMusicBot._normalize_eq_values(
+            getattr(bot, "eq_values", None)))
+        self.current_index = 0
+        self._closed = False
+
+    def enter(self):
+        super().enter()
+        speak(
+            "Music Bot Custom Equalizer. Tab switches Bass, Mid, and Treble. "
+            "Up and Down adjust. Page Up and Page Down adjust by 10. "
+            "Home resets the current band to 50. Enter saves."
+        )
+        self._announce_current()
+
+    def exit(self):
+        super().exit()
+        speak("Music Bot Equalizer closed.")
+
+    def update(self, events):
+        super().update(events)
+        for event in events:
+            if event.type != pygame.KEYDOWN:
+                continue
+            key = event.key
+            if key == pygame.K_TAB:
+                direction = -1 if event.mod & pygame.KMOD_SHIFT else 1
+                self.current_index = (self.current_index + direction) % len(self.BANDS)
+                self._announce_current()
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE):
+                self._close_and_commit()
+                break
+            elif key == pygame.K_UP:
+                self._adjust(1)
+            elif key == pygame.K_DOWN:
+                self._adjust(-1)
+            elif key == pygame.K_PAGEUP:
+                self._adjust(10)
+            elif key == pygame.K_PAGEDOWN:
+                self._adjust(-10)
+            elif key == pygame.K_HOME:
+                self._set_current(50)
+        return True
+
+    def _announce_current(self):
+        band, label = self.BANDS[self.current_index]
+        speak(f"{label}. Slider: {self.values[band]} percent")
+
+    def _adjust(self, amount):
+        band, _ = self.BANDS[self.current_index]
+        self._set_current(self.values[band] + amount)
+
+    def _set_current(self, value):
+        band, _ = self.BANDS[self.current_index]
+        value = max(0, min(100, int(value)))
+        if value != self.values[band]:
+            self.values[band] = value
+            self.bot.set_eq_profile("custom", dict(self.values))
+        speak(f"{value} percent")
+
+    def _close_and_commit(self):
+        if self._closed:
+            return
+        self._closed = True
+        self.bot.set_eq_profile("custom", dict(self.values))
+        gp = self.bot._find_gameplay()
+        if gp is not None:
+            gp.pop_last_substate()
+        self.bot._open_eq_menu()
