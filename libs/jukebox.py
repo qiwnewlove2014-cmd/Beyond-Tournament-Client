@@ -426,7 +426,8 @@ class JukeboxPlayer:
     @audio_probe.measured("jukebox.start", trigger=True)
     def play(self, jukebox_id, x, y, z, title, url, duration, volume=None, start_offset=0.0,
              playback_id=None, transport="direct", relay_id=None, stream_epoch=None,
-             http_headers=None, **_kwargs):
+             http_headers=None, room_lead_in_s=None, join_playing_room=False,
+             received_at=None, **_kwargs):
         """Start (or seamlessly continue) the song for one jukebox at (x, y, z).
 
         Stereo-spatial like piano/drums: the STEREO stream is split into two
@@ -451,6 +452,18 @@ class JukeboxPlayer:
                     except (TypeError, ValueError):
                         pass
                 transport = "direct"
+                # This machine plays direct ONLY because its own relay
+                # channel is chronically lost; the rest of the room still
+                # hears the server relay. The relay room holds no lead-in,
+                # so anchoring with the full DIRECT_LEAD_IN_S hold would
+                # leave this machine exactly one lead-in behind the room for
+                # the whole song — its jam notes land ~3.5s off the beat
+                # with no lag report to fix it (its own anchor says it
+                # started on time). Anchor with zero lead-in and JOIN the
+                # already-playing room at its current position (seek past
+                # the projected audible start) instead of starting at 0.
+                room_lead_in_s = 0.0
+                join_playing_room = True
 
         effective_volume = self.volume if volume is None else volume
         playback_key = ("id", int(playback_id)) if playback_id is not None else ("url", url)
@@ -687,10 +700,12 @@ class JukeboxPlayer:
                     self.game, url, src_l, volume=effective_volume, bot=None,
                     channels=2, spatial_pair=(src_l, src_r, ref, maxd),
                     start_offset=start_offset,
-                    start_offset_received_at=time.monotonic(),
+                    start_offset_received_at=received_at or time.monotonic(),
                     http_headers=http_headers,
                     timeline_anchor=play_params["duration"] > 0,
                     media_cache=self._media_cache if play_params["duration"] > 0 else None,
+                    room_lead_in_s=room_lead_in_s,
+                    join_playing_room=join_playing_room,
                 )
                 streamer.reverb_slot = reverb
                 streamer.eq_slot = slot
@@ -1264,6 +1279,17 @@ class JukeboxPlayer:
             params.get("title", ""), params["url"], params.get("duration") or 0,
             transport="direct", start_offset=offset,
             http_headers=params.get("http_headers"),
+            # This machine fell back while the rest of the room still hears
+            # the server relay. The relay room holds no lead-in, so the
+            # direct anchor must not hold one either — otherwise this
+            # machine trails the room by exactly DIRECT_LEAD_IN_S for the
+            # whole song and its jam notes land seconds off the beat with no
+            # sender-lag report to compensate (its own anchor says it
+            # started on time). It must also JOIN the playing room at its
+            # current position (seek), never start from 0. Any residual
+            # resolve/startup overrun is reported through direct_late_s.
+            room_lead_in_s=0.0,
+            join_playing_room=True,
         )
 
     def request_resync(self, reason="manual recovery", *, raise_errors=False):

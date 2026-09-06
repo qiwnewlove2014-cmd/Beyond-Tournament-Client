@@ -2233,6 +2233,15 @@ class EventHandeler:
                 # the receiver are buffered instead of dropped, so the song
                 # starts from its true intro rather than a few frames in.
                 player.pend_relay_route(data.get("relay_id"), data.get("stream_epoch"))
+            # The network-arrival instant anchors the direct-transport room
+            # timeline (start_offset_received_at). The play() call itself is
+            # deferred to the main thread, so stamping there would shift the
+            # anchor by however long the main thread was busy — and for a
+            # sticky direct fallback the room is ALREADY playing, so the
+            # elapsed time since THIS arrival is exactly the room position
+            # the stream must join. Capture the instant HERE (network
+            # thread) — inside the lambda it would be the main-thread time.
+            received_at = time.monotonic()
             self.game.put(lambda: player.play(
                 jid, x, y, z,
                 data.get("title", ""),
@@ -2247,6 +2256,7 @@ class EventHandeler:
                 eq_profile=data.get("eq_profile", "normal"),
                 eq_values=data.get("eq_values"),
                 cabinet_volume=data.get("volume", 100),
+                received_at=received_at,
             ))
 
     def jukebox_pause(self, data):
