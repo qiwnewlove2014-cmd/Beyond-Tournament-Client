@@ -8,8 +8,6 @@ import unittest
 from unittest import mock
 import zipfile
 
-from cryptography.fernet import Fernet
-
 from libs import menus, options, server_config, vfs
 from tools import pack_data
 
@@ -250,13 +248,15 @@ class ServerConfigPackagingTests(unittest.TestCase):
             pack_data.pack_data(data_dir, output, "official.example", 13000)
 
             self.assertNotIn(b"official.example", output.read_bytes())
-            key = bytes.fromhex(pack_data.KEY_PART_1 + pack_data.KEY_PART_2)
-            decrypted_zip = Fernet(key).decrypt(output.read_bytes())
-            with zipfile.ZipFile(io.BytesIO(decrypted_zip), "r") as archive:
+            with zipfile.ZipFile(output, "r") as archive:
                 embedded = json.loads(
-                    archive.read(vfs.SERVER_CONFIG_MEMBER).decode("utf-8")
+                    vfs.btx_decrypt(
+                        archive.read(vfs.SERVER_CONFIG_MEMBER)
+                    ).decode("utf-8")
                 )
-                self.assertEqual(archive.read("test.txt"), b"asset")
+                self.assertEqual(
+                    vfs.btx_decrypt(archive.read("test.txt")), b"asset"
+                )
 
             self.assertEqual(
                 embedded, {"host": "official.example", "port": 13000}
@@ -264,6 +264,8 @@ class ServerConfigPackagingTests(unittest.TestCase):
             self.assertFalse((data_dir / ".bt").exists())
 
     def test_vfs_keeps_embedded_endpoint_out_of_extracted_temp_files(self):
+        # Lazy VFS: nothing lands on disk at mount time — not even the
+        # embedded endpoint, which is only ever decrypted in memory.
         old_cwd = Path.cwd()
         old_initialized = vfs.VFS_INITIALIZED
         old_temp_dir = vfs.TEMP_DIR
@@ -280,22 +282,31 @@ class ServerConfigPackagingTests(unittest.TestCase):
                     )
 
                     os.chdir(root)
-                    vfs.VFS_INITIALIZED = False
-                    vfs.TEMP_DIR = None
-                    vfs.EMBEDDED_SERVER_CONFIG = None
+                    vfs._reset_for_tests()
                     vfs.init_vfs()
 
                     self.assertEqual(
                         vfs.get_embedded_server_config(),
                         {"host": "official.example", "port": 13000},
                     )
-                    extracted_config = Path(vfs.TEMP_DIR) / Path(
-                        vfs.SERVER_CONFIG_MEMBER
-                    )
-                    self.assertFalse(extracted_config.exists())
+                    # Physical-disk truth: the path hooks fake pack members
+                    # into listings, so inspect with the saved originals.
+                    real_listdir = vfs._ORIGINALS["listdir"]
+                    # Mounting extracted nothing (no bulk plaintext dump).
+                    self.assertEqual(real_listdir(vfs.TEMP_DIR), [])
+                    # Decrypting the endpoint in memory never writes it to disk.
                     self.assertEqual(
-                        (Path(vfs.TEMP_DIR) / "test.txt").read_text(), "asset"
+                        vfs._INSTANCE.read_member(vfs.SERVER_CONFIG_MEMBER),
+                        b'{"host":"official.example","port":13000}',
                     )
+                    self.assertEqual(real_listdir(vfs.TEMP_DIR), [])
+                    # A real asset only materializes on demand, and the .bt
+                    # build members stay off disk even then.
+                    materialized = vfs._INSTANCE.materialize("test.txt")
+                    self.assertEqual(
+                        Path(materialized).read_text(), "asset"
+                    )
+                    self.assertEqual(real_listdir(vfs.TEMP_DIR), ["test.txt"])
                 finally:
                     os.chdir(old_cwd)
                     vfs.cleanup_vfs()

@@ -29,6 +29,9 @@ CHANNEL_JUKEBOX_RELAY = 23
 CHANNEL_MUSICBOT_TIMELINE = 24
 CHANNEL_MEGAPHONE = 30
 SOUNDSPREPEND="/data/"
+# Bound on the lazy VFS temp cache (MB). Only played assets land on disk,
+# and the oldest ones are evicted while this limit is exceeded.
+VFS_CACHE_MB = 512
 
 # Update this variable to force clients to update their game
 CLIENT_VERSION = "BT-1.8.5"

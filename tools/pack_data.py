@@ -6,19 +6,18 @@ import sys
 import tempfile
 import zipfile
 
-from cryptography.fernet import Fernet
-
-
 CLIENT_ROOT = Path(__file__).resolve().parents[1]
 if str(CLIENT_ROOT) not in sys.path:
     sys.path.insert(0, str(CLIENT_ROOT))
 
 from libs.server_config import ServerConfigError, validate_server_endpoint
-from libs.vfs import SERVER_CONFIG_MEMBER
+from libs.vfs import (
+    PACK_META_MEMBER,
+    SERVER_CONFIG_MEMBER,
+    FORMAT_NAME,
+    btx_encrypt,
+)
 
-
-KEY_PART_1 = "70446f58577153326d664363665454635543324e64616b36"
-KEY_PART_2 = "30626a74476d364e797030536a5433316f51673d"
 DEFAULT_BUILD_CONFIG = "build_server_config.json"
 
 
@@ -39,7 +38,12 @@ def pack_data(
     server_host: object,
     server_port: object,
 ) -> Path:
-    """Create an encrypted VFS archive without writing config into source data."""
+    """Create an encrypted VFS archive without writing config into source data.
+
+    Every member is encrypted independently with XChaCha20-Poly1305 and a
+    fresh random nonce (see ``vfs.btx_encrypt``), so the client can decrypt
+    single sounds on demand instead of unpacking the whole archive.
+    """
 
     source_root = Path(data_dir).resolve()
     destination = Path(output_path).resolve()
@@ -61,8 +65,9 @@ def pack_data(
         ) as temporary_zip:
             temporary_zip_path = Path(temporary_zip.name)
 
+        member_count = 0
         with zipfile.ZipFile(
-            temporary_zip_path, "w", compression=zipfile.ZIP_DEFLATED
+            temporary_zip_path, "w", compression=zipfile.ZIP_STORED
         ) as archive:
             for source_path in iter_build_assets(source_root):
                 if source_path.is_file():
@@ -71,20 +76,40 @@ def pack_data(
                         raise ValueError(
                             f"{SERVER_CONFIG_MEMBER} is reserved for the build system."
                         )
-                    archive.write(source_path, archive_name)
+                    archive.writestr(
+                        archive_name,
+                        btx_encrypt(source_path.read_bytes()),
+                    )
+                    member_count += 1
             archive.writestr(
                 SERVER_CONFIG_MEMBER,
-                json.dumps(
-                    {"host": host, "port": port},
-                    ensure_ascii=True,
-                    separators=(",", ":"),
-                    sort_keys=True,
+                btx_encrypt(
+                    json.dumps(
+                        {"host": host, "port": port},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ),
+            )
+            archive.writestr(
+                PACK_META_MEMBER,
+                btx_encrypt(
+                    json.dumps(
+                        {
+                            "format": FORMAT_NAME,
+                            "version": 1,
+                            "members": member_count,
+                            "created": None,
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
                 ),
             )
 
-        key = bytes.fromhex(KEY_PART_1 + KEY_PART_2)
-        encrypted_data = Fernet(key).encrypt(temporary_zip_path.read_bytes())
-        destination.write_bytes(encrypted_data)
+        os.replace(temporary_zip_path, destination)
         return destination
     finally:
         if temporary_zip_path is not None:
