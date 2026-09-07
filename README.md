@@ -108,6 +108,16 @@ Please ensure your code adheres to the project's existing code style and convent
 
 This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for more details.
 
+Beyond Tournament is a continuation of **Final Hour** (GPL-3.0), the open-source audio game created by **The Lower Elements**. Full credits are preserved in [docs/credits.txt](docs/credits.txt), and the full journey — codebase growth, new systems and timeline — is documented in [docs/project_history.md](docs/project_history.md).
+
+## Credits & Thanks
+
+*   **The Lower Elements / Michael Connor Buchan** — creator of *Final Hour*, the open-source audio game Beyond Tournament is built upon, and of *cyal*, the OpenAL bindings that power this game's audio engine.
+    *   Final Hour client: https://github.com/lower-elements/final-hour-client-public (GPL-3.0)
+    *   Final Hour server: https://github.com/lower-elements/final-hour-server-public (AGPL-3.0)
+    *   cyal (Cython OpenAL bindings): https://github.com/lower-elements/cyal (MIT)
+*   Music and game-asset credits inherited from Final Hour are preserved in [docs/credits.txt](docs/credits.txt).
+
 ## Acknowledgments
 
 *   This project is heavily inspired by the Zombies mode in the Call of Duty series, particularly the Aether storyline.

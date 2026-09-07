@@ -1,0 +1,42 @@
+Credits for Beyond Tournament
+================================
+
+Music
+-----
+Music tracks carried over from the original Final Hour audio game
+(data/music/1.ogg through 11.ogg):
+
+music1:  Fight Or Flight by David Fesliyan
+music2:  Villainous by David Fesliyan
+music3:  Haunted Memories by David Fesliyan
+music4:  It Is Coming by David Fesliyan
+music5:  Evil Rising by David Fesliyan
+music6:  Kevin Sherwood - Samantha's Rest (Remix by Thomas Kubler).
+         https://www.youtube.com/watch?v=dwUYbON6y_k
+music7:  Coming After You by RA
+music8:  Threatened by Alex Besss
+music9:  Epic Choir of the Damned by Giulio Fazio
+music10: Dangerous Times by Richard Bodgers
+Death loop: Tears of War by Sub Pub Music
+
+Additional music tracks added in Beyond Tournament keep their own
+licenses/attributions with the respective creators.
+
+Original project
+----------------
+Beyond Tournament is built upon Final Hour, an open-source audio game
+created by The Lower Elements (Michael Connor Buchan):
+
+- Final Hour client: https://github.com/lower-elements/final-hour-client-public (GPL-3.0)
+- Final Hour server: https://github.com/lower-elements/final-hour-server-public (AGPL-3.0)
+
+Audio bindings
+--------------
+cyal - Cython bindings for OpenAL, (c) Michael Connor Buchan (MIT license):
+- https://github.com/lower-elements/cyal
+
+Licensing
+---------
+This game is licensed under the GNU General Public License v3.0
+(see the LICENSE file in the repository root). The dedicated server is
+licensed under the GNU Affero General Public License v3.0.
