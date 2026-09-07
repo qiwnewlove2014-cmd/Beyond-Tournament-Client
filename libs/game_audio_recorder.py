@@ -24,7 +24,34 @@ import wave
 from . import options
 
 
-MIN_PROCESS_LOOPBACK_BUILD = 20348
+# Microsoft's own docs list AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS as available
+# from "Windows 10 Build 20348", but that build number is the Server 2022 /
+# Windows 11 shared core - no consumer Windows 10 ever reaches it. The
+# best-known implementations of this exact API (the OBS plugin
+# win-capture-audio, GStreamer's wasapi2) verify it works on an *updated*
+# Windows 10 2004 (build 19041) or newer, so 19041 is our static floor. Whether
+# a given Windows 10 install truly exposes the API is decided by the cumulative
+# updates it carries, not the marketing build, so we also probe by activating
+# once at runtime (start_process_loopback_probe) and trust that verdict.
+MIN_PROCESS_LOOPBACK_BUILD = 19041  # Windows 10 2004
+
+# How long the recording worker waits for the background probe verdict when
+# there is no countdown to mask it, before letting the real activation decide.
+PROCESS_LOOPBACK_PROBE_WAIT_S = 1.5
+
+# Spoken guidance shown when game-only (isolated process) capture cannot run.
+PROCESS_LOOPBACK_FLOOR_GUIDANCE = (
+    "Game-only recording requires Windows 10 version 2004 (build 19041) or "
+    "newer with the latest updates, or Windows 11. Update Windows 10, or "
+    "enable Screen Reader and Computer Audio in Recording Settings to record "
+    "the whole computer output instead."
+)
+PROCESS_LOOPBACK_PROBE_GUIDANCE = (
+    "This Windows installation does not expose isolated game audio capture. "
+    "Install the latest Windows updates, or enable Screen Reader and Computer "
+    "Audio in Recording Settings to record the whole computer output instead."
+)
+
 SAMPLE_RATE = 48_000
 CHANNELS = 2
 SAMPLE_WIDTH = 2
@@ -197,9 +224,111 @@ class _SegmentedWaveWriter:
         self._close_part()
 
 
+def _windows_build() -> int:
+    """Return the running Windows build number (0 when not on Windows)."""
+    if os.name != "nt":
+        return 0
+    return int(getattr(__import__("sys").getwindowsversion(), "build", 0))
+
+
+def process_loopback_build_supported() -> bool:
+    """Static floor only: Windows 10 2004 (build 19041) or newer.
+
+    Microsoft documents the process-loopback API from "Windows 10 Build
+    20348" (the Server 2022 / Windows 11 shared core; no consumer Windows 10
+    reaches it), but in practice the API is present on updated Windows 10
+    2004+ machines - see the OBS plugin win-capture-audio and GStreamer's
+    wasapi2, which both support Windows 10 2004+. Availability still depends
+    on the cumulative updates an install carries, so the runtime probe in
+    start_process_loopback_probe is the real arbiter on Windows 10.
+    """
+    return os.name == "nt" and _windows_build() >= MIN_PROCESS_LOOPBACK_BUILD
+
+
+# One-shot background probe of the actual process-loopback API. The static
+# build floor cannot tell whether a Windows 10 install carries the audio
+# servicing that backs this API, so we activate once for real and cache the
+# verdict. States: supported=None (unknown), True, or False.
+_process_loopback_probe = {"started": False, "done": False, "supported": None}
+_process_loopback_probe_lock = threading.Lock()
+_process_loopback_probe_event = threading.Event()
+
+
 def process_loopback_supported() -> bool:
-    """Return whether this Windows build exposes process-loopback capture."""
-    return os.name == "nt" and int(getattr(__import__("sys").getwindowsversion(), "build", 0)) >= MIN_PROCESS_LOOPBACK_BUILD
+    """Return whether this Windows install can do game-only capture.
+
+    Static floor first; once the runtime probe has completed, its real
+    activation verdict is authoritative over the build-number guess.
+    """
+    if not process_loopback_build_supported():
+        return False
+    with _process_loopback_probe_lock:
+        supported = _process_loopback_probe["supported"]
+    if supported is not None:
+        return supported
+    return True
+
+
+def start_process_loopback_probe() -> bool:
+    """Begin the one-shot background probe of the process-loopback API.
+
+    Returns True when a probe was actually launched. Safe to call repeatedly.
+    """
+    if os.name != "nt":
+        return False
+    with _process_loopback_probe_lock:
+        if _process_loopback_probe["started"] or _process_loopback_probe["done"]:
+            return False
+        _process_loopback_probe["started"] = True
+    threading.Thread(
+        target=_run_process_loopback_probe,
+        name="process-loopback-probe",
+        daemon=True,
+    ).start()
+    return True
+
+
+def wait_for_process_loopback_verdict(timeout: float) -> bool | None:
+    """Wait up to *timeout* seconds for the background probe to finish.
+
+    Returns True/False once decided, or None while still unknown or when no
+    probe has been started (e.g. a non-Windows process).
+    """
+    with _process_loopback_probe_lock:
+        if not _process_loopback_probe["started"]:
+            return None
+    if _process_loopback_probe_event.wait(timeout):
+        with _process_loopback_probe_lock:
+            return _process_loopback_probe["supported"]
+    return None
+
+
+def _run_process_loopback_probe():
+    """Activate the process-loopback device for this process once."""
+    supported = False
+    if os.name == "nt":
+        try:
+            comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)
+            try:
+                recorder = ProcessLoopbackRecorder(os.getpid())
+                audio_client = recorder._activate()
+                audio_client = None  # release before CoUninitialize
+                supported = True
+            finally:
+                comtypes.CoUninitialize()
+        except Exception:
+            supported = False
+    with _process_loopback_probe_lock:
+        _process_loopback_probe["done"] = True
+        _process_loopback_probe["supported"] = supported
+    _process_loopback_probe_event.set()
+
+
+def process_loopback_unavailable_message() -> str:
+    """Pick the spoken guidance matching why game-only capture is unavailable."""
+    if not process_loopback_build_supported():
+        return PROCESS_LOOPBACK_FLOOR_GUIDANCE
+    return PROCESS_LOOPBACK_PROBE_GUIDANCE
 
 
 def system_loopback_supported() -> bool:
@@ -453,6 +582,11 @@ class ProcessLoopbackRecorder:
     VT_BLOB = 65
     WAIT_OBJECT_0 = 0
     WAIT_FAILED = 0xFFFFFFFF
+    #: True for the isolated game-only backend, which needs the recent
+    #: process-loopback API. The system-output subclass sets this False: its
+    #: classic endpoint loopback works on every supported Windows, so it must
+    #: never be gated by process-loopback availability.
+    uses_process_loopback = True
 
     def __init__(self, process_id: int | None = None):
         self.process_id = int(process_id or os.getpid())
@@ -515,10 +649,10 @@ class ProcessLoopbackRecorder:
         Returns ``(frames_written, elapsed_seconds, output_paths)``. No
         game/OpenAL state is touched from this thread.
         """
-        if not process_loopback_supported():
-            raise ProcessLoopbackUnavailable(
-                "Game-only recording requires Windows build 20348 or newer."
-            )
+        if os.name != "nt":
+            raise ProcessLoopbackUnavailable("Game audio recording requires Windows.")
+        if self.uses_process_loopback and not process_loopback_supported():
+            raise ProcessLoopbackUnavailable(process_loopback_unavailable_message())
 
         output_path = os.fspath(output_path)
         parent = os.path.dirname(os.path.abspath(output_path))
@@ -648,6 +782,7 @@ class SystemOutputLoopbackRecorder(ProcessLoopbackRecorder):
     CLSCTX_ALL = 23
     E_RENDER = 0
     E_CONSOLE = 0
+    uses_process_loopback = False
 
     def _activate(self):
         if os.name != "nt":
@@ -684,6 +819,9 @@ class GameAudioRecorderManager:
         self._parent_provider = parent_provider
         self._backend_factory = backend_factory
         self._system_backend_factory = system_backend_factory
+        # When tests inject a fake backend we must not probe the real OS audio
+        # stack, so only the genuine process-loopback factory triggers probing.
+        self._uses_real_process_backend = backend_factory is ProcessLoopbackRecorder
         self._countdown_interval = max(0.0, float(countdown_interval))
         self._lock = threading.Lock()
         self._state = "idle"
@@ -1018,8 +1156,15 @@ class GameAudioRecorderManager:
                 self._announce("Screen reader and computer audio recording requires Windows.")
                 return
         elif not process_loopback_supported():
-            self._announce("Game-only recording requires Windows build 20348 or newer.")
+            # Below the static floor, or the runtime probe already found this
+            # install cannot isolate the game: reject before the countdown
+            # with actionable guidance.
+            self._announce(process_loopback_unavailable_message())
             return
+        elif self._uses_real_process_backend:
+            # Fire the one-shot probe now so the countdown worker can wait for
+            # its verdict instead of failing after the countdown voices.
+            start_process_loopback_probe()
         with self._lock:
             if self._state != "idle":
                 self._announce("A game audio recording is already being prepared or recorded.")
@@ -1120,6 +1265,16 @@ class GameAudioRecorderManager:
     def _countdown_and_record(self):
         with self._lock:
             countdown_seconds = self._session_countdown_seconds
+            include_computer_audio = self._session_include_computer_audio
+        if not include_computer_audio and self._uses_real_process_backend:
+            # Give a just-started probe a moment to decide before the
+            # countdown so an unsupported install is rejected with guidance
+            # instead of failing after the countdown voices.
+            start_process_loopback_probe()
+            if wait_for_process_loopback_verdict(PROCESS_LOOPBACK_PROBE_WAIT_S) is False:
+                self._announce(process_loopback_unavailable_message())
+                self._finish_idle()
+                return
         if countdown_seconds:
             self._announce(f"Ready, {countdown_seconds}.")
             for number in range(countdown_seconds - 1, 0, -1):

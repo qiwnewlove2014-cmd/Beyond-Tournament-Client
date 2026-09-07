@@ -9,11 +9,17 @@ import unittest
 import wave
 from unittest import mock
 
+from libs import game_audio_recorder as recorder_module
 from libs.game_audio_recorder import (
+    PROCESS_LOOPBACK_FLOOR_GUIDANCE,
+    PROCESS_LOOPBACK_PROBE_GUIDANCE,
     GameAudioRecorderManager,
     MicrophoneOverlayBuffer,
     _SegmentedWaveWriter,
     _mix_mono16_into_stereo16,
+    process_loopback_supported,
+    process_loopback_unavailable_message,
+    wait_for_process_loopback_verdict,
 )
 from libs.voice_chat import VoiceChatRecord
 
@@ -313,6 +319,86 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
             self.manager.stop()
             self.assertTrue(_wait_for(lambda: self.manager.state() == "idle"))
         self.assertIn("Stop the current recording before changing recording settings.", self.messages)
+
+
+class ProcessLoopbackProbeTests(unittest.TestCase):
+    """Capability-probe verdicts and guidance for game-only recording."""
+
+    def setUp(self):
+        self.messages = []
+        self.manager = GameAudioRecorderManager(
+            _ImmediateGame(),
+            lambda: None,
+            backend_factory=_FakeBackend,
+            countdown_interval=0,
+        )
+        self.manager._announce = self.messages.append
+
+    def tearDown(self):
+        self.manager.close()
+        with recorder_module._process_loopback_probe_lock:
+            recorder_module._process_loopback_probe.update(
+                {"started": False, "done": False, "supported": None}
+            )
+            recorder_module._process_loopback_probe_event.clear()
+
+    def test_verdict_false_rejects_game_only_before_countdown(self):
+        with recorder_module._process_loopback_probe_lock:
+            recorder_module._process_loopback_probe["done"] = True
+            recorder_module._process_loopback_probe["supported"] = False
+            recorder_module._process_loopback_probe_event.set()
+        self.assertFalse(process_loopback_supported())
+        with mock.patch("libs.game_audio_recorder.os.name", "nt"), \
+                mock.patch("libs.game_audio_recorder._windows_build", return_value=19045):
+            self.manager.request_start()
+        self.assertEqual(self.manager.state(), "idle")
+        self.assertEqual(_FakeBackend.instances, [])
+        self.assertIn(PROCESS_LOOPBACK_PROBE_GUIDANCE, self.messages)
+
+    def test_probe_starts_once_and_caches_verdict(self):
+        calls = []
+        original = recorder_module._run_process_loopback_probe
+
+        def fake_run():
+            calls.append(1)
+            with recorder_module._process_loopback_probe_lock:
+                recorder_module._process_loopback_probe["done"] = True
+                recorder_module._process_loopback_probe["supported"] = False
+                recorder_module._process_loopback_probe_event.set()
+
+        recorder_module._run_process_loopback_probe = fake_run
+        try:
+            with mock.patch("libs.game_audio_recorder.os.name", "nt"):
+                self.assertTrue(recorder_module.start_process_loopback_probe())
+                self.assertFalse(recorder_module.start_process_loopback_probe())
+            self.assertEqual(len(calls), 1)
+            # Verdict is now cached, so a fresh probe must not start again.
+            self.assertFalse(recorder_module.start_process_loopback_probe())
+            self.assertEqual(len(calls), 1)
+            self.assertFalse(process_loopback_supported())
+        finally:
+            recorder_module._run_process_loopback_probe = original
+
+    def test_unavailable_message_uses_floor_or_probe_guidance(self):
+        with mock.patch("libs.game_audio_recorder.os.name", "nt"), \
+                mock.patch("libs.game_audio_recorder._windows_build", return_value=19000):
+            self.assertEqual(
+                process_loopback_unavailable_message(),
+                PROCESS_LOOPBACK_FLOOR_GUIDANCE,
+            )
+        self.assertNotIn(PROCESS_LOOPBACK_FLOOR_GUIDANCE, self.messages)
+
+    def test_wait_returns_none_without_started_probe(self):
+        self.assertIsNone(wait_for_process_loopback_verdict(0.01))
+
+    def test_verdict_true_allows_game_only_start(self):
+        with recorder_module._process_loopback_probe_lock:
+            recorder_module._process_loopback_probe["done"] = True
+            recorder_module._process_loopback_probe["supported"] = True
+            recorder_module._process_loopback_probe_event.set()
+        with mock.patch("libs.game_audio_recorder.os.name", "nt"), \
+                mock.patch("libs.game_audio_recorder._windows_build", return_value=19045):
+            self.assertTrue(process_loopback_supported())
 
 
 class GameAudioPcmTests(unittest.TestCase):
