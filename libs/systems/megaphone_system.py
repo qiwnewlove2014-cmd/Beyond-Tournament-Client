@@ -207,6 +207,93 @@ class MegaphoneManager:
             pass
         return 0.0  # Clear line-of-sight (or on error, assume not blocked)
 
+    def release_speaker_slots(self):
+        """Release the live per-speaker EFX resources BEFORE a map reload.
+
+        An in-place map reload (builder Save / Reload Map Data) destroys the
+        map's reverb zones and re-acquires their effect slots from the
+        AudioManager pool, but setup_megaphone_speakers(force=True) — the call
+        that normally recycles this speaker set — only runs AFTER the parser
+        has re-created the reverbs. On big-PA maps (12-13 speakers) with a full
+        lobby, remote-player EQ/distortion slots plus these per-speaker reverbs
+        hold most of the pool, so the rebuilt room reverbs could not borrow a
+        slot, got None, and stayed silent until a client restart. Releasing the
+        speaker set here hands those slots back before the parser runs so the
+        rebuilt room reverbs win them; the reload flow calls
+        setup_megaphone_speakers(force=True) immediately afterwards, which
+        rebuilds the speakers from the cleared lists.
+        """
+        if not getattr(self, "speaker_data", None) and not getattr(self, "sources", None):
+            return
+        old_speaker_data = list(getattr(self, "speaker_data", []))
+        for data in old_speaker_data:
+            # Delete ground reflection source after detaching all its sends.
+            if data.get('reflection_source'):
+                if hasattr(self.game.audio_mngr, 'efx'):
+                    for send_idx in range(4):
+                        try:
+                            self.game.audio_mngr.efx.send(
+                                data['reflection_source'], send_idx, None
+                            )
+                        except Exception:
+                            pass
+                try:
+                    data['reflection_source'].stop()
+                except Exception:
+                    pass
+                voice_chat._reclaim_source_buffers(data['reflection_source'])
+                try:
+                    del data['reflection_source'].buffer
+                except Exception:
+                    pass
+                try:
+                    del data['reflection_source'].direct_filter
+                except Exception:
+                    pass
+        # Cleanup existing sources if any
+        if hasattr(self, 'sources'):
+            for src in self.sources:
+                if src:
+                    # Detach EFX slots to prevent driver-level feedback/buzz
+                    if hasattr(self.game.audio_mngr, 'efx'):
+                        for send_idx in range(4):
+                            try:
+                                self.game.audio_mngr.efx.send(src, send_idx, None)
+                            except Exception:
+                                pass
+                    try:
+                        src.stop()
+                    except Exception:
+                        pass
+                    voice_chat._reclaim_source_buffers(src)
+                    try:
+                        del src.buffer
+                    except Exception:
+                        pass
+                    try:
+                        del src.direct_filter
+                    except Exception:
+                        pass
+        # Cleanup per-player megaphone sources
+        if hasattr(self, 'player_sources'):
+            for sid in list(self.player_sources.keys()):
+                self._remove_megaphone_player(sid)
+        # Sources are now detached/deleted, so filters and pooled slots are safe
+        # to recycle for the rebuilt speaker set.
+        for data in old_speaker_data:
+            for filter_key in ('filter', 'refl_filter'):
+                filter_obj = data.get(filter_key)
+                if filter_obj:
+                    # Return to the AudioManager pool — cyal Filter has no
+                    # delete() and must never be GC-freed (crash-prone
+                    # dealloc call).
+                    self.game.audio_mngr.release_filter(filter_obj)
+            if data.get('reverb_slot'):
+                self.game.audio_mngr.release_effect_slot(data['reverb_slot'])
+        self.sources = []
+        self.speaker_data = []
+        self.player_sources = {}
+
     def setup_megaphone_speakers(self, force=False):
         """Initializes or re-initializes megaphone speakers based on map data"""
         

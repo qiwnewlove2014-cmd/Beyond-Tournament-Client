@@ -431,5 +431,157 @@ class TestPersistentStreamReverbDetach(unittest.TestCase):
         self.assertIsNone(manager.gameplay.current_player_reverb_slot)
 
 
+
+class TestReverbSlotRecovery(unittest.TestCase):
+    """Reverb zones must survive a momentary effect-slot pool shortage.
+
+    Room reverbs borrow their EAXREVERB slot from the AudioManager pool at map
+    load. An in-place map reload used to re-create the zones while the old
+    megaphone speaker set (12-13 slots on big PA maps) and every remote
+    player's EQ/distortion slots were still held, so a zone could receive None
+    and stay silent until a client restart. These tests cover the fixes:
+    megaphone speaker slots are released BEFORE the parser re-creates reverbs,
+    and a starved zone retries allocation on demand.
+    """
+
+    def test_megaphone_release_speaker_slots_returns_efx_resources(self):
+        from libs.systems.megaphone_system import MegaphoneManager
+
+        released_slots = []
+        released_filters = []
+        sends = []
+
+        class FakeAudio:
+            efx = SimpleNamespace(
+                send=lambda src, index, slot: sends.append((src, index, slot))
+            )
+
+            def release_effect_slot(self, slot):
+                released_slots.append(slot)
+
+            def release_filter(self, flt):
+                released_filters.append(flt)
+
+        manager = MegaphoneManager.__new__(MegaphoneManager)
+        manager.game = SimpleNamespace(audio_mngr=FakeAudio())
+        reverb_slot, filter_obj = object(), object()
+        source, reflection = object(), object()
+        manager.sources = [source]
+        manager.speaker_data = [{
+            "source": source,
+            "reflection_source": reflection,
+            "reverb_slot": reverb_slot,
+            "filter": filter_obj,
+        }]
+        manager.player_sources = {}
+        manager.release_speaker_slots()
+        self.assertEqual(released_slots, [reverb_slot])
+        self.assertEqual(released_filters, [filter_obj])
+        # Every aux send on the old sources is detached before the slot reuse.
+        self.assertTrue(all(slot is None for _, _, slot in sends))
+        self.assertEqual(manager.sources, [])
+        self.assertEqual(manager.speaker_data, [])
+        # Releasing an already-empty speaker set must be a safe no-op.
+        manager.release_speaker_slots()
+
+    def test_begin_reload_releases_speaker_slots_before_parser(self):
+        from libs.event_handeler import EventHandeler
+
+        events = []
+
+        class FakeMegaphone:
+            def detach_map_reverb(self):
+                events.append("detach")
+
+            def release_speaker_slots(self):
+                events.append("release_speakers")
+
+        class FakePlayer:
+            def detach_environment_effects(self):
+                events.append("player_detach")
+
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.gameplay = SimpleNamespace(
+            player=FakePlayer(),
+            megaphone=FakeMegaphone(),
+        )
+        handler._begin_map_audio_reload()
+        self.assertEqual(events, ["player_detach", "detach", "release_speakers"])
+
+    def test_starved_reverb_zone_retries_slot_on_demand(self):
+        from libs.world_map import Reverb
+
+        calls = []
+        slot_a, slot_b = object(), object()
+
+        class FakeAudio:
+            def gen_effect(self, etype, *params):
+                calls.append((etype, params))
+                # First allocation attempt is starved (pool exhausted); the
+                # retry succeeds with a freshly freed slot.
+                return None if len(calls) == 1 else slot_b
+
+        class FakeGame:
+            audio_mngr = FakeAudio()
+
+        class FakeMap:
+            game = FakeGame()
+
+        rev = Reverb(
+            FakeMap(), "zone1",
+            0, 5, 0, 5, 0, 5,
+            1.49, 1.0, 1.0, 0.32, 0.89, 1.0, 0.83, 1.0,
+            0.05, 0.007, (0.0, 0.0, 0.0),
+            1.26, 0.011, (0.0, 0.0, 0.0),
+            0.25, 0.0, 0.25, 0.0, 0.994, 5000.0, 250.0, 0.0,
+        )
+        # Initial borrow failed -> zone is dry.
+        self.assertIsNone(rev.reverb)
+        # On-demand retry borrows the same parameter set and succeeds.
+        slot = rev.ensure_slot(force=True)
+        self.assertIs(slot, slot_b)
+        self.assertIs(rev.reverb, slot_b)
+        self.assertEqual(len(calls), 2)
+        etype, params = calls[0]
+        self.assertEqual(etype, "EAXREVERB")
+        # The retry used the exact same parameters as the first attempt.
+        self.assertEqual(params, calls[1][1])
+        # A healthy zone returns its slot immediately without re-allocating.
+        self.assertIs(rev.ensure_slot(force=True), slot_b)
+        self.assertEqual(len(calls), 2)
+
+    def test_sync_reverb_applies_retried_slot_on_zone(self):
+        from libs.objects.entity import Entity
+
+        applied = []
+        slot = object()
+
+        class FakeZone:
+            reverb = None
+
+            def ensure_slot(self, force=False):
+                self.reverb = slot
+                return self.reverb
+
+        class FakeMap:
+            def get_reverb_at(self, x, y, z):
+                return FakeZone()
+
+        ent = Entity.__new__(Entity)
+        ent.map = FakeMap()
+        ent.x = 0
+        ent.y = 0
+        ent.z = 0
+        ent.soundgroup = SimpleNamespace(
+            filter=[],
+            apply_effect=lambda s, idx: applied.append((s, idx)),
+        )
+        ent._player = False
+        ent.sync_reverb()
+        self.assertEqual(applied, [(slot, 0)])
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

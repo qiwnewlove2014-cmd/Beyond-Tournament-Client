@@ -152,14 +152,20 @@ class Entity(Object):
                         self.game.audio_mngr.efx.send(self.vc_source, 0, None, filter=None)
                     if getattr(self, "music_source", None):
                         self.game.audio_mngr.efx.send(self.music_source, 0, None, filter=None)
-            elif reverb and reverb.reverb:
-                self.soundgroup.apply_effect(reverb.reverb, 0)
-                if self.player:
-                    flt = self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None
-                    if getattr(self, "vc_source", None):
-                        self.game.audio_mngr.efx.send(self.vc_source, 0, reverb.reverb, filter=flt)
-                    if getattr(self, "music_source", None):
-                        self.game.audio_mngr.efx.send(self.music_source, 0, reverb.reverb, filter=flt)
+            elif reverb is not None:
+                slot = reverb.reverb
+                if slot is None and hasattr(reverb, "ensure_slot"):
+                    # Retry on a cooldown: a zone that failed to borrow a pool
+                    # slot during a reload recovers once one is free.
+                    slot = reverb.ensure_slot()
+                if slot is not None:
+                    self.soundgroup.apply_effect(slot, 0)
+                    if self.player:
+                        flt = self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None
+                        if getattr(self, "vc_source", None):
+                            self.game.audio_mngr.efx.send(self.vc_source, 0, slot, filter=flt)
+                        if getattr(self, "music_source", None):
+                            self.game.audio_mngr.efx.send(self.music_source, 0, slot, filter=flt)
             return True
         except Exception as e:
             log(f"[ENTITY.AUDIO] Reverb sync skipped for {self.name!r}: {e}")

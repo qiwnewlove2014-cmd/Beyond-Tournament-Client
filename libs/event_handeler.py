@@ -381,6 +381,15 @@ class EventHandeler:
         if callable(detach):
             with contextlib.suppress(Exception):
                 detach()
+        # An in-place reload re-creates the map's reverb zones while this
+        # speaker set's per-speaker EFX slots are still held (setup only
+        # recycles them after the parser ran). Free them FIRST so the rebuilt
+        # room reverbs can borrow a pool slot; setup_megaphone_speakers is
+        # called right after parser.load and rebuilds from the cleared lists.
+        release_speakers = getattr(megaphone, 'release_speaker_slots', None)
+        if callable(release_speakers):
+            with contextlib.suppress(Exception):
+                release_speakers()
 
     @audio_probe.measured("map.sync_audio")
     def _finish_map_audio_reload(self):

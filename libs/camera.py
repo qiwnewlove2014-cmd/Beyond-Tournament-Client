@@ -320,7 +320,14 @@ class Camera:
             if reverb is None:
                 self.focus_object.soundgroup.apply_effect(None, 0)
             else:
-                self.focus_object.soundgroup.apply_effect(reverb.reverb, 0)
+                # A zone whose slot could not be borrowed (momentary effect-slot
+                # pool exhaustion) retries on a cooldown, so the current room
+                # recovers its reverb in place instead of staying dry until a
+                # client restart.
+                slot = reverb.reverb
+                if slot is None and hasattr(reverb, "ensure_slot"):
+                    slot = reverb.ensure_slot()
+                self.focus_object.soundgroup.apply_effect(slot, 0)
             
         # enter/leave zones
         zone = self.focus_object.map.get_zone_at(self.x, self.y, self.z)

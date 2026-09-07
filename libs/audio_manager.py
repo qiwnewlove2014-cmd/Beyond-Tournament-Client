@@ -910,7 +910,14 @@ class AudioManager():
         """Pre-allocate auxiliary effect slots at startup.
         These slots are NEVER deleted — they are reused for the lifetime of the app.
         This prevents the OpenAL resource exhaustion that causes reverb to die."""
-        max_slots = 32  # Try to allocate up to 32 (driver will cap at its limit)
+        # Try to allocate up to 64 (driver will cap at its limit). 32 was too
+        # tight for busy PA maps: Mor Lam Field / Pool carry 12-13 per-speaker
+        # reverb slots + the global megaphone reverb/EQ/compressor, and every
+        # remote player entity holds two more (EQ + distortion), so a full
+        # lobby plus jukebox/music-bot EQ presets could exceed 32 and starve
+        # the room reverbs of a slot during an in-place map reload. Only slots
+        # the driver actually grants are pooled; the loop stops on its error.
+        max_slots = 64
         for i in range(max_slots):
             try:
                 slot = self.efx.gen_auxiliary_effect_slot()

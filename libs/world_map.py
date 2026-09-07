@@ -929,8 +929,10 @@ class Reverb(BaseMapObj):
         super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "reverb")
         self.map = map
         self.decay_time = t60
-        self.reverb = self.map.game.audio_mngr.gen_effect(
-            "EAXREVERB",
+        # Parameter snapshot kept so a zone that failed to borrow a pool slot
+        # (momentary exhaustion during an in-place map reload) can retry later
+        # via ensure_slot() instead of staying dry until a client restart.
+        self._reverb_params = (
             ("decay_time", float(t60)),
             ("density", float(density)),
             ("diffusion", float(diffusion)),
@@ -954,6 +956,36 @@ class Reverb(BaseMapObj):
             ("lfreference", float(lfrefference)),
             ("room_rolloff_factor", float(room_rolloff_factor)),
         )
+        self._retry_at = 0.0
+        self.reverb = self.map.game.audio_mngr.gen_effect(
+            "EAXREVERB", *self._reverb_params
+        )
+
+    def ensure_slot(self, force=False):
+        """(Re)borrow this zone's EAXREVERB pool slot if it is currently missing.
+
+        ``gen_effect`` returns None when the AudioManager's effect-slot pool is
+        momentarily exhausted (big-PA maps with a full lobby hold most of the
+        pool, and an in-place map reload used to re-create reverbs before the
+        megaphone speaker slots were recycled). Nothing retried, so a room that
+        failed to allocate stayed dry until the client restarted. Room reverb
+        sync (camera move / entity sync_reverb) calls this on a short cooldown,
+        so the zone recovers in place as soon as the pool has a free slot.
+        """
+        if self.reverb is not None:
+            return self.reverb
+        import time as _time
+        now = _time.time()
+        if not force and now < getattr(self, "_retry_at", 0.0):
+            return None
+        self._retry_at = now + 1.5
+        try:
+            self.reverb = self.map.game.audio_mngr.gen_effect(
+                "EAXREVERB", *self._reverb_params
+            )
+        except Exception:
+            self.reverb = None
+        return self.reverb
 
     def destroy(self):
         with contextlib.suppress(Exception):
