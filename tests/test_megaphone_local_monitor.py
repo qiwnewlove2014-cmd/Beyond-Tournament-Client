@@ -81,7 +81,7 @@ class TestLocalMegaphoneMonitor(unittest.TestCase):
 
         feed_main.assert_called_once_with(gameplay, b"original", "music")
 
-    def test_music_monitor_requests_three_real_frames(self):
+    def test_music_monitor_uses_spread_stagger_with_three_real_frames(self):
         src = _FakeSource()
         local_key = "player-1:music"
         megaphone = SimpleNamespace(
@@ -99,13 +99,47 @@ class TestLocalMegaphoneMonitor(unittest.TestCase):
             player=SimpleNamespace(id="player-1", name="player-1"),
         )
 
-        with mock.patch.object(voice_chat, "_queue_packet_to_source") as queue_frame:
+        with mock.patch.object(voice_chat, "queue_and_delay_frame") as stagger:
             voice_chat._feed_local_megaphone_main(
                 gameplay, b"\x01\x00" * 960, producer="music"
             )
 
-        self.assertEqual(queue_frame.call_count, 1)
-        self.assertEqual(queue_frame.call_args.kwargs["real_prebuffer_frames"], 3)
+        # The local song monitor must ride the same per-speaker propagation
+        # stagger as remote listeners (no jitter margin, music prebuffer kept).
+        stagger.assert_called_once_with(
+            gameplay, local_key, [src], b"\x01\x00" * 960,
+            margin_frames=0,
+            real_prebuffer_frames=3,
+        )
+
+    def test_mic_monitor_uses_spread_stagger_without_prebuffer(self):
+        src = _FakeSource()
+        local_key = "player-1:mic"
+        megaphone = SimpleNamespace(
+            get_megaphone_player_sources=lambda _key: [src],
+            player_sources={
+                local_key: {
+                    "currents_vol": [1.0],
+                    "targets_vol": [1.0],
+                }
+            },
+        )
+        gameplay = SimpleNamespace(
+            game=SimpleNamespace(audio_mngr=object()),
+            megaphone=megaphone,
+            player=SimpleNamespace(id="player-1", name="player-1"),
+        )
+
+        with mock.patch.object(voice_chat, "queue_and_delay_frame") as stagger:
+            voice_chat._feed_local_megaphone_main(
+                gameplay, b"\x01\x00" * 960, producer="mic"
+            )
+
+        stagger.assert_called_once_with(
+            gameplay, local_key, [src], b"\x01\x00" * 960,
+            margin_frames=0,
+            real_prebuffer_frames=None,
+        )
 
     def test_real_frame_prebuffer_starts_on_third_frame_without_silence(self):
         src = _FakeSource()
@@ -265,6 +299,104 @@ class TestLocalMegaphoneResume(unittest.TestCase):
         self.start_stream()
         self.assertEqual(self.src.play_calls, 2)
         self.assertEqual(self.gen_buffer.call_count, 3)
+
+
+class TestMegaphoneStaggerPadding(unittest.TestCase):
+    """queue_and_delay_frame must stagger per-speaker propagation delays for
+    remote listeners while keeping a zero-margin, low-latency monitor for
+    local producers. The silence pads are what spread the image across the
+    cabinets; without them every speaker starts in sync and the precedence
+    effect fuses the broadcast into one phantom speaker."""
+
+    def setUp(self):
+        voice_chat._speaker_last_calc_time = {}
+        voice_chat._speaker_current_delays = {}
+        voice_chat._speaker_initial_delays = {}
+        voice_chat._speaker_delay_cache_expires = {}
+        voice_chat._last_tail_sample = {}
+        voice_chat._just_padded = {}
+        self.pool = []
+        self.pool_patch = mock.patch.object(voice_chat, "_shared_buffer_pool", self.pool)
+        self.pool_patch.start()
+        self.addCleanup(self.pool_patch.stop)
+        self.gen_buffer = mock.Mock(side_effect=_FakeBuffer)
+        self.frame = b"\x01\x00" * 960
+
+    def make_gameplay(self, speaker_pos):
+        return SimpleNamespace(
+            concert_spectator_mode=False,
+            camera=SimpleNamespace(
+                focus_object=SimpleNamespace(x=0.0, y=0.0, z=0.0)
+            ),
+            map=SimpleNamespace(minz=0.0),
+            game=SimpleNamespace(audio_mngr=SimpleNamespace(
+                context=SimpleNamespace(gen_buffer=self.gen_buffer),
+            )),
+            megaphone=SimpleNamespace(
+                fading_sources=[],
+                speaker_data=[{"position": speaker_pos, "delay": 0.0}],
+            ),
+        )
+
+    def count_frames(self, src):
+        silence = sum(1 for b in src.queued if b.data == bytes(len(self.frame)))
+        real = sum(1 for b in src.queued if b.data == self.frame)
+        return silence, real
+
+    def test_remote_listener_keeps_six_frame_reserve_by_default(self):
+        src = _FakeSource()
+        gameplay = self.make_gameplay((0.0, 0.0, 0.0))
+
+        with mock.patch.object(voice_chat, "_reclaim_source_buffers"), \
+                mock.patch.object(voice_chat, "_fade_in_packet", side_effect=lambda data: data), \
+                mock.patch.object(voice_chat, "_fade_out_from_tail", side_effect=lambda data, _tail: data):
+            voice_chat.queue_and_delay_frame(gameplay, "remote-1", [src], self.frame)
+
+        # Speaker at the listener: propagation 0 + static 0, but the stable
+        # v1.6 PA reserve defaults to 6 silence frames (120ms cushion).
+        silence, real = self.count_frames(src)
+        self.assertEqual(silence, 7)  # 6 reserve + 1 legacy cushion
+        self.assertEqual(real, 1)
+        self.assertEqual(src.play_calls, 1)
+
+    def test_local_monitor_gets_no_jitter_margin(self):
+        src = _FakeSource()
+        gameplay = self.make_gameplay((0.0, 0.0, 0.0))
+
+        with mock.patch.object(voice_chat, "_reclaim_source_buffers"), \
+                mock.patch.object(voice_chat, "_fade_in_packet", side_effect=lambda data: data), \
+                mock.patch.object(voice_chat, "_fade_out_from_tail", side_effect=lambda data, _tail: data):
+            voice_chat.queue_and_delay_frame(
+                gameplay, "local:mic", [src], self.frame, margin_frames=0
+            )
+
+        # margin_frames=0: no reserve padding, only the legacy cushion and the
+        # real frame — the owner's monitor stays as close to zero-latency as
+        # the direct queue path it replaces.
+        silence, real = self.count_frames(src)
+        self.assertEqual(silence, 1)
+        self.assertEqual(real, 1)
+        self.assertEqual(src.play_calls, 1)
+
+    def test_local_monitor_staggers_by_propagation_distance(self):
+        src = _FakeSource()
+        # 6.86m at 343 m/s = exactly one 20ms frame of propagation delay.
+        gameplay = self.make_gameplay((6.86, 0.0, 0.0))
+
+        with mock.patch.object(voice_chat, "_reclaim_source_buffers"), \
+                mock.patch.object(voice_chat, "_fade_in_packet", side_effect=lambda data: data), \
+                mock.patch.object(voice_chat, "_fade_out_from_tail", side_effect=lambda data, _tail: data):
+            voice_chat.queue_and_delay_frame(
+                gameplay, "local:mic", [src], self.frame, margin_frames=0
+            )
+
+        # One silence frame of stagger before the real audio — the same
+        # inter-cabinet offset remote listeners hear, so the owner's own
+        # broadcast no longer collapses into a single fused speaker.
+        silence, real = self.count_frames(src)
+        self.assertEqual(silence, 2)  # 1 propagation stagger + 1 legacy cushion
+        self.assertEqual(real, 1)
+        self.assertEqual(src.play_calls, 1)
 
 
 class TestMusicBotDeadlinePacing(unittest.TestCase):

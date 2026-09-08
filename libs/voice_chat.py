@@ -921,20 +921,29 @@ def _feed_local_megaphone_main(gameplay, raw_buf, producer='producer'):
                 if entry['currents_vol'][i] <= 0.05 and i < len(entry.get('targets_vol', [])):
                     entry['currents_vol'][i] = entry['targets_vol'][i]
 
-        for idx, src in enumerate(sources):
-            if src:
-                # Set gain directly just in case update_megaphone_audio hasn't run yet
-                if getattr(src, 'gain', 0.0) <= 0.05 and hasattr(gameplay.megaphone, 'player_sources') and local_key in gameplay.megaphone.player_sources:
-                    entry = gameplay.megaphone.player_sources[local_key]
-                    if idx < len(entry.get('targets_vol', [])):
+        # Set gain directly just in case update_megaphone_audio hasn't run yet
+        if hasattr(gameplay.megaphone, 'player_sources') and local_key in gameplay.megaphone.player_sources:
+            entry = gameplay.megaphone.player_sources[local_key]
+            for idx, src in enumerate(sources):
+                if src and idx < len(entry.get('targets_vol', [])):
+                    if getattr(src, 'gain', 0.0) <= 0.05:
                         src.gain = entry['targets_vol'][idx]
-                _queue_packet_to_source(
-                    gameplay,
-                    idx,
-                    src,
-                    raw_buf,
-                    real_prebuffer_frames=3 if producer == 'music' else None,
-                )
+
+        # The local monitor must ride the SAME per-speaker propagation-delay
+        # stagger as remote listeners (queue_and_delay_frame). Without it every
+        # cabinet starts in perfect sync, the precedence effect fuses them into
+        # one phantom image, and the owner hears their own broadcast as a single
+        # speaker while everyone else hears the PA spread across the map. Local
+        # frames have no network leg, so no jitter margin is needed; music keeps
+        # its real-frame prebuffer for underrun recovery.
+        queue_and_delay_frame(
+            gameplay,
+            local_key,
+            sources,
+            raw_buf,
+            margin_frames=0,
+            real_prebuffer_frames=3 if producer == 'music' else None,
+        )
     except Exception:
         pass
 
@@ -1649,7 +1658,7 @@ def _pad_frames_for_resync(target_active, current_active, needs_initial_delay, a
     return max(0, target_active - current_active)
 
 
-def queue_and_delay_frame(gameplay, sender_id, sources, packet):
+def queue_and_delay_frame(gameplay, sender_id, sources, packet, margin_frames=None, real_prebuffer_frames=None):
 
     global _speaker_delay_queues
     import math
@@ -1778,10 +1787,12 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
             frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
             _speaker_current_delays[sender_id].append(frames_delay)
             
-            # Stable v1.6 PA reserve. The reliable listener leg can deliver a
-            # short burst after retransmission; this fixed 120ms source cushion
-            # keeps OpenAL playing through it. Do not use this for normal voice.
-            margin_frames = _megaphone_margin_frames(sender_id)
+            # Stable v1.6 PA reserve: 6 frames (120ms) for remote listeners, whose
+            # reliable leg can pause briefly for retransmission. Local producers
+            # pass margin_frames=0 — their monitor has no network leg, so a fixed
+            # cushion would only push the owner's own voice/music late.
+            if margin_frames is None:
+                margin_frames = _megaphone_margin_frames(sender_id)
             
             # Instantly push silence frames to restore perfect spatial stagger and jitter margin
             target_active = frames_delay + margin_frames
@@ -1797,7 +1808,10 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
                     silence_packet = bytes(len(packet))
                     if p == 0:
                         silence_packet = _fade_out_from_tail(silence_packet, prev_tail)
-                    _queue_packet_to_source(gameplay, idx, src, silence_packet)
+                    _queue_packet_to_source(
+                        gameplay, idx, src, silence_packet,
+                        real_prebuffer_frames=real_prebuffer_frames,
+                    )
                     
                     # Also pad fading sources
                     if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'fading_sources'):
@@ -1820,7 +1834,10 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet):
         packet_to_queue = _fade_in_packet(packet)
     for idx, src in enumerate(sources):
         if src is not None:
-            _queue_packet_to_source(gameplay, idx, src, packet_to_queue)
+            _queue_packet_to_source(
+                gameplay, idx, src, packet_to_queue,
+                real_prebuffer_frames=real_prebuffer_frames,
+            )
     # Track the tail sample of the last real audio for the next de-click ramp.
     _last_tail_sample[sender_id] = _tail_sample(packet_to_queue)
             

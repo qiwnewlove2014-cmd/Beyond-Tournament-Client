@@ -408,9 +408,16 @@ class Menu(state.State):
         self._poll_preview_result()
         self._sync_preview_reverb()
 
-        # Stop active voice chat if player entered menu while holding Push-to-Talk
+        # Stop a stuck Push-to-Talk recording when a menu opens over it (the
+        # menu swallows the key release, so the mic would stay hot). Toggle-mode
+        # voice chat (tap the key, tap again to stop) is intentional and must
+        # survive opening menus / pressing other keys — voice_chat_toggle_on
+        # marks it so this legacy kill switch leaves it alone.
         target_gp = getattr(self, "parrent", None) or getattr(self.game, "gameplay", None)
-        if target_gp and hasattr(target_gp, "voice_chat_stop") and hasattr(target_gp, "voice_chat") and target_gp.voice_chat and getattr(target_gp.voice_chat, "recording", False):
+        if (target_gp and hasattr(target_gp, "voice_chat_stop")
+                and hasattr(target_gp, "voice_chat") and target_gp.voice_chat
+                and getattr(target_gp.voice_chat, "recording", False)
+                and not getattr(target_gp, "voice_chat_toggle_on", False)):
             target_gp.voice_chat_stop(0)
 
         for event in events:

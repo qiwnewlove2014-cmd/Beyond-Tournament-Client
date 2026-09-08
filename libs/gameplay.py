@@ -112,6 +112,10 @@ class Gameplay(state.State):
         # preserve it in enter() so those current-session packets are not lost.
         self.voice_channels = {}
         self.voice_chat = None
+        # Toggle-mode voice chat (tap the key, tap again to stop) must survive
+        # opening menus and pressing other keys. menu.update's old PTT-era kill
+        # switch only applies when this flag is False.
+        self.voice_chat_toggle_on = False
         self.guitar = GuitarHandler(self)  # Guitar subsystem (extracted from Gameplay)
         self.tracking_target = None
         self.tracking_clock = None
@@ -2389,6 +2393,10 @@ class Gameplay(state.State):
         self.voice_chat_using_megaphone = use_megaphone
         self.voice_chat.audio_input.start()
         self.voice_chat.recording = True
+        # Push-to-talk path: if a menu opens over a held PTT key its release is
+        # swallowed, so menu.update may stop this recording. Toggle mode sets
+        # the flag back to True after start() returns.
+        self.voice_chat_toggle_on = False
         self.game.direct_soundgroup.play("ui/voxon.ogg", volume=20)
 
     def voice_chat_stop(self, mod):
@@ -2402,6 +2410,7 @@ class Gameplay(state.State):
         self.voice_chat.audio_input.stop()
         self.voice_chat.recording = False
         self.voice_chat_using_megaphone = False
+        self.voice_chat_toggle_on = False
         self.game.call_after(40, self.voice_chat.voice_chat_finish)
         self.game.direct_soundgroup.play("ui/voxoff.ogg")
 
@@ -2413,4 +2422,7 @@ class Gameplay(state.State):
             return
         self.voice_chat_start(mod)
         if self.voice_chat is not None and getattr(self.voice_chat, "recording", False):
+            # Toggle mode: the owner wants to keep broadcasting across menus and
+            # other keys, so menu.update must NOT auto-stop it.
+            self.voice_chat_toggle_on = True
             speak("Voice chat activated")
