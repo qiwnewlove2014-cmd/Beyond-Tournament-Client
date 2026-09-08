@@ -168,6 +168,7 @@ class EndpointOptionsMenuTests(unittest.TestCase):
             self.items = []
             self.turning_sensitivity_item_text = "Turning sensitivity"
             self.turning_mode_item_text = "Turning mode"
+            self.voice_chat_mode_item_text = "Voice chat mode"
             self.__class__.last_instance = self
 
         def add_items(self, items):

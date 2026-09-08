@@ -142,7 +142,7 @@ class Gameplay(state.State):
         }
         self.keys_pressed = {
             kc.get("tracking_menu", pygame.K_t): self.open_tracking_menu,
-            kc.get("voice_chat", pygame.K_g): self.voice_chat_toggle,  # Toggle mode (tap to talk, tap again to stop)
+            kc.get("voice_chat", pygame.K_g): self.voice_chat_key,  # mode-aware (tap or push-to-talk)
             pygame.K_RETURN: self.buffer_options,
             kc.get("open_volume_mixer", pygame.K_F7): lambda mod: self.add_substate(volume_mixer.volume_mixer(self.game, parent=self)),
             kc.get("open_staff_menu", pygame.K_F8): self.open_staff_menu,
@@ -245,6 +245,7 @@ class Gameplay(state.State):
             kc.get("snap_modifier", pygame.K_LCTRL): lambda mod: (
                 setattr(self, "turn_mod", False)
             ),
+            kc.get("voice_chat", pygame.K_g): self.voice_chat_key_release,  # PTT: stop on release
         }
         self.configurable_key_actions = [
             (kc.get("check_direction", pygame.K_TAB), self.check_direction_in_play),
@@ -2404,17 +2405,12 @@ class Gameplay(state.State):
                  speak("System: No public address system available directly in this area.")
                  return
             
-            # Check if megaphone is locked by a staff broadcast. Only the
-            # single music-bot slot holder blocks talking - performers in the
-            # multi-owner instrument set can still use the megaphone weapon
-            # (voice never hijacks the PA; everyone's audio is equal-power
-            # mixed), so a band can keep broadcasting while talking.
-            lock_owner = getattr(self.megaphone, 'lock_owner', None)
-            player_name = getattr(self.player, 'name', '')
-            if (lock_owner and lock_owner != player_name
-                    and player_name not in getattr(self.megaphone, 'lock_owners', set())):
-                 speak(f"System: Megaphone is currently locked for a staff broadcast by {lock_owner}.")
-                 return
+            # Voice is NEVER locked by the music-bot broadcast slot. The
+            # server deliberately keeps the single-owner lock for music only
+            # (so two MP3 streams cannot overlap on the PA) while any number
+            # of players talk simultaneously - the client mixes them with
+            # equal power. The music slot is enforced separately on the
+            # music-bot upload path (_is_music_owner gate), not here.
         
         # Route to appropriate channel based on mode
         if use_megaphone and consts.CHANNEL_MEGAPHONE in self.voice_channels:
@@ -2470,3 +2466,22 @@ class Gameplay(state.State):
             # other keys, so menu.update must NOT auto-stop it.
             self.voice_chat_toggle_on = True
             speak("Voice chat activated")
+
+    def voice_chat_key(self, mod):
+        """Voice chat key press, honouring the selected mode.
+
+        "Push to talk" (the default) starts recording on key down and stops
+        on key up (see voice_chat_key_release); "Tap to talk" toggles on key
+        down.
+        """
+        if options.get_voice_chat_mode() == "ptt":
+            self.voice_chat_start(mod)
+        else:
+            self.voice_chat_toggle(mod)
+
+    def voice_chat_key_release(self, mod):
+        """Voice chat key release. Only Push-to-Talk mode acts on it: the
+        recording stops the moment the key is released (toggle mode ignores
+        releases - it is stopped by pressing the key again)."""
+        if options.get_voice_chat_mode() == "ptt":
+            self.voice_chat_stop(mod)

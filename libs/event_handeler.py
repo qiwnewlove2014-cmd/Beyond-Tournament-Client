@@ -1738,6 +1738,12 @@ class EventHandeler:
             if len(data) < 2: return
             sender_id = data[0]
             opus_data = data[1:]
+            # Stamp remote PA activity for music-bot ducking. The server never
+            # echoes a broadcast back to its sender, so every frame arriving
+            # here is another player's voice (or live band) - the music bot
+            # owner ducks the broadcast while anyone else talks and every
+            # listener hears the dip in the owner's uploaded PCM.
+            self.gameplay._last_remote_megaphone_voice_ts = time.monotonic()
             if channelID in self.gameplay.voice_channels:
                 channel = self.gameplay.voice_channels[channelID]
                 # Get or create per-player speaker sources (separate from shared physical speakers)
@@ -2123,9 +2129,17 @@ class EventHandeler:
         if isinstance(owners, (list, tuple, set)):
             megaphone.lock_owners = set(owners)
         if data.get("music_taken"):
+            # The single music slot is held by someone else: revert the
+            # optimistic toggle so the menu does not claim a broadcast that
+            # the server will never route to the PA (the upload leg already
+            # keeps the MP3 private via the _is_music_owner gate).
+            music_bot = getattr(self.gameplay, "music_bot", None)
+            if music_bot is not None:
+                music_bot.broadcast_to_megaphone = False
+            owner = data.get("owner") or "another performer"
             speak(
-                "The music broadcast slot is taken by another performer. "
-                "Your instruments still broadcast to the megaphone."
+                f"The music broadcast slot is taken by {owner}. "
+                "Music stays private; your instruments still broadcast to the megaphone."
             )
 
     # ═══════════════ Music Jukebox events ═══════════════

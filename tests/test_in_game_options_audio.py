@@ -14,6 +14,7 @@ class _OptionsMenu:
         self.items = []
         self.turning_sensitivity_item_text = "Turning sensitivity"
         self.turning_mode_item_text = "Turning mode"
+        self.voice_chat_mode_item_text = "Voice chat mode"
         self.music_paths = []
 
     def add_items(self, items):

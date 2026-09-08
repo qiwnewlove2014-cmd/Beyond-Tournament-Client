@@ -2585,7 +2585,21 @@ class MapMusicBot:
         if gp and gp.voice_chat and gp.voice_chat.recording and getattr(gp, 'voice_chat_using_megaphone', False):
             is_speaking_on_mega = True
 
-        target_duck = 0.2 if (is_speaking_on_mega and self.broadcast_to_megaphone) else 1.0
+        # Also duck while OTHERS talk on the PA: remote megaphone frames are
+        # stamped in event_handeler.process_voice_data (the server never
+        # echoes our own broadcast back, so any recent frame means someone
+        # else is speaking). The duck multiplier scales BOTH the local source
+        # and the uploaded PCM, so every listener hears the music dip together
+        # with no per-listener logic.
+        remote_speaking = False
+        if gp:
+            last_remote = getattr(gp, '_last_remote_megaphone_voice_ts', 0)
+            remote_speaking = (time.monotonic() - last_remote) < 0.6
+
+        target_duck = 0.2 if (
+            (is_speaking_on_mega or remote_speaking)
+            and self.broadcast_to_megaphone
+        ) else 1.0
         
         if not hasattr(self, 'duck_multiplier'):
             self.duck_multiplier = 1.0

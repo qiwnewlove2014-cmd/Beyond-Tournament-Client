@@ -298,6 +298,32 @@ class OptionsMenu(menu.Menu):
         options.set_turn_mode(updated)
         speech.speak(self.turning_mode_value_text(), id="turning_mode")
 
+    @staticmethod
+    def voice_chat_mode_value_text():
+        return options.get_voice_chat_mode_label()
+
+    @classmethod
+    def voice_chat_mode_item_text(cls):
+        return (
+            f"Voice chat mode. Current setting: {cls.voice_chat_mode_value_text()}. "
+            "Press Enter to change. Press Escape when finished."
+        )
+
+    def _adjust_voice_chat_mode(self, direction):
+        order = list(options.VOICE_CHAT_MODES.keys())
+        current = options.get_voice_chat_mode()
+        updated = order[(order.index(current) + direction) % len(order)]
+        if updated == current:
+            if self.edge:
+                self.direct_soundgroup.play(self.edge, cat="ui")
+            speech.speak(
+                f"{self.voice_chat_mode_value_text()}. Limit.",
+                id="voice_chat_mode",
+            )
+            return
+        options.set_voice_chat_mode(updated)
+        speech.speak(self.voice_chat_mode_value_text(), id="voice_chat_mode")
+
     def update(self, events):
         remaining_events = []
         for event in events:
@@ -371,6 +397,13 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         m.turning_mode_item_text,
         lambda: None,
     )
+    # Enter activates the item action (Menu.select_current_item), so it
+    # cycles the mode - deliberately NOT Left/Right, which already adjust
+    # the neighbouring turning items.
+    voice_chat_mode_item = (
+        m.voice_chat_mode_item_text,
+        lambda: m._adjust_voice_chat_mode(1),
+    )
     if server_config.is_production_build():
         endpoint_items = []
     else:
@@ -384,6 +417,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         (f"Select instrument input device - currently set to {options.get('audio_instrument_input_device', '==============system default')[14:]}", lambda: input_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game, target="instrument")),
         (f"Voice Chat Jitter Buffer: {options.get('jitter_buffer', 60)}", lambda: configure_jitter_buffer(game, func_call, replace_call)),
         (game.toggle_item("Voice Chat", "voice_chat", True)),
+        voice_chat_mode_item,
         (game.toggle_item("microphone", "microphone", True)),
         (game.toggle_item("Player beacons", "beacons")),
         (game.toggle_item("Wall proximity tone", "wall_tone", False)),

@@ -137,3 +137,28 @@ def get_turn_mode_label(mode=None):
     if mode is None:
         mode = get_turn_mode()
     return TURN_MODES[mode]
+
+
+VOICE_CHAT_MODE_DEFAULT = "ptt"
+VOICE_CHAT_MODES = {
+    "toggle": "Tap to talk (press once to start, press again to stop)",
+    "ptt": "Push to talk (hold the key while speaking)",
+}
+
+
+def get_voice_chat_mode():
+    """Return the saved voice chat key mode, clamped to the known set."""
+    mode = get("voice_chat_mode", VOICE_CHAT_MODE_DEFAULT)
+    return mode if mode in VOICE_CHAT_MODES else VOICE_CHAT_MODE_DEFAULT
+
+
+def set_voice_chat_mode(mode):
+    mode = mode if mode in VOICE_CHAT_MODES else VOICE_CHAT_MODE_DEFAULT
+    set("voice_chat_mode", mode)
+    return mode
+
+
+def get_voice_chat_mode_label(mode=None):
+    if mode is None:
+        mode = get_voice_chat_mode()
+    return VOICE_CHAT_MODES[mode]
