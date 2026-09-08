@@ -583,9 +583,14 @@ class Gameplay(state.State):
 
         nearest = min(cardinal_directions, key=lambda direction: angular_distance(facing, direction))
 
-        # Always speak the actual 16-way direction. The cue remains anchored
-        # to the nearest cardinal so it can guide rotation through diagonals.
-        speak(string_utils.direction(facing))
+        # Always speak the actual direction. Degrees mode uses the 16-way
+        # compass; clock mode uses the nearest clock hour ("3 o'clock"). The
+        # cue remains anchored to the nearest cardinal so it can guide
+        # rotation through diagonals in both modes.
+        if options.get_turn_mode() == "degrees":
+            speak(string_utils.direction(facing))
+        else:
+            speak(string_utils.clock_direction(facing))
 
         # The source is anchored in the selected world direction, rather than
         # to the listener. Rotating away moves it naturally left or right.
@@ -1141,11 +1146,38 @@ class Gameplay(state.State):
             mode = "run" if self.running else "walk"
             self.player.walk(mode=mode, send=True)
 
+    def _clock_hour_step(self, direction):
+        """Clock-face turning: one press rotates exactly one hour mark (30°).
+
+        Used when the turning mode is "clock_hour": players who think in
+        clock positions ("the door is at 3 o'clock") tap Left/Right once per
+        hour mark instead of holding a continuous turn. The announcement is
+        immediate so every tap answers "where am I now?".
+        """
+        self.player.face(
+            self.player.hfacing + direction * 30, self.player.vfacing
+        )
+        self.compass_turn_cue.on_turn(self.player.hfacing)
+        self.player.play_sound("foley/turn/stop.ogg", cat="self")
+        speak(
+            f"turned to {string_utils.clock_direction(self.player.hfacing)}"
+        )
+
     def turn_left(self, mod, turn=False):
         if getattr(self.game, 'pong_mode', False):
             self.strafe_left(mod)
             return
         if self.player.locked:
+            return
+        if options.get_turn_mode() == "clock_hour":
+            # Tap = one hour mark. Ctrl+Left keeps the fine 45-degree snap so
+            # precise aiming is still possible inside clock mode; holding the
+            # key does nothing (no continuous drift past the hour marks).
+            if turn:
+                if not self.turn_mod:
+                    return self._clock_hour_step(-1)
+                self.turning = True
+                return self.player.face(self.player.hfacing - 45, self.player.vfacing)
             return
         if turn:
             if not self.turn_mod:
@@ -1185,6 +1217,13 @@ class Gameplay(state.State):
             self.strafe_right(mod)
             return
         if self.player.locked:
+            return
+        if options.get_turn_mode() == "clock_hour":
+            if turn:
+                if not self.turn_mod:
+                    return self._clock_hour_step(1)
+                self.turning = True
+                return self.player.face(self.player.hfacing + 45, self.player.vfacing)
             return
         if turn:
             if not self.turn_mod:
@@ -1276,8 +1315,13 @@ class Gameplay(state.State):
         self.compass_turn_cue.stop_turning()
         if not self.player.locked:
             self.player.play_sound("foley/turn/stop.ogg", cat="self")
-            if options.get("speak_on_turn", False):
-                speak(f"turned to {self.player.hfacing} degrees")
+            if options.get("speak_on_turn", True):
+                if options.get_turn_mode() == "degrees":
+                    speak(f"turned to {self.player.hfacing} degrees")
+                else:
+                    speak(
+                        f"turned to {string_utils.clock_direction(self.player.hfacing)}"
+                    )
 
     def pitch_stop(self, mod):
         if not self.turning:

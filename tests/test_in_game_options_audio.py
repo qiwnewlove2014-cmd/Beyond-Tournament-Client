@@ -13,6 +13,7 @@ class _OptionsMenu:
     def __init__(self, *args, **kwargs):
         self.items = []
         self.turning_sensitivity_item_text = "Turning sensitivity"
+        self.turning_mode_item_text = "Turning mode"
         self.music_paths = []
 
     def add_items(self, items):
@@ -79,3 +80,29 @@ class TestInGameOptionsAudio(unittest.TestCase):
         menu = _open_options()
         self.assertEqual(menu.music_paths, ["music/10.ogg"])
         self.assertFalse(_has_item(menu, "Refresh game audio"))
+
+    def test_speak_direction_on_turn_defaults_to_on(self):
+        # New players should hear their direction as soon as they finish a
+        # turn, so the option must start ON (saved configs keep their choice).
+        from libs import menus
+
+        captured = {}
+
+        class CapturingGame(_Game):
+            def toggle_item(self, name, *args):
+                if name == "speak your direction when finished turning":
+                    captured["args"] = args
+                return name
+
+        def make_menu(*args, **kwargs):
+            menu = _OptionsMenu(*args, **kwargs)
+            return menu
+
+        with mock.patch("libs.menus.OptionsMenu", side_effect=make_menu), \
+                mock.patch("libs.menus.set_default_sounds"), \
+                mock.patch("libs.menus.server_config.is_production_build", return_value=True):
+            menus.options_menu(
+                CapturingGame(), lambda: None, replace_call=lambda _menu: None
+            )
+
+        self.assertEqual(captured.get("args"), ("speak_on_turn", True))

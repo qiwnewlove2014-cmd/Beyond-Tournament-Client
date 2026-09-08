@@ -235,11 +235,12 @@ def no_account(game):
 
 
 class OptionsMenu(menu.Menu):
-    """Options menu with an inline Left/Right turning-sensitivity control."""
+    """Options menu with inline Left/Right turning controls."""
 
     def __init__(self, game, title, parent=None):
         super().__init__(game, title, parrent=parent)
         self.turning_sensitivity_item_index = None
+        self.turning_mode_item_index = None
 
     @staticmethod
     def turning_sensitivity_value_text():
@@ -271,12 +272,42 @@ class OptionsMenu(menu.Menu):
             id="turning_sensitivity",
         )
 
+    @staticmethod
+    def turning_mode_value_text():
+        return options.get_turn_mode_label()
+
+    @classmethod
+    def turning_mode_item_text(cls):
+        return (
+            f"Turning mode. Current setting: {cls.turning_mode_value_text()}. "
+            "Press Left or Right to adjust. Press Escape when finished."
+        )
+
+    def _adjust_turning_mode(self, direction):
+        order = list(options.TURN_MODES.keys())
+        current = options.get_turn_mode()
+        updated = order[(order.index(current) + direction) % len(order)]
+        if updated == current:
+            if self.edge:
+                self.direct_soundgroup.play(self.edge, cat="ui")
+            speech.speak(
+                f"{self.turning_mode_value_text()}. Limit.",
+                id="turning_mode",
+            )
+            return
+        options.set_turn_mode(updated)
+        speech.speak(self.turning_mode_value_text(), id="turning_mode")
+
     def update(self, events):
         remaining_events = []
         for event in events:
             on_turning_sensitivity = (
                 self.turning_sensitivity_item_index is not None
                 and self.pos == self.turning_sensitivity_item_index
+            )
+            on_turning_mode = (
+                self.turning_mode_item_index is not None
+                and self.pos == self.turning_mode_item_index
             )
             if (
                 on_turning_sensitivity
@@ -290,6 +321,18 @@ class OptionsMenu(menu.Menu):
                 and event.key == pygame.K_RIGHT
             ):
                 self._adjust_turning_sensitivity(1)
+            elif (
+                on_turning_mode
+                and event.type == pygame.KEYDOWN
+                and event.key == pygame.K_LEFT
+            ):
+                self._adjust_turning_mode(-1)
+            elif (
+                on_turning_mode
+                and event.type == pygame.KEYDOWN
+                and event.key == pygame.K_RIGHT
+            ):
+                self._adjust_turning_mode(1)
             else:
                 remaining_events.append(event)
         return super().update(remaining_events)
@@ -324,6 +367,10 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         m.turning_sensitivity_item_text,
         lambda: None,
     )
+    turning_mode_item = (
+        m.turning_mode_item_text,
+        lambda: None,
+    )
     if server_config.is_production_build():
         endpoint_items = []
     else:
@@ -342,6 +389,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         (game.toggle_item("Wall proximity tone", "wall_tone", False)),
         (game.toggle_item("Compass turn cue", "compass_turn_cue", True)),
         turning_sensitivity_item,
+        turning_mode_item,
         (game.toggle_item("play intro at start up", "play_intro_at_start")),
         (
             game.toggle_item(
@@ -361,7 +409,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         (game.toggle_item(
             "speak your direction when finished turning", 
             "speak_on_turn",
-            False,
+            True,
         )),
         (game.toggle_item("receive typing indicators", "typing")),
         (
@@ -393,6 +441,7 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
     items.append(("Back", lambda: func_call()))
     m.add_items(items)
     m.turning_sensitivity_item_index = m.items.index(turning_sensitivity_item)
+    m.turning_mode_item_index = m.items.index(turning_mode_item)
     # Opening Options from gameplay must not start the main-menu music.  It
     # allocates another direct OpenAL source while map music / jukebox relay
     # sources are already streaming, which can make constrained audio devices

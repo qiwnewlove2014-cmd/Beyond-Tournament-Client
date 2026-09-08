@@ -16,6 +16,7 @@ prefs = {
     "port": consts.DEFAULT_PORT,
     "stream_ambience": True,
     "turning_sensitivity": 1,
+    "turn_mode": "degrees",
 }
 
 TURNING_SENSITIVITY_DEFAULT = 1
@@ -110,3 +111,29 @@ def get_turning_sensitivity_label(level=None):
 def get_turning_step():
     """Return degrees per update while a continuous turn key is held."""
     return TURNING_SENSITIVITY_LEVELS[get_turning_sensitivity()][1]
+
+
+TURN_MODE_DEFAULT = "degrees"
+TURN_MODES = {
+    "degrees": "Degrees",
+    "clock_continuous": "Clock face, continuous turning",
+    "clock_hour": "Clock face, one hour per press",
+}
+
+
+def get_turn_mode():
+    """Return the saved turning mode, clamped to the known set."""
+    mode = get("turn_mode", TURN_MODE_DEFAULT)
+    return mode if mode in TURN_MODES else TURN_MODE_DEFAULT
+
+
+def set_turn_mode(mode):
+    mode = mode if mode in TURN_MODES else TURN_MODE_DEFAULT
+    set("turn_mode", mode)
+    return mode
+
+
+def get_turn_mode_label(mode=None):
+    if mode is None:
+        mode = get_turn_mode()
+    return TURN_MODES[mode]

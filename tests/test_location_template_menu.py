@@ -182,6 +182,7 @@ class LocationTemplateMenuFlowTests(unittest.TestCase):
 
         class FakeOptionsMenu(self.FakeMenu):
             turning_sensitivity_item_text = "Turning sensitivity"
+            turning_mode_item_text = "Turning mode"
 
             def set_music(self, path):
                 self.music = path
