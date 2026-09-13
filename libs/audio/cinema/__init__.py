@@ -43,11 +43,12 @@ cinema enabled; a map with no cinema speakers therefore behaves exactly
 like the plain two-source jukebox it always was.
 """
 
+from .bank import CinemaSpeakerBank
 from .channel import (ChannelAnalyzer, mid_side, mix_channels, mix_samples,
                      source_layout, to_samples)
 from .layout import SLOT_ORDER, CinemaLayout, CinemaSpeakerSpec
-from .plugin import (CinemaSpeakerHost, acquire_renderer, host_for,
-                     release_all, release_renderer, set_enabled)
+from .plugin import (CinemaSpeakerHost, acquire_bank, acquire_renderer,
+                     host_for, release_all, release_renderer, set_enabled)
 from .profiles import (DEFAULT_PROFILE, PROFILES, CinemaProfile,
                        get_profile, profile_names)
 from .router import CinemaRenderer
@@ -57,11 +58,13 @@ __all__ = [
     "CinemaLayout",
     "CinemaProfile",
     "CinemaRenderer",
+    "CinemaSpeakerBank",
     "CinemaSpeakerHost",
     "CinemaSpeakerSpec",
     "ChannelAnalyzer",
     "DEFAULT_PROFILE",
     "PROFILES",
+    "acquire_bank",
     "acquire_renderer",
     "get_profile",
     "host_for",

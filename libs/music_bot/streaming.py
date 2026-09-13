@@ -32,6 +32,16 @@ class AudioStreamer(threading.Thread):
     packet bursting which causes stuttering on receivers.
     """
 
+    # Hand-built instances (tests, diagnostics tools) bypass __init__, so both
+    # mode flags need class defaults for the shared playback paths to work.
+    cinema = None
+    spatial_pair = None
+
+    @property
+    def spatial_active(self):
+        """Either spatial mode: both own their per-frame distance ramp."""
+        return bool(self.spatial_pair or self.cinema is not None)
+
     # 960 samples per channel (20ms at 48kHz for Opus)
     SAMPLES_PER_BUFFER = 960
     BUFFER_SIZE = SAMPLES_PER_BUFFER * 2 * 2  # stereo 16-bit (3840 bytes)
@@ -74,7 +84,7 @@ class AudioStreamer(threading.Thread):
                  spatial_pair=None, start_offset=0.0, http_headers=None,
                  start_offset_received_at=None, canonical_url=None, media_cache=None,
                  timeline_anchor=None, start_paused=False, room_lead_in_s=None,
-                 join_playing_room=False):
+                 join_playing_room=False, cinema=None):
         super().__init__(daemon=True)
         self.game = game
         self.bot = bot
@@ -137,6 +147,14 @@ class AudioStreamer(threading.Thread):
         # image when you stand close, which naturally collapses toward mono at
         # distance — exactly how piano/drum sounds are anchored in the world.
         # `spatial_pair` is (src_l, src_r, reference_distance, max_distance).
+        # A cinema room (CinemaSpeakerBank) REPLACES the stereo pair rather
+        # than joining it: both cannot play, or the room would hear the song
+        # twice and comb filter it. The same interleaved stereo decode is
+        # simply handed to the bank, which owns one positioned source per
+        # speaker, so nothing else about this stream changes.
+        self.cinema = cinema
+        if self.cinema is not None:
+            spatial_pair = None
         self.spatial_pair = spatial_pair
         if self.spatial_pair:
             self.spatial_src_l, self.spatial_src_r = spatial_pair[0], spatial_pair[1]
@@ -144,6 +162,9 @@ class AudioStreamer(threading.Thread):
             self.spatial_max = float(spatial_pair[3])
             self.spatial_base_gain = max(0.0, min(1.0, volume / 100.0))
             self.channels = 2  # decode interleaved stereo, split per channel
+        elif self.cinema is not None:
+            self.spatial_base_gain = max(0.0, min(1.0, volume / 100.0))
+            self.channels = 2
         else:
             self.channels = int(channels)
         self.BUFFER_SIZE = self.SAMPLES_PER_BUFFER * self.channels * 2
@@ -213,7 +234,9 @@ class AudioStreamer(threading.Thread):
         self._timeline_delay = deque()
 
     def _all_sources(self):
-        """All OpenAL sources this stream feeds (1 normal, 2 for spatial pairs)."""
+        """All OpenAL sources this stream feeds (1 normal, 2 spatial, N cinema)."""
+        if self.cinema is not None:
+            return self.cinema.sources
         if self.spatial_pair:
             return (self.spatial_src_l, self.spatial_src_r)
         return (self.source,)
@@ -253,12 +276,18 @@ class AudioStreamer(threading.Thread):
 
     def set_cabinet_volume(self, volume):
         self.cabinet_gain = max(0.0, min(1.0, float(volume) / 100.0))
+        if self.cinema is not None:
+            self.cinema.set_cabinet_volume(volume)
         self._update_spatial_gain()
 
     def _update_spatial_gain(self):
         """Linear distance fade for spatial pairs (same behavior as drums' 3D
         stereo): full volume inside the reference distance, linearly down to
         true silence at max_distance, computed from the listener's position."""
+        if self.cinema is not None:
+            # Per-speaker distance, occlusion and environment for the room.
+            self.cinema.update_output()
+            return
         try:
             audio = getattr(self.game, "audio_mngr", None)
             pos = getattr(audio, "position", None)
@@ -351,6 +380,8 @@ class AudioStreamer(threading.Thread):
         self.spatial_base_gain = max(0.0, min(1.0, volume / 100.0))
         if self.spatial_pair:
             self._update_spatial_gain()
+        elif self.cinema is not None:
+            self.cinema.set_volume(volume)
         elif self.source:
             try:
                 self.source.gain = max(0.0, min(1.0, volume / 100.0))
@@ -359,6 +390,10 @@ class AudioStreamer(threading.Thread):
 
     def _init_buffer_pool(self):
         """Pre-allocate OpenAL buffers for reuse"""
+        if self.cinema is not None:
+            # A cinema room allocates its own per-speaker pools: a single
+            # shared pool could never hold N frames the pre-buffer needs.
+            return
         for _ in range(self.NUM_BUFFERS):
             try:
                 buf = self.game.audio_mngr.context.gen_buffer()
@@ -411,6 +446,18 @@ class AudioStreamer(threading.Thread):
         CRITICAL: cyal's unqueue_buffers() returns a SINGLE Buffer object by default,
         not a list. Handle both cases robustly. Spatial pairs drain both sources.
         """
+        if self.cinema is not None:
+            # The speaker bank owns its per-speaker pools, so it owns the
+            # reclamation too -- but the watchdog's audible-progress stamp is
+            # this stream's contract, so it is still stamped here.
+            reclaimed = False
+            try:
+                reclaimed = self.cinema.reclaim()
+            except Exception:
+                reclaimed = False
+            if reclaimed and getattr(self, "jukebox_player", None) is not None:
+                self.last_output_at = time.monotonic()
+            return
         reclaimed = False
         try:
             for src in self._all_sources():
@@ -798,6 +845,8 @@ class AudioStreamer(threading.Thread):
 
     def _queue_local(self, data):
         """Queue a chunk of PCM data to the LOCAL OpenAL source(s)."""
+        if self.cinema is not None:
+            return self._queue_local_cinema(data)
         if self.spatial_pair:
             return self._queue_local_spatial(data)
         self._reclaim_processed()
@@ -815,6 +864,23 @@ class AudioStreamer(threading.Thread):
             self._note_fed_content(data)
             return True
         except Exception:
+            return False
+
+    def _queue_local_cinema(self, data):
+        """Hand one interleaved stereo frame to the room's speaker bank.
+
+        The bank renders it into one MONO feed per speaker and queues each
+        into that speaker's own pool, so this stream never touches a buffer
+        or a source directly in cinema mode.
+        """
+        try:
+            left, right = self._split_stereo_16(data)
+        except Exception:
+            return False
+        try:
+            return bool(self.cinema.queue_frame(left, right))
+        except Exception:
+            self.failure_reason = "cinema speaker queue failed"
             return False
 
     def _queue_local_spatial(self, data):
@@ -1262,7 +1328,7 @@ class AudioStreamer(threading.Thread):
                     self._cleanup()
                     return
             if not self.paused:
-                if self.spatial_pair:
+                if self.spatial_active:
                     self._diagnostic_startup_call("direct.spatial", self._update_spatial_gain)
                 self._diagnostic_startup_call("direct.first_play", self._play_all)
                 self.ready_event.set()
@@ -1327,8 +1393,8 @@ class AudioStreamer(threading.Thread):
                     self._reclaim_processed()
 
                     # Keep the spatial pair's distance fade up to date as the
-                    # listener walks (cheap: two distance checks per frame).
-                    if self.spatial_pair:
+                    # listener walks (cheap: one distance check per speaker).
+                    if self.spatial_active:
                         self._update_spatial_gain()
 
                     # Drain pause buffer into OpenAL
@@ -1364,7 +1430,7 @@ class AudioStreamer(threading.Thread):
                 while self._buffers_queued() > 0 and self.running:
                     with self._lock:
                         self._reclaim_processed()
-                        if self.spatial_pair:
+                        if self.spatial_active:
                             self._update_spatial_gain()
                     # If we are paused at the very end, wait here until resumed
                     if not self.paused and not self._all_playing() and self._buffers_queued() > 0:

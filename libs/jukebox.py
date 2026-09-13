@@ -31,6 +31,10 @@ from .deferred_log import log_deferred as log_line
 from .jukebox_relay import JukeboxRelayReceiver
 from .jukebox_media_cache import JukeboxMediaCache
 from .audio_diagnostics import probe as audio_probe
+# Opt-in cinema room: a processing layer that spreads this cabinet's song
+# across positioned speakers. Everything is inert unless a cabinet is given
+# a cinema profile, so the two-source playback below is never affected.
+from .audio.cinema import acquire_bank, release_renderer
 
 # Shared wall occlusion tiers used by every playback site below.
 # 0 = clear path · 1 = thin obstacle (a lone pillar tile): light lowpass ·
@@ -100,6 +104,9 @@ class JukeboxPlayer:
         self.eq_slots = {}
         self.custom_eq_slots = {}
         self.cabinet_volumes = {}
+        # The cinema profile each cabinet was last told to use (server data).
+        # Remembered per cabinet so a relocate/reload keeps the same room.
+        self.cinema_profiles = {}
         self._occlusion_filter = None
         self._light_occlusion_filter = None
 
@@ -313,13 +320,22 @@ class JukeboxPlayer:
                         filt = self.get_occlusion_filter()
                     elif tier == OCCLUSION_LIGHT:
                         filt = self.get_light_occlusion_filter()
-                for key in ("source", "secondary_source"):
-                    src = entry.get(key)
-                    if src is not None:
-                        try:
-                            audio.efx.send(src, 1, slot, filter=filt)
-                        except Exception:
-                            pass
+                bank = entry.get("cinema")
+                if bank is not None:
+                    # Every speaker in the room carries the cabinet's EQ, not
+                    # just the front pair; the room re-sends it on its own
+                    # next refresh.
+                    bank.set_eq_slot(slot)
+                    bank.touch_environment()
+                    bank.update_output()
+                else:
+                    for key in ("source", "secondary_source"):
+                        src = entry.get(key)
+                        if src is not None:
+                            try:
+                                audio.efx.send(src, 1, slot, filter=filt)
+                            except Exception:
+                                pass
         if previous_profile == "custom" and profile != "custom":
             old_slot = self.custom_eq_slots.pop(jukebox_id, None)
             if old_slot is not None and hasattr(audio, "release_effect_slot"):
@@ -346,6 +362,12 @@ class JukeboxPlayer:
                 streamer = p.get("streamer")
                 if streamer is not None and hasattr(streamer, "set_cabinet_volume"):
                     streamer.set_cabinet_volume(vol)
+                # The room is told directly as well: its streamer may be a
+                # placeholder with no sources yet, and the room must still
+                # carry the cabinet's own volume.
+                bank = p.get("cinema")
+                if bank is not None:
+                    bank.set_cabinet_volume(vol)
 
     RELAY_STARTUP_TIMEOUT = 7.0
     RELAY_STALL_TIMEOUT = 5.0
@@ -422,6 +444,44 @@ class JukeboxPlayer:
                 streamer = p.get("streamer")
                 if streamer is not None and hasattr(streamer, "set_volume"):
                     streamer.set_volume(self.volume)
+                bank = p.get("cinema")
+                if bank is not None:
+                    bank.set_volume(self.volume)
+
+    def _acquire_cinema(self, jukebox_id, x, y, z, volume, ref, maxd, kwargs):
+        """Build this cabinet's cinema room, or None to play the plain pair.
+
+        The profile comes from the server's per-cabinet decision; a cabinet
+        the server never marked stays a plain jukebox. Every failure path
+        here (feature off, no room possible, a device that refuses the extra
+        sources) returns None so the caller falls back to two-source
+        playback instead of going silent.
+        """
+        try:
+            profile = kwargs.get("cinema_profile") or self.cinema_profiles.get(jukebox_id)
+            if not profile:
+                # Only a cabinet the server actually marked becomes a room.
+                # Everything else stays the plain two-source jukebox even
+                # while the feature is switched on.
+                return None
+            self.cinema_profiles[jukebox_id] = profile
+            return acquire_bank(
+                self.game,
+                jukebox_id,
+                (float(x), float(y), float(z)),
+                profile=profile,
+                specs=kwargs.get("cinema_speakers"),
+                volume=volume,
+                cabinet_volume=self.cabinet_volumes.get(jukebox_id, 100),
+                reference_distance=ref,
+                max_distance=maxd,
+                occlusion_provider=self.occlusion_tier,
+            )
+        except Exception as ex:
+            from . import logger
+            logger.log_exception(ex, f"JukeboxPlayer cinema room ({jukebox_id})")
+            log_line(f"[Jukebox] cinema room unavailable for {jukebox_id}: {ex}")
+            return None
 
     @audio_probe.measured("jukebox.start", trigger=True)
     def play(self, jukebox_id, x, y, z, title, url, duration, volume=None, start_offset=0.0,
@@ -512,7 +572,10 @@ class JukeboxPlayer:
                 if getattr(current_streamer, "main_thread_audio", False) is True:
                     current_streamer.box_pos = (float(x), float(y), float(z))
                 offset = 2.5
-                if src_l is not None and src_r is not None:
+                if (existing.get("cinema") is None
+                        and src_l is not None and src_r is not None):
+                    # Never re-aim a cinema room's speakers from the plain
+                    # pair offset: the bank owns their positions.
                     try:
                         for src, sx in ((src_l, float(x) - offset), (src_r, float(x) + offset)):
                             src.position = (sx, float(y), float(z))
@@ -587,29 +650,38 @@ class JukeboxPlayer:
             log_line(f"[Jukebox] play({jukebox_id}) skipped: no audio_mngr")
             return
         src_l = src_r = None
-        try:
-            src_l = audio_probe.call("jukebox.gen_source", audio.context.gen_source)
-            src_r = audio_probe.call("jukebox.gen_source", audio.context.gen_source)
-        except Exception:
-            self._release_sources((src_l, src_r))
-            log_line(f"[Jukebox] play({jukebox_id}) failed: gen_source error")
-            return
         offset = 2.5   # same stereo offset as piano/drums 3D-stereo sounds
         ref = 8.0      # full volume inside this distance
         maxd = 40.0    # silent at/beyond this distance
         base_gain = max(0.0, min(1.0, effective_volume / 100.0))
-        try:
-            with audio_probe.span("jukebox.source_setup"):
-                for src, sx in ((src_l, float(x) - offset), (src_r, float(x) + offset)):
-                    src.position = (sx, float(y), float(z))
-                    src.rolloff_factor = 0.0   # linear fade handled per-frame
-                    src.reference_distance = maxd
-                    src.max_distance = maxd
-                    src.spatialize = True
-                    src.direct_channels = False
-                    src.gain = base_gain
-        except Exception:
-            pass
+        # Cinema room (opt-in, per cabinet). While it is off -- the shipped
+        # default -- this is None and the block below is the same two-source
+        # playback it has always been.
+        bank = self._acquire_cinema(jukebox_id, x, y, z, effective_volume, ref, maxd, _kwargs)
+        if bank is not None:
+            # The bank already created, positioned and spatialised one source
+            # per speaker around the cabinet.
+            src_l, src_r = bank.primary_source, bank.secondary_source
+        else:
+            try:
+                src_l = audio_probe.call("jukebox.gen_source", audio.context.gen_source)
+                src_r = audio_probe.call("jukebox.gen_source", audio.context.gen_source)
+            except Exception:
+                self._release_sources((src_l, src_r))
+                log_line(f"[Jukebox] play({jukebox_id}) failed: gen_source error")
+                return
+            try:
+                with audio_probe.span("jukebox.source_setup"):
+                    for src, sx in ((src_l, float(x) - offset), (src_r, float(x) + offset)):
+                        src.position = (sx, float(y), float(z))
+                        src.rolloff_factor = 0.0   # linear fade handled per-frame
+                        src.reference_distance = maxd
+                        src.max_distance = maxd
+                        src.spatialize = True
+                        src.direct_channels = False
+                        src.gain = base_gain
+            except Exception:
+                pass
         # A song that starts while the listener is underwater inherits the
         # active global water filter (camera.py pushes it onto
         # audio_mngr.filter) so it is muffled from its first frame.
@@ -669,6 +741,11 @@ class JukeboxPlayer:
             if slot is not None and getattr(audio, "efx", None) is not None:
                 audio_probe.call("jukebox.efx", audio.efx.send, src_l, 1, slot, filter=filt)
                 audio_probe.call("jukebox.efx", audio.efx.send, src_r, 1, slot, filter=filt)
+            if bank is not None:
+                # The room carries the cabinet's reverb and EQ on every one of
+                # its speakers, not just the pair of them.
+                bank.set_reverb(reverb)
+                bank.set_eq_slot(slot)
         except Exception:
             pass
         cab_vol = _kwargs.get("cabinet_volume")
@@ -691,14 +768,16 @@ class JukeboxPlayer:
                     relay_id, stream_epoch, ref, maxd,
                     box_pos=(float(x), float(y), float(z)), player=self,
                     reverb_slot=reverb, eq_slot=slot,
-                    cabinet_volume=cab_vol,
+                    cabinet_volume=cab_vol, cinema=bank,
                 )
             else:
                 from . import music_bot as mb
                 audio_probe.event("jukebox.direct")
                 streamer = audio_probe.call("jukebox.direct_create", mb.AudioStreamer,
                     self.game, url, src_l, volume=effective_volume, bot=None,
-                    channels=2, spatial_pair=(src_l, src_r, ref, maxd),
+                    channels=2,
+                    spatial_pair=None if bank is not None else (src_l, src_r, ref, maxd),
+                    cinema=bank,
                     start_offset=start_offset,
                     start_offset_received_at=received_at or time.monotonic(),
                     http_headers=http_headers,
@@ -729,6 +808,7 @@ class JukeboxPlayer:
             self.players[jukebox_id] = {
                 "source": src_l,
                 "secondary_source": src_r,
+                "cinema": bank,
                 "streamer": streamer,
                 "title": title,
                 "url": url,
@@ -846,6 +926,31 @@ class JukeboxPlayer:
             with contextlib.suppress(Exception):
                 source.delete()
 
+    def _entry_sources(self, entry):
+        """Every OpenAL source an entry owns (2 plain, N in a cinema room)."""
+        if not entry:
+            return []
+        stored = entry.get("sources")
+        if isinstance(stored, (list, tuple)):
+            return [source for source in stored if source is not None]
+        bank = entry.get("cinema")
+        if bank is not None:
+            return list(bank.sources)
+        return [source for source in (entry.get("source"), entry.get("secondary_source"))
+                if source is not None]
+
+    def _release_cinema(self, jukebox_id, entry):
+        """Drop a cabinet's cinema room once its sources were deleted.
+
+        Released after the sources so the bank can never keep a deleted
+        OpenAL name, and its per-speaker buffers are returned with it.
+        """
+        bank = (entry or {}).get("cinema")
+        if bank is None:
+            return
+        release_renderer(self.game, jukebox_id)
+        bank.forget_sources()
+
     @audio_probe.measured("jukebox.stop")
     def stop(self, jukebox_id, playback_id=None, fade=False):
         """Stop the song for one jukebox and free its audio source."""
@@ -869,11 +974,18 @@ class JukeboxPlayer:
                 self.relay_routes.pop(relay_key, None)
                 self._relay_pending.pop(relay_key, None)
         if fade:
-            self._fade_out_sources([player.get("source"), player.get("secondary_source")], streamer=streamer, duration=0.5)
+            bank = player.get("cinema")
+            if bank is not None and getattr(streamer, "main_thread_audio", False) is not True:
+                # The direct fade worker writes source gains that the room's
+                # own frame-by-frame refresh would immediately overwrite, so
+                # the room fades itself over the same duration instead.
+                bank.retire(duration=0.5)
+            self._fade_out_sources(self._entry_sources(player), streamer=streamer, duration=0.5)
             return True
         if getattr(streamer, "main_thread_audio", False) is True:
             streamer.stop()
-            self._release_sources([player.get("source"), player.get("secondary_source")])
+            self._release_sources(self._entry_sources(player))
+            self._release_cinema(jukebox_id, player)
             return True
         try:
             if streamer is not None:
@@ -888,8 +1000,7 @@ class JukeboxPlayer:
                         streamer.join(timeout=1.0)
         except Exception:
             pass
-        for key in ("source", "secondary_source"):
-            source = player.get(key)
+        for source in self._entry_sources(player):
             if source is not None:
                 try:
                     with contextlib.suppress(Exception):
@@ -912,6 +1023,7 @@ class JukeboxPlayer:
                     source.delete()
                 except Exception:
                     pass
+        self._release_cinema(jukebox_id, player)
         return True
 
     def stop_all(self):
@@ -978,11 +1090,16 @@ class JukeboxPlayer:
                 ):
                     self.players.pop(jukebox_id, None)
                     streamer.reverb_slot = None
+                    bank = existing.get("cinema")
+                    if bank is not None:
+                        bank.set_reverb(None)
                     self._retiring_direct.append({
                         "id": jukebox_id,
                         "streamer": streamer,
                         "source": existing.get("source"),
                         "secondary_source": existing.get("secondary_source"),
+                        "cinema": bank,
+                        "sources": self._entry_sources(existing),
                         "deadline": time.monotonic() + remaining + 2.0,
                     })
                     log_line(
@@ -1017,7 +1134,8 @@ class JukeboxPlayer:
                     streamer.stop()
             except Exception:
                 pass
-            self._release_sources([entry.get("source"), entry.get("secondary_source")])
+            self._release_sources(self._entry_sources(entry))
+            self._release_cinema(entry.get("id"), entry)
             log_line(f"[Jukebox] retire({entry.get('id')}): tail finished")
 
     def _stop_retiring_direct(self):
@@ -1032,7 +1150,8 @@ class JukeboxPlayer:
                     streamer.stop()
             except Exception:
                 pass
-            self._release_sources([entry.get("source"), entry.get("secondary_source")])
+            self._release_sources(self._entry_sources(entry))
+            self._release_cinema(entry.get("id"), entry)
 
     def update(self):
         """Recover a jukebox stream that stopped without a stop packet.
@@ -1132,13 +1251,15 @@ class JukeboxPlayer:
                                     (jukebox_id, f"frame starvation ({fps:.1f} fps)")
                                 )
                     stopped_sources = False
-                    src_l = entry.get("source")
-                    src_r = entry.get("secondary_source")
-                    if src_l is not None and src_r is not None and age >= self.RELAY_STARTUP_TIMEOUT:
+                    entry_sources = self._entry_sources(entry)
+                    if entry_sources and age >= self.RELAY_STARTUP_TIMEOUT:
                         try:
-                            if ((src_l.buffers_queued > 0 or src_r.buffers_queued > 0)
-                                    and src_l.state != cyal.SourceState.PLAYING
-                                    and src_r.state != cyal.SourceState.PLAYING):
+                            # A room is as healthy as its busiest speaker: any
+                            # one of them playing with audio queued means the
+                            # stream reached OpenAL.
+                            if (any(source.buffers_queued > 0 for source in entry_sources)
+                                    and not any(source.state == cyal.SourceState.PLAYING
+                                                for source in entry_sources)):
                                 stopped_sources = True
                         except Exception:
                             pass
@@ -1448,6 +1569,24 @@ class JukeboxPlayer:
         healthy = True
         with self._lock:
             for jid, p in self.players.items():
+                bank = p.get("cinema")
+                if bank is not None:
+                    # A room takes its reverb from the cabinet but keeps its
+                    # occlusion per speaker, so one shared ray from here
+                    # would be the wrong answer; the room refreshes itself.
+                    try:
+                        anchor = bank.anchor
+                        reverb_zone = gameplay.map.get_reverb_at(anchor[0], anchor[1], anchor[2])
+                        reverb = reverb_zone.reverb if reverb_zone and hasattr(reverb_zone, "reverb") else None
+                        streamer = p.get("streamer")
+                        if streamer is not None:
+                            streamer.reverb_slot = reverb
+                        bank.set_reverb(reverb)
+                        bank.touch_environment()
+                        bank.update_output()
+                    except Exception:
+                        healthy = False
+                    continue
                 src_l = p.get("source")
                 src_r = p.get("secondary_source")
                 if src_l is None or src_r is None:
@@ -1482,25 +1621,35 @@ class JukeboxPlayer:
             sources = [
                 source
                 for player in self.players.values()
-                for source in (player.get("source"), player.get("secondary_source"))
+                for source in self._entry_sources(player)
                 if source is not None
             ]
             for player in self.players.values():
                 streamer = player.get("streamer")
                 if streamer is not None:
                     streamer.reverb_slot = None
+                bank = player.get("cinema")
+                if bank is not None:
+                    bank.set_reverb(None)
         # Retired relay streams remain audible for the crossfade, but must not
         # retain or reattach a slot after the old map returns it to the pool.
         for receiver in tuple(self._retired_relays):
             receiver.reverb_slot = None
             sources.extend(source for source in (receiver.source_l, receiver.source_r)
                            if source is not None)
+            cinema = getattr(receiver, "cinema", None)
+            if cinema is not None:
+                cinema.set_reverb(None)
+                sources.extend(cinema.sources)
         # Retired direct tails (song-advance crossfade) follow the same rule.
         for entry in tuple(self._retiring_direct):
             streamer = entry.get("streamer")
             if streamer is not None:
                 streamer.reverb_slot = None
-            sources.extend(source for source in (entry.get("source"), entry.get("secondary_source"))
+            bank = entry.get("cinema")
+            if bank is not None:
+                bank.set_reverb(None)
+            sources.extend(source for source in self._entry_sources(entry)
                            if source is not None)
         if audio is None or not hasattr(audio, "efx"):
             return

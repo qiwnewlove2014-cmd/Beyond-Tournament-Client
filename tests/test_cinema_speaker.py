@@ -282,18 +282,20 @@ class RendererTests(unittest.TestCase):
     def test_a_mono_programme_never_reaches_the_stereo_weights(self):
         renderer = self.renderer("theatre")
         mono = mono_bytes(LEFT)
+        rendered = []
         for _ in range(10):
             rendered = renderer.render(mono, mono)
         self.assertEqual(renderer.active_kind, "mono")
         feeds = dict(rendered)
-        # The stereo weights would have collapsed the sides to silence and
-        # fed three identical front speakers. Instead every speaker carries
-        # the programme: full level on the screen wall, equal-power trimmed
-        # around the room.
-        self.assertEqual(to_mono_values(feeds["front_l"]), LEFT)
-        scale = get_profile("mono_spread").surround_scale()
-        for value, source in zip(to_mono_values(feeds["side_l"]), LEFT):
-            self.assertAlmostEqual(value, source * scale, delta=2)
+        # The stereo weights would have collapsed the sides to silence and fed
+        # three identical front speakers. Instead every speaker in the room
+        # carries the programme at an equal-power share (there is no image to
+        # protect in a mono source, so the screen wall is not exempt either).
+        scale = 1 / len(renderer.slots) ** 0.5
+        self.assertEqual(len(renderer.slots), 7)
+        for slot in renderer.slots:
+            for value, source in zip(to_mono_values(feeds[slot]), LEFT):
+                self.assertAlmostEqual(value, source * scale, delta=2)
 
     def test_declared_layout_skips_detection(self):
         renderer = self.renderer("front_only", declared_layout="mono", detect_channels=False)
@@ -301,8 +303,11 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(renderer.active_kind, "mono")
         # A stream the server already declared mono is taken at its word:
         # the mid is the programme, and no evidence was gathered to guess.
-        self.assertEqual(to_mono_values(feeds["front_l"]),
-                         [(l_value + r_value) >> 1 for l_value, r_value in zip(LEFT, RIGHT)])
+        # The two speakers share one equal-power budget, so the room is not
+        # louder than the mono programme it is playing.
+        scale = 1 / 2 ** 0.5
+        for value, l_value, r_value in zip(to_mono_values(feeds["front_l"]), LEFT, RIGHT):
+            self.assertAlmostEqual(value, ((l_value + r_value) >> 1) * scale, delta=1)
         self.assertFalse(renderer.channel.confident)
 
     def test_max_speakers_drops_the_back_of_the_room_first(self):
@@ -320,10 +325,13 @@ class RendererTests(unittest.TestCase):
         renderer.set_profile("surround")
         self.assertEqual(len(renderer.plan()), 5)
 
-    def test_slot_union_covers_both_plans(self):
-        renderer = self.renderer("front_only")
-        self.assertEqual(renderer.slots, ("front_l", "front_c", "front_r", "side_l",
-                                          "side_r", "rear_l", "rear_r"))
+    def test_the_room_is_exactly_the_profiles_speaker_set(self):
+        # A mono passage is spread across the speakers the room already has,
+        # so a two-speaker room never quietly grows seven sources.
+        self.assertEqual(self.renderer("front_only").slots, ("front_l", "front_r"))
+        self.assertEqual(self.renderer("surround").slots,
+                         ("front_l", "front_c", "front_r", "side_l", "side_r"))
+        self.assertEqual(len(self.renderer("theatre").slots), 7)
 
 
 class CinemaSpeakerHostTests(unittest.TestCase):

@@ -36,14 +36,21 @@ IMAGE_SLOTS = ("front_l", "front_r")
 class CinemaProfile:
     """Named slot weights, optionally energy-normalised for the added speakers."""
 
-    __slots__ = ("name", "label", "weights", "equal_power_surrounds")
+    __slots__ = ("name", "label", "weights", "equal_power_surrounds",
+                 "protect_image")
 
-    def __init__(self, name, label, weights, equal_power_surrounds=False):
+    def __init__(self, name, label, weights, equal_power_surrounds=False,
+                 protect_image=True):
         self.name = name
         self.label = label
         self.weights = {slot: (float(gain_l), float(gain_r))
                         for slot, (gain_l, gain_r) in weights.items()}
         self.equal_power_surrounds = bool(equal_power_surrounds)
+        # A stereo profile keeps the screen wall at its authored level no
+        # matter how big the room grows: the front pair IS the stereo image.
+        # A mono programme has no image to protect, so every speaker it
+        # reaches shares one equal-power budget instead.
+        self.protect_image = bool(protect_image)
 
     @property
     def slots(self):
@@ -54,6 +61,9 @@ class CinemaProfile:
         return self.weights.get(slot)
 
     def surround_slots(self):
+        """Slots sharing the equal-power budget rather than the author's level."""
+        if not self.protect_image:
+            return self.slots
         return tuple(slot for slot in self.slots if slot not in IMAGE_SLOTS)
 
     def surround_scale(self):
@@ -137,6 +147,7 @@ PROFILES = {
         {slot: (0.5, 0.5) for slot in
          ("front_l", "front_c", "front_r", "side_l", "side_r", "rear_l", "rear_r")},
         equal_power_surrounds=True,
+        protect_image=False,
     ),
 }
 

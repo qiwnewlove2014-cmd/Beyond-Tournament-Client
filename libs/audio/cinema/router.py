@@ -19,9 +19,11 @@ the transport that already owns them and on the audio owner thread; this
 class only answers "what should each speaker be fed right now".
 """
 
+from math import sqrt
+
 from .channel import (AUTO, MONO, STEREO, ChannelAnalyzer, mix_samples,
                       source_layout, to_samples)
-from .layout import SLOT_ORDER, CinemaLayout
+from .layout import CinemaLayout
 from .profiles import IMAGE_SLOTS, get_profile
 
 # The plain two-source jukebox, expressed as a plan. Matching this exactly
@@ -59,36 +61,50 @@ class CinemaRenderer:
 
     # ---------------------------------------------------------------- plans
 
-    def _plan_for(self, profile):
+    def _plan_for(self, profile, only=None):
         """Resolve a profile into concrete ``(slot, gain_l, gain_r)`` terms.
 
-        Slots are emitted in room order, so truncating to ``max_speakers``
-        drops the back of the room before the screen wall -- the centre and
-        front pair are the last things a constrained room should lose.
+        ``only`` restricts the plan to a given speaker set, which is how a
+        mono passage is spread across the speakers the room actually has
+        instead of conjuring extra ones. Slots are emitted in room order, so
+        truncating to ``max_speakers`` drops the back of the room before the
+        screen wall -- the centre and front pair are the last things a
+        constrained room should lose.
         """
         available = self.layout.slots
-        scale = profile.surround_scale()
+        slots = [slot for slot in profile.slots
+                 if slot in available and (only is None or slot in only)]
+        slots = slots[:self.max_speakers]
+        # The equal-power share is computed over the speakers this plan will
+        # actually feed, so trimming the room also raises each speaker's
+        # share instead of leaving the whole room quiet.
+        if profile.equal_power_surrounds:
+            shared = [slot for slot in slots
+                      if not profile.protect_image or slot not in IMAGE_SLOTS]
+        else:
+            shared = []
+        scale = 1.0 / sqrt(len(shared)) if shared else 1.0
         plan = []
-        for slot in profile.slots:
-            if slot not in available:
-                continue
+        for slot in slots:
             weight = profile.weight(slot)
             if weight is None:
                 continue
-            factor = scale if (profile.equal_power_surrounds and slot not in IMAGE_SLOTS) else 1.0
+            factor = scale if slot in shared else 1.0
             level = self.layout.level(slot)
             plan.append((slot, weight[0] * level * factor, weight[1] * level * factor))
-        return tuple(plan[:self.max_speakers])
+        return tuple(plan)
 
     def _build_plans(self):
         stereo = self._plan_for(self.profile)
         if self.profile.name != MONO_PROFILE:
-            mono = self._plan_for(get_profile(MONO_PROFILE))
+            mono = self._plan_for(get_profile(MONO_PROFILE),
+                                  only=[term[0] for term in stereo])
         else:
             mono = stereo
         self._plans = {STEREO: stereo, MONO: mono}
-        self._slots = tuple(slot for slot in SLOT_ORDER
-                            if any(slot == term[0] for term in stereo + mono))
+        # The room's speaker set is the profile's, so the mono plan can never
+        # need a source the stereo plan has not already created.
+        self._slots = tuple(term[0] for term in stereo)
         # Parity only exists when nothing trims or rescales the front pair.
         self._parity = stereo == PARITY_PLAN
 

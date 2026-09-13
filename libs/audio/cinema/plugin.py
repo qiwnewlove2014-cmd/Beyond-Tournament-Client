@@ -13,6 +13,7 @@ argument for this design: the default value of the feature is "the code you
 already shipped".
 """
 
+from .bank import CinemaSpeakerBank
 from .channel import AUTO
 from .profiles import DEFAULT_PROFILE, get_profile
 from .router import CinemaRenderer
@@ -47,6 +48,7 @@ class CinemaSpeakerHost:
         self.profile = get_profile(profile or DEFAULT_PROFILE).name
         self.max_speakers = max_speakers
         self._renderers = {}
+        self._banks = {}
 
     @property
     def enabled(self):
@@ -95,16 +97,61 @@ class CinemaSpeakerHost:
         self._renderers[key] = renderer
         return renderer
 
+    def acquire_bank(self, jukebox_id, anchor, **options):
+        """Acquire the OpenAL speaker bank for this cabinet, or None when off.
+
+        Re-acquiring the same room (a map reload re-offering the same song)
+        keeps the existing bank and just refreshes its settings: rebuilding it
+        would create new sources and interrupt audio that is already flowing.
+        """
+        volume = options.pop("volume", 100)
+        cabinet_volume = options.pop("cabinet_volume", 100)
+        reference_distance = options.pop("reference_distance", 8.0)
+        max_distance = options.pop("max_distance", 40.0)
+        occlusion_provider = options.pop("occlusion_provider", None)
+        reverb_slot = options.pop("reverb_slot", None)
+        eq_slot = options.pop("eq_slot", None)
+        renderer = self.acquire(jukebox_id, anchor, **options)
+        if renderer is None:
+            return None
+        key = self._key(jukebox_id)
+        bank = self._banks.get(key)
+        if bank is not None and bank.renderer is renderer and bank.sources:
+            bank.set_volume(volume)
+            bank.set_cabinet_volume(cabinet_volume)
+            bank.set_reverb(reverb_slot)
+            bank.set_eq_slot(eq_slot)
+            return bank
+        bank = CinemaSpeakerBank(
+            self.game, renderer, volume=volume, cabinet_volume=cabinet_volume,
+            reference_distance=reference_distance, max_distance=max_distance,
+            occlusion_provider=occlusion_provider, reverb_slot=reverb_slot,
+            eq_slot=eq_slot,
+        )
+        self._banks[key] = bank
+        return bank
+
     def renderer(self, jukebox_id):
         return self._renderers.get(self._key(jukebox_id))
 
+    def bank(self, jukebox_id):
+        return self._banks.get(self._key(jukebox_id))
+
     def release(self, jukebox_id):
-        renderer = self._renderers.pop(self._key(jukebox_id), None)
+        key = self._key(jukebox_id)
+        bank = self._banks.pop(key, None)
+        if bank is not None:
+            bank.stop()
+        renderer = self._renderers.pop(key, None)
         if renderer is not None:
             renderer.stop()
-        return renderer
+        return bank if bank is not None else renderer
 
     def release_all(self):
+        banks = list(self._banks.values())
+        self._banks.clear()
+        for bank in banks:
+            bank.stop()
         renderers = list(self._renderers.values())
         self._renderers.clear()
         for renderer in renderers:
@@ -114,6 +161,10 @@ class CinemaSpeakerHost:
     @property
     def renderers(self):
         return dict(self._renderers)
+
+    @property
+    def banks(self):
+        return dict(self._banks)
 
     def __len__(self):
         return len(self._renderers)
@@ -143,15 +194,39 @@ def set_enabled(game, enabled):
     return None if host is None else host.set_enabled(enabled)
 
 
+def _active_host(game):
+    """The host when cinema is actually in use, else None.
+
+    A host is only attached to the game object once something has turned the
+    feature on, so a player who never uses cinema keeps an untouched game
+    object and the caller keeps its original code path.
+    """
+    host = host_for(game, create=False)
+    if host is not None:
+        return host if host.enabled else None
+    if not _option_enabled():
+        return None
+    return host_for(game)
+
+
 def acquire_renderer(game, jukebox_id, anchor, **options):
     """Single entry point for a source that wants to play through speakers."""
-    host = host_for(game)
+    host = _active_host(game)
     if host is None:
         return None
     return host.acquire(jukebox_id, anchor, **options)
 
 
+def acquire_bank(game, jukebox_id, anchor, **options):
+    """Single entry point for a source that wants an OpenAL room."""
+    host = _active_host(game)
+    if host is None:
+        return None
+    return host.acquire_bank(jukebox_id, anchor, **options)
+
+
 def release_renderer(game, jukebox_id):
+    """Release a cabinet's room; its OpenAL sources are the caller's to delete."""
     host = host_for(game, create=False)
     return None if host is None else host.release(jukebox_id)
 

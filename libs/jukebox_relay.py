@@ -16,6 +16,9 @@ from .audio_diagnostics import probe as audio_probe
 
 class JukeboxRelayReceiver(threading.Thread):
     main_thread_audio = True
+    # Hand-built instances (tests) bypass __init__; the room flag needs a
+    # default so the shared output paths still resolve.
+    cinema = None
     PREBUFFER_FRAMES = 4
     RESUME_FRAMES = 3
     MAX_PENDING_FRAMES = 32
@@ -26,11 +29,17 @@ class JukeboxRelayReceiver(threading.Thread):
     def __init__(self, game, source_l, source_r, volume, relay_id,
                  stream_epoch, reference_distance, max_distance,
                  box_pos=None, player=None, reverb_slot=None, eq_slot=None,
-                 cabinet_volume=100, *, clock=None):
+                 cabinet_volume=100, *, cinema=None, clock=None):
         super().__init__(daemon=True, name=f"jukebox-relay-{relay_id}")
         self._owner = threading.get_ident()
         self._clock = clock or time.monotonic
         self.game = game
+        # A cinema room (CinemaSpeakerBank) replaces the stereo pair: it owns
+        # one positioned source per speaker, so this receiver never touches a
+        # source or a buffer directly while it is set.
+        self.cinema = cinema
+        if cinema is not None:
+            source_l = source_r = None
         self.source_l, self.source_r = source_l, source_r
         self.volume = max(0, min(100, int(volume)))
         self.cabinet_volume = max(0.0, min(1.0, float(cabinet_volume) / 100.0))
@@ -71,6 +80,12 @@ class JukeboxRelayReceiver(threading.Thread):
     def _check_owner(self):
         if threading.get_ident() != self._owner:
             raise RuntimeError("jukebox audio must be pumped/stopped by its owner")
+
+    def _output_sources(self):
+        """Every source this receiver feeds (2 plain, N in a cinema room)."""
+        if self.cinema is not None:
+            return self.cinema.sources
+        return (self.source_l, self.source_r)
 
     @staticmethod
     def _drain(q):
@@ -177,7 +192,7 @@ class JukeboxRelayReceiver(threading.Thread):
     @audio_probe.measured("relay.reclaim")
     def _reclaim(self, *, stopped=False):
         self._check_owner()
-        for source in (self.source_l, self.source_r):
+        for source in self._output_sources():
             if source is None:
                 continue
             try:
@@ -192,7 +207,7 @@ class JukeboxRelayReceiver(threading.Thread):
                 pass
 
     def _reset_output(self):
-        for source in (self.source_l, self.source_r):
+        for source in self._output_sources():
             if source is not None:
                 with contextlib.suppress(Exception):
                     source.stop()
@@ -220,6 +235,17 @@ class JukeboxRelayReceiver(threading.Thread):
     def _update_gain(self):
         self._check_owner()
         if self._stopped:
+            return
+        if self.cinema is not None:
+            # Volume, cabinet trim and the retire ramp are the room's in
+            # cinema mode, and so are per-speaker distance and occlusion.
+            try:
+                self.cinema.configure(volume=self.volume,
+                                      cabinet_volume=self.cabinet_volume * 100.0,
+                                      fade=self._fade_gain())
+                self.cinema.update_output()
+            except Exception:
+                pass
             return
         try:
             audio = self.game.audio_mngr
@@ -278,6 +304,16 @@ class JukeboxRelayReceiver(threading.Thread):
             pass
 
     def _queue_pair(self, left, right):
+        if self.cinema is not None:
+            try:
+                queued = bool(self.cinema.queue_frame(left, right))
+            except Exception:
+                queued = False
+            if queued:
+                self.last_audio_activity = self._clock()
+            else:
+                self.failure_reason = "relay cinema queue failed"
+            return queued
         if len(self._pool) < 2:
             return False
         buf_l, buf_r = self._pool.pop(), self._pool.pop()
@@ -321,7 +357,9 @@ class JukeboxRelayReceiver(threading.Thread):
         self._reclaim()
         self._update_gain()
         new_buffers = 0
-        while (self._allocated_buffers < self.NUM_BUFFERS
+        # A cinema room allocates its own per-speaker pools, so this receiver
+        # never owns buffers while it is set.
+        while (self.cinema is None and self._allocated_buffers < self.NUM_BUFFERS
                and new_buffers < max(0, max_new_buffers) and has_time()):
             try:
                 buffer = audio_probe.call("relay.gen_buffer", self.game.audio_mngr.context.gen_buffer)
@@ -338,7 +376,9 @@ class JukeboxRelayReceiver(threading.Thread):
             new_buffers += 1
         queued_pairs = 0
         for _ in range(max(0, max_frames)):
-            if len(self._pool) < 2 or not has_time():
+            if not has_time():
+                break
+            if self.cinema is None and len(self._pool) < 2:
                 break
             try:
                 generation, left, right = self._pcm_frames.get_nowait()
@@ -351,7 +391,10 @@ class JukeboxRelayReceiver(threading.Thread):
             if generation != self._audio_generation:
                 self._audio_generation = generation
             try:
-                backlog = max(self.source_l.buffers_queued, self.source_r.buffers_queued)
+                if self.cinema is not None:
+                    backlog = self.cinema.queued_frames()
+                else:
+                    backlog = max(self.source_l.buffers_queued, self.source_r.buffers_queued)
                 if self._play_started and backlog >= self.MAX_QUEUED_BUFFERS:
                     continue
                 if self._queue_pair(left, right):
@@ -362,16 +405,27 @@ class JukeboxRelayReceiver(threading.Thread):
         try:
             audio_probe.count("relay.new_buffers", new_buffers)
             audio_probe.count("relay.frames", queued_pairs)
-            queued = min(self.source_l.buffers_queued, self.source_r.buffers_queued)
-            stopped = (self.source_l.state != cyal.SourceState.PLAYING
-                       or self.source_r.state != cyal.SourceState.PLAYING)
-            required = self.RESUME_FRAMES if self._play_started else self.PREBUFFER_FRAMES
-            if stopped and queued >= required:
-                if not self._play_started:
-                    audio_probe.event("relay.first_play")
-                audio_probe.call("relay.play", self.source_l.play)
-                audio_probe.call("relay.play", self.source_r.play)
-                self._play_started = True
+            cinema = self.cinema
+            if cinema is not None:
+                queued = cinema.queued_frames()
+                stopped = not cinema.playing()
+                required = cinema.wanted_for_start()
+                if stopped and queued >= required:
+                    if not self._play_started:
+                        audio_probe.event("relay.first_play")
+                    audio_probe.call("relay.play", cinema.start_playback)
+                    self._play_started = True
+            else:
+                queued = min(self.source_l.buffers_queued, self.source_r.buffers_queued)
+                stopped = (self.source_l.state != cyal.SourceState.PLAYING
+                           or self.source_r.state != cyal.SourceState.PLAYING)
+                required = self.RESUME_FRAMES if self._play_started else self.PREBUFFER_FRAMES
+                if stopped and queued >= required:
+                    if not self._play_started:
+                        audio_probe.event("relay.first_play")
+                    audio_probe.call("relay.play", self.source_l.play)
+                    audio_probe.call("relay.play", self.source_r.play)
+                    self._play_started = True
         except Exception:
             self.failure_reason = "relay audio playback failed"
         return queued_pairs
@@ -410,6 +464,7 @@ class JukeboxRelayReceiver(threading.Thread):
         # The owning JukeboxPlayer entry retains its sources until its cleanup
         # callback. The eventual daemon self-release must retain no AL objects.
         self.source_l = self.source_r = None
+        self.cinema = None
         self.reverb_slot = self.eq_slot = None
         self.player = self.game = None
         cleanup, self._retire_cleanup = self._retire_cleanup, None
