@@ -1446,6 +1446,14 @@ class EventHandeler:
 
         if stage == 'volume':
             min_val, max_val = 0, 100
+        elif stage == 'cinema_delay':
+            # A cinema speaker's trim in milliseconds. It deliberately does not
+            # share the `delay` stage below: that one is the megaphone
+            # speaker's propagation delay in *seconds* (0-0.5), and the range
+            # is enforced one keystroke at a time, so a cinema trim typed there
+            # could never reach the first digit of "60". The Server sends this
+            # range with the prompt too; this is the fallback for it.
+            min_val, max_val = 0, 100
         elif stage == 'delay':
             min_val, max_val = 0.0, 0.5
         elif stage in ['reverb_decay', 'decayTime']:

@@ -155,6 +155,153 @@ def specs(profile_slots, anchor=ANCHOR, radius=8.0):
     return out
 
 
+class SpeakerDelayTests(unittest.TestCase):
+    """A delay trim is decorrelation the room actually plays.
+
+    The trim exists so a wall of speakers does not comb-filter into one thick
+    centre: two speakers fed the same programme a few milliseconds apart read
+    as a wide wall instead of a loud point. The cut is made per sample, not per
+    frame, because a transport frame is 10-20 ms while the values an installer
+    actually dials in are 1-30 ms -- rounding to whole frames would turn "5 ms"
+    into nothing at all, which is how a control ends up looking broken.
+    """
+
+    SAMPLES = 480                  # 10 ms at 48 kHz: a real frame's size
+
+    def make(self, delays):
+        """A front pair, one entry per (slot, delay_ms)."""
+        from math import cos, radians, sin
+        from libs.audio.cinema.layout import IDEAL_BEARING
+        game = FakeGame()
+        room_specs = []
+        for slot, delay in delays.items():
+            angle = radians(IDEAL_BEARING[slot])
+            room_specs.append(CinemaSpeakerSpec(
+                slot,
+                (ANCHOR[0] + sin(angle) * 8.0,
+                 ANCHOR[1] + cos(angle) * 8.0,
+                 ANCHOR[2]),
+                delay_ms=delay,
+            ))
+        renderer = CinemaRenderer(ANCHOR, "front_only", specs=room_specs)
+        return CinemaSpeakerBank(game, renderer, volume=100, cabinet_volume=100,
+                                 occlusion_provider=lambda *a: 0)
+
+    def frame(self, tag):
+        return frame(tag, size=self.SAMPLES)
+
+    def test_a_trimmed_speaker_plays_the_same_audio_a_trim_later(self):
+        bank = self.make({"front_l": 0.0, "front_r": 5.0})
+        for tag in range(4):
+            self.assertTrue(bank.queue_frame(*self.frame(tag)))
+        left = bank.slot_sources["front_l"].buffers[-1].data
+        right = bank.slot_sources["front_r"].buffers[-1].data
+        # 5 ms = 240 samples = 480 bytes back from the newest audio: the window
+        # on the trimmed speaker is the tail of the frame before last plus the
+        # head of the last frame -- the same music, 5 ms late, not silence and
+        # not a copy.
+        self.assertEqual(left, self.frame(3)[0])
+        self.assertEqual(right, self.frame(2)[1][480:] + self.frame(3)[1][:480])
+
+    def test_the_trim_is_not_rounded_to_a_whole_frame(self):
+        bank = self.make({"front_l": 0.0, "front_r": 5.0})
+        for tag in range(3):
+            bank.queue_frame(*self.frame(tag))
+        right = bank.slot_sources["front_r"].buffers[-1].data
+        # A frame here is 10 ms, so a frame-granular implementation would have
+        # applied either 0 or 10 ms and this would not line up.
+        self.assertEqual(right, self.frame(1)[1][480:] + self.frame(2)[1][:480])
+
+    def test_a_trim_longer_than_a_frame_waits_for_the_history(self):
+        bank = self.make({"front_l": 0.0, "front_r": 20.0})
+        # 20 ms is two frames: the first frames cannot be cut that far back, so
+        # the trimmed speaker is simply not fed yet -- never a silent buffer.
+        self.assertTrue(bank.queue_frame(*self.frame(0)))
+        self.assertEqual(bank.slot_sources["front_r"].buffers_queued, 0)
+        bank.queue_frame(*self.frame(1))
+        self.assertEqual(bank.slot_sources["front_r"].buffers_queued, 0)
+        bank.queue_frame(*self.frame(2))
+        self.assertEqual(bank.slot_sources["front_r"].buffers_queued, 1)
+        # Its first window is the whole first frame: 20 ms behind the room.
+        self.assertEqual(bank.slot_sources["front_r"].buffers[-1].data,
+                         self.frame(0)[1])
+
+    def test_an_untouched_room_is_byte_for_byte_what_it_was(self):
+        bank = self.make({"front_l": 0.0, "front_r": 0.0})
+        for tag in range(3):
+            bank.queue_frame(*self.frame(tag))
+        self.assertEqual(bank.slot_sources["front_l"].buffers[-1].data,
+                         self.frame(2)[0])
+        self.assertEqual(bank.slot_sources["front_r"].buffers[-1].data,
+                         self.frame(2)[1])
+
+    def test_the_room_still_starts_and_plays_with_a_trim(self):
+        bank = self.make({"front_l": 0.0, "front_r": 25.0})
+        for tag in range(6):
+            bank.queue_frame(*self.frame(tag))
+        bank.start_playback()
+        self.assertTrue(bank.playing())
+        # The trimmed speaker holds less audio by design, and the room still
+        # reports a queue the transport can measure.
+        self.assertGreater(bank.queued_frames(), 0)
+        self.assertLess(bank.queued_frames(),
+                        bank.slot_sources["front_l"].buffers_queued)
+
+    def test_a_trim_deeper_than_the_room_can_hold_still_plays(self):
+        """Never a dead speaker: it plays the deepest cut the history reaches.
+
+        The trim is played as a cut into audio the room still holds, so a
+        speaker asking for more history than the room keeps (tiny frames, a
+        deep trim) would otherwise never be fed at all -- silent for the whole
+        song with nothing on screen to say why.
+        """
+        def tiny(tag):
+            return frame(tag, size=8)                  # 8 samples, not 480
+
+        bank = self.make({"front_l": 0.0, "front_r": 100.0})
+        for tag in range(12):
+            bank.queue_frame(*tiny(tag))
+        right = bank.slot_sources["front_r"]
+        # 100 ms is 4800 samples, the room's history reaches 88, so it plays
+        # the oldest frame it still holds rather than nothing at all.
+        self.assertEqual(right.buffers_queued, 1)
+        self.assertEqual(right.buffers[-1].data, tiny(0)[1])
+        self.assertNotEqual(right.buffers[-1].data, tiny(11)[1])
+
+    def test_realign_refills_a_trimmed_speaker_with_trimmed_frames(self):
+        """A refill hands it the delayed programme, never the live frame.
+
+        Filling it like an untrimmed speaker lets it catch up with the room
+        for as long as that fill lasts and then jump backwards when the next
+        trimmed window arrives -- a slip in one speaker, right after a pause,
+        which is exactly when a room is most likely to be re-formed.
+        """
+        bank = self.make({"front_l": 0.0, "front_r": 5.0})
+        for tag in range(8):
+            bank.queue_frame(*self.frame(tag))
+        bank.start_playback()
+        right = bank.slot_sources["front_r"]
+        for _ in range(3):
+            right.buffers.pop(0)          # it comes back shallow
+        recorded = spy_render(bank.renderer)
+
+        self.assertTrue(bank.realign(play=False))
+
+        # Every frame it is given is cut five milliseconds back from its own
+        # end, so its queue stays a trim behind the room instead of level with
+        # it. The oldest frame has no history to cut into, so it is skipped --
+        # exactly as it was while the room was first filling.
+        self.assertEqual(recorded, [
+            (self.frame(0)[0][480:] + self.frame(1)[0][:480],
+             self.frame(0)[1][480:] + self.frame(1)[1][:480]),
+            (self.frame(1)[0][480:] + self.frame(2)[0][:480],
+             self.frame(1)[1][480:] + self.frame(2)[1][:480]),
+            (self.frame(2)[0][480:] + self.frame(3)[0][:480],
+             self.frame(2)[1][480:] + self.frame(3)[1][:480]),
+        ])
+        self.assertEqual(right.buffers_queued, 7)
+
+
 class RendererSignatureTests(unittest.TestCase):
     """The room has to be able to tell "the same room" from "a changed one"."""
 
@@ -1287,6 +1434,20 @@ class RoomCheckToolTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("cinema_room_check", path)
         cls.tool = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.tool)
+
+    def test_a_speaker_reports_the_trim_it_carries(self):
+        """A room that sounds different from its neighbour should say why."""
+        def speaker(delay, level):
+            return SimpleNamespace(
+                spec=SimpleNamespace(delay_ms=delay, level=level))
+
+        self.assertEqual(self.tool.speaker_note(speaker(25.0, 1.0)), "  [+25 ms]")
+        self.assertEqual(self.tool.speaker_note(speaker(0.0, 0.4)),
+                         "  [level 40%]")
+        self.assertEqual(self.tool.speaker_note(speaker(30.0, 0.4)),
+                         "  [+30 ms, level 40%]")
+        # An untouched speaker reads exactly as it always did.
+        self.assertEqual(self.tool.speaker_note(speaker(0.0, 1.0)), "")
 
     def test_a_ray_counts_the_wall_tiles_it_crosses(self):
         thin = [(0, 25, 15, 15, 0, 5)]

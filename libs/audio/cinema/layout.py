@@ -59,6 +59,12 @@ IDEAL_BEARING = {
 # the room can honestly reproduce.
 SLOT_PAIRS = (("side_l", "side_r"), ("rear_l", "rear_r"))
 
+# The deepest decorrelation trim a speaker may carry, in milliseconds. Past
+# this the offset stops reading as a wider wall and starts reading as an echo,
+# and the room has to keep enough queued audio to cut that far back (see
+# ``bank.CinemaSpeakerBank._recent``).
+MAX_TRIM_MS = 100.0
+
 
 def slot_for_bearing(bearing):
     """Nearest slot for a bearing in degrees (0 ahead, +right, +/-180 behind)."""
@@ -111,7 +117,7 @@ class CinemaSpeakerSpec:
         self.slot = str(slot or AUTO_SLOT).strip().lower()
         self.position = (float(position[0]), float(position[1]), float(position[2]))
         self.level = max(0.0, min(4.0, float(level)))
-        self.delay_ms = max(0.0, min(100.0, float(delay_ms)))
+        self.delay_ms = max(0.0, min(MAX_TRIM_MS, float(delay_ms)))
         self.name = name
         self.room = str(room or "").strip()
         self.aim_yaw = None if aim_yaw is None else float(aim_yaw) % 360.0

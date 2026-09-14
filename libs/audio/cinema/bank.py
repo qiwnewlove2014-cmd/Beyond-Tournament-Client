@@ -100,7 +100,11 @@ class CinemaSpeakerBank:
         # frames they were rendered from. A speaker that joins the room, or
         # one that has to be put back in step with the others, is filled from
         # here -- which is the only way it can start at the room's own content
-        # instant instead of a queue's worth behind (or ahead of) it.
+        # instant instead of a queue's worth behind (or ahead of) it. It is
+        # also the audio a trimmed speaker is cut into (see `_delayed_window`),
+        # so it has to stay deeper than the deepest trim the map can carry:
+        # both transports deliver 20 ms frames and a trim is capped at 100 ms
+        # (see `layout.MAX_TRIM_MS`), which this covers twice over.
         self._recent = deque(maxlen=max(self.buffers_per_slot, MAX_QUEUED_FRAMES))
         self._clock = clock or time.monotonic
         self._external_fade = 1.0
@@ -262,10 +266,10 @@ class CinemaSpeakerBank:
         """
         if self._stopped or not self.slot_sources:
             return False
-        feeds = self.renderer.render(left, right)
+        targets = set(self._feed_slots())
+        feeds = self._slot_feeds(left, right, targets)
         if not feeds:
             return False
-        targets = set(self._feed_slots())
         claimed = []
         for slot, pcm in feeds:
             if slot not in targets:
@@ -346,6 +350,101 @@ class CinemaSpeakerBank:
                 return []
         return slots
 
+    def _delay_samples(self, slot):
+        """Samples this speaker plays late, straight from its own delay trim."""
+        millis = float(self.renderer.layout.delay_ms(slot) or 0.0)
+        if millis <= 0.0:
+            return 0
+        return int(round(millis * SAMPLERATE / 1000.0))
+
+    def _applied_trim(self, slot, history):
+        """This speaker's delay, cut back to what the room's history reaches.
+
+        The trim is played -- not merely measured -- as a cut into the frames
+        the room still holds, so it can only ever be as deep as they are. While
+        the room is still filling that is just "this speaker starts that late".
+        Once the history is full and still shorter than the trim (frames much
+        smaller than a twentieth of it), waiting for audio that will never
+        arrive would leave the speaker unfed -- and therefore silent -- for the
+        whole song, so it plays the deepest offset the room can cut: a shorter
+        trim, never a dead speaker.
+        """
+        want = self._delay_samples(slot)
+        if want <= 0:
+            return 0
+        depth = self._recent.maxlen
+        if depth is None or len(history) < depth or len(history) < 2:
+            return want
+        per_frame = max(1, len(history[-1][0]) // 2)
+        return min(want, (len(history) - 1) * per_frame)
+
+    def _delayed_window(self, history, index, samples):
+        """The ``(left, right)`` programme ``samples`` samples behind that frame.
+
+        A delay trim is decorrelation, not silence: the speaker plays the same
+        programme, a few milliseconds later, which is what stops two speakers
+        side by side from comb-filtering into one thick centre. The room keeps
+        the frames it queued (``_recent``), so the cut is made at the exact
+        sample offset -- rounding to whole frames would turn the 1-30 ms an
+        installer actually dials in into "nothing" or "twice as much".
+
+        ``history`` is the room's queued frames with the frame in question last,
+        so the same cut serves the live feed (frame not queued yet) and a
+        realign filling frames the room already holds.
+
+        Returns None when the room has not queued that much audio yet, so a
+        trimmed speaker starts that many samples late instead of being handed
+        silence buffers (which OpenAL would play as a click).
+        """
+        frame = history[index]
+        if samples <= 0:
+            return frame
+        frame_bytes = len(frame[0])
+        need = samples * 2
+        past = []
+        for older in reversed(history[:index]):
+            past.append(older)
+            need -= len(older[0])
+            if need <= 0:
+                break
+        if need > 0:
+            return None
+        chunks = list(reversed(past))
+        chunks.append(frame)
+        lefts = b"".join(chunk[0] for chunk in chunks)
+        rights = b"".join(chunk[1] for chunk in chunks)
+        end = len(lefts) - samples * 2
+        start = end - frame_bytes
+        if start < 0:
+            return None
+        return lefts[start:end], rights[start:end]
+
+    def _slot_feeds(self, left, right, targets):
+        """``[(slot, mono_pcm16), ...]`` for one frame, each at its own delay.
+
+        Slots are grouped by the trim they carry, so a room with one alignment
+        on its side pair and none on the screen wall renders each source frame
+        once per distinct offset instead of once per speaker. A room with no
+        trims at all (the shipped jukebox) takes exactly the path it always
+        did: one render of the live frame, byte for byte.
+        """
+        history = list(self._recent)
+        history.append((left, right))
+        index = len(history) - 1
+        groups = {}
+        for slot in targets:
+            groups.setdefault(self._applied_trim(slot, history), []).append(slot)
+        feeds = []
+        for samples in sorted(groups):
+            source = self._delayed_window(history, index, samples)
+            if source is None:
+                continue
+            wanted = set(groups[samples])
+            for slot, pcm in self.renderer.render(*source):
+                if slot in wanted:
+                    feeds.append((slot, pcm))
+        return feeds
+
     def _feed_slots(self):
         """The speakers a frame is queued to right now.
 
@@ -401,32 +500,38 @@ class CinemaSpeakerBank:
         target = max(counts.values()) if counts else 0
         if target <= 0:
             return False
-        frames = list(self._recent)
-        if target > len(frames):
-            target = len(frames)
+        history = list(self._recent)
+        if target > len(history):
+            target = len(history)
         if target <= 0:
             return False
-        frames = frames[-target:]
+        base = len(history) - target
         fed = 0
         for slot, queued in counts.items():
             missing = target - queued
             if missing <= 0:
                 continue
             # The frames this speaker is missing are the ones just before the
-            # queue it already holds (all of them when it holds nothing).
-            wanted = frames[:-queued] if queued > 0 else frames
-            wanted = wanted[-missing:]
-            for left, right in wanted:
-                pcm = dict(self.renderer.render(left, right)).get(slot)
-                pool = self._pools.get(slot)
-                source = self.slot_sources.get(slot)
-                if pcm is None or not pool or source is None:
+            # queue it already holds (all of them when it holds nothing). Each
+            # one is cut to that speaker's own trim: handed the live frame
+            # instead, a trimmed speaker would catch up with the room for as
+            # long as that fill lasts and then jump backwards when the next
+            # trimmed window arrives.
+            offset = self._applied_trim(slot, history)
+            pool = self._pools.get(slot)
+            speaker = self.slot_sources.get(slot)
+            for step in range(missing):
+                pair = self._delayed_window(history, base + step, offset)
+                if pair is None:
+                    continue
+                pcm = dict(self.renderer.render(*pair)).get(slot)
+                if pcm is None or not pool or speaker is None:
                     continue
                 buffer = pool.pop()
                 try:
                     buffer.set_data(pcm, sample_rate=SAMPLERATE,
                                     format=cyal.BufferFormat.MONO16)
-                    source.queue_buffers(buffer)
+                    speaker.queue_buffers(buffer)
                     fed += 1
                 except Exception:
                     pool.append(buffer)

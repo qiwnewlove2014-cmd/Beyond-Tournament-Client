@@ -178,6 +178,23 @@ def audible_lines(room, anchor, walls):
     return "\n".join(lines)
 
 
+def speaker_note(speaker):
+    """The trims this speaker carries, or "" when it is at its defaults.
+
+    A room that sounds different from the one next door should say why. The
+    delay is the one setting whose effect is not visible in the map file's own
+    units -- 25 ms looks like a number, and it is heard as a wider wall.
+    """
+    notes = []
+    delay = float(getattr(speaker.spec, "delay_ms", 0.0) or 0.0)
+    if delay > 0.0:
+        notes.append(f"+{delay:.0f} ms")
+    level = float(getattr(speaker.spec, "level", 1.0) or 1.0)
+    if abs(level - 1.0) > 0.005:
+        notes.append(f"level {level * 100:.0f}%")
+    return f"  [{', '.join(notes)}]" if notes else ""
+
+
 def describe(room, anchor=(0.0, 0.0, 0.0), heading=None):
     lines = [f"  profile : {room.profile_name}",
              f"  anchor  : {anchor}   room yaw: {room.yaw_deg:.0f}deg"]
@@ -186,7 +203,7 @@ def describe(room, anchor=(0.0, 0.0, 0.0), heading=None):
         how = {"label": "as labelled", "geometry": "placed by position",
                "floor": "moved to a free slot"}.get(speaker.source, speaker.source)
         lines.append(f"  {slot:<8} at {tuple(round(v, 1) for v in speaker.position)}"
-                     f"  ({how})")
+                     f"  ({how}){speaker_note(speaker)}")
     for warning in room.warnings:
         lines.append(f"  ! {warning}")
     renderer = CinemaRenderer(anchor, room.profile_name, specs=room.specs)
