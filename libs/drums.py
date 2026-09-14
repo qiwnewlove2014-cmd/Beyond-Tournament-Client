@@ -228,6 +228,10 @@ class DrumAudio:
             })
 
     def _remove_record(self, key, record, fade_seconds):
+        # Marked before anything is faded: a speaker whose copy is still
+        # waiting for its trim must not play a hit that was choked or stolen
+        # in the meantime (see route_to_cinema_room).
+        record["retired"] = True
         voices = self.active_voices.get(key)
         if voices is not None:
             with contextlib.suppress(ValueError):
@@ -345,6 +349,73 @@ class DrumAudio:
             sounds.append(sound)
         return sounds
 
+    # Live drums come out of the cabinet's room at the same wall the song is
+    # mixed at, exactly like the piano's route (see PianoAudio).
+    CINEMA_ROOM_VOLUME = 0.5
+
+    def route_to_cinema_room(self, peer_id, pad, x, y, z, adjusted_volume, kit=None,
+                             wanted=None, sink=None):
+        """Play this hit at the speakers of the room nearest the performer.
+
+        One sample per speaker of that room, shaped by the room's own numbers
+        (its distance ramp, the map's level per speaker, each speaker's trim,
+        the wall between) so a drummer in a hall is heard through the hall
+        rather than only from the kit.
+
+        A hit has no note-off: what stops it is the caller's own voice record
+        (a hi-hat choke, a stolen voice). The copies therefore go into ``sink``
+        -- that record's list -- rather than into a list of our own, because a
+        copy whose speaker carries a trim is spawned *after* this returns, and
+        a list nobody else holds would leave it outside the very thing that
+        silences a choked hit. ``wanted()`` is the other half of the same
+        problem: a copy still waiting when the choke lands must not play.
+        """
+        gameplay = self.gameplay
+        bot = getattr(gameplay, "music_bot", None) if gameplay else None
+        game = getattr(gameplay, "game", None) if gameplay else None
+        if game is None:
+            return []
+        from .audio.cinema import live as cinema_live
+        # The listener's own option -- the same one the piano asks and the one
+        # the Music Bot menu's line edits -- so two instruments can never
+        # answer differently about how this listener hears them. It is on for
+        # everyone: a live note takes nothing from anybody.
+        if not cinema_live.live_instruments_enabled():
+            return []
+        path = self.pad_defs(kit)[pad][1]
+        if path is None:
+            return []
+        from .audio.cinema import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
+        bot_volume = (max(0.1, getattr(bot, "volume", 50) / 100.0)
+                      * self.CINEMA_ROOM_VOLUME)
+        sounds = [] if sink is None else sink
+
+        def _spawn(px, py, pz, gain, tier, _delay_ms):
+            volume = adjusted_volume * max(0.0, gain) * bot_volume
+            if volume <= 0.0:
+                return
+            sound = self.am.play_unbound(
+                path, px, py, pz,
+                volume=volume, cat="miscelaneous",
+                # Flat at the source: the room's ramp already shaped this hit.
+                reference_distance=ROOM_REFERENCE_DISTANCE, rolloff=0.0,
+                max_distance=ROOM_MAX_DISTANCE,
+                direct_filter=cinema_live.wall_filter(self, tier),
+            )
+            if sound is None:
+                return
+            self._tag_sounds(sound, peer_id, pad)
+            sounds.append(sound)
+
+        cinema_live.route_to_room(
+            game, (x, y, z), _spawn,
+            occlusion_provider=getattr(getattr(gameplay, "jukebox_player", None),
+                                       "occlusion_tier", None),
+            schedule=getattr(game, "call_after", None),
+            wanted=wanted,
+        )
+        return sounds
+
     def play_hit(self, peer_id, pad, x, y, z, listener_x, listener_y, listener_z,
                  volume=300, occluded=False, via_megaphone=False, kit=None, occlusion=None):
         if not self.is_valid_pad(pad):
@@ -388,15 +459,22 @@ class DrumAudio:
             return None
         self._tag_sounds(primary, peer_id, pad)
         sounds = self._iter_sounds(primary)
+        # The record goes up before the PA and room copies are spawned, and the
+        # room copies are appended into its own list: a hat choked (or a voice
+        # stolen) while a trimmed speaker is still waiting would otherwise
+        # leave that speaker playing a hit nothing owns any more, which is
+        # heard as an open hi-hat that never stops.
+        key = (peer_id, pad)
+        record = {"created": time.monotonic(), "sounds": sounds, "retired": False}
+        self.active_voices.setdefault(key, deque()).append(record)
 
         if via_megaphone:
             sounds.extend(self.route_to_megaphone_speakers(peer_id, pad, adjusted_volume, kit=kit))
+        # The room around the cabinet this drummer stands at, when the
+        # listener has live instruments routed there.
+        self.route_to_cinema_room(peer_id, pad, x, y, z, adjusted_volume, kit=kit,
+                                  wanted=lambda: not record["retired"], sink=sounds)
 
-        key = (peer_id, pad)
-        self.active_voices.setdefault(key, deque()).append({
-            "created": time.monotonic(),
-            "sounds": sounds,
-        })
         self._enforce_voice_limits(peer_id, pad)
         return primary
 

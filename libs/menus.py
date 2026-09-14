@@ -420,13 +420,12 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         voice_chat_mode_item,
         (game.toggle_item("microphone", "microphone", True)),
         (game.toggle_item("Player beacons", "beacons")),
-        (
-            game.toggle_item(
-                "Cinema rooms: a jukebox plays through the room speakers a builder placed around it, so songs come from around the room. Each jukebox is set to Auto, Off or a room shape at the jukebox itself; turning this off makes every jukebox play its normal two-source stereo for you",
-                "cinema_speakers",
-                True,
-            )
-        ),
+        # The cinema rooms switch (``cinema_speakers``) is deliberately not
+        # listed here any more. It is how a listener hears a jukebox rather
+        # than a setting for the game, so it lives with the other listening
+        # switches in the Music Bot menu (M), which keeps this list the length
+        # it was. The option itself is unchanged: on by default, and it only
+        # ever matters on a map that gave a cabinet a room.
         (game.toggle_item("Wall proximity tone", "wall_tone", False)),
         (game.toggle_item("Compass turn cue", "compass_turn_cue", True)),
         turning_sensitivity_item,

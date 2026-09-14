@@ -16,10 +16,13 @@ import pygame
 
 from .. import options
 from .. import state
-from ..audio.cinema import (acquire_bank as cinema_acquire_bank, preview_room,
+from ..audio.cinema import (ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE,
+                            acquire_bank as cinema_acquire_bank,
+                            live_instruments_enabled, preview_room,
                             release_renderer as cinema_release,
-                            room_diagnosis as cinema_diagnosis,
-                            set_enabled as cinema_set_enabled)
+                            room_diagnosis as cinema_diagnosis, rooms_enabled,
+                            set_enabled as cinema_set_enabled,
+                            set_live_instruments, set_rooms_enabled)
 from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
@@ -156,6 +159,12 @@ class MapMusicBot:
         # audio plays through that jukebox's speakers instead of the
         # listener's ears, using the exact same room the jukebox itself feeds.
         self.cinema_target = str(options.get("music_bot_cinema_target", "") or "") or None
+        # Live instruments through the nearest cabinet's room. The setting is
+        # the listener's and is on for everyone (see libs/audio/cinema/live.py):
+        # a live note is one sample per speaker on this client and takes
+        # nothing from anybody. Kept here so the menu has something to flip;
+        # the instruments read the option itself.
+        self.instruments_cinema = live_instruments_enabled()
         self.cinema_bank = None
         self.cinema_bank_key = None
         self.cinema_cabinet = None
@@ -412,6 +421,91 @@ class MapMusicBot:
             return None
         return getattr(self, "cinema_target", None)
 
+    def cinema_listening_allowed(self):
+        """Whether this account gets the listener-side cinema switches.
+
+        Two lines ask this: the rooms switch and the live-instrument routing.
+        Both are about how *this* listener hears a cabinet and both take
+        nothing from anybody -- the *song* routing above stays
+        Developer/Contributor because feeding a room turns a cabinet over --
+        so the rule is the Music Bot's own access rule, asked rather than
+        copied, and neither line can appear in a menu the account cannot open.
+        The Server still owns the switch behind it and is accepted too.
+        """
+        gp = self._find_gameplay()
+        if gp is None:
+            return False
+        if getattr(gp, "can_use_cinema_speakers", False):
+            return True
+        can_use = getattr(gp, "_can_use_music_bot", None)
+        if callable(can_use):
+            return bool(can_use())
+        return bool(getattr(gp, "can_use_music_bot", False)
+                    or getattr(gp, "is_staff", False)
+                    or getattr(gp, "is_builder", False)
+                    or getattr(gp, "is_technician", False))
+
+    def instruments_cinema_active(self):
+        """Whether this client plays live instruments through the room.
+
+        The listener's own choice, like ``cinema_speakers``, because it is
+        about how *you* hear the band and not about what the band does: the
+        performer's notes arrive with their world position, and every client
+        decides for itself whether to also play them at the speakers around
+        the cabinet. No packet changes, and two listeners in one hall can
+        disagree without either being wrong.
+
+        Open to everybody and on by default (see ``live.py``), because a live
+        note takes nothing from anybody: this is not a staff switch. The
+        instruments ask the option itself, so the answer here is the same one
+        a piano and a kit already act on.
+        """
+        return live_instruments_enabled()
+
+    def instruments_cinema_label(self):
+        """Menu text for the live-instrument routing choice."""
+        if not live_instruments_enabled():
+            return "Instruments: OFF (played where they stand)"
+        return "Instruments: through the nearest cabinet's room"
+
+    def toggle_instruments_cinema(self):
+        """Send (or stop sending) live instruments into the room.
+
+        Turning it off never needs a bank to be handed back: the notes were
+        never in the room's buffers, they were one sample per speaker, so the
+        very next note simply is not spawned there. The choice is saved where
+        both instruments read it, so the line cannot look switched while the
+        room stays silent.
+        """
+        self.instruments_cinema = not live_instruments_enabled()
+        set_live_instruments(self.instruments_cinema)
+        if self.instruments_cinema:
+            speak("Instruments through the cabinet speakers.")
+        else:
+            speak("Instruments played where they stand.")
+
+    def cinema_rooms_label(self):
+        """Menu text for whether songs come out of the rooms around cabinets.
+
+        This switch used to be a paragraph in Options; it is a listening
+        choice like the two lines next to it, so it lives with them (and
+        Options keeps its length). Which room a single cabinet uses is still
+        the map's decision, and turning this off only makes every jukebox the
+        plain two-source stereo for this listener.
+        """
+        if not rooms_enabled():
+            return "Cinema rooms: OFF (every jukebox plays its own stereo here)"
+        return "Cinema rooms: ON (songs come from the speakers around a cabinet)"
+
+    def toggle_cinema_rooms(self):
+        """Hear a jukebox through its room, or as the plain two-source stereo."""
+        enabled = not rooms_enabled()
+        set_rooms_enabled(self.game, enabled)
+        if enabled:
+            speak("Songs come from the rooms around cabinets.")
+        else:
+            speak("Every jukebox plays its own stereo.")
+
     def _cinema_problem(self, anchor, cabinet_id=None):
         """Why this cabinet's speakers cannot be used, in the resolver's words.
 
@@ -547,7 +641,10 @@ class MapMusicBot:
             profile=room.profile, specs=room.specs, placement=room.placement,
             fill=room.fill,
             volume=self.volume, cabinet_volume=100,
-            reference_distance=8.0, max_distance=40.0,
+            # A room is heard from the back row; the bot's own ear source keeps
+            # its own falloff and is not part of this.
+            reference_distance=ROOM_REFERENCE_DISTANCE,
+            max_distance=ROOM_MAX_DISTANCE,
             occlusion_provider=self._cinema_occlusion,
             # The bot's own output answers to the Music slider, not the
             # Jukebox one: the room is only where it comes out.
@@ -868,6 +965,16 @@ class MapMusicBot:
                 self._open_cinema_menu()
 
             items.append((self.cinema_target_label, go_cinema))
+
+        # Two listener-side switches, one line below the song's own routing: a
+        # room is how *this* listener hears a cabinet, so neither takes
+        # anything from anybody and both are open to everyone who can open
+        # this menu (the song routing above stays Developer/Contributor,
+        # because that one turns a cabinet over).
+        if self.cinema_listening_allowed():
+            items.append((self.cinema_rooms_label, self.toggle_cinema_rooms))
+            items.append((self.instruments_cinema_label,
+                          self.toggle_instruments_cinema))
 
         items.extend([
             (get_queue_mode_label, toggle_queue_mode),

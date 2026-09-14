@@ -1721,17 +1721,50 @@ class RoomCheckToolTests(unittest.TestCase):
                     '</body></map>')
             self.assertEqual(len(self.tool.read_walls(path)), 3)
 
-    def test_loudness_uses_the_jukebox_distance_ramp(self):
-        class Speaker:
-            position = (10.0, 45.0, 0.0)
+    def test_loudness_uses_the_rooms_own_distance_ramp(self):
+        """Not the plain pair's narrower 8/40 -- a room reaches the back row."""
+        def report(offset):
+            class Speaker:
+                position = (10.0, 5.0 + offset, 0.0)
 
-        class Room:
-            slots = ("front_c",)
-            speakers = {"front_c": Speaker()}
+            class Room:
+                slots = ("front_c",)
+                speakers = {"front_c": Speaker()}
 
-        text = self.tool.audible_lines(Room(), (10.0, 5.0, 0.0), [])
+            return self.tool.audible_lines(Room(), (10.0, 5.0, 0.0), [])
+
+        # 40 m out is past the plain pair's silence, but a room that reaches
+        # 60 plays it at a partial level (1 - 32/52) rather than nothing.
+        self.assertGreater(self.tool.ROOM_MAX_DISTANCE, 40.0)
+        text = report(40.0)
         self.assertIn("40.0m", text)
-        self.assertIn("silent", text)
+        self.assertNotIn("silent", text)
+        self.assertIn("38% of full", text)
+        # Past the room's own reach it is silent, and says so.
+        self.assertIn("silent", report(70.0))
+
+    def test_the_reported_feeds_are_the_speakers_the_map_has(self):
+        """The tool must not report a room the game never plays.
+
+        A room read off the map is only the speakers the map has (the game
+        builds it with ``use_ring=False``); listing the feeds from the profile
+        alone would invent a centre channel and a side pair nobody placed, and
+        whoever tunes delays off that line tunes a room that does not exist.
+        """
+        from libs.audio.cinema import resolve_room
+        # A four-speaker room resolves to the *theatre* profile, which wants a
+        # centre and a side pair as well: the ring is exactly what must not
+        # appear in the feeds.
+        room = resolve_room(specs(["front_l", "front_r", "rear_l", "rear_r"]),
+                            ANCHOR)
+        self.assertEqual(room.profile_name, "theatre")
+        line = [line for line in self.tool.describe(room, ANCHOR).splitlines()
+                if line.strip().startswith("feeds")][0]
+        self.assertIn("front_l", line)
+        self.assertIn("front_r", line)
+        self.assertIn("rear_l", line)
+        self.assertNotIn("front_c", line)
+        self.assertNotIn("side_", line)
 
 
 class StreamPauseTests(unittest.TestCase):

@@ -160,6 +160,24 @@ def make_bot(game, **attributes):
     return bot
 
 
+class FakeMenu:
+    """Drop-in for libs.menu.Menu capturing the items it was built with."""
+
+    def __init__(self, *args, **kwargs):
+        self.items = []
+
+    def add_items(self, items):
+        self.items = list(items)
+
+    def speak_current_item(self):
+        pass
+
+
+def norm(label):
+    """Menu labels may be dynamic callables; resolve them for assertions."""
+    return label() if callable(label) else label
+
+
 class CinemaMenuTests(unittest.TestCase):
     def test_the_menu_offers_every_cabinet_on_the_map(self):
         game = FakeGame()
@@ -537,6 +555,174 @@ class CinemaRoutingPermissionTests(unittest.TestCase):
         self.assertEqual(gp.substates, [])
         gp.add_substate.assert_not_called()
         gp.pop_last_substate.assert_not_called()
+
+
+class LiveInstrumentRoutingTests(unittest.TestCase):
+    """The two listening switches, next to the song's own routing line.
+
+    A live note is not a stream: it is played at the room's speakers by every
+    listener's own client, so it is a listening choice (like the Cinema
+    Speakers line) rather than something the performer forces on anyone -- and
+    so is hearing a song through a room at all. Both lines are the listener's,
+    both are on for everyone, and both live here instead of in Options.
+    """
+
+    KEYS = ("cinema_live_instruments", "music_bot_instruments_cinema",
+            "cinema_speakers")
+
+    def setUp(self):
+        # The toggles write into the shared options store; leave it as found.
+        from libs import options
+        self._saved = {key: options.prefs.pop(key, None) for key in self.KEYS}
+
+    def tearDown(self):
+        from libs import options
+        for key, value in self._saved.items():
+            options.prefs.pop(key, None)
+            if value is not None:
+                options.prefs[key] = value
+
+    def routed_game(self):
+        game = FakeGame()
+        map_obj = place_speakers(game, [("front_l", -30), ("front_r", 30)])
+        game.gameplay.map = map_obj
+        return game
+
+    def test_it_is_on_for_a_new_listener(self):
+        """Nobody has to find a switch to hear the band through the room.
+
+        A live note is one sample per speaker on the listener's own client and
+        takes nothing from anybody, so this is not a staff switch: the default
+        is what every player gets.
+        """
+        from libs.audio.cinema import live as cinema_live
+        game = self.routed_game()
+        bot = make_bot(game)
+        self.assertTrue(cinema_live.live_instruments_enabled())
+        self.assertTrue(bot.instruments_cinema_active())
+        self.assertIn("cabinet", bot.instruments_cinema_label())
+        self.assertIn("Cinema rooms: ON", bot.cinema_rooms_label())
+
+    def test_the_menu_line_and_the_instruments_read_one_setting(self):
+        """The line saves exactly where the playback path reads.
+
+        Two keys meant the line could look switched while the room stayed
+        silent (or the other way round), which is invisible until somebody
+        stands in the hall and listens.
+        """
+        from libs import options
+        from libs.audio.cinema import live as cinema_live
+        game = self.routed_game()
+        bot = make_bot(game)
+        with mock.patch("libs.music_bot.controller.speak"), \
+                mock.patch.object(options, "save"):
+            bot.toggle_instruments_cinema()                 # turn it off
+        # The key the instruments read, written by the line that flipped it.
+        self.assertFalse(options.get(cinema_live.OPTION_ENABLED))
+        self.assertFalse(cinema_live.live_instruments_enabled())
+        self.assertFalse(bot.instruments_cinema_active())
+        self.assertIn("OFF", bot.instruments_cinema_label())
+        with mock.patch("libs.music_bot.controller.speak"), \
+                mock.patch.object(options, "save"):
+            bot.toggle_instruments_cinema()                 # and back on
+        self.assertTrue(cinema_live.live_instruments_enabled())
+        self.assertTrue(bot.instruments_cinema_active())
+
+    def test_a_preference_saved_under_the_old_name_still_counts(self):
+        """The key was renamed once the switch stopped being the bot's own."""
+        from libs import options
+        from libs.audio.cinema import live as cinema_live
+        options.prefs.pop("cinema_live_instruments", None)
+        options.prefs["music_bot_instruments_cinema"] = False
+        self.assertFalse(cinema_live.live_instruments_enabled())
+        options.prefs["cinema_live_instruments"] = True
+        self.assertTrue(cinema_live.live_instruments_enabled())
+
+    def test_a_player_who_cannot_open_the_menu_still_hears_the_band(self):
+        """The switches are for reaching them; the default is for everyone.
+
+        Both lines follow the Music Bot's own access rule, so neither can
+        appear in a menu the account cannot open -- but that rule only decides
+        who may *change* the setting. A listener who cannot reach the line
+        gets the default, which is the band through the room.
+        """
+        game = self.routed_game()
+        bot = make_bot(game)
+        self.assertTrue(bot.cinema_listening_allowed())
+        for flag in ("can_use_cinema_speakers", "can_use_music_bot",
+                     "can_broadcast_megaphone", "is_staff", "is_builder",
+                     "is_technician"):
+            if hasattr(game.gameplay, flag):
+                delattr(game.gameplay, flag)
+        # A regular player never sees the Music Bot, and so neither line.
+        self.assertFalse(bot.cinema_listening_allowed())
+        self.assertTrue(bot.instruments_cinema_active())
+        # Any staff level is enough -- a builder is not a contributor.
+        game.gameplay.is_builder = True
+        self.assertTrue(bot.cinema_listening_allowed())
+
+    def test_the_server_flag_still_grants_the_lines(self):
+        game = self.routed_game()
+        for flag in ("can_use_music_bot", "is_staff", "is_builder",
+                     "is_technician"):
+            if hasattr(game.gameplay, flag):
+                delattr(game.gameplay, flag)
+        game.gameplay.can_use_cinema_speakers = False
+        # A Server older than the staff snapshot but with the routing flag on
+        # is still authorization: the flag is the Server's own word.
+        self.assertFalse(make_bot(game).cinema_listening_allowed())
+        game.gameplay.can_use_cinema_speakers = True
+        self.assertTrue(make_bot(game).cinema_listening_allowed())
+
+    def test_the_switches_are_lines_on_the_music_bot_menu(self):
+        """Where they live: with the other listening lines, not in Options."""
+        game = self.routed_game()
+        bot = make_bot(game, queue_mode=False, next_up_queue=[])
+        captured = []
+        game.gameplay.add_substate = captured.append
+        game.gameplay.pop_last_substate = lambda: None
+        with mock.patch("libs.menu.Menu", FakeMenu), \
+                mock.patch("libs.menus.set_default_sounds"):
+            bot._show_mode_menu()
+        labels = [norm(label) for label, _action in captured[-1].items]
+        self.assertTrue(any(label.startswith("Cinema rooms: ON")
+                            for label in labels), labels)
+        self.assertTrue(any(label.startswith("Instruments:")
+                            for label in labels), labels)
+
+    def test_the_rooms_switch_releases_the_room_that_is_playing(self):
+        """Off has to be heard now, not at the end of the song."""
+        from libs import options
+        from libs.audio.cinema import plugin as cinema_plugin
+        game = self.routed_game()
+        bot = make_bot(game)
+        host = SimpleNamespace(calls=[],
+                               set_enabled=lambda enabled: host.calls.append(enabled))
+        with mock.patch.object(cinema_plugin, "host_for", return_value=host), \
+                mock.patch("libs.music_bot.controller.speak"), \
+                mock.patch.object(options, "save"):
+            bot.toggle_cinema_rooms()
+        self.assertEqual(host.calls, [False])
+        self.assertFalse(options.get("cinema_speakers"))
+        self.assertIn("OFF", bot.cinema_rooms_label())
+        with mock.patch.object(cinema_plugin, "host_for", return_value=host), \
+                mock.patch("libs.music_bot.controller.speak"), \
+                mock.patch.object(options, "save"):
+            bot.toggle_cinema_rooms()
+        self.assertEqual(host.calls, [False, True])
+        self.assertTrue(options.get("cinema_speakers"))
+        self.assertIn("ON", bot.cinema_rooms_label())
+
+    def test_flipping_the_rooms_switch_builds_no_host_out_of_nothing(self):
+        """A game that never used cinema is left exactly as it was."""
+        from libs import options
+        from libs.audio.cinema import plugin as cinema_plugin
+        game = self.routed_game()
+        bot = make_bot(game)
+        with mock.patch("libs.music_bot.controller.speak"), \
+                mock.patch.object(options, "save"):
+            bot.toggle_cinema_rooms()
+        self.assertIsNone(cinema_plugin.host_for(game, create=False))
 
 
 if __name__ == "__main__":

@@ -36,7 +36,8 @@ from .audio_diagnostics import probe as audio_probe
 # the speakers a builder placed around it. What a cabinet plays through is the
 # map's decision (the element's ``cinema_mode``: auto / off / a profile), so a
 # cabinet with no room around it is the two-source playback below, untouched.
-from .audio.cinema import (CINEMA_AUTO, CINEMA_OFF, acquire_bank, cabinet_anchor,
+from .audio.cinema import (CINEMA_AUTO, CINEMA_OFF, ROOM_MAX_DISTANCE,
+                           ROOM_REFERENCE_DISTANCE, acquire_bank, cabinet_anchor,
                            cinema_room, preview_room, profile_names,
                            release_renderer, room_diagnosis)
 
@@ -468,7 +469,7 @@ class JukeboxPlayer:
                 if bank is not None:
                     bank.set_volume(self.volume)
 
-    def _acquire_cinema(self, jukebox_id, x, y, z, volume, ref, maxd, kwargs, keep=None):
+    def _acquire_cinema(self, jukebox_id, x, y, z, volume, kwargs, keep=None):
         """Build this cabinet's cinema room, or None to play the plain pair.
 
         The profile comes from the server's per-cabinet decision, and the
@@ -515,8 +516,11 @@ class JukeboxPlayer:
                 volume=volume,
                 cabinet_volume=(keep.cabinet_volume * 100.0 if keep is not None
                                 else self.cabinet_volumes.get(jukebox_id, 100)),
-                reference_distance=ref,
-                max_distance=maxd,
+                # The ROOM's own scale, not the plain pair's 8/40: a room is
+                # heard from the back row, while the two-source playback this
+                # replaces keeps its falloff exactly as it shipped.
+                reference_distance=ROOM_REFERENCE_DISTANCE,
+                max_distance=ROOM_MAX_DISTANCE,
                 occlusion_provider=self.occlusion_tier,
                 reverb_slot=keep.reverb_slot if keep is not None else None,
                 eq_slot=keep.eq_slot if keep is not None else None,
@@ -610,7 +614,7 @@ class JukeboxPlayer:
                 options = {"cinema_mode": running_mode or self.cinema_mode(jukebox_id)}
                 bank = self._acquire_cinema(
                     jukebox_id, anchor[0], anchor[1], anchor[2],
-                    self.volume, 8.0, 40.0, options, keep=expected,
+                    self.volume, options, keep=expected,
                 )
             except Exception as ex:
                 from . import logger
@@ -816,7 +820,7 @@ class JukeboxPlayer:
         # Cinema room (opt-in, per cabinet). While it is off -- the shipped
         # default -- this is None and the block below is the same two-source
         # playback it has always been.
-        bank = self._acquire_cinema(jukebox_id, x, y, z, effective_volume, ref, maxd, _kwargs)
+        bank = self._acquire_cinema(jukebox_id, x, y, z, effective_volume, _kwargs)
         if bank is not None:
             # The bank already created, positioned and spatialised one source
             # per speaker around the cabinet.

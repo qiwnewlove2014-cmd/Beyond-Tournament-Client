@@ -31,7 +31,8 @@ from collections import deque
 import cyal
 
 from ...deferred_log import log_deferred as log_line
-from .listener import cone_gain
+from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
+from .listener import distance_gain, speaker_aim_gain
 
 # One pool and one queue allowance per speaker. The radio between them keeps
 # the same shape as the plain jukebox (32 buffers, 10 queued): enough head-
@@ -68,7 +69,8 @@ class CinemaSpeakerBank:
     main_thread_audio = True
 
     def __init__(self, game, renderer, *, volume=100, cabinet_volume=100,
-                 reference_distance=8.0, max_distance=40.0,
+                 reference_distance=ROOM_REFERENCE_DISTANCE,
+                 max_distance=ROOM_MAX_DISTANCE,
                  occlusion_provider=None, reverb_slot=None, eq_slot=None,
                  category=DEFAULT_CATEGORY, duck=1.0,
                  buffers_per_slot=None, clock=None):
@@ -796,17 +798,13 @@ class CinemaSpeakerBank:
         return self._external_fade * self._fade_gain()
 
     def distance_gain(self, slot, listener):
-        """The plain jukebox's linear fade, evaluated at this speaker."""
-        if listener is None:
-            return 1.0
-        position = self.slot_sources[slot].position
-        distance = sum((float(listener[i]) - position[i]) ** 2 for i in range(3)) ** 0.5
-        if distance <= self.reference_distance:
-            return 1.0
-        if distance >= self.max_distance:
-            return 0.0
-        span = max(0.0001, self.max_distance - self.reference_distance)
-        return max(0.0, 1.0 - (distance - self.reference_distance) / span)
+        """The room's own linear fade, evaluated at this speaker.
+
+        The maths lives in ``listener.distance_gain`` so a live instrument
+        played at this speaker is shaped by the very same curve as the song.
+        """
+        return distance_gain(self.slot_sources[slot].position, listener,
+                             self.reference_distance, self.max_distance)
 
     def aim_gain(self, slot, listener):
         """How much of an aimed speaker reaches the listener (1.0 when unaimed).
@@ -817,14 +815,8 @@ class CinemaSpeakerBank:
         what makes "the audience is behind that speaker now" a physical fact
         instead of an assumption.
         """
-        if listener is None:
-            return 1.0
-        spec = self.renderer.layout.spec(slot)
-        if spec is None or not spec.has_cone:
-            return 1.0
-        return cone_gain(listener, self.renderer.layout.position(slot),
-                         spec.aim_yaw, spec.cone_inner, spec.cone_outer,
-                         spec.cone_outer_gain if spec.cone_outer_gain is not None else 0.0)
+        return speaker_aim_gain(listener, self.renderer.layout.position(slot),
+                                self.renderer.layout.spec(slot))
 
     def update_output(self):
         """Refresh per-speaker gain, occlusion and environment sends.

@@ -30,8 +30,9 @@ from math import cos, radians, sin, sqrt, trunc
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from libs.audio.cinema import (ListenerPose, exclusive_speakers, facing_report,
-                               resolve_room)
+from libs.audio.cinema import (ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE,
+                               CinemaLayout, ListenerPose, exclusive_speakers,
+                               facing_report, resolve_room)
 from libs.audio.cinema.router import CinemaRenderer
 
 # Angles and radius for the room --make-room generates: a front wall, the two
@@ -45,7 +46,10 @@ ROOM_PLAN = (
     ("rear_l", -150.0),
     ("rear_r", 150.0),
 )
-ROOM_RADIUS = 8.0
+# The ring this tool places its own demo speakers on -- NOT the game's room
+# radius (see layout.ROOM_RADIUS): a synthetic room is small on purpose so the
+# printed coordinates stay readable.
+DEMO_RING_RADIUS = 8.0
 
 
 def _number(value, default=0.0):
@@ -153,20 +157,23 @@ def audible_lines(room, anchor, walls):
 
     A wall never silences a speaker -- the room applies a lowpass (light for
     one tile, heavy for three or more) measured from that speaker's own spot,
-    and the distance ramp is the same one the plain jukebox pair uses: full
-    within 8 blocks, silent at 40. This is what a builder wants to know
-    before walking the room.
+    and the room's own distance ramp: full within reference distance, silent
+    at the room's max distance (a plain jukebox pair keeps the narrower 8/40
+    it has always had). This is what a builder wants to know before walking
+    the room.
     """
+    reference = float(ROOM_REFERENCE_DISTANCE)
+    span = max(0.0001, float(ROOM_MAX_DISTANCE) - reference)
     lines = ["  at the cabinet:"]
     for slot in room.slots:
         position = room.speakers[slot].position
         distance = sqrt(sum((float(anchor[i]) - position[i]) ** 2 for i in range(3)))
-        if distance <= 8.0:
+        if distance <= reference:
             loudness = "full"
-        elif distance >= 40.0:
+        elif distance >= ROOM_MAX_DISTANCE:
             loudness = "silent"
         else:
-            loudness = f"{1.0 - (distance - 8.0) / 32.0:.0%} of full"
+            loudness = f"{1.0 - (distance - reference) / span:.0%} of full"
         tiles = wall_tiles(walls, position, anchor)
         if tiles == 0:
             wall = "clear path"
@@ -195,6 +202,23 @@ def speaker_note(speaker):
     return f"  [{', '.join(notes)}]" if notes else ""
 
 
+def _renderer_for(room, anchor):
+    """The renderer the game would build for this room, feeds and all.
+
+    A room read off the map is only the speakers the map has (the game builds
+    it with ``use_ring=False``), so listing the feeds from the profile alone
+    would invent a centre channel and a side pair nobody placed and report a
+    room the player never hears. A requested profile is allowed to pad itself
+    out, and then the ring is the only thing there is to play.
+    """
+    # ``fill`` only exists on the host's plan; a room resolved straight off
+    # the map is its speakers, so a missing flag means exactly that.
+    if getattr(room, "fill", False) or not room.specs:
+        return CinemaRenderer(anchor, room.profile_name, specs=room.specs)
+    return CinemaRenderer(anchor, room.profile_name,
+                          CinemaLayout(anchor, room.specs, use_ring=False))
+
+
 def describe(room, anchor=(0.0, 0.0, 0.0), heading=None):
     lines = [f"  profile : {room.profile_name}",
              f"  anchor  : {anchor}   room yaw: {room.yaw_deg:.0f}deg"]
@@ -206,7 +230,7 @@ def describe(room, anchor=(0.0, 0.0, 0.0), heading=None):
                      f"  ({how}){speaker_note(speaker)}")
     for warning in room.warnings:
         lines.append(f"  ! {warning}")
-    renderer = CinemaRenderer(anchor, room.profile_name, specs=room.specs)
+    renderer = _renderer_for(room, anchor)
     feeds = ", ".join(f"{slot} {gain_l:.2f}L/{gain_r:.2f}R"
                       for slot, gain_l, gain_r in renderer.plan())
     lines.append(f"  feeds   : {feeds}")
@@ -230,7 +254,7 @@ def facing_lines(room, anchor, headings):
 def demo():
     from libs.audio.cinema import CinemaSpeakerSpec
 
-    def speaker(channel, bearing, radius=ROOM_RADIUS, **kwargs):
+    def speaker(channel, bearing, radius=DEMO_RING_RADIUS, **kwargs):
         angle = radians(bearing)
         return CinemaSpeakerSpec(channel,
                                  (sin(angle) * radius, cos(angle) * radius, 0.0),
@@ -338,7 +362,7 @@ def main():
                         help="print paste-ready speaker lines for one cabinet")
     parser.add_argument("--channels", default="front_l,front_c,front_r,side_l,side_r,rear_l,rear_r",
                         help="comma separated slots for --make-room")
-    parser.add_argument("--radius", type=float, default=ROOM_RADIUS,
+    parser.add_argument("--radius", type=float, default=DEMO_RING_RADIUS,
                         help="room radius in blocks for --make-room")
     args = parser.parse_args()
 

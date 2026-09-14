@@ -24,6 +24,21 @@ SLOT_ORDER = ("front_l", "front_c", "front_r", "side_l", "side_r", "rear_l", "re
 
 AUTO_SLOT = "auto"
 
+# How big a room is, in metres -- the room's own scale, deliberately wider
+# than the plain jukebox pair's falloff (full within 8 m, silent at 40). A
+# cabinet with no speakers keeps that 8/40 exactly, so nothing about the
+# shipped jukebox moves when a room is placed; a room is meant to be heard
+# from the back row, which the old radius could not reach.
+#
+# ROOM_RADIUS is how far from the CABINET a speaker may stand and still
+# belong to the room; ROOM_MAX_DISTANCE is how far from the LISTENER a
+# speaker may be before it is silent. They are equal on purpose, so "inside
+# the room" and "audible" are the same statement rather than two numbers that
+# can drift apart.
+ROOM_RADIUS = 60.0
+ROOM_REFERENCE_DISTANCE = 8.0     # full volume within this many metres
+ROOM_MAX_DISTANCE = 60.0          # silent at (and beyond) this many metres
+
 # Bearing bands used to snap an `auto` speaker to a slot, in degrees where
 # 0 is straight ahead, positive is to the listener's right and +/-180 is
 # directly behind. The front gets the widest band because the screen wall is

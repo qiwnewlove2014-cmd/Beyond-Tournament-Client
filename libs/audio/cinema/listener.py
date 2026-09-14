@@ -104,6 +104,44 @@ def _acos(value):
     return acos(value)
 
 
+def distance_gain(position, listener, reference_distance, max_distance):
+    """The room's own linear fade, measured at one speaker.
+
+    Full volume within ``reference_distance`` of the listener, silent at
+    ``max_distance``. One function for the whole feature on purpose: the room
+    applies this to every song frame, and a live instrument played at a
+    speaker has to be shaped by exactly the same numbers, or the same speaker
+    is louder for the band than it is for the song.
+    """
+    if listener is None or position is None:
+        return 1.0
+    distance = sqrt(sum((float(listener[i]) - float(position[i])) ** 2
+                        for i in range(3)))
+    reference_distance = float(reference_distance)
+    max_distance = float(max_distance)
+    if distance <= reference_distance:
+        return 1.0
+    if distance >= max_distance:
+        return 0.0
+    span = max(0.0001, max_distance - reference_distance)
+    return max(0.0, 1.0 - (distance - reference_distance) / span)
+
+
+def speaker_aim_gain(listener, position, spec):
+    """How much of an aimed speaker reaches a listener standing at ``listener``.
+
+    1.0 for a speaker with no aim -- omnidirectional is the room's default and
+    the coverage is the room's job. Shared with the bank for the same reason
+    as :func:`distance_gain`: a live note and the song must agree.
+    """
+    if listener is None or spec is None or not getattr(spec, "has_cone", False):
+        return 1.0
+    return cone_gain(listener, position, spec.aim_yaw, spec.cone_inner,
+                     spec.cone_outer,
+                     spec.cone_outer_gain if spec.cone_outer_gain is not None
+                     else 0.0)
+
+
 class ListenerPose:
     """The listener's head: forward/up vectors, position, and what it faces.
 

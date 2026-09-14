@@ -958,7 +958,90 @@ class PianoAudio:
             except Exception:
                 pass
 
+        # The room around the cabinet this performer stands at, when the
+        # listener has live instruments routed there. Independent of the PA
+        # above: a performance can be in neither, either or both.
+        try:
+            self.route_to_cinema_room(peer_id, note_name, x, y, z, volume)
+        except Exception:
+            pass
+
         return snd
+
+    # Live instruments come out of the cabinet's room at the same wall it is
+    # mixed at: a band through a venue's speakers is louder than the same band
+    # heard from the instrument itself, but not so loud it drowns the song.
+    # The switch is the listener's own (the Music Bot menu line next to the
+    # rooms switch) and it is on for everyone by default, so this runs for
+    # whoever asked for it and never for anyone else.
+    CINEMA_ROOM_VOLUME = 0.5
+
+    def route_to_cinema_room(self, peer_id, note_name, x, y, z, base_volume=300):
+        """Play this note at the speakers of the room nearest the performer.
+
+        The megaphone's route is a broadcast -- every PA speaker on the map,
+        wherever it stands. This is the opposite: one room, the cabinet the
+        performer is standing at, shaped by that room's own numbers (its
+        distance ramp, the map's level for each speaker, the trim that speaker
+        carries, the wall standing between) so a band sounds like it is playing
+        through the venue instead of through an unshaped second copy of itself.
+
+        Tracked under ``cin-<peer>-<note>`` so ``stop_note`` fades it with the
+        note. Returns how many speakers the note reached (0 when the listener
+        has this off, or when there is no room to play into).
+        """
+        gameplay = self.gameplay
+        if gameplay is None:
+            return 0
+        game = getattr(gameplay, "game", None)
+        if game is None:
+            return 0
+        from .audio.cinema import live as cinema_live
+        from .audio.cinema import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
+        if not cinema_live.live_instruments_enabled():
+            return 0
+        bot = getattr(gameplay, "music_bot", None)
+        bot_volume = (max(0.1, getattr(bot, "volume", 50) / 100.0)
+                      * self.CINEMA_ROOM_VOLUME)
+        path = f"piano/Piano.mf.{note_name}.ogg"
+        key = f"cin-{peer_id}-{note_name}"
+        # Register the note before a single speaker is fed. A speaker carrying
+        # a trim is spawned a few ms later, and a key released inside those
+        # milliseconds must not be able to come out of the room afterwards:
+        # stop_note retires this key, and that is what the deferred spawns ask.
+        self.active_piano_notes.setdefault(key, [])
+
+        def _spawn(px, py, pz, gain, tier, _delay_ms):
+            volume = base_volume * max(0.0, gain) * bot_volume
+            if volume <= 0.0:
+                return
+            sound = self.am.play_unbound(
+                path, px, py, pz,
+                volume=volume, cat="miscelaneous",
+                # Flat at the source: the room's own ramp already shaped this
+                # note, and letting OpenAL attenuate it again would fade the
+                # same speaker twice.
+                reference_distance=ROOM_REFERENCE_DISTANCE, rolloff=0.0,
+                max_distance=ROOM_MAX_DISTANCE,
+                direct_filter=cinema_live.wall_filter(self, tier),
+            )
+            if sound is None:
+                return
+            self._tag_sounds(sound, peer_id, "cinema")
+            self.apply_chorus_send(sound, peer_id)
+            tracked = self.active_piano_notes.setdefault(key, [])
+            if not isinstance(tracked, list):
+                tracked = [tracked]
+                self.active_piano_notes[key] = tracked
+            tracked.append(sound)
+
+        return cinema_live.route_to_room(
+            game, (x, y, z), _spawn,
+            occlusion_provider=getattr(getattr(gameplay, "jukebox_player", None),
+                                       "occlusion_tier", None),
+            schedule=getattr(game, "call_after", None),
+            wanted=lambda: key in self.active_piano_notes,
+        )
 
     def route_to_megaphone_speakers(self, peer_id, note_name, base_volume=300):
         """Spawn a piano note at every megaphone PA speaker position with PA filter & EQ.
@@ -1061,14 +1144,18 @@ class PianoAudio:
         """
         piano_key = f"{peer_id}-{note_name}"
         mega_key = f"mega-{peer_id}-{note_name}"
+        cinema_key = f"cin-{peer_id}-{note_name}"
         snds = self.active_piano_notes.pop(piano_key, None)
         mega_snds = self.active_piano_notes.pop(mega_key, None)
+        cinema_snds = self.active_piano_notes.pop(cinema_key, None)
         
         all_snds = []
         if snds:
             all_snds.extend(snds if isinstance(snds, (list, tuple)) else [snds])
         if mega_snds:
             all_snds.extend(mega_snds if isinstance(mega_snds, (list, tuple)) else [mega_snds])
+        if cinema_snds:
+            all_snds.extend(cinema_snds if isinstance(cinema_snds, (list, tuple)) else [cinema_snds])
 
         if all_snds:
             for snd in all_snds:

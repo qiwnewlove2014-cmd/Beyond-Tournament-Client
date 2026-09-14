@@ -18,8 +18,9 @@ import cyal
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import jukebox
-from libs.audio.cinema import (CinemaRenderer, CinemaSpeakerBank, host_for,
-                               set_enabled)
+from libs.audio.cinema import (ROOM_MAX_DISTANCE, ROOM_RADIUS,
+                               ROOM_REFERENCE_DISTANCE, CinemaRenderer,
+                               CinemaSpeakerBank, host_for, set_enabled)
 from libs.world_map import CinemaSpeakerZone, Map
 
 
@@ -217,11 +218,26 @@ class CinemaRoomTests(unittest.TestCase):
     def test_room_sources_carry_the_spatial_contract(self):
         game, player, streamer = self.make()
         bank = streamer.call_args.kwargs["cinema"]
+        # The room's own scale, not the plain pair's 8/40: a room is heard
+        # from the back row, which the pair's falloff could not reach. OpenAL's
+        # own falloff stays off because the room fades each speaker per frame.
+        self.assertEqual(ROOM_REFERENCE_DISTANCE, 8.0)
+        self.assertGreater(ROOM_MAX_DISTANCE, 40.0)
         for source in bank.sources:
             self.assertTrue(source.spatialize)
             self.assertFalse(source.direct_channels)
             self.assertEqual(source.rolloff_factor, 0.0)
-            self.assertEqual(source.reference_distance, 40.0)
+            self.assertEqual(source.reference_distance, ROOM_MAX_DISTANCE)
+            self.assertEqual(source.max_distance, ROOM_MAX_DISTANCE)
+
+    def test_inside_the_room_and_audible_are_one_distance(self):
+        """A speaker the resolver keeps must be one the listener can hear.
+
+        These were two separate numbers once (one to belong to the room, one
+        to be audible in it), so the room could accept a speaker and then play
+        it into silence. They are the same number now, and this pins that.
+        """
+        self.assertEqual(ROOM_RADIUS, ROOM_MAX_DISTANCE)
 
     def test_cabinet_volume_and_eq_reach_every_speaker(self):
         game, player, streamer = self.make()

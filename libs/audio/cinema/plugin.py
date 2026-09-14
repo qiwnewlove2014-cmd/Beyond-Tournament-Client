@@ -24,6 +24,7 @@ runs its original two-source code path untouched.
 from .bank import DEFAULT_CATEGORY, CinemaSpeakerBank
 from .channel import AUTO
 from .listener import ListenerPose, facing_report
+from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
 from .placement import (AUTO_PROFILE, ROOM_RADIUS, RoomPlan, exclusive_speakers,
                         resolve_room, room_profile)
 from .profiles import DEFAULT_PROFILE, get_profile
@@ -56,6 +57,37 @@ def _option_enabled():
         # A missing settings back end must never stop the game from starting;
         # staying in the pre-cinema behaviour is always the safe answer.
         return DEFAULT_ENABLED
+
+
+def rooms_enabled():
+    """Whether this listener hears a jukebox through the room around it.
+
+    The value :func:`acquire_renderer` itself acts on, asked rather than
+    copied, so the menu line that switches it and the playback path can never
+    disagree about it. Off is the plain two-source jukebox, which is why the
+    switch sits next to the other listening choices instead of being buried.
+    """
+    return _option_enabled()
+
+
+def set_rooms_enabled(game, enabled):
+    """Record the listener's choice and apply it to a room already playing.
+
+    A room is released when this goes off, because the switch exists to be
+    heard: leaving a song playing into a room until the next track would make
+    the line look broken for as long as anyone is listening. A game that never
+    used cinema is left with no host at all, exactly as before.
+    """
+    enabled = bool(enabled)
+    try:
+        from ... import options
+        options.set(OPTION_ENABLED, enabled)
+    except Exception:
+        pass
+    host = host_for(game, create=False)
+    if host is not None:
+        host.set_enabled(enabled)
+    return enabled
 
 
 class CinemaSpeakerHost:
@@ -245,8 +277,10 @@ class CinemaSpeakerHost:
         """
         volume = options.pop("volume", 100)
         cabinet_volume = options.pop("cabinet_volume", 100)
-        reference_distance = options.pop("reference_distance", 8.0)
-        max_distance = options.pop("max_distance", 40.0)
+        # The room's own scale, not the plain pair's 8/40: a caller that wants
+        # something else passes it (see ``layout.ROOM_MAX_DISTANCE``).
+        reference_distance = options.pop("reference_distance", ROOM_REFERENCE_DISTANCE)
+        max_distance = options.pop("max_distance", ROOM_MAX_DISTANCE)
         occlusion_provider = options.pop("occlusion_provider", None)
         reverb_slot = options.pop("reverb_slot", None)
         eq_slot = options.pop("eq_slot", None)
@@ -416,6 +450,27 @@ def cabinet_anchor(game, jukebox_id):
     return None
 
 
+def cabinet_anchors(game):
+    """``(cabinet_id, anchor)`` for every jukebox this map has.
+
+    The single place that reads the map's cabinets, so a caller that needs to
+    know which cabinet is *which* (rather than only where the others stand)
+    takes the same view of the map as the jukebox and the menus do.
+    """
+    map_ = _map_of(game)
+    found = []
+    for zone in getattr(map_, "jukebox_list", ()) or ():
+        center = getattr(zone, "center", None)
+        if not center:
+            continue
+        try:
+            anchor = tuple(float(value) for value in center)
+        except (TypeError, ValueError):
+            continue
+        found.append((str(getattr(zone, "id", "")), anchor))
+    return found
+
+
 def map_cabinet_anchors(game, exclude=None):
     """Position of every jukebox on the map except ``exclude``.
 
@@ -423,19 +478,8 @@ def map_cabinet_anchors(game, exclude=None):
     resolves a room needs the rivals' positions to hand each speaker to the
     cabinet it actually stands next to (see ``exclusive_speakers``).
     """
-    map_ = _map_of(game)
-    anchors = []
-    for zone in getattr(map_, "jukebox_list", ()) or ():
-        if exclude is not None and str(getattr(zone, "id", "")) == str(exclude):
-            continue
-        center = getattr(zone, "center", None)
-        if not center:
-            continue
-        try:
-            anchors.append(tuple(float(value) for value in center))
-        except (TypeError, ValueError):
-            continue
-    return anchors
+    return [anchor for cabinet_id, anchor in cabinet_anchors(game)
+            if exclude is None or cabinet_id != str(exclude)]
 
 
 def preview_room(game, anchor, *, room_id=None, radius=None):

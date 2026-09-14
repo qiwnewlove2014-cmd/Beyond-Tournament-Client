@@ -33,14 +33,13 @@ project already had rather than into silence.
 
 from math import sqrt
 
-from .layout import (AUTO_SLOT, IDEAL_BEARING, SLOT_ORDER, SLOT_PAIRS,
-                     CinemaSpeakerSpec, bearing_from, coerce_spec,
+from .layout import (AUTO_SLOT, IDEAL_BEARING, ROOM_RADIUS, SLOT_ORDER,
+                     SLOT_PAIRS, CinemaSpeakerSpec, bearing_from, coerce_spec,
                      slot_for_bearing)
 
-# Speakers built for one cabinet are expected to live inside the cabinet's
-# own audible radius. Matches the jukebox pair's max distance so a room never
-# reaches further than the plain playback it replaces.
-ROOM_RADIUS = 40.0
+# ROOM_RADIUS (the room's own scale, in metres) lives with the rest of the
+# room's geometry in ``layout`` and is re-exported here, because that is where
+# callers have always imported it from.
 
 # How far a speaker's slot may sit from its measured bearing before the
 # geometry wins the argument. Wide on purpose: a builder placing a wall

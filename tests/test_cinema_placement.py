@@ -145,6 +145,22 @@ class RoomResolutionTests(unittest.TestCase):
         )
         self.assertEqual(set(room.slots), {"front_l", "front_r"})
 
+    def test_a_back_row_speaker_belongs_to_the_room(self):
+        """A theatre's rear pair stands further out than a pair's own fade.
+
+        The resolver's radius is the room's own scale, not the plain jukebox
+        pair's 40 m falloff: at 55 m this is still one room, and under the
+        pair's number the rear pair used to be dropped as another room's.
+        """
+        room = resolve_room(
+            [speaker("front_l", -30), speaker("front_r", 30),
+             speaker("rear_l", -150, distance=55.0),
+             speaker("rear_r", 150, distance=55.0)],
+            ANCHOR,
+        )
+        self.assertEqual(set(room.slots),
+                         {"front_l", "front_r", "rear_l", "rear_r"})
+
     def test_room_id_selects_the_speakers_of_one_cabinet(self):
         here = [speaker("front_l", -30, room="box_a"), speaker("front_r", 30, room="box_a")]
         there = [speaker("front_l", -30, room="box_b"), speaker("front_r", 30, room="box_b")]

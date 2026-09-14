@@ -54,23 +54,37 @@ like the plain two-source jukebox it always was.
 from .bank import CinemaSpeakerBank
 from .channel import (ChannelAnalyzer, mid_side, mix_channels, mix_samples,
                      source_layout, to_samples)
-from .layout import (IDEAL_BEARING, SLOT_ORDER, CinemaLayout, CinemaSpeakerSpec,
-                     coerce_spec, slot_for_bearing)
+from .layout import (IDEAL_BEARING, ROOM_MAX_DISTANCE, ROOM_RADIUS,
+                     ROOM_REFERENCE_DISTANCE, SLOT_ORDER, CinemaLayout,
+                     CinemaSpeakerSpec, coerce_spec, slot_for_bearing)
 from .listener import ListenerPose, cone_gain, facing_report
 from .placement import (AUTO_PROFILE, PlacedSpeaker, RoomPlacement, RoomPlan,
                         auto_profile, exclusive_speakers, nearest_anchor,
                         resolve_room, room_profile)
+from .live import (LiveRoomRouter, cabinet_mode, live_instruments_enabled,
+                   route_to_room, router_for, set_live_instruments,
+                   wall_filter)
 from .plugin import (CINEMA_AUTO, CINEMA_OFF, CinemaSpeakerHost, acquire_bank,
                      acquire_renderer, cabinet_anchor, cinema_room, host_for,
                      map_cabinet_anchors, map_speakers, preview_room, release_all,
-                     release_renderer, room_diagnosis, set_enabled)
+                     release_renderer, room_diagnosis, rooms_enabled, set_enabled,
+                     set_rooms_enabled)
 from .profiles import (DEFAULT_PROFILE, PROFILES, CinemaProfile,
                        get_profile, profile_names)
 from .router import CinemaRenderer
 
 __all__ = [
     "SLOT_ORDER",
+    "ROOM_RADIUS",
+    "ROOM_REFERENCE_DISTANCE",
+    "ROOM_MAX_DISTANCE",
     "AUTO_PROFILE",
+    "LiveRoomRouter",
+    "route_to_room",
+    "router_for",
+    "wall_filter",
+    "live_instruments_enabled",
+    "set_live_instruments",
     "CinemaLayout",
     "CinemaProfile",
     "CinemaRenderer",
@@ -104,6 +118,8 @@ __all__ = [
     "mid_side",
     "preview_room",
     "resolve_room",
+    "rooms_enabled",
+    "set_rooms_enabled",
     "room_diagnosis",
     "room_profile",
     "slot_for_bearing",

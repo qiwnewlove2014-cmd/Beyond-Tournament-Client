@@ -77,6 +77,17 @@ class TestInGameOptionsAudio(unittest.TestCase):
         menu = _open_options(in_game=True, parent=object())
         self.assertEqual(menu.music_paths, [])
 
+    def test_in_game_options_no_longer_list_the_cinema_rooms_switch(self):
+        # The cinema rooms switch (``cinema_speakers``) moved to the Music Bot
+        # menu, where the other listening switches are: it is how a listener
+        # hears a jukebox, not a setting for the game, and this list is long.
+        # The option itself is unchanged (on by default).
+        from libs.audio.cinema import rooms_enabled
+
+        self.assertTrue(rooms_enabled())
+        menu = _open_options(in_game=True, parent=object())
+        self.assertFalse(_has_item(menu, "Cinema rooms"))
+
     def test_title_options_keep_menu_music(self):
         menu = _open_options()
         self.assertEqual(menu.music_paths, ["music/10.ogg"])
