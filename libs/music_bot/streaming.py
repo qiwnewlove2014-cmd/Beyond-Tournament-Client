@@ -1243,6 +1243,7 @@ class AudioStreamer(threading.Thread):
         _pre_leftover = b''
         error_detail = ""
         for attempt in range(4):
+            stalled = False
             if not self.running:
                 break
             try:
@@ -1266,6 +1267,15 @@ class AudioStreamer(threading.Thread):
                     error_detail = self.process.stderr.read(4096).decode(
                         'utf-8', 'replace'
                     ).strip()
+                else:
+                    # Alive and silent after the whole pre-buffer window: ffmpeg
+                    # is inside its own reconnect attempt (nothing is logged at
+                    # `-loglevel error` until it gives up) against a host that
+                    # is not answering. There is no 403 to match on, but
+                    # repeating this URL is exactly what it has been doing for
+                    # twelve seconds, so this counts as a failed link -- a
+                    # freshly resolved one points at another CDN edge.
+                    stalled = True
             except Exception:
                 error_detail = ""
 
@@ -1295,10 +1305,14 @@ class AudioStreamer(threading.Thread):
                 cmd = _build_cmd()
                 continue
 
-            retryable = any(tok in error_detail for tok in ("403", "429", "503", "connection", "timeout", "reset"))
+            retryable = stalled or any(tok in error_detail for tok in ("403", "429", "503", "connection", "timeout", "reset"))
             if not retryable or attempt >= 3:
                 break
-            if attempt >= 1 and canonical_url and ("youtube.com" in canonical_url or "youtu.be" in canonical_url):
+            # A stall is refreshed on the FIRST attempt too (the retry budget
+            # otherwise spends itself re-running the command the stalled host
+            # already ignored for twelve seconds).
+            if (stalled or attempt >= 1) and canonical_url \
+                    and ("youtube.com" in canonical_url or "youtu.be" in canonical_url):
                 # The exact URL+headers already failed once — grab a fresh
                 # signed stream URL instead of re-running the same command.
                 fresh = self._resolve_playback_info(canonical_url)

@@ -35,9 +35,10 @@ class JukeboxMediaIntegrationTests(unittest.TestCase):
         stream._route_aligned_network_frame = Mock()
         return stream
 
-    def process(self, error=b"", exit_code=0):
+    def process(self, error=b"", exit_code=0, alive=False):
         return SimpleNamespace(stdout=io.BytesIO(b""), stderr=io.BytesIO(error),
-                               poll=lambda: exit_code, kill=Mock(), wait=Mock())
+                               poll=lambda: None if alive else exit_code,
+                               kill=Mock(), wait=Mock())
 
     def run_stream(self, stream, *, resolve=None, processes=None):
         with patch("libs.music_bot.streaming.FFMPEG_PATH", "never-executed"), \
@@ -114,6 +115,35 @@ class JukeboxMediaIntegrationTests(unittest.TestCase):
         self.assertEqual(commands[1][commands[1].index("-user_agent") + 1], "Exact Agent fresh")
         self.assertIsNot(self.cache.get(PAGE), old)
         self.assertIsNone(stream.failure_reason)
+
+    def test_a_link_that_stalls_without_a_word_is_re_resolved(self):
+        """A silent stall is a dead CDN edge, not a rejected URL.
+
+        ffmpeg burns its whole reconnect budget on the same host without
+        printing anything at `-loglevel error`, so there is no 403 to match on
+        and the command that failed is the one it has already been ignoring for
+        twelve seconds. A freshly resolved URL points at another edge, so a
+        stall has to take the same path a rejected link does -- and on the FIRST
+        play, which has no cached entry to notice it.
+        """
+        stream = self.stream()
+        stream.canonical_url = PAGE
+        stream._read_prebuffer.side_effect = [(0, b""), (1, b"")]
+        answers = [media("first"), media("fresh")]
+        resolver, launch, sleep, speak = self.run_stream(
+            stream, resolve=lambda *a, **kw: answers.pop(0),
+            processes=[self.process(alive=True), self.process()])
+        self.assertEqual(resolver.call_count, 2)
+        self.assertEqual(launch.call_count, 2)
+        commands = [call.args[0] for call in launch.call_args_list]
+        self.assertEqual(commands[0][commands[0].index("-i") + 1],
+                         media("first")["url"])
+        self.assertEqual(commands[1][commands[1].index("-i") + 1],
+                         media("fresh")["url"])
+        self.assertEqual(commands[1][commands[1].index("-user_agent") + 1],
+                         "Exact Agent fresh")
+        self.assertIsNone(stream.failure_reason)
+        speak.assert_not_called()
 
     def test_failed_fresh_resolution_never_relaunches_bad_cached_link(self):
         self.cache.put(PAGE, media())
