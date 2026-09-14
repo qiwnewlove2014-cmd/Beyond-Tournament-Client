@@ -2461,7 +2461,23 @@ class Gameplay(state.State):
         # thread reads the correct routing from its very first chunk (otherwise
         # the first ~20ms of a PA session would leak onto the normal channel).
         self.voice_chat_using_megaphone = use_megaphone
-        self.voice_chat.audio_input.start()
+        try:
+            self.voice_chat.audio_input.start()
+        except cyal.exceptions.CyalError as e:
+            # The microphone handle can die while the game runs (device
+            # unplugged or disabled, default-device switch, sleep/resume).
+            # That is a voice chat problem, not a game crash: say so, stay in
+            # the game, and retire the dead recorder so the next key press
+            # rebuilds capture against the current device list.
+            from libs import logger
+            logger.log(f"[VOICE] Microphone failed to start: {e}")
+            self.voice_chat_using_megaphone = False
+            self.voice_chat_toggle_on = False
+            with contextlib.suppress(Exception):
+                self.voice_chat.close()
+            self.voice_chat = None
+            speak("Microphone unavailable.")
+            return
         self.voice_chat.recording = True
         # Push-to-talk path: if a menu opens over a held PTT key its release is
         # swallowed, so menu.update may stop this recording. Toggle mode sets
@@ -2477,7 +2493,10 @@ class Gameplay(state.State):
         if not self.voice_chat.recording:
             return
             
-        self.voice_chat.audio_input.stop()
+        with contextlib.suppress(cyal.exceptions.CyalError):
+            # Releasing the key on a dead microphone must still clear the
+            # recording state below.
+            self.voice_chat.audio_input.stop()
         self.voice_chat.recording = False
         self.voice_chat_using_megaphone = False
         self.voice_chat_toggle_on = False

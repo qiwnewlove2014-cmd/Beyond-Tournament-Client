@@ -1050,11 +1050,24 @@ class VoiceChatRecord(threading.Thread):
             if self.audio_input is None or not options.get("microphone", True) or not options.get("voice_chat", True):
                 accumulated_bytes.clear()
                 continue
-            samples = self.audio_input.available_samples
+            try:
+                samples = self.audio_input.available_samples
+            except cyal.exceptions.CyalError:
+                # The microphone vanished mid-recording (device unplugged or
+                # disabled). Stop recording quietly; the next voice key press
+                # reports the problem and rebuilds the capture device.
+                self.recording = False
+                accumulated_bytes.clear()
+                continue
             if samples >= 480:  # 10ms ultra-fast hardware capture
                 is_stereo = getattr(self, 'stereo', False)
                 chunk = bytearray(samples * (4 if is_stereo else 2))
-                self.audio_input.capture_samples(chunk)
+                try:
+                    self.audio_input.capture_samples(chunk)
+                except cyal.exceptions.CyalError:
+                    self.recording = False
+                    accumulated_bytes.clear()
+                    continue
                 
                 if is_stereo:
                     import numpy as np
@@ -1138,9 +1151,14 @@ class VoiceChatRecord(threading.Thread):
         self.voice_chat_finish2()
     
     def voice_chat_finish2(self):
-        if self.audio_input.available_samples < 960: return self.audio_input.capture_samples(bytearray(self.audio_input.available_samples*2))
-        buf = bytearray(1920)
-        self.audio_input.capture_samples(buf)
+        try:
+            if self.audio_input.available_samples < 960: return self.audio_input.capture_samples(bytearray(self.audio_input.available_samples*2))
+            buf = bytearray(1920)
+            self.audio_input.capture_samples(buf)
+        except cyal.exceptions.CyalError:
+            # The microphone can die between the key release and this delayed
+            # final drain; a dead handle is not worth interrupting the game.
+            return
         
         # Check if Music Bot is streaming to Megaphone
         music_bot = self._find_music_bot()
