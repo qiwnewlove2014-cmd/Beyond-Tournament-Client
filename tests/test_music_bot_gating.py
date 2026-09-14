@@ -36,6 +36,10 @@ class FakeMusicBot:
     def has_last_track(self):
         return False
 
+    def set_cinema_target(self, cabinet_id):
+        self.calls.append(("set_cinema_target", cabinet_id))
+        self.cinema_target = cabinet_id
+
 
 def make_gp(**role_flags):
     gp = Gameplay.__new__(Gameplay)
@@ -102,6 +106,46 @@ class TestMusicBotGating(unittest.TestCase):
         })
         self.assertFalse(gp._can_use_music_bot())
         self.assertEqual(gp.music_bot.calls, ["stop"])
+
+    def test_losing_cinema_permission_hands_the_track_back_to_the_ears(self):
+        from types import SimpleNamespace
+        from libs.event_handeler import EventHandeler
+
+        gp = make_gp(can_use_music_bot=True, can_use_cinema_speakers=True)
+        gp.music_bot.cinema_target = "box_a"
+        scheduled = []
+        handler = SimpleNamespace(
+            gameplay=gp,
+            game=SimpleNamespace(put=lambda callback: scheduled.append(callback)),
+        )
+        EventHandeler.staff_permissions(handler, {
+            "is_staff": True,
+            "can_use_music_bot": True,
+            "can_use_cinema_speakers": False,
+        })
+        self.assertFalse(gp.can_use_cinema_speakers)
+        self.assertEqual(len(scheduled), 1,
+                         "the routing must be dropped on the main thread")
+        scheduled[0]()
+        self.assertEqual(gp.music_bot.calls, [("set_cinema_target", None)])
+        self.assertIsNone(gp.music_bot.cinema_target)
+
+    def test_a_plain_account_never_touches_the_cinema_routing(self):
+        from types import SimpleNamespace
+        from libs.event_handeler import EventHandeler
+
+        gp = make_gp(can_use_music_bot=True)
+        scheduled = []
+        handler = SimpleNamespace(
+            gameplay=gp,
+            game=SimpleNamespace(put=lambda callback: scheduled.append(callback)),
+        )
+        EventHandeler.staff_permissions(handler, {
+            "is_staff": True,
+            "can_use_music_bot": True,
+            "can_use_cinema_speakers": False,
+        })
+        self.assertEqual(scheduled, [])
 
     def test_staff_volume_and_feed_work(self):
         gp = make_gp(is_staff=True)

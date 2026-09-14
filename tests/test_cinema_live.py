@@ -126,7 +126,12 @@ class FakeAudio:
 class FakeGame:
     def __init__(self):
         self.audio_mngr = FakeAudio()
-        self.gameplay = SimpleNamespace(map=SimpleNamespace(), voice_chat=None)
+        # ``can_use_cinema_speakers`` stands in for the Server's login
+        # snapshot: routing a bot into a room is Developer/Contributor only,
+        # and a lower-ranked account gets False here (see
+        # test_music_bot_cinema.CinemaRoutingPermissionTests).
+        self.gameplay = SimpleNamespace(map=SimpleNamespace(), voice_chat=None,
+                                        can_use_cinema_speakers=True)
 
 
 def frame(tag, size=8):

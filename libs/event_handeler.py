@@ -149,12 +149,19 @@ class EventHandeler:
                 or self.gameplay.is_builder
                 or self.gameplay.is_technician,
             ))
+            # Cinema routing is Developer/Contributor only, and the Server owns
+            # that rule: the Music Bot menu hides the line entirely for anyone
+            # else, so no client-side rank guessing can reveal it.
+            self.gameplay.can_use_cinema_speakers = bool(
+                data.get("can_use_cinema_speakers", False)
+            )
         except Exception:
             self.gameplay.is_staff = False
             self.gameplay.is_builder = False
             self.gameplay.is_technician = False
             self.gameplay.can_broadcast_megaphone = False
             self.gameplay.can_use_music_bot = False
+            self.gameplay.can_use_cinema_speakers = False
             
         # Reset PA Test Mode state
         if hasattr(self.gameplay, 'pa_test_mode'):
@@ -2396,6 +2403,24 @@ class EventHandeler:
             "can_use_music_bot",
             gp.is_staff or gp.is_builder or gp.is_technician,
         ))
+        # A refresh from a Server that predates the cinema routing omits the
+        # key; keeping the last known answer then is what stops an unrelated
+        # rank change from silently switching a room off.
+        if "can_use_cinema_speakers" in data:
+            had_cinema_routing = bool(
+                getattr(gp, "can_use_cinema_speakers", False)
+            )
+            gp.can_use_cinema_speakers = bool(
+                data.get("can_use_cinema_speakers", False)
+            )
+            if had_cinema_routing and not gp.can_use_cinema_speakers:
+                bot = getattr(gp, "music_bot", None)
+                if bot is not None and getattr(bot, "cinema_target", None):
+                    # The room owns the sources the running stream feeds, so
+                    # losing the permission hands the track back to the
+                    # listener's ears instead of leaving it writing into a room
+                    # whose menu line this account can no longer see.
+                    self.game.put(lambda: bot.set_cinema_target(None))
         can_use_music_bot = bool(
             gp.can_use_music_bot
             or gp.is_staff

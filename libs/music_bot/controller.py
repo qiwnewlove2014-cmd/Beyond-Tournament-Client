@@ -295,7 +295,7 @@ class MapMusicBot:
         the bot must not leave a second local source playing alongside.
         """
         self._destroy_stream_source()
-        if getattr(self, "cinema_target", None):
+        if self.cinema_active_target():
             if self._ensure_cinema_bank() is not None:
                 # stream_source stays None on purpose: every gain, EQ and
                 # reverb call site below already skips a missing source, and
@@ -390,6 +390,28 @@ class MapMusicBot:
                 return f"Cinema Speakers: jukebox {cabinet_id} ({where})"
         return f"Cinema Speakers: jukebox {self.cinema_target} (not on this map)"
 
+    def cinema_routing_allowed(self):
+        """Whether this account may route the bot into a cabinet's room.
+
+        Server-owned: Developer/Contributor only. Feeding a room takes the
+        cabinet's speakers over, so this stays a building and testing tool
+        rather than a way to listen -- lower staff get a plain Music Bot, with
+        no Cinema Speakers line in the menu at all.
+        """
+        gp = self._find_gameplay()
+        return bool(getattr(gp, "can_use_cinema_speakers", False))
+
+    def cinema_active_target(self):
+        """The cabinet this bot may feed right now, or None for normal playback.
+
+        A choice saved before a rank change is not acted on: the routing drops
+        back to the listener's ears instead of playing through a room whose
+        menu line this account can no longer see (or switch off).
+        """
+        if not self.cinema_routing_allowed():
+            return None
+        return getattr(self, "cinema_target", None)
+
     def _cinema_problem(self, anchor, cabinet_id=None):
         """Why this cabinet's speakers cannot be used, in the resolver's words.
 
@@ -478,6 +500,8 @@ class MapMusicBot:
         gp = self._find_gameplay()
         if gp is None:
             return
+        if not self.cinema_routing_allowed():
+            return
 
         def go_back():
             gp.pop_last_substate()
@@ -561,7 +585,7 @@ class MapMusicBot:
 
     def _ensure_cinema_bank(self):
         """The room this bot should feed right now, or None for normal playback."""
-        target = getattr(self, "cinema_target", None)
+        target = self.cinema_active_target()
         if not target:
             return None
         for attempt in (0, 1):
@@ -614,7 +638,7 @@ class MapMusicBot:
         rebuilds it around the stream that is already playing rather than
         going silent.
         """
-        if not getattr(self, "cinema_target", None):
+        if not self.cinema_active_target():
             if getattr(self, "cinema_bank", None) is not None:
                 self._release_cinema_bank()
             return
@@ -835,15 +859,15 @@ class MapMusicBot:
                 
             items.append((get_megaphone_label, toggle_megaphone_routing))
 
-        # Cinema speaker routing. Shown to everyone: it is the player's own
-        # listening choice (play at my ears, or out of a room a builder made),
-        # and it is how a room can be heard without queueing a song on the
-        # cabinet itself.
-        def go_cinema():
-            gp.pop_last_substate()
-            self._open_cinema_menu()
+        # Cinema speaker routing is Developer/Contributor only (see
+        # cinema_routing_allowed): everyone else gets a plain Music Bot menu
+        # rather than a switch the Server would refuse to honour.
+        if self.cinema_routing_allowed():
+            def go_cinema():
+                gp.pop_last_substate()
+                self._open_cinema_menu()
 
-        items.append((self.cinema_target_label, go_cinema))
+            items.append((self.cinema_target_label, go_cinema))
 
         items.extend([
             (get_queue_mode_label, toggle_queue_mode),
@@ -1652,7 +1676,7 @@ class MapMusicBot:
 
     def _start_crossfade_roll(self):
         """Begin pre-rolling the next queued track (called each frame)."""
-        if getattr(self, "cinema_target", None):
+        if self.cinema_active_target():
             # A room is fed by one stream at a time; a pre-rolled second
             # streamer would queue its own frames into the same speakers and
             # double the audio. Tracks cut over instead of crossfading.
@@ -3041,7 +3065,10 @@ class MapMusicBot:
             self._sync_map_reverb()
 
         # A cinema room needs its own upkeep every frame (per-speaker gains,
-        # occlusion, and survival across a jukebox stop or map reload).
+        # occlusion, and survival across a jukebox stop or map reload). This
+        # reads the raw attribute on purpose: whether the routing is actually
+        # allowed is decided inside, so a bot whose account lost the
+        # permission still runs the release path that hands the track back.
         if getattr(self, "cinema_target", None):
             self._update_cinema_output()
 

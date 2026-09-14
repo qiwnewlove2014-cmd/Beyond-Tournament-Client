@@ -90,7 +90,11 @@ class FakeGame:
         )
         # ``voice_chat`` is read by loop() every frame; None means "nobody is
         # talking into the PA", which is the duck-free case.
-        self.gameplay = SimpleNamespace(map=SimpleNamespace(), voice_chat=None)
+        # ``can_use_cinema_speakers`` mirrors the Server's login snapshot: the
+        # routing is Developer/Contributor only, so a test that wants a plain
+        # Music Bot turns it off the same way a lower-ranked account gets it.
+        self.gameplay = SimpleNamespace(map=SimpleNamespace(), voice_chat=None,
+                                        can_use_cinema_speakers=True)
 
 
 def place_speakers(game, entries, anchor=ANCHOR):
@@ -442,6 +446,68 @@ class CinemaOutputTests(unittest.TestCase):
         self.assertIsNone(bot.cinema_bank)
         # The track keeps playing, restarted at the same position at the ears.
         self.assertEqual(restarts, [12.0])
+
+
+class CinemaRoutingPermissionTests(unittest.TestCase):
+    """Developer/Contributor only: everyone else gets a plain Music Bot.
+
+    Feeding a room takes a cabinet's speakers over, so the Server owns the
+    rule (``can_use_cinema_speakers``) and the client mirrors it: the menu
+    line is hidden entirely, and a choice saved before a rank change stops
+    being acted on instead of leaving a room the account can no longer see or
+    switch off.
+    """
+
+    def routed_game(self):
+        game = FakeGame()
+        map_obj = place_speakers(game, [("front_l", -30), ("front_r", 30)])
+        map_obj.spawn_jukebox(minx=9, maxx=10, miny=19, maxy=20, minz=0, maxz=1,
+                              id="box_a")
+        game.gameplay.map = map_obj
+        return game
+
+    def test_the_server_flag_is_what_grants_it(self):
+        game = self.routed_game()
+        bot = make_bot(game)
+        self.assertTrue(bot.cinema_routing_allowed())
+        game.gameplay.can_use_cinema_speakers = False
+        self.assertFalse(bot.cinema_routing_allowed())
+        del game.gameplay.can_use_cinema_speakers
+        self.assertFalse(
+            bot.cinema_routing_allowed(),
+            "a Server that predates the flag must not grant the routing",
+        )
+
+    def test_a_saved_target_plays_at_the_ears_without_the_permission(self):
+        game = self.routed_game()
+        bot = make_bot(game)
+        bot.cinema_target = "box_a"
+        self.assertEqual(bot.cinema_active_target(), "box_a")
+        game.gameplay.can_use_cinema_speakers = False
+        self.assertIsNone(bot.cinema_active_target())
+        # The room is never taken, and the bot falls back to its ear source.
+        self.assertIsNone(bot._ensure_cinema_bank())
+        bot._new_bot_source = lambda: FakeSource(game.audio_mngr.context)
+        bot._sync_map_reverb = lambda *a, **k: True
+        with mock.patch("libs.music_bot.controller.speak"):
+            bot._create_stream_source()
+        self.assertIsNotNone(bot.stream_source)
+        self.assertIsNone(bot.cinema_bank)
+
+    def test_the_room_menu_is_refused_without_the_permission(self):
+        from libs.gameplay import Gameplay
+
+        game = self.routed_game()
+        gp = mock.MagicMock(spec=Gameplay)
+        gp.substates = []
+        gp.map = game.gameplay.map
+        gp.can_use_cinema_speakers = False
+        game.gameplay = gp
+        bot = make_bot(game)
+        bot._open_cinema_menu()
+        self.assertEqual(gp.substates, [])
+        gp.add_substate.assert_not_called()
+        gp.pop_last_substate.assert_not_called()
 
 
 if __name__ == "__main__":
