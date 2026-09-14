@@ -13,6 +13,9 @@ from . import audio_manager, buffer, gameplay, local_player_documents, menu, men
 from .speech import speak
 from .weapons import weapon
 from . import tickets
+# Speech through a cabinet's room: whether an incoming megaphone frame belongs
+# to a room (see libs/audio/cinema/speech.py).
+from .audio.cinema import speech as cinema_speech
 from pyogg import OpusDecoder
 from .audio_diagnostics import probe as audio_probe
 
@@ -397,6 +400,12 @@ class EventHandeler:
         if callable(release_speakers):
             with contextlib.suppress(Exception):
                 release_speakers()
+        # A voice playing out of a cabinet's room is playing at the speakers
+        # the parser is about to replace (their positions are the old map's),
+        # so those sources go back now; the next frame a talker sends builds
+        # the room again from the map that came back.
+        with contextlib.suppress(Exception):
+            cinema_speech.release_all(self.game)
 
     @audio_probe.measured("map.sync_audio")
     def _finish_map_audio_reload(self):
@@ -1777,12 +1786,28 @@ class EventHandeler:
             # owner ducks the broadcast while anyone else talks and every
             # listener hears the dip in the owner's uploaded PCM.
             self.gameplay._last_remote_megaphone_voice_ts = time.monotonic()
-            if channelID in self.gameplay.voice_channels:
-                channel = self.gameplay.voice_channels[channelID]
-                # Get or create per-player speaker sources (separate from shared physical speakers)
-                player_sources = self.gameplay.megaphone.get_megaphone_player_sources(sender_id)
-                if player_sources:
-                    channel.vc_compression.recieve(opus_data, player_sources, None, channelID, self.gameplay, sender_id)
+            megaphone = getattr(self.gameplay, 'megaphone', None)
+            player_sources = None
+            if megaphone is not None:
+                # Per-player speaker sources (separate from the shared
+                # physical speakers the map placed).
+                player_sources = megaphone.get_megaphone_player_sources(sender_id)
+            # A talker standing in a cabinet's room is played through that
+            # room's speakers instead, and a map with no PA speakers at all
+            # hands over no channel and no sources here -- before this the
+            # voice died at this line and was heard by nobody.
+            in_room = cinema_speech.routed(getattr(self, "game", None),
+                                           self.gameplay, sender_id)
+            channel = self.gameplay.voice_channels.get(channelID)
+            compression = getattr(channel, 'vc_compression', None)
+            if compression is None and in_room and megaphone is not None:
+                # No PA on this map: the room's own channel is the one that
+                # carries a voice (built on demand, with no PA sources).
+                compression = getattr(megaphone.megaphone_channel(),
+                                      'vc_compression', None)
+            if compression is not None and (player_sources or in_room):
+                compression.recieve(opus_data, player_sources or [], None,
+                                    channelID, self.gameplay, sender_id)
         elif channelID in self.gameplay.voice_channels.keys():
             vc_source = self.gameplay.voice_channels[channelID].vc_source
             radio_source = self.gameplay.voice_channels[channelID].radio_source

@@ -180,7 +180,20 @@ class LiveRoomRouter:
         target = self.route_for(position)
         if target is None:
             return []
-        _cabinet_id, plan = target
+        return self.terms_for_plan(target[1], listener, occlusion_provider,
+                                   reference_distance, max_distance)
+
+    def terms_for_plan(self, plan, listener=None, occlusion_provider=None,
+                       reference_distance=ROOM_REFERENCE_DISTANCE,
+                       max_distance=ROOM_MAX_DISTANCE):
+        """The same terms, for a caller that already resolved the room.
+
+        A legacy of the split: the note path resolves per strike, but a voice
+        is a *stream* that owns the speakers it is playing into, so it has to
+        shape itself against the plan it is following rather than re-answer
+        "which room is this" fifty times a second. Same numbers either way, so
+        one speaker is exactly as loud for speech as it is for the band.
+        """
         placement = getattr(plan, "placement", None)
         terms = []
         for slot in getattr(placement, "slots", ()):

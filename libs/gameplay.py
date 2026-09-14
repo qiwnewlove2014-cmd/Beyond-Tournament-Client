@@ -2297,7 +2297,16 @@ class Gameplay(state.State):
             if hasattr(self.map, 'megaphone_speakers') and self.map.megaphone_speakers:
                 self.megaphone.setup_megaphone_speakers(force=True)
 
-        if not hasattr(self.megaphone, 'sources') or not self.megaphone.sources or consts.CHANNEL_MEGAPHONE not in self.voice_channels:
+        # A cinema cabinet is a public address system too. On a map with a
+        # cabinet and no PA speakers the room is the only thing there is to
+        # test, so the key must work there instead of refusing -- the whole
+        # point of testing is to talk and listen, and nobody should have to
+        # place PA speakers that exist only for the test.
+        from .audio.cinema import speech as cinema_speech
+        room_ready = cinema_speech.local_room_available(self.game, self)
+        pa_ready = (hasattr(self.megaphone, 'sources') and self.megaphone.sources
+                    and consts.CHANNEL_MEGAPHONE in self.voice_channels)
+        if not pa_ready and not room_ready:
             speak("System: No PA speakers available on this map.")
             return
         
@@ -2384,7 +2393,9 @@ class Gameplay(state.State):
         
         # PA Test Mode: Force megaphone channel (if available)
         if self.pa_test_mode and not self.game_started:
-            if consts.CHANNEL_MEGAPHONE in self.voice_channels:
+            from .audio.cinema import speech as cinema_speech
+            if (consts.CHANNEL_MEGAPHONE in self.voice_channels
+                    or cinema_speech.local_room_available(self.game, self)):
                 use_megaphone = True
             else:
                 speak("PA Test Mode: No speakers available.")
@@ -2397,11 +2408,21 @@ class Gameplay(state.State):
                 
         # Megaphone availability check
         if use_megaphone:
-            if (consts.CHANNEL_MEGAPHONE not in self.voice_channels or not hasattr(self.megaphone, 'sources') or not self.megaphone.sources):
-                 if hasattr(self.map, 'megaphone_speakers') and self.map.megaphone_speakers:
-                     self.megaphone.setup_megaphone_speakers(force=True)
+            pa_ready = (consts.CHANNEL_MEGAPHONE in self.voice_channels
+                        and hasattr(self.megaphone, 'sources')
+                        and self.megaphone.sources)
+            if not pa_ready and hasattr(self.map, 'megaphone_speakers') and self.map.megaphone_speakers:
+                self.megaphone.setup_megaphone_speakers(force=True)
+                pa_ready = bool(getattr(self.megaphone, 'sources', None)) \
+                    and consts.CHANNEL_MEGAPHONE in self.voice_channels
 
-            if consts.CHANNEL_MEGAPHONE not in self.voice_channels or not hasattr(self.megaphone, 'sources') or not self.megaphone.sources:
+            # A cabinet's room carries the voice where the map has no PA at
+            # all (see libs/audio/cinema/speech.py): the room replaces the PA
+            # for a talker standing inside it, so there is something to talk
+            # into even with no megaphone speakers placed.
+            from .audio.cinema import speech as cinema_speech
+            room_ready = cinema_speech.local_room_available(self.game, self)
+            if not pa_ready and not room_ready:
                  speak("System: No public address system available directly in this area.")
                  return
             
@@ -2413,11 +2434,20 @@ class Gameplay(state.State):
             # music-bot upload path (_is_music_owner gate), not here.
         
         # Route to appropriate channel based on mode
-        if use_megaphone and consts.CHANNEL_MEGAPHONE in self.voice_channels:
-            # Use megaphone's compression (sends to CHANNEL_MEGAPHONE)
+        if use_megaphone:
+            # Use megaphone's compression (sends to CHANNEL_MEGAPHONE). The
+            # map's own PA channel is preferred; only where there is none (a
+            # map with a cinema cabinet and no PA speakers) does the megaphone
+            # manager build a room-only channel -- the room is a perfectly
+            # good public address system, and it is the only one there to test.
             from libs import logger
+            channel = self.voice_channels.get(consts.CHANNEL_MEGAPHONE)
+            if channel is None:
+                builder = getattr(self.megaphone, 'megaphone_channel', None)
+                channel = builder() if callable(builder) else None
             logger.log(f"Routing voice to MEGAPHONE channel ({consts.CHANNEL_MEGAPHONE})")
-            self.voice_chat.vc_compression = self.voice_channels[consts.CHANNEL_MEGAPHONE].vc_compression
+            if channel is not None:
+                self.voice_chat.vc_compression = channel.vc_compression
         else:
             from libs import logger
             logger.log("Routing voice to STANDARD VOICECHAT channel")

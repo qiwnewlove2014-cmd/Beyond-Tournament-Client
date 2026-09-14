@@ -71,6 +71,11 @@ from .plugin import (CINEMA_AUTO, CINEMA_OFF, CinemaSpeakerHost, acquire_bank,
                      set_rooms_enabled)
 from .profiles import (DEFAULT_PROFILE, PROFILES, CinemaProfile,
                        get_profile, profile_names)
+from .speech import (SpeechRooms, describe as speech_describe, drop as speech_drop,
+                     feed as speech_feed, release_all as release_speech,
+                     room_target as speech_room_target,
+                     routed as speech_routed,
+                     set_speech_enabled, speech_enabled)
 from .router import CinemaRenderer
 
 __all__ = [
@@ -85,6 +90,15 @@ __all__ = [
     "wall_filter",
     "live_instruments_enabled",
     "set_live_instruments",
+    "SpeechRooms",
+    "speech_enabled",
+    "set_speech_enabled",
+    "speech_room_target",
+    "speech_routed",
+    "speech_feed",
+    "speech_drop",
+    "speech_describe",
+    "release_speech",
     "CinemaLayout",
     "CinemaProfile",
     "CinemaRenderer",

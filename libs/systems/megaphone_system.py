@@ -709,6 +709,36 @@ class MegaphoneManager:
         if not hasattr(self, 'voice_chat') or self.voice_chat is None:
             self.voice_chat = voice_chat.VoiceChatRecord(self.game, self.player)
 
+    def megaphone_channel(self):
+        """The channel a megaphone voice is sent on and played through.
+
+        The map's own PA speakers normally register it (``setup_megaphone_
+        speakers``), and while they exist this returns exactly that entry.
+
+        A map with a cinema cabinet and **no** PA speakers has no entry at
+        all -- and a voice coming out of the cabinet's room still needs a
+        channel: one compression to send with (the talker's own client) and
+        one to receive with (every listener's). So it is built on demand, with
+        no PA sources, because there are none. It is deliberately kept off
+        ``voice_channels``: that mapping means "channels with audio sources",
+        and half the client walks it looking for a ``vc_source``.
+        """
+        channel = self.voice_channels.get(consts.CHANNEL_MEGAPHONE)
+        if channel is not None:
+            return channel
+        room_only = getattr(self, '_room_voice_channel', None)
+        if room_only is None:
+            room_only = type('MegaphoneChannel', (), {
+                'name': "MEGAPHONE_GLOBAL",
+                'has_radio': False,
+                'vc_source': [],
+                'radio_source': None,
+                'vc_compression': voice_chat.voice_chat_compression(
+                    self.game, consts.CHANNEL_MEGAPHONE),
+            })()
+            self._room_voice_channel = room_only
+        return room_only
+
     def get_megaphone_player_sources(self, sender_id):
         """Get or create per-player OpenAL sources for megaphone speakers.
         Clones spatial properties from the physical speaker template sources.

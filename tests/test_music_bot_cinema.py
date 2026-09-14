@@ -689,6 +689,31 @@ class LiveInstrumentRoutingTests(unittest.TestCase):
                             for label in labels), labels)
         self.assertTrue(any(label.startswith("Instruments:")
                             for label in labels), labels)
+        self.assertTrue(any(label.startswith("Speech:")
+                            for label in labels), labels)
+
+    def test_the_speech_switch_is_one_setting_the_voice_paths_read(self):
+        """The line and the audio behind it cannot drift apart.
+
+        A voice is played at the room's speakers by every listener's own
+        client (libs/audio/cinema/speech.py), so off is the map's PA -- and
+        the key the line flips is the key that path reads.
+        """
+        from libs import options
+        from libs.audio.cinema import speech as cinema_speech
+        bot = make_bot(FakeGame())
+        self.assertTrue(cinema_speech.speech_enabled())
+        self.assertIn("cabinet", bot.speech_cinema_label())
+        with mock.patch("libs.music_bot.controller.speak"), \
+                mock.patch.object(options, "save"):
+            bot.toggle_speech_cinema()                       # back to the PA
+        self.assertFalse(options.get(cinema_speech.OPTION_ENABLED))
+        self.assertFalse(cinema_speech.speech_enabled())
+        self.assertIn("PA", bot.speech_cinema_label())
+        with mock.patch("libs.music_bot.controller.speak"), \
+                mock.patch.object(options, "save"):
+            bot.toggle_speech_cinema()                       # and through the room
+        self.assertTrue(cinema_speech.speech_enabled())
 
     def test_the_rooms_switch_releases_the_room_that_is_playing(self):
         """Off has to be heard now, not at the end of the song."""

@@ -8,6 +8,10 @@ from . import consts
 from .speech import speak
 from . import options
 from . import logger
+# A cinema cabinet's room, for the megaphone frames that belong to one (see
+# libs/audio/cinema/speech.py). Aliased because libs/speech.py above is the
+# text-to-speech announcer and has nothing to do with this.
+from .audio.cinema import speech as cinema_speech
 
 import audioop
 import collections
@@ -655,8 +659,13 @@ class voice_chat_compression(threading.Thread):
             player_sources = getattr(
                 getattr(gameplay, 'megaphone', None), 'player_sources', {}
             )
+            # A talker standing in a cabinet's room is heard from that room
+            # instead of the map's PA, so their stream has no PA sources to
+            # check for -- and on a map with no PA speakers at all, that check
+            # used to drop the whole stream before a single frame played.
+            in_room = cinema_speech.routed(self.game, gameplay, sender_id)
             if (mono_now - stream['last_packet_monotonic'] > 1.0
-                    or sender_id not in player_sources):
+                    or (sender_id not in player_sources and not in_room)):
                 stream['jitter_buffer'].reset()
                 stale.append(sender_id)
                 continue
@@ -673,6 +682,17 @@ class voice_chat_compression(threading.Thread):
             try:
                 if gameplay.player.dead:
                     continue
+                if in_room:
+                    # The room's own speakers, not the PA: same cadence, same
+                    # frame, shaped by the room's numbers. Still deferred --
+                    # source creation, buffer upload and play() are OpenAL.
+                    _gp, _sid, _pkt = gameplay, sender_id, packet
+                    self.game.audio_mngr.defer_audio(
+                        lambda gp=_gp, sid=_sid, pkt=_pkt:
+                        cinema_speech.feed(self.game, gp, sid, pkt)
+                    )
+                    _last_play_times[sender_id] = time.time()
+                    continue
                 # Hand the frame to the MAIN thread via the audio inbox:
                 # queue_and_delay_frame does OpenAL work (silence-pad buffers,
                 # unqueue/queue/play), and OpenAL must only ever be touched
@@ -682,8 +702,13 @@ class voice_chat_compression(threading.Thread):
                 # CADENCE stays clock-driven here (should_output above) —
                 # only the AL execution moves, at most one frame later.
                 _gp, _sid, _srcs, _pkt = gameplay, sender_id, stream['sources'], packet
+                # Default arguments, not a closure over the loop's variables:
+                # two talkers handing a frame to the inbox in the same pass
+                # would otherwise both fire with the LAST pair's values, and
+                # one speaker would get the other's audio.
                 self.game.audio_mngr.defer_audio(
-                    lambda: queue_and_delay_frame(_gp, _sid, _srcs, _pkt)
+                    lambda gp=_gp, sid=_sid, srcs=_srcs, pkt=_pkt:
+                    queue_and_delay_frame(gp, sid, srcs, pkt)
                 )
                 _last_play_times[sender_id] = time.time()
             except Exception as exc:
@@ -693,6 +718,12 @@ class voice_chat_compression(threading.Thread):
         for sender_id in stale:
             self._megaphone_playouts.pop(sender_id, None)
             self._megaphone_decoders.pop(sender_id, None)
+            # Destroying the room's sources is OpenAL work too, so it rides
+            # the same inbox; a leg that outlived its voice would leave the
+            # speakers queued and quiet, not free.
+            self.game.audio_mngr.defer_audio(
+                lambda sid=sender_id: cinema_speech.drop(self.game, sid)
+            )
     
     def run(self):
         logger.log(f"VoiceChatCompression thread started: {self.channel}")
@@ -908,6 +939,14 @@ def _feed_local_megaphone_main(gameplay, raw_buf, producer='producer'):
         # Separate source set per producer so concurrent local streams mix in
         # OpenAL instead of interleaving frames into one queue.
         local_key = f"{local_id}:{producer}"
+        # A player standing in a cabinet's room hears their own broadcast from
+        # that room -- the same speakers, and the same numbers, everyone else
+        # hears it from -- and on a map with no PA speakers at all that room is
+        # the only thing that can play it. The installer's trims are skipped
+        # for the owner's own ears (see cinema/speech.py::feed_local).
+        if cinema_speech.feed_local(getattr(gameplay, 'game', None), gameplay,
+                                    local_key, raw_buf):
+            return
         sources = gameplay.megaphone.get_megaphone_player_sources(local_key)
         if not sources:
             return
@@ -936,6 +975,14 @@ def _feed_local_megaphone_main(gameplay, raw_buf, producer='producer'):
         # speaker while everyone else hears the PA spread across the map. Local
         # frames have no network leg, so no jitter margin is needed; music keeps
         # its real-frame prebuffer for underrun recovery.
+        #
+        # ignore_speaker_delay: the per-speaker `delay` an installer sets on a
+        # map speaker is an alignment offset for the people standing out there -
+        # the owner is not listening to the broadcast from across the room, so
+        # holding their own voice back by it (up to 0.5 s) only made a performer
+        # hear their own line late. Only the geometry stagger (distance / 343)
+        # stays. It goes for EVERY local producer, so the owner's own voice and
+        # the song they are singing over stay aligned with each other.
         queue_and_delay_frame(
             gameplay,
             local_key,
@@ -943,6 +990,7 @@ def _feed_local_megaphone_main(gameplay, raw_buf, producer='producer'):
             raw_buf,
             margin_frames=0,
             real_prebuffer_frames=3 if producer == 'music' else None,
+            ignore_speaker_delay=True,
         )
     except Exception:
         pass
@@ -1658,7 +1706,21 @@ def _pad_frames_for_resync(target_active, current_active, needs_initial_delay, a
     return max(0, target_active - current_active)
 
 
-def queue_and_delay_frame(gameplay, sender_id, sources, packet, margin_frames=None, real_prebuffer_frames=None):
+def queue_and_delay_frame(gameplay, sender_id, sources, packet, margin_frames=None, real_prebuffer_frames=None,
+                          ignore_speaker_delay=False):
+    """Queue one frame to every speaker source with the PA's spatial stagger.
+
+    ignore_speaker_delay: TRUE for the OWNER's own monitor (local producers).
+    The per-speaker `delay` an installer sets on a map speaker is an ALIGNMENT
+    offset for the people standing out there, not something the owner should
+    hear themselves through. Holding the owner's own voice back by it (up to
+    0.5 s) made a performer hear their own line late. The propagation part of
+    the stagger (distance / 343 m/s) is still applied, so the owner's own
+    broadcast keeps the same spread every listener hears - only the installer's
+    offset is skipped. Remote listeners always keep it, and the delay baselines
+    are cached per sender key ('<player>:<producer>' vs the peer id), so the two
+    never share a cache entry.
+    """
 
     global _speaker_delay_queues
     import math
@@ -1752,7 +1814,7 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet, margin_frames=No
             
             if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'speaker_data') and spk_idx < len(gameplay.megaphone.speaker_data):
                 spk_data = gameplay.megaphone.speaker_data[spk_idx]
-                static_delay = spk_data.get('delay', 0.0)
+                static_delay = 0.0 if ignore_speaker_delay else spk_data.get('delay', 0.0)
                 speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
                 
             if getattr(gameplay, 'concert_spectator_mode', False):

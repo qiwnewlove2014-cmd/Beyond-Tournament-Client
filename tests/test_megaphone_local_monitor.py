@@ -105,11 +105,14 @@ class TestLocalMegaphoneMonitor(unittest.TestCase):
             )
 
         # The local song monitor must ride the same per-speaker propagation
-        # stagger as remote listeners (no jitter margin, music prebuffer kept).
+        # stagger as remote listeners (no jitter margin, music prebuffer kept),
+        # while dropping the installer's per-speaker delay: the owner is not
+        # listening to their own broadcast from across the room.
         stagger.assert_called_once_with(
             gameplay, local_key, [src], b"\x01\x00" * 960,
             margin_frames=0,
             real_prebuffer_frames=3,
+            ignore_speaker_delay=True,
         )
 
     def test_mic_monitor_uses_spread_stagger_without_prebuffer(self):
@@ -139,6 +142,7 @@ class TestLocalMegaphoneMonitor(unittest.TestCase):
             gameplay, local_key, [src], b"\x01\x00" * 960,
             margin_frames=0,
             real_prebuffer_frames=None,
+            ignore_speaker_delay=True,
         )
 
     def test_real_frame_prebuffer_starts_on_third_frame_without_silence(self):
@@ -322,7 +326,7 @@ class TestMegaphoneStaggerPadding(unittest.TestCase):
         self.gen_buffer = mock.Mock(side_effect=_FakeBuffer)
         self.frame = b"\x01\x00" * 960
 
-    def make_gameplay(self, speaker_pos):
+    def make_gameplay(self, speaker_pos, delay=0.0):
         return SimpleNamespace(
             concert_spectator_mode=False,
             camera=SimpleNamespace(
@@ -334,7 +338,7 @@ class TestMegaphoneStaggerPadding(unittest.TestCase):
             )),
             megaphone=SimpleNamespace(
                 fading_sources=[],
-                speaker_data=[{"position": speaker_pos, "delay": 0.0}],
+                speaker_data=[{"position": speaker_pos, "delay": delay}],
             ),
         )
 
@@ -397,6 +401,43 @@ class TestMegaphoneStaggerPadding(unittest.TestCase):
         self.assertEqual(silence, 2)  # 1 propagation stagger + 1 legacy cushion
         self.assertEqual(real, 1)
         self.assertEqual(src.play_calls, 1)
+
+    def test_owner_monitor_drops_the_installer_delay_but_keeps_geometry(self):
+        src = _FakeSource()
+        # 30 m = 87 ms of propagation (4 frames of 20 ms) and half a second of
+        # installer trim on the same speaker.
+        gameplay = self.make_gameplay((30.0, 0.0, 0.0), delay=0.5)
+
+        with mock.patch.object(voice_chat, "_reclaim_source_buffers"), \
+                mock.patch.object(voice_chat, "_fade_in_packet", side_effect=lambda data: data), \
+                mock.patch.object(voice_chat, "_fade_out_from_tail", side_effect=lambda data, _tail: data):
+            voice_chat.queue_and_delay_frame(
+                gameplay, "local:mic", [src], self.frame,
+                margin_frames=0, ignore_speaker_delay=True,
+            )
+
+        # 4 propagation frames + the legacy cushion, and NONE of the 25 trim
+        # frames: the owner hears their own line 500 ms earlier than before
+        # while the room still gets the installer's offset.
+        silence, real = self.count_frames(src)
+        self.assertEqual(silence, 5)
+        self.assertEqual(real, 1)
+        self.assertEqual(src.play_calls, 1)
+
+    def test_remote_listener_still_gets_the_installer_delay(self):
+        src = _FakeSource()
+        gameplay = self.make_gameplay((30.0, 0.0, 0.0), delay=0.5)
+
+        with mock.patch.object(voice_chat, "_reclaim_source_buffers"), \
+                mock.patch.object(voice_chat, "_fade_in_packet", side_effect=lambda data: data), \
+                mock.patch.object(voice_chat, "_fade_out_from_tail", side_effect=lambda data, _tail: data):
+            voice_chat.queue_and_delay_frame(gameplay, "remote-1", [src], self.frame)
+
+        # 25 trim frames + 4 propagation + 6 jitter reserve + 1 legacy cushion:
+        # only the owner's own monitor skips the installer's offset.
+        silence, real = self.count_frames(src)
+        self.assertEqual(silence, 36)
+        self.assertEqual(real, 1)
 
 
 class TestMusicBotDeadlinePacing(unittest.TestCase):

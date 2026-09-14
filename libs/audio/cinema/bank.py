@@ -32,7 +32,8 @@ import cyal
 
 from ...deferred_log import log_deferred as log_line
 from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
-from .listener import distance_gain, speaker_aim_gain
+from .listener import (distance_gain, occlusion_filter, restore_filter,
+                       speaker_aim_gain)
 
 # One pool and one queue allowance per speaker. The radio between them keeps
 # the same shape as the plain jukebox (32 buffers, 10 queued): enough head-
@@ -858,11 +859,7 @@ class CinemaSpeakerBank:
                 else:
                     # Clearing a wall must not strip the underwater muffle;
                     # restore the active global filter instead of deleting.
-                    active = getattr(audio, "filter", None)
-                    if active and active[-1] is not None:
-                        source.direct_filter = active[-1]
-                    else:
-                        del source.direct_filter
+                    restore_filter(source, audio)
             if efx is not None:
                 with contextlib.suppress(Exception):
                     if reverb_slot is not None:
@@ -884,19 +881,14 @@ class CinemaSpeakerBank:
             return 0
 
     def _occlusion_filter(self, audio, *, heavy):
-        key = "heavy" if heavy else "light"
-        cached = self._occlusion_filters.get(key)
-        if cached is not None:
-            return cached
-        if not hasattr(audio, "gen_filter"):
-            return None
-        params = (("GAINHF", 0.05), ("GAIN", 0.22)) if heavy else (("GAINHF", 0.45), ("GAIN", 0.75))
-        try:
-            cached = audio.gen_filter("LOWPASS", *params)
-        except Exception:
-            cached = None
-        self._occlusion_filters[key] = cached
-        return cached
+        """The room's wall filters, shared with the live and speech paths.
+
+        The params live in :func:`listener.occlusion_filter` and nowhere else:
+        the song, a live note and a voice played behind the same wall have to
+        be muffled by the same filters, or the room sounds like three
+        different rooms depending on what is coming out of it.
+        """
+        return occlusion_filter(audio, 2 if heavy else 1, self._occlusion_filters)
 
     # -------------------------------------------------------------- settings
 

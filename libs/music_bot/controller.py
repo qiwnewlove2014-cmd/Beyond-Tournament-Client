@@ -22,7 +22,9 @@ from ..audio.cinema import (ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE,
                             release_renderer as cinema_release,
                             room_diagnosis as cinema_diagnosis, rooms_enabled,
                             set_enabled as cinema_set_enabled,
-                            set_live_instruments, set_rooms_enabled)
+                            set_live_instruments, set_rooms_enabled,
+                            set_speech_enabled as set_cinema_speech,
+                            speech_enabled as cinema_speech_enabled)
 from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
@@ -483,6 +485,35 @@ class MapMusicBot:
             speak("Instruments through the cabinet speakers.")
         else:
             speak("Instruments played where they stand.")
+
+    def speech_cinema_label(self):
+        """Menu text for whether a voice comes out of the room it is spoken in.
+
+        The third listening switch, next to songs and instruments: a talker
+        standing inside a cabinet's room is heard from that room's speakers
+        instead of the map's PA speakers. Turning it off is exactly the PA
+        every map already had, so this changes how *this* listener hears a
+        voice and nothing about what anyone else hears.
+        """
+        if not cinema_speech_enabled():
+            return "Speech: through the map's PA speakers"
+        return "Speech: through the nearest cabinet's room"
+
+    def toggle_speech_cinema(self):
+        """Hear a voice from the room it is spoken in, or from the map's PA.
+
+        Nothing has to be handed back when it changes: the next frame is
+        simply fed by the other path, and a room that was playing the voice
+        is released by the frame that no longer routes to it (the room's
+        speakers are never the ones a song is using -- a voice takes them for
+        itself, on this client only).
+        """
+        enabled = not cinema_speech_enabled()
+        set_cinema_speech(enabled)
+        if enabled:
+            speak("Speech comes from the cabinet's room.")
+        else:
+            speak("Speech uses the map's PA speakers.")
 
     def cinema_rooms_label(self):
         """Menu text for whether songs come out of the rooms around cabinets.
@@ -966,15 +997,17 @@ class MapMusicBot:
 
             items.append((self.cinema_target_label, go_cinema))
 
-        # Two listener-side switches, one line below the song's own routing: a
-        # room is how *this* listener hears a cabinet, so neither takes
-        # anything from anybody and both are open to everyone who can open
-        # this menu (the song routing above stays Developer/Contributor,
-        # because that one turns a cabinet over).
+        # Three listener-side switches, one line below the song's own routing:
+        # a room is how *this* listener hears a cabinet, so none of them takes
+        # anything from anybody and all three are open to everyone who can
+        # open this menu (the song routing above stays Developer/Contributor,
+        # because that one turns a cabinet over). Songs, instruments, and now
+        # a voice: the same three things a room carries.
         if self.cinema_listening_allowed():
             items.append((self.cinema_rooms_label, self.toggle_cinema_rooms))
             items.append((self.instruments_cinema_label,
                           self.toggle_instruments_cinema))
+            items.append((self.speech_cinema_label, self.toggle_speech_cinema))
 
         items.extend([
             (get_queue_mode_label, toggle_queue_mode),

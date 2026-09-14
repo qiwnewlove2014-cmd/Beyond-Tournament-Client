@@ -142,6 +142,52 @@ def speaker_aim_gain(listener, position, spec):
                      else 0.0)
 
 
+def occlusion_filter(audio, tier, cache=None):
+    """The wall between a speaker and the listener, as an OpenAL filter.
+
+    One measurement, one pair of filters, shared by *everything* the room
+    carries: the song's frames, a live note and a voice all have to be muffled
+    by the same wall the same way. ``tier`` is the room's own reading (0 clear,
+    1 light, 2 heavy) and ``cache`` is an optional dict the caller owns, so a
+    room builds two filter objects once instead of one per speaker per frame.
+    """
+    if tier is None or tier <= 0:
+        return None
+    heavy = tier >= 2
+    key = "heavy" if heavy else "light"
+    if cache is not None and key in cache:
+        return cache[key]
+    if not hasattr(audio, "gen_filter"):
+        return None
+    params = (("GAINHF", 0.05), ("GAIN", 0.22)) if heavy else (("GAINHF", 0.45), ("GAIN", 0.75))
+    try:
+        filt = audio.gen_filter("LOWPASS", *params)
+    except Exception:
+        filt = None
+    if cache is not None:
+        cache[key] = filt
+    return filt
+
+
+def restore_filter(source, audio):
+    """Clear a wall from one source without stripping the underwater muffle.
+
+    A source the room owns is created raw (not through a soundgroup), so the
+    camera's dive filter never reached it; deleting its direct filter on the
+    way out of a wall would then also drop the muffle it inherited, and the
+    room would sound clear to a diver. Restore whatever filter is active
+    globally instead.
+    """
+    try:
+        active = getattr(audio, "filter", None)
+        if active and active[-1] is not None:
+            source.direct_filter = active[-1]
+        else:
+            del source.direct_filter
+    except Exception:
+        pass
+
+
 class ListenerPose:
     """The listener's head: forward/up vectors, position, and what it faces.
 
