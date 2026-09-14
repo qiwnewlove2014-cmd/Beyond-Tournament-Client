@@ -431,9 +431,29 @@ class CinemaSpeakerBank:
         history = list(self._recent)
         history.append((left, right))
         index = len(history) - 1
+        feeds = self._feeds_for(history, index, targets, bound=False)
+        if feeds:
+            return feeds
+        # Nobody could be fed: every speaker of this room carries a trim deeper
+        # than the audio the room still holds. A trimmed speaker waiting for
+        # the history it needs is by design -- starting a few milliseconds late
+        # IS the trim -- but that wait has always assumed some other speaker
+        # queues the frames that build the history up. In a room where every
+        # speaker was given a delay there is no such speaker, so the room never
+        # queued its first frame, never grew the history, and stayed silent for
+        # the whole song (reported as "I set a delay on each speaker and cinema
+        # mode went quiet"). Cut every trim back to what this frame can reach:
+        # each speaker starts a little early for the few frames the room needs
+        # and carries its real trim from then on.
+        return self._feeds_for(history, index, targets, bound=True)
+
+    def _feeds_for(self, history, index, targets, bound):
+        """One render per distinct trim, or nothing when none is reachable."""
         groups = {}
         for slot in targets:
-            groups.setdefault(self._applied_trim(slot, history), []).append(slot)
+            samples = (self._reachable_trim(slot, history) if bound
+                       else self._applied_trim(slot, history))
+            groups.setdefault(samples, []).append(slot)
         feeds = []
         for samples in sorted(groups):
             source = self._delayed_window(history, index, samples)
@@ -444,6 +464,21 @@ class CinemaSpeakerBank:
                 if slot in wanted:
                     feeds.append((slot, pcm))
         return feeds
+
+    def _reachable_trim(self, slot, history):
+        """This speaker's trim, cut back to the audio the room still holds.
+
+        ``_applied_trim`` deliberately plays the FULL trim while the room is
+        still filling its history, because a speaker starting that late is
+        what the trim asks for. This is the same trim with the one thing that
+        makes feeding possible in the first place enforced: it can never be
+        deeper than ``history``, which is what ``_delayed_window`` can cut.
+        """
+        want = self._delay_samples(slot)
+        if want <= 0:
+            return 0
+        per_frame = max(1, len(history[-1][0]) // 2)
+        return min(want, max(0, (len(history) - 1) * per_frame))
 
     def _feed_slots(self):
         """The speakers a frame is queued to right now.

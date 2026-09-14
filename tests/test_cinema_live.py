@@ -268,6 +268,32 @@ class SpeakerDelayTests(unittest.TestCase):
         self.assertEqual(right.buffers[-1].data, tiny(0)[1])
         self.assertNotEqual(right.buffers[-1].data, tiny(11)[1])
 
+    def test_a_room_where_every_speaker_carries_a_trim_still_plays(self):
+        """Nothing else can seed the room's history once every speaker is late.
+
+        A trim is played as a cut into the audio the room still holds, so a
+        trimmed speaker is only fed once that much audio is queued -- a speaker
+        starting a few milliseconds late is what a trim IS. That wait needs
+        some other speaker to queue the first frames, and a room whose every
+        speaker was given a delay has none: the room never queued its first
+        frame, so it never had the history it was waiting for and stayed silent
+        for the whole song (the reported "I set a delay on each speaker and
+        cinema mode went quiet").
+        """
+        bank = self.make({"front_l": 20.0, "front_r": 20.0})
+        for tag in range(6):
+            self.assertTrue(bank.queue_frame(*self.frame(tag)))
+
+        for slot in ("front_l", "front_r"):
+            self.assertEqual(bank.slot_sources[slot].buffers_queued, 6, slot)
+        self.assertEqual(bank.frames_queued, 6)
+        # The first frames play a shorter cut (the room cannot reach 20 ms back
+        # yet); the full trim is in force as soon as the history is deep
+        # enough, which here is the same programme 20 ms -- one frame's worth --
+        # behind the live frame.
+        self.assertEqual(bank.slot_sources["front_l"].buffers[-1].data,
+                         self.frame(3)[0])
+
     def test_realign_refills_a_trimmed_speaker_with_trimmed_frames(self):
         """A refill hands it the delayed programme, never the live frame.
 
