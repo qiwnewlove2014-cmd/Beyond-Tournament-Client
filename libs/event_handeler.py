@@ -1599,6 +1599,14 @@ class EventHandeler:
                 if (isinstance(streamer, JukeboxRelayReceiver)
                         and getattr(streamer, "running", False)
                         and getattr(streamer, "_play_started", False)):
+                    room = getattr(streamer, "cinema", None)
+                    if room is not None and room.sources:
+                        # A cinema room owns one source per speaker, so this
+                        # receiver's own pair is deliberately None and its
+                        # 40ms-per-frame backlog no longer exists: the room's
+                        # frame queue IS the backlog, and a per-speaker delay
+                        # trim is latency the song gains that no queue can see.
+                        return room.buffered_ms() + room.extra_latency_ms()
                     try:
                         src = getattr(streamer, "source_l", None)
                         queued = int(src.buffers_queued) if src is not None else 0
@@ -1620,6 +1628,18 @@ class EventHandeler:
                     # machine's audible start ran past the shared deadline
                     # (slow resolve/startup makes the local song trail the
                     # room, so its notes must wait for it to catch up).
+                    late_ms = int(
+                        max(0.0, float(getattr(streamer, "direct_late_s", 0.0) or 0.0)) * 1000)
+                    room = getattr(streamer, "cinema", None)
+                    if room is not None and room.sources:
+                        # Cinema mode replaces the stereo pair with the room's
+                        # own speakers, so the sources read below carry none of
+                        # this song: measuring them reported about one frame of
+                        # backlog for a room that is really a whole queue plus
+                        # its delay trims behind, and the notes landed early by
+                        # the difference.
+                        return (room.buffered_ms() + room.extra_latency_ms()
+                                + late_ms)
                     try:
                         src = getattr(streamer, "spatial_src_l", None)
                         if src is None:
@@ -1627,8 +1647,6 @@ class EventHandeler:
                         queued = int(src.buffers_queued) if src is not None else 0
                     except Exception:
                         queued = 0
-                    late_ms = int(
-                        max(0.0, float(getattr(streamer, "direct_late_s", 0.0) or 0.0)) * 1000)
                     return max(queued, 1) * 20 + late_ms
             return None
         except Exception:

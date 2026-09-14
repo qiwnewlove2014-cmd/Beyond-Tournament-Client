@@ -120,6 +120,7 @@ class CinemaSpeakerBank:
         self.last_output_at = None
         self.failure_reason = None
         self.frames_queued = 0
+        self._frame_ms = 20.0
         self._plays_started = False
         self._build()
 
@@ -293,6 +294,14 @@ class CinemaSpeakerBank:
                 queued += 1
             self.frames_queued += 1
             self._recent.append((left, right))
+            # One frame per speaker per call, so the queued depth IS a duration
+            # once the frame's own size is known -- and the transports do not
+            # agree on it (the direct streamer decodes 20 ms at a time, the
+            # server relay hands 40 ms PCM frames). Measured from the audio
+            # handed over, never assumed: see ``buffered_ms``.
+            samples = len(left) // 2
+            if samples > 0:
+                self._frame_ms = samples * 1000.0 / SAMPLERATE
             return True
         except Exception:
             # Return whatever was not queued, then reset the whole room so
@@ -500,6 +509,36 @@ class CinemaSpeakerBank:
         """Frames queued on the slowest speaker this frame reaches (min, not sum)."""
         counts = [self._queued_of(slot) for slot in self._feed_slots()]
         return min(counts) if counts else 0
+
+    def frame_ms(self):
+        """Milliseconds of audio in one queued frame (20 ms until told)."""
+        return self._frame_ms
+
+    def buffered_ms(self):
+        """How far behind the live edge this room's audio is, in milliseconds.
+
+        What a remote instrument note has to wait out to land on the beat the
+        listener actually hears: one buffer per speaker per frame, so the
+        shallowest speaker's queue is the room's distance behind the live
+        edge. A room is never reported as "level with the live edge" either --
+        the frame being staged right now is still ahead of what is audible.
+        """
+        return int(round(max(self.queued_frames(), 1) * self._frame_ms))
+
+    def extra_latency_ms(self):
+        """The room's delay trims, in milliseconds: latency no queue can see.
+
+        A trim is the same programme played late, so the song gains that much
+        latency without one extra frame being queued. A note scheduled from
+        the queue alone would land that far ahead of the deepest speaker;
+        ``listener.py``/``router.py`` report it as
+        ``CinemaRenderer.extra_latency_s`` for exactly this. A room with no
+        trims reports zero, so the shipped jukebox is unchanged.
+        """
+        try:
+            return int(round(float(self.renderer.extra_latency_s or 0.0) * 1000.0))
+        except Exception:
+            return 0
 
     def playing(self):
         """True when every speaker is playing."""

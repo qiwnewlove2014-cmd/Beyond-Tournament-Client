@@ -45,6 +45,13 @@ def _handler_with_jukebox(entries):
     return handler
 
 
+def _room(buffered_ms=120, extra_ms=60):
+    """A cinema room's own measurement: its frame queue and its delay trims."""
+    return SimpleNamespace(sources=(object(), object()),
+                           buffered_ms=lambda: buffered_ms,
+                           extra_latency_ms=lambda: extra_ms)
+
+
 def _relay_entry(queued=4, started=True):
     # A real receiver subclass built via __new__ (its __init__ needs live
     # OpenAL sources) so the isinstance check in the scheduler recognizes it.
@@ -111,6 +118,41 @@ class ActiveJukeboxBufferTests(unittest.TestCase):
         entry["streamer"].running = False
         handler = _handler_with_jukebox(entry)
         self.assertIsNone(handler._active_jukebox_buffer_ms())
+
+    def test_a_relay_room_reports_the_rooms_own_queue_and_trims(self):
+        """A cinema room replaces the receiver's pair, so its queue is the lag.
+
+        The 40ms-per-frame backlog belongs to the two plain sources, and in
+        cinema mode those are deliberately None: measuring them reported the
+        floor of one frame for a room that is a whole queue behind, so every
+        remote note landed ahead of the beat.
+        """
+        entry = _relay_entry(queued=4)
+        entry["streamer"].cinema = _room(buffered_ms=140, extra_ms=60)
+        handler = _handler_with_jukebox(entry)
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 200)
+
+    def test_a_direct_room_reports_queue_plus_trims_plus_lateness(self):
+        """The room's queue, its delay trims, and this machine's late start."""
+        entry = _direct_entry(queued=5, late_s=1.5)
+        entry["streamer"].cinema = _room(buffered_ms=140, extra_ms=60)
+        handler = _handler_with_jukebox(entry)
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 1700)
+
+    def test_an_untrimmed_room_reports_only_its_queue(self):
+        # The shipped jukebox has no trims, so nothing is added for them.
+        entry = _direct_entry(queued=5, late_s=0.0)
+        entry["streamer"].cinema = _room(buffered_ms=100, extra_ms=0)
+        handler = _handler_with_jukebox(entry)
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 100)
+
+    def test_a_room_that_has_no_speakers_is_ignored(self):
+        """A released room must not be measured: the plain pair takes over."""
+        entry = _direct_entry(queued=5, late_s=0.0)
+        room = SimpleNamespace(sources=())
+        entry["streamer"].cinema = room
+        handler = _handler_with_jukebox(entry)
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 100)
 
 
 class ScheduleRemoteNoteTests(unittest.TestCase):

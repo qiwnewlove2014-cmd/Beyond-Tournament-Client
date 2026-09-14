@@ -328,6 +328,71 @@ class SpeakerDelayTests(unittest.TestCase):
         self.assertEqual(right.buffers_queued, 7)
 
 
+class RoomLagMeasurementTests(unittest.TestCase):
+    """What a remote instrument note has to wait out to land on the beat.
+
+    Remote jam notes are delayed by how far behind the song's shared clock the
+    listener's own audio is. A room is the one output whose audio does not sit
+    on a single source, so it has to measure itself: one queued frame per
+    speaker IS the backlog once the frame's size is known, and a per-speaker
+    delay trim is latency the song gains that no queue depth can see.
+    """
+
+    def make(self, delays=None, **kwargs):
+        from math import cos, radians, sin
+        from libs.audio.cinema.layout import IDEAL_BEARING
+        game = FakeGame()
+        room_specs = []
+        for slot, delay in (delays or {"front_l": 0.0, "front_r": 0.0}).items():
+            angle = radians(IDEAL_BEARING[slot])
+            room_specs.append(CinemaSpeakerSpec(
+                slot,
+                (ANCHOR[0] + sin(angle) * 8.0,
+                 ANCHOR[1] + cos(angle) * 8.0,
+                 ANCHOR[2]),
+                delay_ms=delay,
+            ))
+        renderer = CinemaRenderer(ANCHOR, "front_only", specs=room_specs)
+        return CinemaSpeakerBank(game, renderer, volume=100, cabinet_volume=100,
+                                 occlusion_provider=lambda *a: 0, **kwargs)
+
+    def test_a_frame_is_measured_not_assumed(self):
+        """The direct streamer hands 20 ms frames and the relay 40 ms."""
+        bank = self.make()
+        self.assertEqual(bank.frame_ms(), 20.0)          # nothing queued yet
+        bank.queue_frame(*frame(0, size=960))            # 20 ms at 48 kHz
+        self.assertEqual(bank.frame_ms(), 20.0)
+        bank.queue_frame(*frame(1, size=1920))           # the relay's 40 ms
+        self.assertEqual(bank.frame_ms(), 40.0)
+
+    def test_the_queue_depth_is_the_rooms_distance_behind_the_live_edge(self):
+        bank = self.make()
+        for tag in range(5):
+            bank.queue_frame(*frame(tag, size=960))
+        self.assertEqual(bank.buffered_ms(), 100)
+
+    def test_a_room_is_never_reported_as_level_with_the_live_edge(self):
+        # Same floor as the plain stereo path: the frame being staged right
+        # now is still ahead of what is audible.
+        bank = self.make()
+        self.assertEqual(bank.buffered_ms(), 20)
+
+    def test_delay_trims_are_latency_the_queue_cannot_see(self):
+        bank = self.make({"front_l": 0.0, "front_r": 60.0})
+        for tag in range(6):
+            bank.queue_frame(*frame(tag, size=960))
+        # The trimmed speaker is fed the same programme 60 ms late, so the
+        # room has gained 60 ms on top of whatever it has queued.
+        self.assertEqual(bank.extra_latency_ms(), 60)
+
+    def test_an_untrimmed_room_adds_nothing(self):
+        bank = self.make()
+        for tag in range(6):
+            bank.queue_frame(*frame(tag, size=960))
+        self.assertEqual(bank.extra_latency_ms(), 0)
+        self.assertEqual(bank.buffered_ms(), 120)
+
+
 class RendererSignatureTests(unittest.TestCase):
     """The room has to be able to tell "the same room" from "a changed one"."""
 
