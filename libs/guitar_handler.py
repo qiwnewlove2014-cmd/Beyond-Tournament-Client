@@ -119,7 +119,22 @@ class GuitarHandler:
 
     def feed_monitor(self):
         """Play the raw strum/chord frames back at the player's position so
-        the performer hears their own playing (3D monitor)."""
+        the performer hears their own playing (3D monitor).
+
+        Also the one place a capture worker's failure reaches the player: the
+        worker cannot speak, so the first frame after it retires a dead device
+        turns guitar mode off and says why, instead of leaving a silent monitor
+        and an "on" light. Toggling again reopens the device (see
+        _start_recording).
+        """
+        failure = self.instrument_input.take_device_error()
+        if failure:
+            self.active = False
+            if self.monitor:
+                self.monitor.close()
+                self.monitor = None
+            speak(f"{failure}. Toggle guitar mode to try again.")
+            return
         raw_frames = self.instrument_input.drain_raw_frames()
         if raw_frames and self.monitor:
             self.monitor.set_position(
@@ -182,9 +197,9 @@ class GuitarHandler:
                 # briefly open every capture device and keep the one carrying
                 # signal while the player strums. Runs on a background thread
                 # so the game never freezes during the scan.
-                if self.instrument_input.audio_input is not None:
-                    self.instrument_input.audio_input.stop()
-                    self.instrument_input.audio_input = None
+                # Let go of the current handle before the scan opens devices
+                # of its own; a dead one must not stop the switch either.
+                self.instrument_input.release_device()
                 speak("No guitar or pedal name detected. Scanning for signal, play a note.")
                 import threading as _threading
                 _threading.Thread(
@@ -217,12 +232,24 @@ class GuitarHandler:
             speak("No signal found. Choose the input device manually in Options.")
 
     def _start_recording(self):
-        """Turn on guitar mode with the currently selected instrument device."""
+        """Turn on guitar mode with the currently selected instrument device.
+
+        A handle OpenAL has refused is reopened rather than reported missing:
+        the device the player picked is a *name* in their options, and a USB
+        interface unplugged and plugged back in is a new handle on that same
+        name. Only a device that cannot be opened at all is unavailable.
+        """
         from . import instrument_input as _instr
+        if self.instrument_input.audio_input is None:
+            self.instrument_input.reopen(
+                options.get("audio_instrument_input_device", "system default"))
         if self.instrument_input.audio_input is None:
             speak("Instrument input device unavailable.")
             return
-        self.instrument_input.start_recording()
+        if not self.instrument_input.start_recording():
+            # It opened but would not start: the device is gone again.
+            speak("Instrument input device stopped working.")
+            return
         self.active = True
         self.monitor = _instr.GuitarLocalMonitor(self._game.audio_mngr)
         speak("Guitar mode on")

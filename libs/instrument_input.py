@@ -14,7 +14,7 @@ import time
 import cyal
 import numpy as np
 
-from . import options, pitch, speech
+from . import logger, options, pitch, speech
 
 # Device-name hints that suggest a capture device is a guitar/bass line-in.
 # This covers two common setups:
@@ -110,6 +110,9 @@ class InstrumentInput(threading.Thread):
         # are heard near the player without needing the music bot broadcast).
         self._guitar_voice = None
         self.recording = False
+        # Set when the capture handle dies under us (see :meth:`_device_died`):
+        # the capture worker cannot speak, so the next main-thread frame does.
+        self.device_error = None
         self.running = True
         self.start()
 
@@ -129,7 +132,11 @@ class InstrumentInput(threading.Thread):
                 )
                 self.stereo = stereo
                 return
-            except (cyal.exceptions.DeviceNotFoundError, TypeError):
+            except (cyal.exceptions.CyalError, TypeError):
+                # CyalError, not only DeviceNotFoundError: a device that is
+                # listed but cannot be opened (in use, removed between the
+                # list and the click) raises one of the other subclasses, and
+                # the fallback to STEREO16 is worth trying for those too.
                 continue
         self.audio_input = None
         speech.speak(f"Failed to load instrument input device: {device}")
@@ -146,16 +153,63 @@ class InstrumentInput(threading.Thread):
         self._open(device)
 
     def start_recording(self):
-        """Begin capturing into the ring buffer (no-op if the device failed)."""
+        """Begin capturing into the ring buffer. False if it could not start.
+
+        A capture handle is only good for the call that used it: a USB
+        interface unplugged while the game runs leaves an OpenAL error behind
+        rather than a device, and letting that escape into the key press that
+        asked for it (or into the toggle that switched the guitar on) is the
+        same crash the microphone path had. A handle OpenAL refuses is retired
+        here, so the next attempt opens a fresh one from the same name.
+        """
         if self.audio_input is None:
-            return
-        self.audio_input.start()
+            return False
+        try:
+            self.audio_input.start()
+        except cyal.exceptions.CyalError as exc:
+            self._device_died(exc, "start")
+            return False
         self.recording = True
+        return True
 
     def stop_recording(self):
+        """Stop capturing; a device that died on the way out is let go."""
         self.recording = False
-        if self.audio_input is not None:
+        if self.audio_input is None:
+            return
+        try:
             self.audio_input.stop()
+        except cyal.exceptions.CyalError as exc:
+            self._device_died(exc, "stop")
+
+    def release_device(self):
+        """Let go of the capture handle without caring whether it still lives.
+
+        The one place that drops ``audio_input``, so nothing else has to call
+        ``stop()`` on a handle that may already be dead (see
+        :meth:`_device_died`). Safe to call from the main thread at any time.
+        """
+        device, self.audio_input = self.audio_input, None
+        self.recording = False
+        if device is not None:
+            with contextlib.suppress(Exception):
+                device.stop()
+
+    def _device_died(self, exc, where):
+        """Retire a capture handle OpenAL refused, and remember why.
+
+        The reason is kept for the main thread: this runs on the capture
+        worker (or inside a key press), and a session that goes quiet with
+        nothing on screen is how a guitar "just stops working".
+        """
+        self.device_error = f"Instrument input device stopped working ({where})"
+        logger.log(f"[INSTRUMENT] {self.device_error}: {exc}")
+        self.release_device()
+
+    def take_device_error(self):
+        """The device failure nobody has reported yet, once (main thread)."""
+        message, self.device_error = self.device_error, None
+        return message
 
     def _find_music_bot(self):
         """Locate the active MapMusicBot (if any) in the game stack."""
@@ -171,11 +225,25 @@ class InstrumentInput(threading.Thread):
             time.sleep(0.0005)
             if not self.recording or self.audio_input is None:
                 continue
-            if self.audio_input.available_samples >= self.FRAME_SAMPLES:
+            try:
+                ready = self.audio_input.available_samples
+            except cyal.exceptions.CyalError as exc:
+                # The handle is good only for the call that used it. Retire it
+                # and stay alive: this thread is what every later session needs,
+                # and dying here is a guitar that goes quiet for no stated
+                # reason. The failure is reported by the next frame (see
+                # take_device_error).
+                self._device_died(exc, "capture")
+                continue
+            if ready >= self.FRAME_SAMPLES:
                 # cyal counts frames for both formats: mono16 frames are 2
                 # bytes, stereo16 frames are 4 bytes (L+R pairs).
                 buf = bytearray(self.FRAME_SAMPLES * (4 if self.stereo else 2))
-                self.audio_input.capture_samples(buf)
+                try:
+                    self.audio_input.capture_samples(buf)
+                except cyal.exceptions.CyalError as exc:
+                    self._device_died(exc, "capture")
+                    continue
                 if self.stereo:
                     mono = _downmix_stereo(buf)
                     raw = mono
@@ -272,16 +340,13 @@ class InstrumentInput(threading.Thread):
 
     def close(self):
         self.running = False
-        self.recording = False
         if self._guitar_voice is not None:
             try:
                 self._guitar_voice.put(None)  # stop its encode/send thread
             except Exception:
                 pass
             self._guitar_voice = None
-        if self.audio_input is not None:
-            self.audio_input.stop()
-            self.audio_input = None
+        self.release_device()
 
 
 def _downmix_stereo(buf):
