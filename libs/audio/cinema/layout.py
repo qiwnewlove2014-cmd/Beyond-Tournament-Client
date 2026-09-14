@@ -39,6 +39,26 @@ _BEARING_BANDS = (
 # Mirror map for negative bearings; the centre is its own mirror image.
 _MIRROR = {"front_r": "front_l", "side_r": "side_l", "rear_r": "rear_l"}
 
+# Where each slot belongs in a room, in degrees relative to the screen wall
+# (0 = dead ahead, negative = the audience's left). This is the reference the
+# placement resolver measures a builder's speakers against, and it is what
+# lets a rotated or lopsided room still resolve to the right slots.
+IDEAL_BEARING = {
+    "front_c": 0.0,
+    "front_l": -30.0,
+    "front_r": 30.0,
+    "side_l": -90.0,
+    "side_r": 90.0,
+    "rear_l": -150.0,
+    "rear_r": 150.0,
+}
+
+# Slots that only work as a mirrored pair. A left wall speaker with no right
+# wall speaker is not half a room, it is a room with a steering bias, so an
+# unpaired member is dropped and the profile falls back to what the rest of
+# the room can honestly reproduce.
+SLOT_PAIRS = (("side_l", "side_r"), ("rear_l", "rear_r"))
+
 
 def slot_for_bearing(bearing):
     """Nearest slot for a bearing in degrees (0 ahead, +right, +/-180 behind)."""
@@ -72,20 +92,141 @@ class CinemaSpeakerSpec:
     without touching the profile weights. ``delay_ms`` is a deliberate
     Haas-style offset; it never accelerates anything, so the renderer
     reports it as extra latency for the jam-note sync.
+
+    ``aim_yaw`` (absolute degrees, 0 = +Y, +90 = +X, the same convention as
+    ``bearing_from`` and the megaphone speaker's own aim) is the direction
+    the cabinet faces. It is optional and only used to work out whether a
+    listener stands in front of or behind that particular speaker; a speaker
+    without an aim is omnidirectional, which is the right default for a
+    cinema room where every seat has to hear every wall.
     """
 
-    __slots__ = ("slot", "position", "level", "delay_ms", "name")
+    __slots__ = ("slot", "position", "level", "delay_ms", "name",
+                 "room", "aim_yaw", "cone_inner", "cone_outer",
+                 "cone_outer_gain", "declared")
 
-    def __init__(self, slot, position, level=1.0, delay_ms=0.0, name=None):
+    def __init__(self, slot, position, level=1.0, delay_ms=0.0, name=None,
+                 room=None, aim_yaw=None, cone_inner=None, cone_outer=None,
+                 cone_outer_gain=None, declared=None):
         self.slot = str(slot or AUTO_SLOT).strip().lower()
         self.position = (float(position[0]), float(position[1]), float(position[2]))
         self.level = max(0.0, min(4.0, float(level)))
         self.delay_ms = max(0.0, min(100.0, float(delay_ms)))
         self.name = name
+        self.room = str(room or "").strip()
+        self.aim_yaw = None if aim_yaw is None else float(aim_yaw) % 360.0
+        self.cone_inner = None if cone_inner is None else max(0.0, float(cone_inner))
+        self.cone_outer = None if cone_outer is None else max(0.0, float(cone_outer))
+        self.cone_outer_gain = (None if cone_outer_gain is None
+                                else max(0.0, min(1.0, float(cone_outer_gain))))
+        # The slot the builder typed in (None when they left it on auto), kept
+        # for diagnostics: a room that had to overrule its own labels should be
+        # able to say so out loud.
+        self.declared = None if declared is None else str(declared).strip().lower()
+
+    @property
+    def has_cone(self):
+        """True when this speaker's aim should shape its output at all."""
+        return self.aim_yaw is not None and (self.cone_inner is not None
+                                             or self.cone_outer is not None)
 
     def __repr__(self):
         return (f"CinemaSpeakerSpec({self.slot!r}, level={self.level}, "
-                f"delay_ms={self.delay_ms})")
+                f"delay_ms={self.delay_ms}, aim={self.aim_yaw})")
+
+
+# Percent-scaled attributes a builder types into a map element. ``level`` and
+# ``volume`` both mean the same thing to a speaker (how hot it runs), and
+# ``delay`` is accepted in milliseconds for cinema speakers because a wall
+# speaker's offset is far smaller than a megaphone tower's.
+_PERCENT_KEYS = ("level", "volume", "gain")
+
+
+def _first(raw, keys, default=None):
+    for key in keys:
+        if key in raw and raw[key] is not None:
+            return raw[key]
+    return default
+
+
+def _number(value, default=None):
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _position_of(raw):
+    """A speaker's world position, from x/y/z or from the centre of its box."""
+    x = _number(_first(raw, ("x", "position_x")))
+    y = _number(_first(raw, ("y", "position_y")))
+    z = _number(_first(raw, ("z", "position_z")))
+    if x is not None and y is not None and z is not None:
+        return (x, y, z)
+    try:
+        minx, maxx, miny, maxy, minz, maxz = (float(raw["minx"]), float(raw["maxx"]),
+                                              float(raw["miny"]), float(raw["maxy"]),
+                                              float(raw["minz"]), float(raw["maxz"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return ((minx + maxx) / 2.0, (miny + maxy) / 2.0, (minz + maxz) / 2.0)
+
+
+def coerce_spec(raw):
+    """Turn a map element (or a spec object) into a usable speaker, or None.
+
+    Map data is builder-authored and travels through a network round trip, so
+    every field is treated as advisory: an unusable one is dropped here rather
+    than allowed to break playback for the whole room.
+    """
+    if isinstance(raw, CinemaSpeakerSpec):
+        # A spec built by hand (a test, a future caller) carries its own slot
+        # as its label; only a spec that was explicitly left on ``auto`` has
+        # nothing to declare.
+        if raw.declared is None and raw.slot in IDEAL_BEARING:
+            raw.declared = raw.slot
+        return raw
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        source = raw
+    else:
+        source = {key: getattr(raw, key) for key in (
+            "x", "y", "z", "minx", "maxx", "miny", "maxy", "minz", "maxz",
+            "channel", "slot", "room", "level", "volume", "delay", "delay_ms",
+            "aim_yaw", "aim_pitch", "inner_cone_angle", "outer_cone_angle",
+            "outer_cone_gain", "id") if hasattr(raw, key)}
+        position = getattr(raw, "position", None)
+        if position is not None:
+            source["x"], source["y"], source["z"] = position
+    position = _position_of(source)
+    if position is None:
+        return None
+    declared = _first(source, ("channel", "slot"))
+    declared = None if declared is None else str(declared).strip().lower()
+    level = _number(_first(source, _PERCENT_KEYS), None)
+    if level is None:
+        level = 1.0
+    elif level > 4.0:
+        level = level / 100.0
+    delay_ms = _number(_first(source, ("delay_ms",)), None)
+    if delay_ms is None:
+        delay_ms = _number(_first(source, ("delay",)), 0.0)
+    return CinemaSpeakerSpec(
+        declared if declared else AUTO_SLOT,
+        position,
+        level=level,
+        delay_ms=delay_ms,
+        name=_first(source, ("id", "name")),
+        room=_first(source, ("room",), ""),
+        aim_yaw=_number(_first(source, ("aim_yaw",))),
+        cone_inner=_number(_first(source, ("inner_cone_angle", "cone_inner"))),
+        cone_outer=_number(_first(source, ("outer_cone_angle", "cone_outer"))),
+        cone_outer_gain=_number(_first(source, ("outer_cone_gain", "cone_outer_gain"))),
+        declared=declared,
+    )
 
 
 def _ring_position(anchor, bearing, radius):
@@ -141,21 +282,16 @@ class CinemaLayout:
         speaker does not exist' rather than break playback for the room.
         """
         for spec in specs or ():
-            slot = getattr(spec, "slot", None)
-            position = getattr(spec, "position", None)
-            if slot is None or position is None:
+            speaker = coerce_spec(spec)
+            if speaker is None:
                 continue
-            try:
-                resolved = (float(position[0]), float(position[1]), float(position[2]))
-            except (TypeError, ValueError, IndexError):
-                continue
+            slot = speaker.slot
             if slot == AUTO_SLOT:
-                slot = slot_for_bearing(bearing_from(self.anchor, resolved))
+                slot = slot_for_bearing(bearing_from(self.anchor, speaker.position))
             if slot not in SLOT_ORDER:
                 continue
-            yield CinemaSpeakerSpec(slot, resolved, getattr(spec, "level", 1.0),
-                                    getattr(spec, "delay_ms", 0.0),
-                                    getattr(spec, "name", None))
+            speaker.slot = slot
+            yield speaker
 
     def _build_ring(self):
         radii = {

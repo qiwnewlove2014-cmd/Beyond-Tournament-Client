@@ -160,6 +160,32 @@ class CinemaRenderer:
         return self._slots
 
     @property
+    def signature(self):
+        """A stable description of the room's shape, for reuse decisions.
+
+        Two renderers built from the same speakers, profile and trims are the
+        same room even though they are different objects, so a caller that
+        re-offers a song on a map reload keeps the room it already has. A
+        renderer whose speaker set, positions, levels or aims differ is a
+        *different* room: treating those as equal is what made a speaker a
+        builder placed mid-song inaudible until the feature was toggled.
+        """
+        slots = []
+        for slot in self._slots:
+            position = self.layout.position(slot)
+            spec = self.layout.spec(slot)
+            slots.append((
+                slot,
+                None if position is None else tuple(round(float(value), 3)
+                                                    for value in position),
+                round(float(self.layout.level(slot)), 4),
+                round(float(self.layout.delay_ms(slot)), 4),
+                None if spec is None or spec.aim_yaw is None else round(float(spec.aim_yaw), 3),
+                False if spec is None else bool(spec.has_cone),
+            ))
+        return (self.profile.name, self.max_speakers, tuple(slots))
+
+    @property
     def extra_latency_s(self):
         """Latency this room adds beyond the transport's own buffering.
 

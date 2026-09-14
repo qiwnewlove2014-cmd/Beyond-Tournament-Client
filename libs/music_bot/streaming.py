@@ -257,6 +257,23 @@ class AudioStreamer(threading.Thread):
                 return False
         return True
 
+    def _start_output_playing(self):
+        """Start whichever sources are not playing yet, as one output.
+
+        In a cinema room the bank owns that decision, because starting a
+        speaker on its own is what makes one of them permanently miss the
+        room's beat: the bank puts a speaker that fell behind back on the
+        room's content instant first (see ``CinemaSpeakerBank.realign``) and
+        then starts the room together.
+        """
+        if self.cinema is not None:
+            try:
+                self.cinema.start_playback()
+                return
+            except Exception:
+                pass
+        self._play_all()
+
     def _buffers_queued(self):
         total = 0
         for src in self._all_sources():
@@ -1407,7 +1424,7 @@ class AudioStreamer(threading.Thread):
 
                     # Restart if source stopped and we have buffers queued (only if new buffers are queued and not EOF)
                     if not eof and not self._all_playing() and self._buffers_queued() > 0:
-                        self._play_all()
+                        self._start_output_playing()
                 except Exception:
                     pass
 
@@ -1434,7 +1451,7 @@ class AudioStreamer(threading.Thread):
                             self._update_spatial_gain()
                     # If we are paused at the very end, wait here until resumed
                     if not self.paused and not self._all_playing() and self._buffers_queued() > 0:
-                        self._play_all()
+                        self._start_output_playing()
                     time.sleep(0.05)
             except Exception:
                 pass
@@ -1516,7 +1533,7 @@ class AudioStreamer(threading.Thread):
             if not self.running or self.paused or self._buffers_queued() <= 0:
                 return False
             if not self._all_playing():
-                self._play_all()
+                self._start_output_playing()
                 return True
         return False
 
@@ -1533,6 +1550,18 @@ class AudioStreamer(threading.Thread):
                     break
         with self._lock:
             try:
+                if self.cinema is not None:
+                    # A cinema room is N speakers, and pausing only the one this
+                    # stream was handed leaves the rest of them playing their
+                    # queues -- and then replaying from the front of those
+                    # queues on resume, which is heard as speakers that never
+                    # line up again after a pause. The bank holds them all,
+                    # and puts a speaker that ran dry during the hold back on
+                    # the room's content instant before resuming.
+                    self.cinema.set_paused(paused)
+                    if not paused:
+                        self.ready_event.set()
+                    return
                 if paused:
                     self.source.pause()
                 else:

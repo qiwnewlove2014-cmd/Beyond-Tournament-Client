@@ -64,6 +64,9 @@ class Map:
         # 🎵 Music jukeboxes (persistent map elements). Positions are used to
         # anchor jukebox audio in 3D space.
         self.jukebox_list = []
+        # 🎬 Cinema speakers: same idea as the jukebox list, one entry per
+        # placed speaker. The room they form is resolved per cabinet.
+        self.cinema_speaker_list = []
 
     def valid_straight_path(self, position1, position2):
         x1, y1, z1 = position1
@@ -272,6 +275,11 @@ class Map:
         self.minigame_table_list.clear()
         self.travel_point_list.clear()
         self.jukebox_list.clear()
+        # Tolerant on purpose: partially built maps (tests, a map object made
+        # before this feature existed) have no list to clear.
+        cinema_speakers = getattr(self, "cinema_speaker_list", None)
+        if cinema_speakers is not None:
+            cinema_speakers.clear()
         self.megaphone_speakers.clear()
 
     def get_ambiences_at(self, x, y, z):
@@ -687,6 +695,69 @@ class Map:
             if jb.id == jukebox_id:
                 return jb
         return None
+
+    def spawn_cinemaSpeaker(
+        self,
+        minx=0,
+        maxx=0,
+        miny=0,
+        maxy=0,
+        minz=0,
+        maxz=0,
+        id="",
+        x=None,
+        y=None,
+        z=None,
+        channel="auto",
+        room="",
+        level=100,
+        delay=0.0,
+        **kwargs,
+    ):
+        """Spawns a cinema speaker element (one speaker of a room)."""
+        # Newer XML (and the builder flow) carries an explicit point; older
+        # hand-written maps only have the box, whose centre is the speaker.
+        if x is not None and y is not None and z is not None:
+            try:
+                minx = maxx = float(x)
+                miny = maxy = float(y)
+                minz = maxz = float(z)
+            except (TypeError, ValueError):
+                pass
+        obj = CinemaSpeakerZone(
+            id, minx, maxx, miny, maxy, minz, maxz,
+            channel=channel, room=room, level=level, delay=delay,
+            aim_yaw=kwargs.get("aim_yaw"),
+            cone_inner=kwargs.get("inner_cone_angle"),
+            cone_outer=kwargs.get("outer_cone_angle"),
+            cone_outer_gain=kwargs.get("outer_cone_gain"),
+        )
+        # Tolerant on purpose: partially built maps (tests, a map object made
+        # before this feature existed) have no list yet.
+        if getattr(self, "cinema_speaker_list", None) is None:
+            self.cinema_speaker_list = []
+        index = -1
+        for i, element in enumerate(self.cinema_speaker_list):
+            if element.id == id:
+                index = i
+                break
+        if index > -1:
+            self.cinema_speaker_list[index] = obj
+        else:
+            self.cinema_speaker_list.append(obj)
+
+    def get_cinema_speakers(self, room=None):
+        """Speakers of a room as plain dicts; every speaker when room is None.
+
+        The placement resolver does the room/radius filtering, so the map
+        stays a dumb container: it never decides which speaker belongs where.
+        """
+        speakers = []
+        for speaker in getattr(self, "cinema_speaker_list", ()):
+            if room is not None and speaker.room and speaker.room != str(room):
+                continue
+            speakers.append(speaker.as_spec())
+        return speakers
 
     def spawn_perkMachine(
         self,
@@ -1505,6 +1576,69 @@ class SoundSource(BaseMapObj):
                 self.sound.destroy()
         self.sound = None
         self.soundgroup.destroy()
+
+class CinemaSpeakerZone(BaseMapObj):
+    """One speaker of a cinema room, placed by a builder.
+
+    Only geometry lives here: where the speaker stands, which role the
+    builder claimed for it and how it is trimmed. Which slot it actually
+    ends up playing is decided later, per listener, by
+    :mod:`libs.audio.cinema.placement` -- a map that says ``front_l`` in the
+    wrong place must not be able to pin the stereo image to the wrong wall.
+    """
+
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, channel="auto",
+                 room="", level=100, delay=0.0, aim_yaw=None, cone_inner=None,
+                 cone_outer=None, cone_outer_gain=None, **kwargs):
+        super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "cinemaSpeaker")
+        self.label = "Cinema Speaker"
+        self.channel = str(channel or "auto").strip().lower()
+        self.room = str(room or "").strip()
+        try:
+            self.level = float(level)
+        except (TypeError, ValueError):
+            self.level = 100.0
+        try:
+            self.delay = float(delay)
+        except (TypeError, ValueError):
+            self.delay = 0.0
+        self.aim_yaw = aim_yaw
+        self.cone_inner = cone_inner
+        self.cone_outer = cone_outer
+        self.cone_outer_gain = cone_outer_gain
+
+    @property
+    def position(self):
+        try:
+            return (
+                (float(self.minx) + float(self.maxx)) / 2.0,
+                (float(self.miny) + float(self.maxy)) / 2.0,
+                (float(self.minz) + float(self.maxz)) / 2.0,
+            )
+        except Exception:
+            return (0.0, 0.0, 0.0)
+
+    def as_spec(self):
+        """The plain-data view the placement resolver consumes."""
+        spec = {
+            "id": self.id,
+            "channel": self.channel,
+            "room": self.room,
+            "level": self.level,
+            "delay_ms": self.delay,
+        }
+        x, y, z = self.position
+        spec["x"], spec["y"], spec["z"] = x, y, z
+        if self.aim_yaw is not None:
+            spec["aim_yaw"] = self.aim_yaw
+        if self.cone_inner is not None:
+            spec["inner_cone_angle"] = self.cone_inner
+        if self.cone_outer is not None:
+            spec["outer_cone_angle"] = self.cone_outer
+        if self.cone_outer_gain is not None:
+            spec["outer_cone_gain"] = self.cone_outer_gain
+        return spec
+
 
 class JukeboxZone(BaseMapObj):
     """A music jukebox element. Stores the position its audio is anchored to."""

@@ -192,6 +192,21 @@ class JukeboxRelayReceiver(threading.Thread):
     @audio_probe.measured("relay.reclaim")
     def _reclaim(self, *, stopped=False):
         self._check_owner()
+        if self.cinema is not None:
+            # The room owns one buffer pool per speaker, so it owns the
+            # reclamation too. Unqueueing the room's finished buffers into
+            # *this* receiver's pool -- which cinema mode never allocates from
+            # -- permanently drained the room's pools: it played the handful
+            # of frames it started with and then refused every later frame, so
+            # the speakers stopped consuming and the watchdog rebuilt the room
+            # every ~8s forever (heard as a song that cuts in and out).
+            try:
+                reclaimed = self.cinema.reclaim()
+            except Exception:
+                reclaimed = False
+            if reclaimed and not stopped:
+                self.last_output_at = self._clock()
+            return
         for source in self._output_sources():
             if source is None:
                 continue

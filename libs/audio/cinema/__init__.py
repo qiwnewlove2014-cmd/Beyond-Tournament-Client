@@ -32,6 +32,14 @@ the side/rear slots carry the *difference*, which is what makes a room feel
 wide instead of hollow. Giving two speakers identical content is what
 produces comb filtering, so no two slots in a profile share weights.
 
+Where the speakers *are* is a separate problem from what they play, because
+map data is hand-placed and frequently wrong. ``placement.py`` measures
+every speaker against the room's geometry and resolves mislabelled, rotated,
+duplicated or unpaired speakers into a working room (or refuses the room
+entirely, which falls back to the plain jukebox pair), and ``listener.py``
+answers the other half of the question -- what the player is facing, and
+whether an aimed speaker is pointing at them.
+
 The renderer is deliberately pure PCM: it never touches OpenAL. Every
 OpenAL call in the client stays on the audio owner thread (see
 ``AudioManager.loop`` and the audio inbox), so source creation, buffer
@@ -46,29 +54,59 @@ like the plain two-source jukebox it always was.
 from .bank import CinemaSpeakerBank
 from .channel import (ChannelAnalyzer, mid_side, mix_channels, mix_samples,
                      source_layout, to_samples)
-from .layout import SLOT_ORDER, CinemaLayout, CinemaSpeakerSpec
-from .plugin import (CinemaSpeakerHost, acquire_bank, acquire_renderer,
-                     host_for, release_all, release_renderer, set_enabled)
+from .layout import (IDEAL_BEARING, SLOT_ORDER, CinemaLayout, CinemaSpeakerSpec,
+                     coerce_spec, slot_for_bearing)
+from .listener import ListenerPose, cone_gain, facing_report
+from .placement import (AUTO_PROFILE, PlacedSpeaker, RoomPlacement, RoomPlan,
+                        auto_profile, exclusive_speakers, nearest_anchor,
+                        resolve_room, room_profile)
+from .plugin import (CINEMA_AUTO, CINEMA_OFF, CinemaSpeakerHost, acquire_bank,
+                     acquire_renderer, cabinet_anchor, cinema_room, host_for,
+                     map_cabinet_anchors, map_speakers, preview_room, release_all,
+                     release_renderer, room_diagnosis, set_enabled)
 from .profiles import (DEFAULT_PROFILE, PROFILES, CinemaProfile,
                        get_profile, profile_names)
 from .router import CinemaRenderer
 
 __all__ = [
     "SLOT_ORDER",
+    "AUTO_PROFILE",
     "CinemaLayout",
     "CinemaProfile",
     "CinemaRenderer",
     "CinemaSpeakerBank",
     "CinemaSpeakerHost",
     "CinemaSpeakerSpec",
+    "IDEAL_BEARING",
+    "ListenerPose",
+    "PlacedSpeaker",
+    "RoomPlacement",
+    "RoomPlan",
+    "CINEMA_AUTO",
+    "CINEMA_OFF",
     "ChannelAnalyzer",
     "DEFAULT_PROFILE",
     "PROFILES",
     "acquire_bank",
     "acquire_renderer",
+    "auto_profile",
+    "cabinet_anchor",
+    "cinema_room",
+    "coerce_spec",
+    "cone_gain",
+    "exclusive_speakers",
+    "nearest_anchor",
+    "facing_report",
     "get_profile",
     "host_for",
+    "map_cabinet_anchors",
+    "map_speakers",
     "mid_side",
+    "preview_room",
+    "resolve_room",
+    "room_diagnosis",
+    "room_profile",
+    "slot_for_bearing",
     "mix_channels",
     "mix_samples",
     "profile_names",

@@ -2279,8 +2279,10 @@ class EventHandeler:
                 eq_profile=data.get("eq_profile", "normal"),
                 eq_values=data.get("eq_values"),
                 cabinet_volume=data.get("volume", 100),
-                # Per-cabinet cinema profile. Absent until the server sends
-                # one, so every cabinet stays a plain two-source jukebox.
+                # What the map says this cabinet plays through: "auto", "off",
+                # or a cinema profile. "auto" on a map with no speakers around
+                # the cabinet is the plain two-source jukebox, unchanged.
+                cinema_mode=data.get("cinema_mode"),
                 cinema_profile=data.get("cinema_profile"),
                 received_at=received_at,
             ))

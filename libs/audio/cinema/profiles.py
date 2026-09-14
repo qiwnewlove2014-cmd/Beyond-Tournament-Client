@@ -121,9 +121,15 @@ PROFILES = {
         },
         equal_power_surrounds=True,
     ),
-    # The full room. The rears lean toward their own side so bass and vocals
-    # still come from the screen; a rear pair mixed hard would pull the
-    # performance behind the audience.
+    # The full room. The rears lean toward the OPPOSITE channel of the side
+    # they stand on (rear_l carries more of the right channel): that is what
+    # decorrelates them from the screen wall. A rear pair carrying its own
+    # side would be the front pair again, quieter and a metre further away --
+    # two correlated speakers at different distances comb filter at the
+    # listener, which is the one thing that makes a room sound broken. The
+    # level (a quarter of a front channel) is what keeps bass and vocals at
+    # the screen and the room around the audience. Flip the two weights and
+    # the rears become a mirrored copy of the front instead of ambience.
     "theatre": CinemaProfile(
         "theatre",
         "Front stage, sides and rear",

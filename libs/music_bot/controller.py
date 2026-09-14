@@ -16,6 +16,10 @@ import pygame
 
 from .. import options
 from .. import state
+from ..audio.cinema import (acquire_bank as cinema_acquire_bank, preview_room,
+                            release_renderer as cinema_release,
+                            room_diagnosis as cinema_diagnosis,
+                            set_enabled as cinema_set_enabled)
 from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
@@ -147,6 +151,15 @@ class MapMusicBot:
         self.feed_index = -1
 
         # Settings
+        # Cinema speaker output (opt-in, for testing and for rooms a builder
+        # built around a cabinet). When a cabinet is selected, this bot's
+        # audio plays through that jukebox's speakers instead of the
+        # listener's ears, using the exact same room the jukebox itself feeds.
+        self.cinema_target = str(options.get("music_bot_cinema_target", "") or "") or None
+        self.cinema_bank = None
+        self.cinema_bank_key = None
+        self.cinema_cabinet = None
+
         self.volume = options.get("music_bot_volume", 50)
         self.enabled = options.get("music_bot_enabled", True)
         self.broadcast_enabled = False  # Disabled by default (Private listening mode)
@@ -276,8 +289,19 @@ class MapMusicBot:
         """Create a fresh OpenAL source for streaming.
         Uses direct_channels=True for clear stereo, plus EFX reverb send
         for environmental atmosphere.
+
+        With a cinema cabinet selected this makes no source at all: the room
+        owns one source per speaker and the stream is handed to it instead, so
+        the bot must not leave a second local source playing alongside.
         """
         self._destroy_stream_source()
+        if getattr(self, "cinema_target", None):
+            if self._ensure_cinema_bank() is not None:
+                # stream_source stays None on purpose: every gain, EQ and
+                # reverb call site below already skips a missing source, and
+                # the bank is what carries them for the room.
+                return
+            speak("Cinema speakers unavailable; playing at your ears.")
         src = self._new_bot_source()
         if src is None:
             return
@@ -285,10 +309,358 @@ class MapMusicBot:
         # Apply current map reverb immediately
         self._sync_map_reverb()
 
+    def _output_source(self):
+        """The source the running stream is written into, or None.
+
+        Normally that is the bot's own ear source. With cinema routing it does
+        not exist *by design*: the room owns one source per speaker and the
+        bank is what carries the audio, so a caller asking "is there anywhere
+        for this stream to play" has to accept the room as an answer. Skipping
+        that made starting a track through a room report "Audio error." and
+        play nothing at all.
+        """
+        if self.stream_source is not None:
+            return self.stream_source
+        bank = getattr(self, "cinema_bank", None)
+        return getattr(bank, "primary_source", None) if bank is not None else None
+
     def _destroy_stream_source(self):
         if self.stream_source:
             self._delete_source(self.stream_source)
             self.stream_source = None
+
+    # === Cinema speakers (play this bot through a cabinet's room) ===
+    #
+    # The Music Bot normally plays straight into the listener's ears. With a
+    # cabinet selected it feeds that jukebox's room instead, through the same
+    # CinemaSpeakerBank the cabinet's own playback uses -- one room per
+    # cabinet, whoever is feeding it. That makes the room audible without
+    # queueing a song on the jukebox itself, which is what a tester standing
+    # in the room actually wants to hear.
+
+    def cinema_cabinets(self):
+        """``(id, anchor, room)`` for every jukebox on the current map.
+
+        ``room`` is None for a cabinet with no speakers resolved around it, so
+        the menu can say which cabinets are ready instead of letting someone
+        pick one that would play nowhere.
+
+        The room is only *previewed*, never acquired: listing what the map has
+        must not turn the feature on. A tester has to be able to look before
+        sending audio into a room, and the menu reads the same whether cinema
+        happens to be on or off.
+        """
+        gp = self._find_gameplay()
+        map_obj = getattr(gp, "map", None) if gp else None
+        cabinets = []
+        for zone in list(getattr(map_obj, "jukebox_list", None) or ()):
+            try:
+                anchor = tuple(float(value) for value in zone.center)
+            except Exception:
+                continue
+            cabinet_id = str(getattr(zone, "id", ""))
+            try:
+                room = preview_room(self.game, anchor, room_id=cabinet_id)
+            except Exception:
+                room = None
+            cabinets.append((cabinet_id, anchor, room))
+        return cabinets
+
+    # How often a playing room re-resolves the map it is in, so a speaker a
+    # builder places or deletes mid-song is heard without touching the menu.
+    CINEMA_RESHAPE_INTERVAL = 1.0
+
+    @staticmethod
+    def _cinema_key(cabinet_id):
+        """This bot feeds a cabinet under its own key.
+
+        The room's speakers are the cabinet's, but the registry entry is
+        separate so a song playing on that jukebox at the same time cannot
+        share (and then tear down) the bot's bank, and vice versa.
+        """
+        return f"musicbot:{cabinet_id}"
+
+    def cinema_target_label(self):
+        """Menu text for the current routing choice."""
+        if not getattr(self, "cinema_target", None):
+            return "Cinema Speakers: OFF (play at my ears)"
+        for cabinet_id, anchor, room in self.cinema_cabinets():
+            if cabinet_id == self.cinema_target:
+                where = room.summary() if room is not None else self._cinema_problem(anchor)
+                return f"Cinema Speakers: jukebox {cabinet_id} ({where})"
+        return f"Cinema Speakers: jukebox {self.cinema_target} (not on this map)"
+
+    def _cinema_problem(self, anchor, cabinet_id=None):
+        """Why this cabinet's speakers cannot be used, in the resolver's words.
+
+        "No speakers found" is what leaves a tester standing in front of four
+        of them with no idea what is wrong. The reason a room was refused is
+        knowable -- a missing front pair, a lone side wall, no speaker close
+        enough -- so the menu says it instead of guessing.
+        """
+        try:
+            return cinema_diagnosis(self.game, anchor, room_id=cabinet_id)
+        except Exception as exc:
+            return f"speakers unusable ({exc})"
+
+    def _cinema_map_help(self):
+        """What this map is missing for a room, for the empty-cabinet menu."""
+        from ..audio.cinema import map_speakers
+        try:
+            speakers = len(map_speakers(self.game))
+        except Exception:
+            speakers = 0
+        if speakers:
+            return (f"This map has {speakers} cinema speaker(s) but no Jukebox to "
+                    f"anchor them. Add one: Builder menu (F8) -> Musical "
+                    f"Instrument -> Jukebox.")
+        return ("This map has no Jukebox to build a cinema room around. Add one: "
+                "Builder menu (F8) -> Musical Instrument -> Jukebox.")
+
+    def set_cinema_target(self, cabinet_id):
+        """Route (or un-route) this bot through a cabinet's speaker room.
+
+        Applying it restarts the current track the same way a seek does, so
+        the change is heard immediately instead of at the next song.
+        """
+        cabinet_id = str(cabinet_id or "") or None
+        self.cinema_target = cabinet_id
+        options.set("music_bot_cinema_target", cabinet_id or "")
+        self._release_cinema_bank()
+        room = None
+        if cabinet_id is not None:
+            # Selecting a room is an explicit request for the feature, so the
+            # local master switch cannot silently swallow it.
+            cinema_set_enabled(self.game, True)
+            for other_id, anchor, other_room in self.cinema_cabinets():
+                if other_id == cabinet_id:
+                    room = other_room
+                    break
+        if cabinet_id is None:
+            speak("Cinema speakers off. Music plays at your ears again.")
+        elif room is None:
+            anchor = None
+            for other_id, other_anchor, _room in self.cinema_cabinets():
+                if other_id == cabinet_id:
+                    anchor = other_anchor
+                    break
+            reason = (self._cinema_problem(anchor, cabinet_id) if anchor is not None
+                      else "that jukebox is not on this map")
+            speak(f"Jukebox {cabinet_id} cannot play through its speakers: {reason}. "
+                  f"Music will play at your ears.")
+        else:
+            speak(f"Music now plays through the speakers around jukebox {cabinet_id}: "
+                  f"{room.summary()}.")
+        # Both directions move the running stream, not just the one that turns
+        # the room on. Turning it off deletes the room's sources, which are
+        # what the live streamer is feeding.
+        self._restart_in_new_output()
+
+    def _restart_in_new_output(self):
+        """Hand a playing track to whichever output now owns the stream.
+
+        Switching between the room and the listener's ears changes which
+        OpenAL sources carry the audio, so the running stream has to be
+        restarted into the new one. This is the same path a seek takes: the
+        position and the queue both survive, and without it the bot would
+        either fall silent or keep writing into deleted sources.
+        """
+        if not getattr(self, "playing", False):
+            return
+        try:
+            self._seek_restart(self.track_position() or 0.0)
+        except Exception:
+            pass
+
+    def _open_cinema_menu(self):
+        """Pick the cabinet whose room this bot should play through."""
+        from .. import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if gp is None:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._show_mode_menu()
+
+        m = menu_mod.Menu(self.game, "Cinema Speakers", parrent=gp)
+        items = []
+        if self.cinema_target:
+            items.append(("Turn Off (play at my ears)",
+                          lambda: (self.set_cinema_target(None), go_back())))
+        cabinets = self.cinema_cabinets()
+        if not cabinets:
+            items.append(("No jukebox on this map", lambda: speak(
+                self._cinema_map_help())))
+        for cabinet_id, anchor, room in cabinets:
+            position = f"({anchor[0]:.0f}, {anchor[1]:.0f}, {anchor[2]:.0f})"
+            if room is None:
+                label = (f"Jukebox {cabinet_id} {position} - "
+                         f"{self._cinema_problem(anchor, cabinet_id)}")
+            else:
+                label = f"Jukebox {cabinet_id} {position} - {room.summary()}"
+            picked = cabinet_id == self.cinema_target
+            if picked:
+                label = f"* {label} (playing here)"
+            items.append((label, (lambda cid=cabinet_id: (
+                self.set_cinema_target(cid), go_back()))))
+        items.append(("Cancel", lambda: gp.pop_last_substate()))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _acquire_cinema_room(self, anchor, room):
+        """Take (or re-shape) the room this bot feeds for a resolved cabinet.
+
+        Called both when a track starts and, once a second, while it plays:
+        the host hands back the SAME bank and re-shapes it in place when the
+        map gained or lost a speaker, so there is nothing for the caller to
+        hand over -- the running stream keeps feeding the room it holds.
+        """
+        key = self._cinema_key(self.cinema_target)
+        bank = cinema_acquire_bank(
+            self.game, key, anchor,
+            profile=room.profile, specs=room.specs, placement=room.placement,
+            fill=room.fill,
+            volume=self.volume, cabinet_volume=100,
+            reference_distance=8.0, max_distance=40.0,
+            occlusion_provider=self._cinema_occlusion,
+            # The bot's own output answers to the Music slider, not the
+            # Jukebox one: the room is only where it comes out.
+            category="music",
+        )
+        if bank is None:
+            return None
+        self.cinema_bank = bank
+        self.cinema_cabinet = self.cinema_target
+        self.cinema_bank_key = key
+        return bank
+
+    def _cinema_occlusion(self, position, listener, max_distance):
+        """Wall occlusion for the room, measured from each speaker's own spot.
+
+        Without a provider a room is heard as if the map had no walls at all:
+        a speaker standing in the next room plays as loudly and as brightly as
+        one beside the listener. The jukebox player's ray already caches tile
+        results for a fraction of a second, so this is cheap per speaker; the
+        music bot would otherwise be the one output that ignores walls.
+        """
+        gp = self._find_gameplay()
+        if gp is None:
+            return 0
+        provider = getattr(getattr(gp, "jukebox_player", None),
+                           "occlusion_tier", None)
+        if not callable(provider):
+            from ..jukebox import wall_occlusion_tier
+            map_obj = getattr(gp, "map", None)
+            provider = (lambda pos, lis, _max: wall_occlusion_tier(map_obj, pos, lis))
+        try:
+            return int(provider(position, listener, max_distance))
+        except Exception:
+            return 0
+
+    def _ensure_cinema_bank(self):
+        """The room this bot should feed right now, or None for normal playback."""
+        target = getattr(self, "cinema_target", None)
+        if not target:
+            return None
+        for attempt in (0, 1):
+            for cabinet_id, anchor, room in self.cinema_cabinets():
+                if cabinet_id != target or room is None:
+                    continue
+                bank = self.cinema_bank
+                if bank is not None and not bank._stopped and bank.sources:
+                    return bank
+                return self._acquire_cinema_room(anchor, room)
+            if attempt == 0:
+                # A target restored from settings on a fresh client starts
+                # before anything has turned the feature on; selecting a room
+                # is itself the request, so honour it.
+                cinema_set_enabled(self.game, True)
+        return None
+
+    def _release_cinema_bank(self):
+        """Silence and delete this bot's room, then hand it back."""
+        bank = getattr(self, "cinema_bank", None)
+        key = getattr(self, "cinema_bank_key", None)
+        self.cinema_bank = None
+        self.cinema_cabinet = None
+        self.cinema_bank_key = None
+        if bank is None:
+            return
+        try:
+            bank.stop()
+        except Exception:
+            pass
+        for source in getattr(bank, "sources", ()) or ():
+            self._delete_source(source)
+        # Released after the sources, so the bank can never keep a deleted
+        # OpenAL name, and its per-speaker buffers go back with it.
+        try:
+            bank.forget_sources()
+        except Exception:
+            pass
+        if key:
+            try:
+                cinema_release(self.game, key)
+            except Exception:
+                pass
+
+    def _update_cinema_output(self):
+        """Per-frame room upkeep: gains, map changes, recovery from a lost room.
+
+        A jukebox stop, map change or map reload can take the shared bank away
+        (one room per cabinet, owned by whoever is feeding it). The bot then
+        rebuilds it around the stream that is already playing rather than
+        going silent.
+        """
+        if not getattr(self, "cinema_target", None):
+            if getattr(self, "cinema_bank", None) is not None:
+                self._release_cinema_bank()
+            return
+        bank = self.cinema_bank
+        if bank is None or bank._stopped or not bank.sources:
+            self._release_cinema_bank()
+            bank = self._ensure_cinema_bank()
+            streamer = self.streamer
+            if bank is None or streamer is None:
+                return
+            streamer.cinema = bank
+            streamer.source = getattr(bank, "primary_source", None)
+        self._follow_cinema_map(bank)
+        try:
+            bank.update_output()
+        except Exception:
+            pass
+
+    def _follow_cinema_map(self, bank):
+        """Let the playing room follow the map under it.
+
+        A builder who places (or deletes) a speaker while a song is playing
+        gets the change without toggling this routing off and on again, which
+        stops and restarts the track. The room is re-resolved at most once a
+        second and the bank is re-shaped IN PLACE (see
+        ``CinemaSpeakerBank.reconfigure``), so the speakers that did not
+        change keep playing and one that just appeared joins on the current
+        beat.
+        """
+        now = time.monotonic()
+        if now - getattr(self, "_cinema_reshape_at", 0.0) < self.CINEMA_RESHAPE_INTERVAL:
+            return
+        self._cinema_reshape_at = now
+        cabinet = getattr(self, "cinema_cabinet", None)
+        if not cabinet:
+            return
+        for cabinet_id, anchor, room in self.cinema_cabinets():
+            if cabinet_id != cabinet:
+                continue
+            if room is None:
+                # An edit that removed the room must never yank the audio out
+                # from under a song that is already playing: keep the room
+                # that is audible and let the next track re-decide.
+                return
+            self._acquire_cinema_room(anchor, room)
+            return
 
     def _fade_out_source(self, source, streamer=None, duration=0.5):
         """Fade an active OpenAL stream source to 0 gain in background and delete."""
@@ -462,6 +834,16 @@ class MapMusicBot:
                 )
                 
             items.append((get_megaphone_label, toggle_megaphone_routing))
+
+        # Cinema speaker routing. Shown to everyone: it is the player's own
+        # listening choice (play at my ears, or out of a room a builder made),
+        # and it is how a room can be heard without queueing a song on the
+        # cabinet itself.
+        def go_cinema():
+            gp.pop_last_substate()
+            self._open_cinema_menu()
+
+        items.append((self.cinema_target_label, go_cinema))
 
         items.extend([
             (get_queue_mode_label, toggle_queue_mode),
@@ -1270,6 +1652,11 @@ class MapMusicBot:
 
     def _start_crossfade_roll(self):
         """Begin pre-rolling the next queued track (called each frame)."""
+        if getattr(self, "cinema_target", None):
+            # A room is fed by one stream at a time; a pre-rolled second
+            # streamer would queue its own frames into the same speakers and
+            # double the audio. Tracks cut over instead of crossfading.
+            return
         if not self.crossfade_enabled or self.is_loading_stream:
             return
         remaining = self._remaining_seconds()
@@ -1797,6 +2184,12 @@ class MapMusicBot:
         """Re-apply the current EQ to every live bot source."""
         if slot is None:
             slot = self._get_bot_eq_slot(self.eq_profile, self.eq_values)
+        if getattr(self, "cinema_bank", None) is not None:
+            # The room carries the EQ on every speaker, not on a source the
+            # bot owns (in cinema mode the bot owns no source at all).
+            with contextlib.suppress(Exception):
+                self.cinema_bank.set_eq_slot(slot)
+            return
         audio = getattr(self.game, "audio_mngr", None)
         if audio is None or getattr(audio, "efx", None) is None:
             return
@@ -2250,7 +2643,7 @@ class MapMusicBot:
             return
         self.is_loading_stream = False
         self._create_stream_source()
-        if not self.stream_source:
+        if not self._output_source():
             speak("Audio error.")
             return
 
@@ -2259,11 +2652,16 @@ class MapMusicBot:
             if canonical_url else None
         )
         self.streamer = AudioStreamer(
-            self.game, audio_url, self.stream_source, self.volume, bot=self,
+            self.game, audio_url,
+            self._output_source(),
+            self.volume, bot=self,
             http_headers=http_headers,
             canonical_url=canonical_url,
             start_offset=start_offset,
             start_paused=start_paused,
+            # A room replaces the ear source entirely: the same interleaved
+            # stereo decode is rendered into one feed per speaker.
+            cinema=self.cinema_bank,
         )
         self.streamer.start()
 
@@ -2489,6 +2887,9 @@ class MapMusicBot:
                 self.streamer.stop()
                 self.streamer = None
             self._destroy_stream_source()
+        # A room fed by this bot goes quiet with it (the sources are the
+        # room's, so they are deleted here rather than by _destroy_stream_source).
+        self._release_cinema_bank()
         # Stop local playback
         self._stop_local()
         self.playing = False
@@ -2560,6 +2961,11 @@ class MapMusicBot:
         if self.streamer:
             self.streamer.volume = self.volume
         options.set("music_bot_volume", self.volume)
+        if getattr(self, "cinema_bank", None) is not None:
+            try:
+                self.cinema_bank.set_volume(self.volume)
+            except Exception:
+                pass
         music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
         gain = (self.volume / 100) * music_vol
         if self.stream_source:
@@ -2611,7 +3017,13 @@ class MapMusicBot:
         self._ensure_live_relay_streamer()
 
         # Apply updated gain to local stream source. During a crossfade the
-        # two overlapping sources are ramped against each other instead.
+        # two overlapping sources are ramped against each other instead. With
+        # cinema routing there is no ear source to write a gain to -- the
+        # room's speakers carry it -- so the duck is handed to the bank.
+        bank = getattr(self, "cinema_bank", None)
+        if bank is not None and (self.playing or self.paused):
+            with contextlib.suppress(Exception):
+                bank.set_duck(self.duck_multiplier)
         if self.stream_source and (self.playing or self.paused):
             try:
                 music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
@@ -2625,8 +3037,13 @@ class MapMusicBot:
                 pass
 
         # Sync reverb even when paused so it matches when resumed
-        if self.stream_source and (self.playing or self.paused):
+        if (self.stream_source or bank is not None) and (self.playing or self.paused):
             self._sync_map_reverb()
+
+        # A cinema room needs its own upkeep every frame (per-speaker gains,
+        # occlusion, and survival across a jukebox stop or map reload).
+        if getattr(self, "cinema_target", None):
+            self._update_cinema_output()
 
         if not self.playing or self.paused:
             return
@@ -2718,13 +3135,17 @@ class MapMusicBot:
         while the wet signal from the reverb adds the room's atmosphere.
         Skipped entirely when the player disabled Room Reverb in settings.
         """
-        if not self.stream_source:
+        bank = getattr(self, "cinema_bank", None)
+        if not self.stream_source and bank is None:
             return True
         if not getattr(self, "reverb_enabled", True):
             # Setting off — detach any slot that was applied before it flipped.
             if force or self._current_reverb_slot is not None:
-                with contextlib.suppress(Exception):
-                    self.game.audio_mngr.efx.send(self.stream_source, 0, None)
+                slot = None
+                if bank is not None:
+                    self.cinema_bank.set_reverb(None)
+                elif self.stream_source is not None:
+                    self.game.audio_mngr.efx.send(self.stream_source, 0, slot)
                 self._current_reverb_slot = None
             return True
         try:
@@ -2735,6 +3156,15 @@ class MapMusicBot:
 
             player = gp.player
             reverb = map_obj.get_reverb_at(player.x, player.y, player.z)
+            if bank is not None:
+                # The room sits in the map too, so it takes the zone the
+                # LISTENER is standing in -- the same atmosphere the deck
+                # plays dry into, applied to every speaker.
+                slot = reverb.reverb if (reverb and reverb.reverb) else None
+                if force or self._current_reverb_slot != slot:
+                    bank.set_reverb(slot)
+                    self._current_reverb_slot = slot
+                return True
 
             if reverb and reverb.reverb:
                 # Apply map's reverb to the music via aux send 0

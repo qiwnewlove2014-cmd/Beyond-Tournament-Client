@@ -16,6 +16,7 @@ queued songs, skipping songs, adjusting volume, and staff queue clearance.
 """
 
 import contextlib
+import functools
 import struct
 import threading
 import time
@@ -31,10 +32,17 @@ from .deferred_log import log_deferred as log_line
 from .jukebox_relay import JukeboxRelayReceiver
 from .jukebox_media_cache import JukeboxMediaCache
 from .audio_diagnostics import probe as audio_probe
-# Opt-in cinema room: a processing layer that spreads this cabinet's song
-# across positioned speakers. Everything is inert unless a cabinet is given
-# a cinema profile, so the two-source playback below is never affected.
-from .audio.cinema import acquire_bank, release_renderer
+# The cabinet's cinema room: a processing layer that spreads its song across
+# the speakers a builder placed around it. What a cabinet plays through is the
+# map's decision (the element's ``cinema_mode``: auto / off / a profile), so a
+# cabinet with no room around it is the two-source playback below, untouched.
+from .audio.cinema import (CINEMA_AUTO, CINEMA_OFF, acquire_bank, cabinet_anchor,
+                           cinema_room, preview_room, profile_names,
+                           release_renderer, room_diagnosis)
+
+# The profile ids a cabinet's mode may name, and the shape every jukebox
+# caller can rely on (see plugin.CINEMA_AUTO / CINEMA_OFF).
+CINEMA_PROFILES = frozenset(profile_names())
 
 # Shared wall occlusion tiers used by every playback site below.
 # 0 = clear path · 1 = thin obstacle (a lone pillar tile): light lowpass ·
@@ -104,9 +112,21 @@ class JukeboxPlayer:
         self.eq_slots = {}
         self.custom_eq_slots = {}
         self.cabinet_volumes = {}
-        # The cinema profile each cabinet was last told to use (server data).
-        # Remembered per cabinet so a relocate/reload keeps the same room.
+        # The cinema profile each cabinet's room actually resolved to, for
+        # diagnostics. The *authority* on what a cabinet should play is the
+        # server's own hint (below) plus the map's speakers.
         self.cinema_profiles = {}
+        # The mode the map has for each cabinet (auto / off / a profile id), as
+        # last told by the server. Kept locally because a mid-song map refresh
+        # re-resolves the room without a fresh play event, and because the
+        # cabinet menu has to answer before another song starts.
+        self._cinema_modes = {}
+        # Placement warnings already written to the log, per cabinet.
+        self._cinema_warned = {}
+        # When the playing rooms last re-resolved their shape (see
+        # refresh_cinema_rooms): a builder placing a speaker mid-song must not
+        # have to wait for the next song to hear it.
+        self._cinema_refresh_at = 0.0
         self._occlusion_filter = None
         self._light_occlusion_filter = None
 
@@ -448,40 +468,168 @@ class JukeboxPlayer:
                 if bank is not None:
                     bank.set_volume(self.volume)
 
-    def _acquire_cinema(self, jukebox_id, x, y, z, volume, ref, maxd, kwargs):
+    def _acquire_cinema(self, jukebox_id, x, y, z, volume, ref, maxd, kwargs, keep=None):
         """Build this cabinet's cinema room, or None to play the plain pair.
 
-        The profile comes from the server's per-cabinet decision; a cabinet
-        the server never marked stays a plain jukebox. Every failure path
-        here (feature off, no room possible, a device that refuses the extra
-        sources) returns None so the caller falls back to two-source
-        playback instead of going silent.
+        The profile comes from the server's per-cabinet decision, and the
+        speakers from the map's own cinema elements; a cabinet with neither
+        stays a plain jukebox. Every failure path here (feature off, no room
+        possible, a device that refuses the extra sources) returns None so
+        the caller falls back to two-source playback instead of going silent.
+
+        ``keep`` is the room that is already audible, when a playing room is
+        being re-resolved. Re-acquiring a room passes its trims through
+        rather than the defaults, or every refresh would reset the cabinet's
+        own volume to 100 and drop the reverb and EQ the song started with.
         """
         try:
-            profile = kwargs.get("cinema_profile") or self.cinema_profiles.get(jukebox_id)
-            if not profile:
-                # Only a cabinet the server actually marked becomes a room.
-                # Everything else stays the plain two-source jukebox even
-                # while the feature is switched on.
+            # The map may mark a cabinet (an enforced profile) or surround it
+            # with speakers. Either alone is enough to make a room, an explicit
+            # "off" refuses one, and with none of them this returns None so the
+            # plain two-source playback below runs exactly as it always has.
+            mode = self._cinema_mode(jukebox_id, kwargs)
+            if mode == CINEMA_OFF:
                 return None
-            self.cinema_profiles[jukebox_id] = profile
+            requested = None if mode == CINEMA_AUTO else mode
+            plan = cinema_room(self.game, jukebox_id, (float(x), float(y), float(z)),
+                               requested)
+            if plan is None:
+                return None
+            self.cinema_profiles[jukebox_id] = plan.profile
+            # Map mistakes are worth reporting once, not once per song: a room
+            # that is resolved the same way again has nothing new to say.
+            warnings = plan.warnings
+            if warnings and self._cinema_warned.get(jukebox_id) != warnings:
+                self._cinema_warned[jukebox_id] = warnings
+                for warning in warnings:
+                    log_line(f"[Jukebox] cinema room {jukebox_id}: {warning}")
             return acquire_bank(
                 self.game,
                 jukebox_id,
                 (float(x), float(y), float(z)),
-                profile=profile,
-                specs=kwargs.get("cinema_speakers"),
+                profile=plan.profile,
+                specs=plan.specs or kwargs.get("cinema_speakers"),
+                placement=plan.placement,
+                # A room read off the map is only the speakers the map has.
+                fill=plan.fill,
                 volume=volume,
-                cabinet_volume=self.cabinet_volumes.get(jukebox_id, 100),
+                cabinet_volume=(keep.cabinet_volume * 100.0 if keep is not None
+                                else self.cabinet_volumes.get(jukebox_id, 100)),
                 reference_distance=ref,
                 max_distance=maxd,
                 occlusion_provider=self.occlusion_tier,
+                reverb_slot=keep.reverb_slot if keep is not None else None,
+                eq_slot=keep.eq_slot if keep is not None else None,
             )
         except Exception as ex:
             from . import logger
             logger.log_exception(ex, f"JukeboxPlayer cinema room ({jukebox_id})")
             log_line(f"[Jukebox] cinema room unavailable for {jukebox_id}: {ex}")
             return None
+
+    # How often a playing room re-resolves the map it is in. A builder who
+    # places a speaker sees it join within this long, and the cost is one
+    # resolve per playing room (a handful of distance checks).
+    CINEMA_REFRESH_INTERVAL = 1.0
+
+    def cinema_mode(self, jukebox_id):
+        """The mode this client will play a cabinet in (auto when unknown)."""
+        return self._cinema_modes.get(jukebox_id, CINEMA_AUTO)
+
+    def set_local_cinema_mode(self, jukebox_id, mode):
+        """Echo a mode change locally so the cabinet menu answers immediately.
+
+        The server owns this setting -- it is written into the map and sent to
+        everybody -- so this is only what *this* client will do. It is not
+        what makes a playing song change output: the server writing the mode
+        re-offers the song (``jukeboxRestoreStates``), and that re-offer
+        carries a different mode, which is what tells ``play`` to re-tune
+        instead of taking the seamless-continuity shortcut.
+        """
+        self._cinema_modes[jukebox_id] = str(mode or "").strip().lower() or CINEMA_AUTO
+
+    def _cinema_mode(self, jukebox_id, kwargs=None):
+        """What the map says this cabinet plays through, right now.
+
+        The mode arrives with every play event (and with the cabinet state, so
+        a menu can read it with nothing playing). An unrecognised value reads
+        as ``auto`` rather than as a profile: a cabinet whose mode nobody
+        understands must behave like every other cabinet, not go quiet.
+        """
+        kwargs = kwargs or {}
+        raw = kwargs.get("cinema_mode")
+        if raw is None:
+            raw = kwargs.get("cinema_profile")
+        if raw is None:
+            return self.cinema_mode(jukebox_id)
+        mode = str(raw).strip().lower() or CINEMA_AUTO
+        if mode not in CINEMA_PROFILES and mode not in (CINEMA_AUTO, CINEMA_OFF):
+            mode = CINEMA_AUTO
+        self._cinema_modes[jukebox_id] = mode
+        return mode
+
+    def refresh_cinema_rooms(self, now=None):
+        """Let every playing room follow the map under it.
+
+        Adding or deleting a speaker used to need the whole feature toggled
+        off and on, which stops and restarts the song. Instead the room is
+        re-resolved at most once a second and its bank is re-shaped IN PLACE
+        (``CinemaSpeakerBank.reconfigure``): the speakers that did not change
+        keep playing what they hold, a speaker that just appeared joins on the
+        current beat, and a speaker that was deleted stops. A map edit that
+        removes the room entirely never yanks the audio out from under a song
+        -- the room that is audible stays audible until the next track.
+        """
+        now = time.monotonic() if now is None else now
+        if now - self._cinema_refresh_at < self.CINEMA_REFRESH_INTERVAL:
+            return 0
+        self._cinema_refresh_at = now
+        with self._lock:
+            rooms = [
+                (jukebox_id, entry.get("cinema"), entry.get("cinema_mode"))
+                for jukebox_id, entry in self.players.items()
+                if entry.get("cinema") is not None
+            ]
+        refreshed = 0
+        for jukebox_id, expected, running_mode in rooms:
+            anchor = cabinet_anchor(self.game, jukebox_id)
+            if anchor is None:
+                continue
+            try:
+                # Re-resolved exactly as the play did, minus the fallback to
+                # the profile the map happened to resolve last time: a server
+                # hint still applies, but a cabinet that only ever had a map
+                # room must not be handed a synthetic ring just because its
+                # speakers were deleted while the song played.
+                #
+                # The mode is the one this output was *built* with, never a
+                # newer pick: a mode change is applied by the server's
+                # re-offer (which rebuilds the output), and reshaping the
+                # running room to a shape it is about to be replaced with
+                # churned the speakers in the window between the two.
+                options = {"cinema_mode": running_mode or self.cinema_mode(jukebox_id)}
+                bank = self._acquire_cinema(
+                    jukebox_id, anchor[0], anchor[1], anchor[2],
+                    self.volume, 8.0, 40.0, options, keep=expected,
+                )
+            except Exception as ex:
+                from . import logger
+                logger.log_exception(ex, f"JukeboxPlayer cinema room refresh ({jukebox_id})")
+                continue
+            if bank is None:
+                # Room no longer resolvable (or the feature was turned off):
+                # keep the room that is already audible rather than cutting
+                # the song off mid-verse.
+                continue
+            if bank is not expected:
+                # The room that was playing no longer exists (its bank was
+                # stopped), so the stream holding it is already silent: the
+                # stall watchdog owns that rebuild. Never swap a bank out from
+                # under a live stream -- the bank is what the transport feeds.
+                log_line(f"[Jukebox] cinema room {jukebox_id} was lost; awaiting recovery")
+                continue
+            refreshed += 1
+        return refreshed
 
     @audio_probe.measured("jukebox.start", trigger=True)
     def play(self, jukebox_id, x, y, z, title, url, duration, volume=None, start_offset=0.0,
@@ -558,11 +706,22 @@ class JukeboxPlayer:
                 # were already connected. Fresh clients register the new route
                 # on join, which is why only "old" clients lose the audio.
                 same_relay_identity = existing.get("relay_key") == incoming_key
+            # A change of cinema mode is a change of *output*, and the server
+            # re-offers this same song when the map it wrote is reloaded. That
+            # re-offer is not continuity -- treating it as continuity was why
+            # picking a mode from the cabinet menu appeared to do nothing: the
+            # song kept playing through the old output until the next track.
+            mode_changed = (
+                existing is not None
+                and existing.get("cinema_mode")
+                != self._cinema_mode(jukebox_id, _kwargs)
+            )
             if (
                 existing is not None
                 and existing.get("playback_key") == playback_key
                 and existing.get("transport") == transport
                 and same_relay_identity
+                and not mode_changed
             ):
                 # Idempotent even while yt-dlp/ffmpeg is still resolving. Two map
                 # sync routes must never cancel the same in-flight playback.
@@ -809,6 +968,10 @@ class JukeboxPlayer:
                 "source": src_l,
                 "secondary_source": src_r,
                 "cinema": bank,
+                # The mode this output was built for. A re-offer of the same
+                # song that carries a different mode is a request to re-tune,
+                # not seamless continuity.
+                "cinema_mode": self.cinema_mode(jukebox_id),
                 "streamer": streamer,
                 "title": title,
                 "url": url,
@@ -834,8 +997,23 @@ class JukeboxPlayer:
             f"at ({x}, {y}, {z}) offset={start_offset:.1f}s url={url[:60]!r}"
         )
 
-    def _fade_out_sources(self, sources, streamer=None, duration=0.5):
-        """Fade active OpenAL sources to 0 gain in a daemon thread and clean them up."""
+    def _fade_out_sources(self, sources, streamer=None, duration=0.5, cleanup=None):
+        """Fade active OpenAL sources to 0 gain, then clean them up.
+
+        ``cleanup`` runs exactly once, after the sources are gone. A cinema
+        room's sources are deleted here rather than by ``stop()``, so this is
+        the only place that can hand the room back to the host -- a fade that
+        skipped it left the host holding a bank whose every OpenAL source had
+        been deleted, and the *next* song was handed those dead names: the
+        room went silent and the stream stuttered over the failures.
+        """
+        def finished():
+            if callable(cleanup):
+                try:
+                    cleanup()
+                except Exception:
+                    pass
+
         valid_sources = [s for s in sources if s is not None]
         if getattr(streamer, "main_thread_audio", False) is True:
             # Relay fades share the main audio pump: no timer thread touches
@@ -845,6 +1023,7 @@ class JukeboxPlayer:
                 if streamer in self._retired_relays:
                     self._retired_relays.remove(streamer)
                 self._release_sources(valid_sources)
+                finished()
             streamer.retire(duration=duration, cleanup_callback=finish)
             return
         if not valid_sources:
@@ -856,6 +1035,7 @@ class JukeboxPlayer:
                         streamer.running = False
                 except Exception:
                     pass
+            finished()
             return
 
         def _fade_worker():
@@ -901,6 +1081,7 @@ class JukeboxPlayer:
                         s.delete()
                     except Exception:
                         pass
+                finished()
 
         import threading
         threading.Thread(target=_fade_worker, daemon=True).start()
@@ -948,7 +1129,9 @@ class JukeboxPlayer:
         bank = (entry or {}).get("cinema")
         if bank is None:
             return
-        release_renderer(self.game, jukebox_id)
+        # Releasing by name, not by key: a retired room lingers half a second
+        # while the song that replaced it already owns the key.
+        release_renderer(self.game, jukebox_id, bank)
         bank.forget_sources()
 
     @audio_probe.measured("jukebox.stop")
@@ -975,12 +1158,24 @@ class JukeboxPlayer:
                 self._relay_pending.pop(relay_key, None)
         if fade:
             bank = player.get("cinema")
-            if bank is not None and getattr(streamer, "main_thread_audio", False) is not True:
+            if bank is not None:
                 # The direct fade worker writes source gains that the room's
                 # own frame-by-frame refresh would immediately overwrite, so
-                # the room fades itself over the same duration instead.
-                bank.retire(duration=0.5)
-            self._fade_out_sources(self._entry_sources(player), streamer=streamer, duration=0.5)
+                # the room fades itself over the same duration instead. A relay
+                # room fades on the receiver's own pump, but it is marked as
+                # leaving either way: without that the replacement song was
+                # handed the very room being torn down, and the receiver's
+                # cleanup then stopped and unregistered the room the new song
+                # was playing through (the never-ending "cinema room was lost").
+                bank.retire(duration=0.5,
+                            ramp=getattr(streamer, "main_thread_audio", False) is not True)
+            # The fade worker deletes the room's sources, so it is also what
+            # has to give the room back: releasing it here would strand the
+            # sources it has not deleted yet, and releasing it never left the
+            # host handing the recycled bank's dead sources to the next song.
+            self._fade_out_sources(self._entry_sources(player), streamer=streamer,
+                                   duration=0.5,
+                                   cleanup=lambda: self._release_cinema(jukebox_id, player))
             return True
         if getattr(streamer, "main_thread_audio", False) is True:
             streamer.stop()
@@ -1174,6 +1369,12 @@ class JukeboxPlayer:
         """
         now = time.monotonic()
         self._sweep_retiring_direct()
+        # A speaker placed or deleted while a song plays joins (or leaves) the
+        # room the listener is hearing, without the song being restarted.
+        try:
+            self.refresh_cinema_rooms(now)
+        except Exception:
+            pass
         rebuilds = []  # [(jukebox_id, reason)]
         stalled_ids = []  # relays relying on a warm-up un-stick this cycle
         needs_resync = False
@@ -1666,6 +1867,108 @@ def _current_state(gp):
     return state if isinstance(state, dict) else {"jukeboxes": {}}
 
 
+def _cabinet_cinema_mode(gp, jukebox_id):
+    """The mode the map has for a cabinet, from the cached server state.
+
+    An unknown value reads as ``auto``, the same rule the playing path uses:
+    a cabinet whose mode nobody recognises must behave like every other
+    cabinet rather than go silent.
+    """
+    state = _current_state(gp)
+    box = (state.get("jukeboxes", {}) or {}).get(jukebox_id) or {}
+    raw = str(box.get("cinema_mode") or box.get("cinema_profile") or "").strip().lower()
+    if raw == "":
+        return CINEMA_AUTO
+    if raw in (CINEMA_AUTO, CINEMA_OFF) or raw in CINEMA_PROFILES:
+        return raw
+    return CINEMA_AUTO
+
+
+def _cinema_mode_label(mode):
+    """Short form of a mode, for a menu line."""
+    if mode == CINEMA_OFF:
+        return "Off - the cabinet's own stereo"
+    if mode == CINEMA_AUTO:
+        return "Auto - the speakers around it, if any"
+    return f"{mode} - that room shape, speakers or not"
+
+
+def _cinema_detail(game, gp, jukebox_id, mode=None):
+    """The full answer to "what is this cabinet playing through", and why.
+
+    The room is *previewed*, never acquired: saying out loud what the map
+    could do must not create a speaker or change how anything plays.
+    """
+    mode = mode or _cabinet_cinema_mode(gp, jukebox_id)
+    if mode == CINEMA_OFF:
+        return ("This cabinet plays its own stereo: the map turned its cinema "
+                "room off.")
+    anchor = cabinet_anchor(game, jukebox_id)
+    if anchor is None:
+        return ("This cabinet has no cinema room: it is not on the map (or its "
+                "position is not known yet).")
+    room = preview_room(game, anchor, room_id=jukebox_id)
+    if room is not None:
+        if mode == CINEMA_AUTO:
+            return (f"Playing through the room speakers around this cabinet "
+                    f"({room.summary()}).")
+        return (f"This cabinet plays as {mode}: {room.summary()}. A shape "
+                f"nobody placed around it is filled from the ring behind it.")
+    if mode != CINEMA_AUTO:
+        return (f"This cabinet plays as {mode} from a ring of speakers behind "
+                f"it, because the map has no room here: "
+                f"{room_diagnosis(game, anchor, room_id=jukebox_id)}.")
+    return (f"No cinema room here, so this cabinet plays its own stereo: "
+            f"{room_diagnosis(game, anchor, room_id=jukebox_id)}.")
+
+
+def _open_cinema_mode_menu(game, gp, jukebox_id):
+    """Staff menu: what this cabinet should play through.
+
+    The server writes the answer into the map and every client hears it from
+    the next song on, so nothing here has to be remembered locally -- the
+    local echo below only makes the menu answer immediately.
+    """
+    from . import menu as menu_mod, menus
+
+    current = _cabinet_cinema_mode(gp, jukebox_id)
+    choices = [
+        (CINEMA_AUTO, "Auto - use the speakers placed around this cabinet"),
+        (CINEMA_OFF, "Off - always this cabinet's own stereo"),
+    ]
+    choices.extend((name, f"Force the {name} room shape")
+                   for name in profile_names())
+
+    items = []
+    for value, description in choices:
+        label = f"{description}{' (now)' if value == current else ''}"
+        items.append((label, functools.partial(
+            _apply_cinema_mode, game, gp, jukebox_id, value)))
+    items.append(("Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))))
+
+    m = menu_mod.Menu(game, "Jukebox Cinema Mode", parrent=gp)
+    m.add_items(items)
+    menus.set_default_sounds(m)
+    gp.add_substate(m)
+
+
+def _apply_cinema_mode(game, gp, jukebox_id, mode):
+    """Ask the server to change a cabinet's mode (it checks who may)."""
+    from . import consts
+
+    gp.pop_last_substate()
+    game.network.send(consts.CHANNEL_MISC, "jukebox_cinema_mode",
+                      {"id": jukebox_id, "mode": mode})
+    player = getattr(game, "gameplay", None)
+    jukebox_player = getattr(player, "jukebox_player", None)
+    if jukebox_player is not None:
+        jukebox_player.set_local_cinema_mode(jukebox_id, mode)
+    # It does not wait for the next track: the server writes the mode into the
+    # map and re-offers the song it is playing, which the client re-tunes.
+    speak(f"Cinema mode {mode} ({_cinema_mode_label(mode)}). "
+          "Re-tuning this cabinet.")
+
+
 def _closest_jukebox(gp):
     """Pick the jukebox nearest to the player from the cached server state."""
     state = _current_state(gp)
@@ -1766,6 +2069,15 @@ def open_jukebox_menu(game, gp):
         vol = _get_jukebox_volume(gp, jukebox_id)
         return f"Adjust jukebox volume (now: {vol}%)"
 
+    def go_cinema_status():
+        speak(_cinema_detail(game, gp, jukebox_id))
+
+    def go_cinema_mode():
+        gp.pop_last_substate()
+        _open_cinema_mode_menu(game, gp, jukebox_id)
+
+    mode_now = _cabinet_cinema_mode(gp, jukebox_id)
+
     menu_items = [
         ("Search YouTube and queue a song", go_search),
         ("Queue by YouTube URL or livestream", go_direct_url),
@@ -1788,6 +2100,14 @@ def open_jukebox_menu(game, gp):
     if is_staff:
         menu_items.append((_eq_label, go_eq))
         menu_items.append(("Clear queue and stop (Staff only)", go_clear_all))
+
+    # What this cabinet plays through, said at the cabinet itself: the one
+    # place a person is standing when the question comes up. It is read-only
+    # for everybody -- it answers "am I hearing the room or the box" -- and a
+    # staff member gets the mode menu underneath it.
+    menu_items.append((f"Cinema: {_cinema_mode_label(mode_now)}", go_cinema_status))
+    if is_staff:
+        menu_items.append((f"Set cinema mode (now: {mode_now})", go_cinema_mode))
 
     menu_items.append(("Cancel", lambda: gp.pop_last_substate()))
 

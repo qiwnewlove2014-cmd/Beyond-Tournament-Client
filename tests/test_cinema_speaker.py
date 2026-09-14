@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 from libs.audio.cinema import (ChannelAnalyzer, CinemaLayout, CinemaRenderer,
                                CinemaSpeakerSpec, CinemaSpeakerHost,
-                               acquire_renderer, get_profile, mid_side,
+                               acquire_bank, acquire_renderer, get_profile, mid_side,
                                mix_channels, release_all, release_renderer,
                                set_enabled, source_layout)
 from libs.audio.cinema.layout import (bearing_from, slot_for_bearing)
@@ -374,12 +374,17 @@ class CinemaSpeakerHostTests(unittest.TestCase):
 
     def test_module_helpers_attach_and_detach_the_host(self):
         game = SimpleNamespace()
-        self.assertIsNone(acquire_renderer(game, "box", self.ANCHOR))
-        self.assertTrue(set_enabled(game, True))
         renderer = acquire_renderer(game, "box", self.ANCHOR, profile="front_stage")
         self.assertEqual(renderer.profile.name, "front_stage")
         self.assertIs(release_renderer(game, "box"), renderer)
         self.assertEqual(release_all(game), 0)
+
+    def test_the_player_opt_out_turns_every_helper_off(self):
+        game = SimpleNamespace()
+        self.assertFalse(set_enabled(game, False))
+        self.assertIsNone(acquire_renderer(game, "box", self.ANCHOR))
+        self.assertIsNone(acquire_bank(game, "box", self.ANCHOR))
+        self.assertIsNone(release_renderer(game, "box"))
 
 
 if __name__ == "__main__":

@@ -23,9 +23,15 @@ behind the rear speakers must not muffle the screen wall.
 """
 
 import contextlib
+import functools
+import threading
 import time
+from collections import deque
 
 import cyal
+
+from ...deferred_log import log_deferred as log_line
+from .listener import cone_gain
 
 # One pool and one queue allowance per speaker. The radio between them keeps
 # the same shape as the plain jukebox (32 buffers, 10 queued): enough head-
@@ -38,6 +44,23 @@ MAX_QUEUED_FRAMES = 6
 
 SAMPLERATE = 48000
 
+# The cabinet's own playback uses its own category, not map music.
+DEFAULT_CATEGORY = "jukebox"
+
+
+def _serialized(method):
+    """Run a room mutation under the bank's own lock.
+
+    Frames arrive on the transport's thread while a speaker can be placed or
+    deleted from the game thread, so the two must not interleave: without this
+    a frame could be queued into a speaker that is being released.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
 
 class CinemaSpeakerBank:
     """One positioned OpenAL source (and its buffer pool) per cinema slot."""
@@ -47,9 +70,19 @@ class CinemaSpeakerBank:
     def __init__(self, game, renderer, *, volume=100, cabinet_volume=100,
                  reference_distance=8.0, max_distance=40.0,
                  occlusion_provider=None, reverb_slot=None, eq_slot=None,
+                 category=DEFAULT_CATEGORY, duck=1.0,
                  buffers_per_slot=None, clock=None):
         self.game = game
         self.renderer = renderer
+        # Which volume slider this room answers to. The cabinet's own playback
+        # uses the jukebox category (deliberately separate from map music);
+        # a room fed by something else passes its own, so one system's slider
+        # never moves another system's sound.
+        self.category = str(category or DEFAULT_CATEGORY)
+        # Live duck multiplier (a megaphone broadcast lowering the music). It
+        # is applied per frame by update_output() because a room has no single
+        # source anyone could set a gain on.
+        self.duck = float(duck)
         self.volume = max(0, min(100, int(volume)))
         self.cabinet_volume = max(0.0, min(1.0, float(cabinet_volume) / 100.0))
         self.reference_distance = float(reference_distance)
@@ -58,6 +91,17 @@ class CinemaSpeakerBank:
         self.reverb_slot = reverb_slot
         self.eq_slot = eq_slot
         self.buffers_per_slot = int(buffers_per_slot or BUFFERS_PER_SLOT)
+        # A room can be re-shaped (a speaker placed or deleted) while the
+        # transport is pumping frames into it, from a different thread: the
+        # structural changes and the queueing have to be serialized, or a
+        # frame could land on a speaker that is being deleted.
+        self._lock = threading.RLock()
+        # The frames the room has queued, newest last, as the stereo source
+        # frames they were rendered from. A speaker that joins the room, or
+        # one that has to be put back in step with the others, is filled from
+        # here -- which is the only way it can start at the room's own content
+        # instant instead of a queue's worth behind (or ahead of) it.
+        self._recent = deque(maxlen=max(self.buffers_per_slot, MAX_QUEUED_FRAMES))
         self._clock = clock or time.monotonic
         self._external_fade = 1.0
         self._fade_started = None
@@ -65,6 +109,7 @@ class CinemaSpeakerBank:
         self._environment_dirty = True
         self._slot_tier = {}
         self._occlusion_filters = {}
+        self._retired = False
         self._stopped = False
         self.slot_sources = {}
         self._pools = {}
@@ -84,7 +129,24 @@ class CinemaSpeakerBank:
     def sources(self):
         """Every speaker source, in room order (front wall first)."""
         return tuple(self.slot_sources[slot] for slot in self.renderer.slots
-                     if slot in self.slot_sources)
+                     if self.slot_sources.get(slot) is not None)
+
+    @property
+    def spent(self):
+        """True once this room is leaving service and must not be re-handed out.
+
+        A room that is stopping, or already retiring because a song is being
+        replaced, still holds live sources for another half second. A new song
+        must never be given it: whatever fades or stops it would silence *the
+        new song's* speakers, and the cleanup about to finish the teardown
+        would delete them underneath it.
+
+        ``_retired`` is set even when the fade ramp belongs to the transport
+        (a relay receiver fades on its own pump and overwrites this bank's
+        gain), because a room that is on its way out is on its way out
+        whoever drives the ramp.
+        """
+        return self._stopped or self._retired or self._fade_started is not None
 
     @property
     def primary_source(self):
@@ -100,37 +162,69 @@ class CinemaSpeakerBank:
         audio = getattr(self.game, "audio_mngr", None)
         if audio is None:
             raise RuntimeError("cinema speakers need an audio manager")
-        context = audio.context
         for slot in self.renderer.slots:
-            source = context.gen_source()
-            position = self.renderer.layout.position(slot)
-            if position is not None:
-                source.position = position
-            # Same spatial contract as the plain jukebox pair: OpenAL's own
-            # rolloff is off and the frame-by-frame gain ramp does the fading.
-            source.rolloff_factor = 0.0
-            source.reference_distance = self.max_distance
-            source.max_distance = self.max_distance
-            source.spatialize = True
-            source.direct_channels = False
-            source.gain = 0.0
-            self.slot_sources[slot] = source
-            # A song that starts mid-dive inherits the active water muffle
-            # from its first frame (see camera._music_water_sources).
-            active = getattr(audio, "filter", None)
-            if active and active[-1] is not None:
-                with contextlib.suppress(Exception):
-                    source.direct_filter = active[-1]
-            pool = []
-            for _ in range(self.buffers_per_slot):
-                try:
-                    pool.append(context.gen_buffer())
-                except Exception:
-                    break
-            if not pool:
-                raise RuntimeError("cinema speakers could not allocate buffers")
-            self._pools[slot] = pool
+            self._pools[slot] = self._make_speaker(audio, slot)
 
+    def _make_speaker(self, audio, slot):
+        """Create one speaker: its source, its position and its buffer pool."""
+        context = audio.context
+        source = context.gen_source()
+        position = self.renderer.layout.position(slot)
+        if position is not None:
+            source.position = position
+        # Same spatial contract as the plain jukebox pair: OpenAL's own
+        # rolloff is off and the frame-by-frame gain ramp does the fading.
+        source.rolloff_factor = 0.0
+        source.reference_distance = self.max_distance
+        source.max_distance = self.max_distance
+        source.spatialize = True
+        source.direct_channels = False
+        source.gain = 0.0
+        self.slot_sources[slot] = source
+        # A song that starts mid-dive inherits the active water muffle
+        # from its first frame (see camera._music_water_sources).
+        active = getattr(audio, "filter", None)
+        if active and active[-1] is not None:
+            with contextlib.suppress(Exception):
+                source.direct_filter = active[-1]
+        pool = []
+        for _ in range(self.buffers_per_slot):
+            try:
+                pool.append(context.gen_buffer())
+            except Exception:
+                break
+        if not pool:
+            with contextlib.suppress(Exception):
+                source.delete()
+            self.slot_sources.pop(slot, None)
+            raise RuntimeError("cinema speakers could not allocate buffers")
+        return pool
+
+    def _dispose_speaker(self, source):
+        """Stop a speaker and give its OpenAL name back to the context."""
+        if source is None:
+            return
+        audio = getattr(self.game, "audio_mngr", None)
+        efx = getattr(audio, "efx", None)
+        if efx is not None:
+            for index in (0, 1):
+                with contextlib.suppress(Exception):
+                    efx.send(source, index, None)
+        with contextlib.suppress(Exception):
+            del source.direct_filter
+        with contextlib.suppress(Exception):
+            source.stop()
+        try:
+            limit = 64
+            while source.buffers_processed > 0 and limit > 0:
+                source.unqueue_buffers()
+                limit -= 1
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            source.delete()
+
+    @_serialized
     def stop(self):
         """Silence and drain every speaker; the player deletes the sources."""
         if self._stopped:
@@ -138,6 +232,7 @@ class CinemaSpeakerBank:
         self._stopped = True
         self._reset_output(stamp=False)
         self.release_buffers()
+        self._recent.clear()
 
     def release_buffers(self):
         """Drop buffer references so they are collected like any other pool."""
@@ -145,31 +240,46 @@ class CinemaSpeakerBank:
             pool.clear()
         self._pools.clear()
 
+    @_serialized
     def forget_sources(self):
         """Called once the owning player has deleted the OpenAL sources."""
         self.slot_sources.clear()
+        self._recent.clear()
         self._stopped = True
 
     # ---------------------------------------------------------------- output
 
+    @_serialized
     def queue_frame(self, left, right):
         """Render one stereo frame and queue it on every speaker it feeds.
 
         Buffers are reserved for every speaker *before* anything is uploaded,
         so a frame can never land on half the room: a partial frame is torn
         down rather than left to drift out of step with the other speakers.
+        A speaker that already stopped while the rest play is skipped rather
+        than fed (see ``_feed_slots``), so it rejoins on the live frame
+        instead of replaying a growing backlog behind the room.
         """
         if self._stopped or not self.slot_sources:
             return False
         feeds = self.renderer.render(left, right)
         if not feeds:
             return False
+        targets = set(self._feed_slots())
         claimed = []
         for slot, pcm in feeds:
+            if slot not in targets:
+                continue
             pool = self._pools.get(slot)
             if not pool:
+                # Give back whatever was already claimed: a refused frame must
+                # not quietly cost other speakers their buffers.
+                for taken_slot, taken, _pcm in claimed:
+                    self._pools[taken_slot].append(taken)
                 return False
             claimed.append((slot, pool.pop(), pcm))
+        if not claimed:
+            return False
         queued = 0
         try:
             for slot, buffer, pcm in claimed:
@@ -178,6 +288,7 @@ class CinemaSpeakerBank:
                 self.slot_sources[slot].queue_buffers(buffer)
                 queued += 1
             self.frames_queued += 1
+            self._recent.append((left, right))
             return True
         except Exception:
             # Return whatever was not queued, then reset the whole room so
@@ -190,6 +301,7 @@ class CinemaSpeakerBank:
             self._reset_output()
             return False
 
+    @_serialized
     def reclaim(self):
         """Return finished buffers to their speaker's pool; True if any moved."""
         reclaimed = False
@@ -214,14 +326,45 @@ class CinemaSpeakerBank:
             self.last_output_at = self._clock()
         return reclaimed
 
-    def queued_frames(self):
-        """Frames currently queued on the slowest speaker (min, not sum)."""
-        counts = []
-        for source in self.slot_sources.values():
+    def _queued_of(self, slot):
+        """Frames this speaker still holds, or 0 when it cannot say."""
+        source = self.slot_sources.get(slot)
+        if source is None:
+            return 0
+        try:
+            return int(source.buffers_queued)
+        except Exception:
+            return 0
+
+    def _playing_slots(self):
+        slots = []
+        for slot, source in self.slot_sources.items():
             try:
-                counts.append(source.buffers_queued)
+                if source.state == cyal.SourceState.PLAYING:
+                    slots.append(slot)
             except Exception:
-                return 0
+                return []
+        return slots
+
+    def _feed_slots(self):
+        """The speakers a frame is queued to right now.
+
+        Normally that is all of them. A speaker that already stopped while
+        the rest of the room keeps playing is deliberately left out: filling
+        its queue with the frames it is missing would restart it a whole
+        queue's worth behind the song and it would replay them at the live
+        edge, which is heard as one speaker lagging for the rest of the song.
+        Left empty, it rejoins at the live frame instead (see realign(), which
+        puts it back on the room's content instant first).
+        """
+        playing = self._playing_slots()
+        if playing and len(playing) < len(self.slot_sources):
+            return playing
+        return list(self.slot_sources)
+
+    def queued_frames(self):
+        """Frames queued on the slowest speaker this frame reaches (min, not sum)."""
+        counts = [self._queued_of(slot) for slot in self._feed_slots()]
         return min(counts) if counts else 0
 
     def playing(self):
@@ -237,15 +380,177 @@ class CinemaSpeakerBank:
     def wanted_for_start(self):
         return RESUME_FRAMES if self._plays_started else PREBUFFER_FRAMES
 
-    def start_playback(self):
-        """Start the room once enough frames are queued on every speaker."""
-        if not self.playing():
-            for source in self.slot_sources.values():
-                with contextlib.suppress(Exception):
+    @_serialized
+    def realign(self, *, play=True):
+        """Put every speaker back on the same content instant as the room.
+
+        A room is only as in-step as its shallowest queue: a speaker that
+        stopped (a pause, an underrun, a device hiccup) holds less audio than
+        the others, so it would resume a queue's worth ahead of the song --
+        or, if it kept being fed while silent, behind it. Both are heard as
+        two songs playing at once from the same room.
+
+        The frames the room still holds are in ``_recent``, so a shallow
+        speaker is handed exactly what the deepest one is about to play and
+        starts from the same instant. Nothing is ever removed from a queue:
+        only added, which is all OpenAL allows.
+        """
+        if self._stopped or not self.slot_sources:
+            return False
+        counts = {slot: self._queued_of(slot) for slot in self.slot_sources}
+        target = max(counts.values()) if counts else 0
+        if target <= 0:
+            return False
+        frames = list(self._recent)
+        if target > len(frames):
+            target = len(frames)
+        if target <= 0:
+            return False
+        frames = frames[-target:]
+        fed = 0
+        for slot, queued in counts.items():
+            missing = target - queued
+            if missing <= 0:
+                continue
+            # The frames this speaker is missing are the ones just before the
+            # queue it already holds (all of them when it holds nothing).
+            wanted = frames[:-queued] if queued > 0 else frames
+            wanted = wanted[-missing:]
+            for left, right in wanted:
+                pcm = dict(self.renderer.render(left, right)).get(slot)
+                pool = self._pools.get(slot)
+                source = self.slot_sources.get(slot)
+                if pcm is None or not pool or source is None:
+                    continue
+                buffer = pool.pop()
+                try:
+                    buffer.set_data(pcm, sample_rate=SAMPLERATE,
+                                    format=cyal.BufferFormat.MONO16)
+                    source.queue_buffers(buffer)
+                    fed += 1
+                except Exception:
+                    pool.append(buffer)
+        if fed and play:
+            self.play()
+        return fed > 0
+
+    @_serialized
+    def play(self):
+        """Start every speaker that is not already playing."""
+        started = False
+        for source in self.slot_sources.values():
+            with contextlib.suppress(Exception):
+                if source.state != cyal.SourceState.PLAYING:
                     source.play()
-            self._plays_started = True
+                    started = True
+        return started
+
+    @_serialized
+    def start_playback(self):
+        """Start the room once enough frames are queued on every speaker.
+
+        ``realign`` runs first: whoever is being restarted is about to play
+        while the rest of the room is still playing, and without the frames
+        the room holds it would start at the wrong content instant for the
+        remainder of the song.
+        """
+        if self.playing():
+            return True
+        self.realign(play=False)
+        self.play()
+        self._plays_started = True
         return True
 
+    @_serialized
+    def set_paused(self, paused):
+        """Hold or release every speaker in the room at once.
+
+        Pausing only the source the transport was handed leaves the rest of
+        the room playing (and then replaying from the front of their queues on
+        resume), which is exactly how a room ends up permanently out of step
+        after a pause. Holding all of them keeps every speaker's position, so
+        resuming is sample-accurate across the room.
+        """
+        if self._stopped or not self.slot_sources:
+            return False
+        if not paused:
+            # Re-form the room before it becomes audible again: a speaker that
+            # ran dry during the hold would otherwise come back a queue's
+            # worth ahead of the others.
+            self.realign(play=False)
+        for source in self.slot_sources.values():
+            with contextlib.suppress(Exception):
+                if paused:
+                    source.pause()
+                else:
+                    source.play()
+        return True
+
+    @_serialized
+    def reconfigure(self, renderer):
+        """Re-shape the room in place after the map changed under it.
+
+        A speaker placed while a song is playing used to need the whole
+        feature toggled off and on again, which stops and restarts the song.
+        The bank is deliberately never replaced: whatever is feeding it (a
+        relay receiver, a running ffmpeg decode, the music bot) holds this
+        object and would have to be restarted to see a new one. Instead the
+        slot set is changed here -- untouched speakers keep playing what they
+        already hold, a speaker that was removed is stopped and deleted, and a
+        speaker that just appeared is filled with the frames the room still
+        holds so it joins on the current beat rather than the next one.
+        """
+        if self._stopped:
+            return False
+        if renderer.signature == self.renderer.signature:
+            return False
+        playing = bool(self.slot_sources) and self.playing()
+        old_sources = dict(self.slot_sources)
+        kept = [slot for slot in renderer.slots if slot in old_sources]
+        added = [slot for slot in renderer.slots if slot not in old_sources]
+        dropped = [slot for slot in old_sources if slot not in renderer.slots]
+        self.renderer = renderer
+        for slot in dropped:
+            self._pools.pop(slot, None)
+            self.slot_sources.pop(slot, None)
+            self._slot_tier.pop(slot, None)
+            self._dispose_speaker(old_sources[slot])
+        changes = []
+        if added:
+            changes.append("+" + ", ".join(added))
+        if dropped:
+            changes.append("-" + ", ".join(dropped))
+        log_line(f"[Cinema] room {renderer.profile.name}: "
+                 f"{' '.join(changes) or 're-positioned'} "
+                 f"-> {len(renderer.slots)} speaker(s) while playing")
+        audio = getattr(self.game, "audio_mngr", None)
+        for slot in kept:
+            position = renderer.layout.position(slot)
+            if position is None:
+                continue
+            with contextlib.suppress(Exception):
+                self.slot_sources[slot].position = position
+        # Keep the speakers that survive, in the room's order; the added slots
+        # are filled in below once their sources exist.
+        self.slot_sources = {slot: old_sources[slot] for slot in kept}
+        if audio is None:
+            return True
+        for slot in added:
+            try:
+                self._pools[slot] = self._make_speaker(audio, slot)
+            except Exception:
+                self.failure_reason = "cinema speaker could not join the room"
+        if added:
+            # Every speaker holds the same frames again, so the new ones start
+            # on the beat the room is already playing.
+            self.realign(play=False)
+        self.touch_environment()
+        self.update_output()
+        if playing and not self.playing():
+            self.start_playback()
+        return True
+
+    @_serialized
     def _reset_output(self, *, stamp=False):
         for source in self.slot_sources.values():
             with contextlib.suppress(Exception):
@@ -271,6 +576,10 @@ class CinemaSpeakerBank:
         if fade is not None:
             self._external_fade = max(0.0, min(1.0, float(fade)))
 
+    def set_duck(self, multiplier):
+        """Set the live duck (megaphone-over-music) applied to every speaker."""
+        self.duck = max(0.0, float(multiplier))
+
     def set_volume(self, volume):
         self.configure(volume=volume)
         self.update_output()
@@ -283,9 +592,16 @@ class CinemaSpeakerBank:
         """External fade (the relay receiver owns its own retire ramp)."""
         self.configure(fade=gain)
 
-    def retire(self, duration=0.5):
-        """Fade the room out over ``duration`` on the owner thread."""
-        if self._fade_started is not None:
+    def retire(self, duration=0.5, ramp=True):
+        """Take the room out of service, fading it out here over ``duration``.
+
+        ``ramp=False`` for a room whose fade the transport owns (a relay
+        receiver recomputes the room's gain every pump, so a ramp set here
+        would be overwritten): the room is still marked as leaving, which is
+        what keeps the song replacing it from being handed this very room.
+        """
+        self._retired = True
+        if not ramp or self._fade_started is not None:
             return
         self._fade_started = self._clock()
         self._fade_duration = max(0.0, float(duration))
@@ -313,6 +629,24 @@ class CinemaSpeakerBank:
         span = max(0.0001, self.max_distance - self.reference_distance)
         return max(0.0, 1.0 - (distance - self.reference_distance) / span)
 
+    def aim_gain(self, slot, listener):
+        """How much of an aimed speaker reaches the listener (1.0 when unaimed).
+
+        A speaker the builder never aimed is omnidirectional, which is the
+        right default for a room every seat has to hear. This only matters
+        for the speakers a builder deliberately pointed somewhere, and it is
+        what makes "the audience is behind that speaker now" a physical fact
+        instead of an assumption.
+        """
+        if listener is None:
+            return 1.0
+        spec = self.renderer.layout.spec(slot)
+        if spec is None or not spec.has_cone:
+            return 1.0
+        return cone_gain(listener, self.renderer.layout.position(slot),
+                         spec.aim_yaw, spec.cone_inner, spec.cone_outer,
+                         spec.cone_outer_gain if spec.cone_outer_gain is not None else 0.0)
+
     def update_output(self):
         """Refresh per-speaker gain, occlusion and environment sends.
 
@@ -326,14 +660,16 @@ class CinemaSpeakerBank:
         if audio is None:
             return
         listener = getattr(audio, "position", None)
-        category = audio.volume_categories.get("jukebox", [100])[0] / 100.0
-        local = (self.volume / 100.0) * category * self.cabinet_volume * self.current_fade()
+        category = audio.volume_categories.get(self.category, [100])[0] / 100.0
+        local = ((self.volume / 100.0) * category * self.cabinet_volume
+                 * self.current_fade() * self.duck)
         reverb_slot = self.reverb_slot
         eq_slot = self.eq_slot
         efx = getattr(audio, "efx", None)
         for slot, source in self.slot_sources.items():
             with contextlib.suppress(Exception):
-                source.gain = local * self.distance_gain(slot, listener)
+                source.gain = (local * self.distance_gain(slot, listener)
+                               * self.aim_gain(slot, listener))
             if listener is None:
                 continue
             tier = self._wall_tier(slot, listener)

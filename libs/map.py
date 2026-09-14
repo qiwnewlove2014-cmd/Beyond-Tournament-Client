@@ -13,6 +13,7 @@ _SPAWN_TIMINGS = {
     "soundSource": "map.spawn.source",
     "pannable": "map.spawn.source",
     "megaphoneSpeaker": "map.spawn.speaker",
+    "cinemaSpeaker": "map.spawn.speaker",
     "instrument": "map.spawn.instrument",
     "platform": "map.spawn.geometry",
     "door": "map.spawn.geometry",
