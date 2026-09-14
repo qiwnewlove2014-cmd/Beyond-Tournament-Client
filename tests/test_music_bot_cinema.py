@@ -346,6 +346,35 @@ class CinemaOutputTests(unittest.TestCase):
         bot._apply_bot_eq()
         self.assertEqual(bank.eq_slot, 7)
 
+    def test_a_seek_through_the_room_starts_from_where_the_song_has_got_to(self):
+        """Seeking is measured from the position the room has played to.
+
+        The bot asks its streamer how far into the song it is and adds the
+        jump to that. A room feeds through the bank rather than a source of
+        its own, so if that position never leaves the seek offset every
+        forward seek restarts beside the intro -- a listener four minutes in
+        presses seek +30 and the song jumps back to 30 seconds.
+        """
+        bot = self.routed_bot()
+        bot._create_stream_source()
+        from libs.music_bot import AudioStreamer
+        streamer = AudioStreamer(self.game, "http://example.com/a.mp3", None,
+                                 volume=100, bot=SimpleNamespace(),
+                                 cinema=bot.cinema_bank)
+        streamer.is_alive = lambda: True
+        bot.streamer = streamer
+        bot.playing = True
+        chunk = bytes(streamer.SAMPLES_PER_BUFFER * streamer.channels * 2)
+        for _ in range(10):         # 200 ms of the song, through the room
+            self.assertTrue(streamer._queue_local(chunk))
+        self.assertAlmostEqual(bot.track_position(), 0.2, places=6)
+
+        restarts = []
+        bot._seek_restart = lambda position: restarts.append(position)
+        with mock.patch("libs.music_bot.controller.speak"):
+            bot.seek_by(30)
+        self.assertAlmostEqual(restarts[0], 30.2, places=6)
+
     def test_crossfade_is_bypassed_so_one_stream_feeds_the_room(self):
         bot = self.routed_bot()
         bot.crossfade_enabled = True

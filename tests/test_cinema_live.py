@@ -1197,6 +1197,165 @@ class MusicBotLiveRoomTests(unittest.TestCase):
         self.assertIs(bot.cinema_bank, bank)
         self.assertFalse(bank._stopped)
 
+    def streamer_for(self, bank):
+        """The REAL streamer handed a room, not a stand-in with .cinema on it."""
+        return AudioStreamer(self.game, "http://example.com/a.mp3", None,
+                             volume=100, bot=SimpleNamespace(), cinema=bank)
+
+    def test_the_stream_feeding_the_room_is_never_refused(self):
+        """A stream that cannot queue reads as "stream produced no audio".
+
+        The queue call is the only thing standing between a decoded frame and
+        the room: if every frame were refused, the pre-buffer would come back
+        empty and the track would be reported as unplayable (no silence, no
+        error, nothing to point at) even though OpenAL was never the problem.
+        """
+        bot = self.routed()
+        bank = bot.cinema_bank
+        streamer = self.streamer_for(bank)
+        chunk = bytes(streamer.SAMPLES_PER_BUFFER * streamer.channels * 2)
+
+        for _ in range(streamer.PRE_BUFFER_COUNT):
+            self.assertTrue(streamer._queue_local(chunk))
+
+        for slot, source in bank.slot_sources.items():
+            self.assertEqual(source.buffers_queued, streamer.PRE_BUFFER_COUNT, slot)
+
+    def test_a_trimmed_room_still_takes_every_frame(self):
+        """A trim makes one speaker start late -- never the stream or the room."""
+        from libs.audio.cinema.layout import IDEAL_BEARING, CinemaSpeakerSpec
+        from math import radians, sin, cos
+
+        def positioned(channel, delay_ms):
+            angle = radians(IDEAL_BEARING[channel])
+            return CinemaSpeakerSpec(
+                channel,
+                (ANCHOR[0] + sin(angle) * 8.0, ANCHOR[1] + cos(angle) * 8.0,
+                 ANCHOR[2]),
+                delay_ms=delay_ms)
+
+        game = FakeGame()
+        renderer = CinemaRenderer(ANCHOR, "front_only", specs=[
+            positioned("front_l", 0.0), positioned("front_r", 60.0)])
+        bank = CinemaSpeakerBank(game, renderer, volume=100, cabinet_volume=100,
+                                 occlusion_provider=lambda *a: 0)
+        streamer = AudioStreamer(game, "http://example.com/a.mp3", None,
+                                 volume=100, bot=SimpleNamespace(), cinema=bank)
+        chunk = bytes(streamer.SAMPLES_PER_BUFFER * streamer.channels * 2)
+
+        # 60 ms of trim is three 20 ms frames: the trimmed speaker is simply
+        # not fed yet, and the stream must keep filling the room regardless.
+        for _ in range(6):
+            self.assertTrue(streamer._queue_local(chunk))
+        self.assertEqual(bank.slot_sources["front_l"].buffers_queued, 6)
+        self.assertEqual(bank.slot_sources["front_r"].buffers_queued, 3)
+
+    def test_the_room_reports_the_audio_it_has_actually_been_fed(self):
+        """A room's fed position is how far into the song the output has got.
+
+        ``content_position()`` is what the Music Bot's seek and the Jukebox's
+        end-of-song hand-over are measured from, and the room is the one
+        output that queues through the bank instead of a source of its own.
+        If handing it a frame does not move that position, a song played
+        through a room reads as one that never started: a seek lands beside
+        the intro no matter how long it has been playing, and a direct
+        jukebox song never qualifies for its tail.
+        """
+        bot = self.routed()
+        bank = bot.cinema_bank
+        streamer = self.streamer_for(bank)
+        chunk = bytes(streamer.SAMPLES_PER_BUFFER * streamer.channels * 2)
+
+        self.assertAlmostEqual(streamer.content_position(), 0.0, places=6)
+        for _ in range(5):
+            self.assertTrue(streamer._queue_local(chunk))
+        # Five 20 ms frames: a tenth of a second, not zero and not more.
+        self.assertAlmostEqual(streamer.content_position(), 0.1, places=6)
+
+    def test_a_frame_the_room_never_took_is_not_a_played_frame(self):
+        """A refused frame must not advance the position it was refused for.
+
+        The pre-buffer retries a frame until the room accepts it, so a room
+        that is momentarily full (or already stopped) would otherwise be
+        credited with audio nobody ever heard -- and the position would run
+        ahead of the song by however many frames were dropped.
+        """
+        bot = self.routed()
+        bank = bot.cinema_bank
+        streamer = self.streamer_for(bank)
+        chunk = bytes(streamer.SAMPLES_PER_BUFFER * streamer.channels * 2)
+        bank.stop()
+
+        self.assertFalse(streamer._queue_local(chunk))
+        self.assertAlmostEqual(streamer.content_position(), 0.0, places=6)
+
+
+class RoomFeedPositionTests(unittest.TestCase):
+    """A room's fed position is read by more than the room itself.
+
+    ``content_position()`` is how far into the song the output has got, and
+    the Jukebox's end-of-song hand-over reads it to decide whether a song's
+    last seconds are worth letting play out. A room queues through the bank
+    rather than a source of its own, so a stream feeding a room that never
+    advanced that position would look like one still at the intro: every
+    direct song on a cinema map had its ending cut off at the packet, with a
+    position that agreed the song had not been played yet.
+    """
+
+    ROOM = [("front_l", -30), ("front_r", 30)]
+
+    def build(self):
+        from math import cos, radians, sin
+        game = FakeGame()
+        game.audio_mngr = PooledAudio()     # models OpenAL consuming buffers
+        set_enabled(game, True)
+        map_obj = Map(game)
+        for index, (channel, bearing) in enumerate(self.ROOM):
+            angle = radians(bearing)
+            x = ANCHOR[0] + sin(angle) * 8.0
+            y = ANCHOR[1] + cos(angle) * 8.0
+            map_obj.spawn_cinemaSpeaker(minx=x - 0.5, maxx=x + 0.5, miny=y - 0.5,
+                                        maxy=y + 0.5, minz=0, maxz=1,
+                                        id=f"spk{index}", channel=channel)
+        map_obj.spawn_jukebox(minx=9, maxx=10, miny=19, maxy=20, minz=0, maxz=1,
+                              id="j1")
+        game.gameplay.map = map_obj
+        player = jukebox.JukeboxPlayer(game)
+        with mock.patch("libs.music_bot.AudioStreamer"):
+            player.play("j1", 9.5, 19.5, 0.5, "Song", "http://example.com/a.mp3",
+                        60, transport="direct")
+        return game, player
+
+    def play_through_room(self, streamer, bank, frames):
+        """Feed the room the way the streaming loop does, OpenAL consuming."""
+        chunk = bytes(streamer.SAMPLES_PER_BUFFER * streamer.channels * 2)
+        for _ in range(frames):
+            while not streamer._queue_local(chunk):
+                for source in bank.slot_sources.values():
+                    source.finish_one()
+                bank.reclaim()
+
+    def test_a_direct_song_through_a_room_still_gets_its_tail(self):
+        game, player = self.build()
+        entry = player.players["j1"]
+        bank = entry["cinema"]
+        streamer = AudioStreamer(game, "http://example.com/a.mp3", None,
+                                 volume=60, cinema=bank)
+        streamer.is_alive = lambda: True
+        self.play_through_room(streamer, bank, 250)     # five seconds heard
+        self.assertAlmostEqual(streamer.content_position(), 5.0, places=6)
+
+        entry["streamer"] = streamer
+        # Twelve seconds of song with three left: inside the hand-over budget
+        # once the room's own position is counted, and far outside it if the
+        # position is still sitting at the intro.
+        entry["play_params"]["duration"] = 12.0
+        calls = []
+        player.stop = lambda jid, fade=False: calls.append((jid, fade)) or True
+        player._retire_or_stop("j1")
+        self.assertEqual(calls, [], "the song's ending was cut off instead")
+        self.assertEqual(len(player._retiring_direct), 1)
+
 
 class RoomShapeTests(unittest.TestCase):
     """Which speakers a room plays: the map's, not the profile's wish list."""

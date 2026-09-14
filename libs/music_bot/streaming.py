@@ -889,16 +889,27 @@ class AudioStreamer(threading.Thread):
         The bank renders it into one MONO feed per speaker and queues each
         into that speaker's own pool, so this stream never touches a buffer
         or a source directly in cinema mode.
+
+        A frame the room accepted still counts as played content, exactly as
+        it does on a plain source: ``content_position()`` is what the Music
+        Bot's seek and the Jukebox's end-of-song hand-over are measured from,
+        and a room is the one output whose frames never pass through
+        ``_queue_local``'s own sources. Crediting it per ACCEPTED frame (not
+        per decoded one) keeps that position honest while the pre-buffer
+        retries a frame the room has no buffer for yet.
         """
         try:
             left, right = self._split_stereo_16(data)
         except Exception:
             return False
         try:
-            return bool(self.cinema.queue_frame(left, right))
+            queued = bool(self.cinema.queue_frame(left, right))
         except Exception:
             self.failure_reason = "cinema speaker queue failed"
             return False
+        if queued:
+            self._note_fed_content(data)
+        return queued
 
     def _queue_local_spatial(self, data):
         """Queue a STEREO chunk split into L/R MONO buffers on the two positioned
