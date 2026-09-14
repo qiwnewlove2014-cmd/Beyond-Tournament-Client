@@ -528,6 +528,7 @@ class RoomSpeechLeg:
         self.plan = None
         self.signature = None
         self.sources = {}     # slot -> OpenAL source
+        self.fresh = {}       # slot -> frames queued since a stopped source's last drain
         self.hold = {}        # slot -> frames waiting for that speaker's trim
         self.holds = {}       # slot -> how many frames that speaker holds
         self.tiers = {}       # slot -> the wall tier last applied
@@ -557,7 +558,7 @@ class RoomSpeechLeg:
                 # waiting for audio nobody will send (the limit is whole
                 # frames, and `holds` is derived from the trim itself).
                 continue
-            self._publish(source, waiting.popleft())
+            self._publish(slot, source, waiting.popleft())
         return True
 
     def _follow(self, target):
@@ -715,18 +716,48 @@ class RoomSpeechLeg:
             return {}
         return {term[0]: term for term in terms}
 
-    def _publish(self, source, frame):
-        """Queue one frame on one speaker and make sure it is playing."""
+    def _publish(self, slot, source, frame):
+        """Queue one frame on one speaker and make sure it is playing.
+
+        A STOPPED or INITIAL source reports **every** buffer it holds as
+        *processed*: OpenAL counts a buffer as done the moment its source is
+        not playing it. Recycling on that number before queueing the next
+        frame therefore hands back the frame that was just queued, and the
+        queue can never reach ``START_FRAMES`` -- so a speaker that had ever
+        played (the first word of the previous sentence, the end of the last
+        burst) never started again, and the next thing said through the room
+        was silent until the leg was swept and its sources rebuilt. Only a
+        *playing* source's finished buffers are recycled here; while a stopped
+        one is being filled, what is left over from the previous burst goes
+        first and this burst's own frames stay.
+        """
         try:
-            while source.buffers_processed > 0:
-                self.holder.recycle(source.unqueue_buffers())
+            import cyal
+            state = source.state
+            queued = int(source.buffers_queued)
         except Exception:
             return
+        if state in (cyal.SourceState.PLAYING, cyal.SourceState.PAUSED):
+            try:
+                if source.buffers_processed > 0:
+                    self.holder.recycle(source.unqueue_buffers())
+            except Exception:
+                return
+            self.fresh[slot] = 0
+        else:
+            # A stopped speaker's leftover queue is finished audio; the frames
+            # this burst has queued are not (and cannot be told apart by the
+            # driver's own count). `max=` keeps the unqueue to the leftovers.
+            stale = queued - self.fresh.get(slot, 0)
+            if stale > 0:
+                try:
+                    self.holder.recycle(source.unqueue_buffers(max=stale))
+                except Exception:
+                    return
         buffer = self.holder.take_buffer()
         if buffer is None:
             return
         try:
-            import cyal
             buffer.set_data(frame, sample_rate=SAMPLE_RATE,
                             format=cyal.BufferFormat.MONO16)
             source.queue_buffers(buffer)
@@ -736,15 +767,20 @@ class RoomSpeechLeg:
         try:
             import cyal
             if source.state in (cyal.SourceState.STOPPED, cyal.SourceState.INITIAL):
+                self.fresh[slot] = self.fresh.get(slot, 0) + 1
                 if source.buffers_queued < START_FRAMES:
                     # Give it real frames to start on (see START_FRAMES).
                     return
                 source.play()
+                self.fresh[slot] = 0
+            else:
+                self.fresh[slot] = 0
         except Exception:
             pass
 
     def _retire(self, slot):
         source = self.sources.pop(slot, None)
+        self.fresh.pop(slot, None)
         self.hold.pop(slot, None)
         self.holds.pop(slot, None)
         self.tiers.pop(slot, None)

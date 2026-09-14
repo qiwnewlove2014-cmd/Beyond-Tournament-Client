@@ -86,11 +86,12 @@ class FakeSource:
     def queue_buffers(self, buffer):
         self.queued.append(buffer)
 
-    def unqueue_buffers(self):
+    def unqueue_buffers(self, *, max=2 ** 31 - 1):
         if self.processed <= 0:
             return []
-        taken = self.queued[:self.processed]
-        del self.queued[:self.processed]
+        count = min(self.processed, int(max))
+        taken = self.queued[:count]
+        del self.queued[:count]
         self.processed = 0
         return taken
 
@@ -104,6 +105,41 @@ class FakeSource:
     def destroy(self):
         self.destroyed = True
         self.context.destroyed.append(self)
+
+
+class DriverFakeSource(FakeSource):
+    """A source that reports its queue the way OpenAL really does.
+
+    ``AL_BUFFERS_PROCESSED`` counts *finished* buffers, and a source that is not
+    playing has finished everything it holds: a STOPPED or INITIAL source
+    reports its whole queue, not zero. That is the behaviour the voice leg has
+    to survive -- recycling on that number hands back the frame that was just
+    queued, so the queue can never reach ``START_FRAMES`` and a speaker that has
+    ever played never starts again. Only a PLAYING source reports honestly.
+    """
+
+    @property
+    def buffers_processed(self):
+        if self.state == cyal.SourceState.PLAYING:
+            return self.processed
+        return len(self.queued)
+
+    def unqueue_buffers(self, *, max=2 ** 31 - 1):
+        # OpenAL hands back exactly what it calls processed, so a stopped
+        # source gives up its whole queue -- which is how the frame that was
+        # just queued came to be taken straight back.
+        count = min(int(self.buffers_processed), int(max))
+        if count <= 0:
+            return []
+        taken = self.queued[:count]
+        del self.queued[:count]
+        self.processed = 0
+        return taken
+
+    def drain_and_stop(self):
+        """The device plays everything queued out and the source stops."""
+        self.processed = len(self.queued)
+        self.state = cyal.SourceState.STOPPED
 
 
 class FakeContext:
@@ -120,6 +156,15 @@ class FakeContext:
     def gen_buffer(self):
         self.buffers += 1
         return FakeBuffer()
+
+
+class DriverContext(FakeContext):
+    """A context that hands out drivers-honest sources."""
+
+    def gen_source(self, **kwargs):
+        source = DriverFakeSource(self)
+        self.created.append(source)
+        return source
 
 
 class FakeAudio:
@@ -443,10 +488,12 @@ class RoomLegTests(unittest.TestCase):
             for leg in game.audio_mngr.cinema_speech.legs.values():
                 for source in leg.sources.values():
                     source.processed = source.buffers_queued
-        # 150 frames across six speakers came out of the two buffers those
-        # speakers started with, not 150: a voice is ~50 buffers a second per
-        # speaker and they are reused instead of allocated.
-        self.assertLessEqual(game.audio_mngr.context.buffers, 6)
+        # 150 frames across six speakers came out of the three frames each
+        # speaker keeps to start on, not 150: a voice is ~50 buffers a second
+        # per speaker, and every frame after the first fill-up is a buffer a
+        # finished one handed back rather than a new allocation.
+        self.assertLessEqual(game.audio_mngr.context.buffers,
+                             6 * cinema_speech.START_FRAMES)
 
     def test_a_talker_nobody_has_heard_from_is_let_go(self):
         game = make_game()
@@ -472,6 +519,84 @@ class RoomLegTests(unittest.TestCase):
         self.leg(game)
         self.assertEqual(cinema_speech.describe(game),
                          ["7: jukebox j1 (2 speaker(s))"])
+
+
+class RestartingSpeakerTests(unittest.TestCase):
+    """A speaker that has finished one burst has to start again on the next.
+
+    Frames arrive one at a time and a speaker only starts once ``START_FRAMES``
+    of them are queued. OpenAL reports a source that is not playing as having
+    processed *everything* it holds, so the "recycle what has finished" step in
+    front of every frame used to hand back the frame that had just been queued:
+    the queue could never reach the start-up depth, and every burst after the
+    first one was silent until the leg was swept and its sources rebuilt --
+    heard as "the second thing I say does not come out of the room, I have to
+    turn PA Test Mode off and on again".
+    """
+
+    def game(self):
+        game = make_game()
+        # The honest driver, not the convenient fake (see DriverFakeSource).
+        game.audio_mngr.context = DriverContext()
+        return game
+
+    def talk(self, game, frames, sender_id=7):
+        for _ in range(frames):
+            self.assertTrue(cinema_speech.feed(game, game.gameplay, sender_id, FRAME))
+
+    def speakers(self, game, sender_id=7):
+        return game.audio_mngr.cinema_speech.legs[sender_id].sources
+
+    def speaker(self, game, sender_id=7):
+        return self.speakers(game, sender_id)["front_l"]
+
+    def test_a_speaker_that_finished_a_burst_starts_again(self):
+        game = self.game()
+        self.talk(game, 3)                      # enough to start playing
+        source = self.speaker(game)
+        self.assertEqual(source.state, cyal.SourceState.PLAYING)
+
+        # The device plays the burst out and the speaker stops by itself. Its
+        # buffers are finished but still queued until someone unqueues them,
+        # which is exactly how the driver leaves a source behind.
+        for item in self.speakers(game).values():
+            item.drain_and_stop()
+        self.assertEqual(source.buffers_processed, source.buffers_queued)
+
+        self.talk(game, 3)
+        self.assertEqual(source.state, cyal.SourceState.PLAYING)
+        self.assertGreaterEqual(source.buffers_queued, 1)
+
+    def test_the_new_burst_keeps_its_own_frames_while_it_fills_up(self):
+        game = self.game()
+        self.talk(game, 3)
+        source = self.speaker(game)
+        for item in self.speakers(game).values():
+            item.drain_and_stop()
+
+        # One frame into the next burst the speaker is not playing yet, and the
+        # driver already calls that frame processed. It must still be there for
+        # the second and third frame to line up behind.
+        self.talk(game, 1)
+        self.assertEqual(source.buffers_queued, 1)
+        self.talk(game, 1)
+        self.assertEqual(source.buffers_queued, 2)
+        self.talk(game, 1)
+        self.assertEqual(source.state, cyal.SourceState.PLAYING)
+
+    def test_the_finished_frames_of_the_last_burst_are_reused(self):
+        game = self.game()
+        context = game.audio_mngr.context
+        self.talk(game, 3)
+        source = self.speaker(game)
+        for item in self.speakers(game).values():
+            item.drain_and_stop()
+        made = context.buffers
+        self.talk(game, 3)
+        # The finished frames go back to the pool, so the new burst reuses them
+        # instead of leaving three more buffers attached to a dead queue.
+        self.assertEqual(source.buffers_queued, 3)
+        self.assertEqual(context.buffers, made)
 
 
 class RoomAcousticsTests(unittest.TestCase):
