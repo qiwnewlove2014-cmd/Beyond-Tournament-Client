@@ -711,6 +711,182 @@ class PanOpenedFromTheTechnicianMenuTests(unittest.TestCase):
                       self._read("default_keyconfig.json"))
 
 
+def land(gp, packet):
+    """One relayed pan, as ``event_handeler.staff_pan`` handles it.
+
+    The handler reads the table *either side* of the packet: the entry that was
+    there before is what makes an identical (replayed) pan say nothing, so the
+    two reads and the packet belong together and are exercised together here.
+    """
+    before = cinema_pan.own_entry(gp)
+    cinema_pan.apply_packet(gp, packet)
+    return cinema_pan.own_notice(gp, cinema_pan.own_entry(gp), before)
+
+
+class OwnerSeesThePanTests(unittest.TestCase):
+    """The player a pan moved: they *see* it, and staff still decide.
+
+    A pan is a performance decision, relayed to the whole map and resolved on
+    every listener's own machine -- so the one person who cannot look it up is
+    the player whose voice it moved (their own name never arrives in a spawn
+    packet; the login snapshot carries the channel instead). These tests pin the
+    half they get: a sentence when it lands under *either* key, a line they can
+    check by hand, and no say in it at all.
+    """
+
+    def _gameplay(self, own=9, me="Somchai", others=()):
+        gp = SimpleNamespace(
+            voice_channels={channel: SimpleNamespace(name=name)
+                            for name, channel in others},
+            player=SimpleNamespace(name=me))
+        gp.own_voice_channel = own
+        cinema_pan.table_for(gp)
+        return gp
+
+    # ---- hearing about it -------------------------------------------------
+    def test_a_pan_under_your_name_reaches_you(self):
+        gp = self._gameplay(own=9, me="Somchai")
+        notice = land(gp, {"channel": 9, "name": "Somchai", "cabinet": "j2",
+                           "direction": "auto"})
+        self.assertIn("jukebox j2", notice)
+
+    def test_the_owner_is_found_by_the_key_the_voice_routing_uses(self):
+        # A panned voice is looked up by voice channel (``target_for_channel``),
+        # and the login snapshot is where this client learns its own -- so the
+        # person told is whoever the routing would move, even when the table
+        # holds a name string that is not this client's current one (a session
+        # where the player was renamed after the pan was placed).
+        gp = self._gameplay(own=9, me="Somchai")
+        cinema_pan.table_for(gp).set("Somchai (old name)", 9, "j1", "left")
+        self.assertEqual(cinema_pan.own_entry(gp)[0], "Somchai (old name)")
+        notice = cinema_pan.own_notice(gp, cinema_pan.own_entry(gp), None)
+        self.assertIn("jukebox j1", notice)
+
+    def test_somebody_elses_pan_is_not_your_news(self):
+        gp = self._gameplay(own=9, others=(("Anong", 4),))
+        self.assertIsNone(land(gp, {"channel": 4, "name": "Anong",
+                                    "cabinet": "j1", "direction": "left"}))
+
+    def test_the_same_pan_twice_is_said_once(self):
+        # A map hands its pans over again to a joiner; being read the same
+        # sentence on every arrival is how a real change stops being noticed.
+        gp = self._gameplay(own=9)
+        packet = {"channel": 9, "name": "Somchai", "cabinet": "j1",
+                  "direction": "left"}
+        self.assertIsNotNone(land(gp, packet))
+        self.assertIsNone(land(gp, packet))
+
+    def test_a_changed_destination_is_news_again(self):
+        gp = self._gameplay(own=9)
+        land(gp, {"channel": 9, "name": "Somchai", "cabinet": "j1",
+                  "direction": "left"})
+        notice = land(gp, {"channel": 9, "name": "Somchai", "cabinet": "j2",
+                           "direction": "right"})
+        self.assertIn("jukebox j2", notice)
+
+    def test_clearing_says_where_your_voice_goes_back_to(self):
+        gp = self._gameplay(own=9)
+        land(gp, {"channel": 9, "name": "Somchai", "cabinet": "j1",
+                  "direction": "left"})
+        notice = land(gp, {"channel": 9, "name": "Somchai", "cabinet": "",
+                           "direction": "auto"})
+        self.assertIn("no longer moved", notice)
+        self.assertIn("where you stand", notice)
+
+    def test_a_cleared_pan_you_never_had_says_nothing(self):
+        gp = self._gameplay(own=9)
+        self.assertIsNone(land(gp, {"channel": 9, "name": "Somchai",
+                                    "cabinet": ""}))
+
+    # ---- what the sentence may and may not claim ---------------------------
+    def test_the_two_questions_stay_apart(self):
+        # "Where others hear me" is the pan; "what I hear" is my own switches
+        # (the confusion that produced the switches-off-but-still-audible
+        # report). One sentence says the first and names the second.
+        gp = self._gameplay(own=9)
+        notice = land(gp, {"channel": 9, "name": "Somchai", "cabinet": "j1",
+                           "direction": "left"})
+        self.assertIn("Other players now hear your voice", notice)
+        self.assertIn("your own listening switches", notice)
+        self.assertIn("towards the left of the room", notice)
+
+    def test_the_words_are_the_pickers_own(self):
+        # One table, or the menu and the confirmation start naming the same
+        # destination two ways.
+        self.assertIs(cinema_pan_menu.DIRECTION_LABELS,
+                      cinema_pan.DIRECTION_LABELS)
+        self.assertEqual([value for value, _label in cinema_pan.DIRECTION_LABELS],
+                         list(cinema_pan.DIRECTIONS))
+        self.assertEqual(cinema_pan.direction_phrase("left"),
+                         "towards the left of the room")
+        self.assertEqual(cinema_pan.direction_phrase("right"),
+                         "towards the right of the room")
+        self.assertEqual(cinema_pan.direction_phrase("front"),
+                         "towards the screen")
+
+    def test_the_rooms_own_mix_is_not_a_direction(self):
+        # "auto" is what clearing restores, so it is the absence of a lean and
+        # must not be read out as one.
+        self.assertEqual(cinema_pan.direction_phrase("auto"), "")
+        self.assertEqual(cinema_pan.direction_phrase(None), "")
+        gp = self._gameplay(own=9)
+        notice = land(gp, {"channel": 9, "name": "Somchai", "cabinet": "j1",
+                           "direction": "auto"})
+        self.assertNotIn("towards", notice)
+
+    # ---- the line they can check by hand ----------------------------------
+    def test_the_line_says_where_you_stand_when_nobody_moved_you(self):
+        gp = self._gameplay(own=9)
+        self.assertEqual(cinema_pan.own_label(gp),
+                         "Your sound: where you stand (no staff pan)")
+
+    def test_the_line_names_the_room_and_the_side_once_you_are_moved(self):
+        gp = self._gameplay(own=9)
+        cinema_pan.table_for(gp).set("Somchai", 9, "j3", "left")
+        self.assertEqual(cinema_pan.own_label(gp),
+                         "Your sound: heard from jukebox j3, towards the left "
+                         "of the room")
+        cinema_pan.table_for(gp).set("Somchai", 9, "j3", "auto")
+        self.assertEqual(cinema_pan.own_label(gp),
+                         "Your sound: heard from jukebox j3")
+
+    # ---- it is sight, never a veto ---------------------------------------
+    def test_looking_and_being_told_never_write_the_table(self):
+        gp = self._gameplay(own=9)
+        land(gp, {"channel": 9, "name": "Somchai", "cabinet": "j1",
+                  "direction": "left"})
+        table = cinema_pan.table_for(gp)
+        version = table.version
+        for _ in range(3):
+            cinema_pan.own_label(gp)
+            cinema_pan.own_entry(gp)
+            cinema_pan.own_notice(gp, cinema_pan.own_entry(gp), None)
+        self.assertEqual(table.version, version)
+        self.assertEqual(cinema_pan.own_entry(gp)[2], "j1")
+
+    def test_a_client_that_knows_nothing_about_itself_is_told_nothing(self):
+        # Nobody to name, no channel to match: silence, because the only other
+        # answer would be telling the wrong player about somebody else's pan.
+        gp = SimpleNamespace(voice_channels={}, player=SimpleNamespace(name=""))
+        gp.own_voice_channel = None
+        cinema_pan.table_for(gp).set("Anong", 4, "j1", "left")
+        self.assertIsNone(cinema_pan.own_entry(gp))
+        self.assertIsNone(cinema_pan.own_notice(gp, cinema_pan.table_for(gp).entries()[0], None))
+        self.assertEqual(cinema_pan.own_label(gp),
+                         "Your sound: where you stand (no staff pan)")
+
+    def test_the_handler_tells_the_owner_through_these_functions(self):
+        # The wiring, read from the source: the handler must not decide for
+        # itself who the owner is (the packet's name was the old, narrow rule)
+        # or what to say (a second copy of the words would drift).
+        with open(os.path.join(os.path.dirname(__file__), "..", "libs",
+                               "event_handeler.py"), encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("cinema_pan.own_entry", source)
+        self.assertIn("cinema_pan.own_notice", source)
+        self.assertNotIn("Your voice has been moved to jukebox", source)
+
+
 class ListeningSummaryTests(unittest.TestCase):
     """The three listening switches, each said as its own menu line says it."""
 

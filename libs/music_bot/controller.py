@@ -25,6 +25,7 @@ from ..audio.cinema import (ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE,
                             set_live_instruments, set_rooms_enabled,
                             set_speech_enabled as set_cinema_speech,
                             speech_enabled as cinema_speech_enabled)
+from ..audio.cinema import pan as cinema_pan
 from ..audio.cinema import peer as cinema_peer
 from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
@@ -549,6 +550,41 @@ class MapMusicBot:
         else:
             speak("Every jukebox plays its own stereo.")
 
+    def own_sound_label(self):
+        """Read-only line: where staff have put *your* voice.
+
+        The one thing the player a pan moved could not look up. A pan is a staff
+        decision relayed to the map and the owner is told once when it lands --
+        and after that it can only be *heard*, which with a room around you
+        sounds much like standing anywhere else in that room. This line answers
+        it the way the pan menu answers for everybody else, and it changes
+        nothing: staff still choose, the owner just gets to see where their
+        voice went (never a veto -- see ``pan.own_notice``).
+        """
+        gp = self._find_gameplay()
+        if gp is None:
+            return "Your sound: unknown here"
+        return cinema_pan.own_label(gp)
+
+    def announce_own_sound(self):
+        """Say where your own voice is heard, and what decides what you hear.
+
+        The two halves are said apart on purpose: other players hear the voice
+        from the staff-chosen room, while the owner hears it according to their
+        own ``Cinema rooms``/``Instruments``/``Speech`` switches. Same sentence
+        the announcement uses, so the menu and the moment it happens agree.
+        """
+        gp = self._find_gameplay()
+        if gp is None:
+            speak("Your sound is not known here.")
+            return
+        report = cinema_pan.own_report(gp)
+        if report is None:
+            speak("No staff pan is moving your voice: other players hear you "
+                  "from where you stand.")
+            return
+        speak(report)
+
     def _cinema_problem(self, anchor, cabinet_id=None):
         """Why this cabinet's speakers cannot be used, in the resolver's words.
 
@@ -1071,6 +1107,14 @@ class MapMusicBot:
             items.append((self.instruments_cinema_label,
                           self.toggle_instruments_cinema))
             items.append((self.speech_cinema_label, self.toggle_speech_cinema))
+            # The three lines above choose how *you* hear a room; this one is
+            # the other direction and is not a switch at all -- it is the answer
+            # to "where do other players hear me from", which is decided by
+            # staff and cannot be changed from here. It sits with them because
+            # this is where a listener comes to ask about rooms, and it reads
+            # rather than toggles: pressing it says the same sentence the moment
+            # of a pan says, so nothing about it can look like a setting.
+            items.append((self.own_sound_label, self.announce_own_sound))
 
         items.extend([
             (get_queue_mode_label, toggle_queue_mode),

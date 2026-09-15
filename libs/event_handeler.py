@@ -2090,22 +2090,27 @@ class EventHandeler:
         cabinet. A pan naming a cabinet this map does not have (or one the map
         set to ``off``) resolves to nothing, and then nothing about this
         client's behaviour changes.
+
+        Only the player whose own voice moved is spoken to, and the sentence is
+        built by ``pan.own_notice`` from the table itself rather than from the
+        packet's own fields: a pan can reach this client keyed by name *or* by
+        voice channel, and the player it moved is the one person who cannot look
+        it up any other way. What they are told is where **other players** now
+        hear them -- what they themselves hear stays their own switches.
         """
         if not isinstance(data, dict):
             return
-        who = str(data.get("name") or "")
-        cabinet = str(data.get("cabinet") or "")
 
         def _apply():
-            cinema_pan.apply_packet(self.gameplay, data)
-            me = str(getattr(getattr(self.gameplay, "player", None), "name", ""))
-            if who and me and who.lower() == me.lower():
-                # Only the player whose voice moved is told: everybody else
-                # hears the difference instead of being read a roll call.
-                if cabinet:
-                    speak(f"Your voice has been moved to jukebox {cabinet}.")
-                else:
-                    speak("Your voice is no longer moved by staff.")
+            gameplay = self.gameplay
+            # Read the tables either side of the packet: the one before is what
+            # makes an identical (replayed) pan say nothing at all.
+            before = cinema_pan.own_entry(gameplay)
+            cinema_pan.apply_packet(gameplay, data)
+            notice = cinema_pan.own_notice(gameplay,
+                                           cinema_pan.own_entry(gameplay), before)
+            if notice:
+                speak(notice)
 
         # The table is read by the audio worker every frame, so everything that
         # *writes* it happens on the main thread (the same inbox OpenAL work

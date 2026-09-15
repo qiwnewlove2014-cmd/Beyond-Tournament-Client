@@ -37,15 +37,12 @@ MODE_PAN = "pan"
 MODE_TEST = "test"
 
 # The direction vocabulary in the order a reader wants it, with the words a
-# player hears instead of the wire values in ``pan.DIRECTIONS``.
-DIRECTION_LABELS = (
-    ("auto", "As the room is mixed"),
-    ("front", "Towards the screen (front)"),
-    ("back", "Towards the back of the room"),
-    ("left", "Towards the left of the room"),
-    ("right", "Towards the right of the room"),
-    ("centre", "Towards the centre of the room"),
-)
+# player hears instead of the wire values in ``pan.DIRECTIONS``. It is the pan
+# module's own table, read here rather than kept again: the same words have to
+# come out of this picker and out of the sentence that confirms a pan (and out
+# of the "your sound" line an owner checks), or the feature starts naming the
+# same destination two ways.
+DIRECTION_LABELS = cinema_pan.DIRECTION_LABELS
 
 
 def allowed(gameplay):

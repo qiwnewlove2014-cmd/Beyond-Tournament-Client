@@ -750,5 +750,93 @@ class LiveInstrumentRoutingTests(unittest.TestCase):
         self.assertIsNone(cinema_plugin.host_for(game, create=False))
 
 
+class OwnSoundLineTests(unittest.TestCase):
+    """The read-only line beside the three listening switches.
+
+    The three lines above it choose how *you* hear a room; this one is the
+    other direction -- where other players hear *you* -- and is decided by staff
+    on the Server. So it has to exist in the menu a listener actually opens,
+    read rather than toggle, and change nothing at all when it is pressed: a
+    line that looked like a setting somebody can turn off would be a switch the
+    Server would never honour.
+    """
+
+    def _bot(self, own=9, me="Somchai"):
+        game = FakeGame()
+        gp = game.gameplay
+        gp.add_substate = lambda menu: None
+        gp.pop_last_substate = lambda: None
+        gp.voice_channels = {}
+        gp.player = SimpleNamespace(name=me)
+        gp.own_voice_channel = own
+        return game, gp, make_bot(game, queue_mode=False, next_up_queue=[])
+
+    def _open_menu(self, bot):
+        made = []
+
+        class Capturing(FakeMenu):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                made.append(self)
+
+        with mock.patch("libs.menu.Menu", Capturing), \
+                mock.patch("libs.menus.set_default_sounds"):
+            bot._show_mode_menu()
+        return made[-1]
+
+    def _labels(self, menu):
+        return [norm(label) for label, _action in menu.items]
+
+    def test_it_sits_beside_the_three_listening_switches(self):
+        _game, _gp, bot = self._bot()
+        menu = self._open_menu(bot)
+        labels = self._labels(menu)
+        speech = next(index for index, text in enumerate(labels)
+                      if text.startswith("Speech:"))
+        self.assertTrue(any(text.startswith("Cinema rooms:") for text in labels))
+        self.assertTrue(any(text.startswith("Instruments:") for text in labels))
+        self.assertTrue(any(text.startswith("Your sound:") for text in labels))
+        self.assertEqual(
+            next(text for text in labels if text.startswith("Your sound:")),
+            "Your sound: where you stand (no staff pan)")
+        self.assertEqual(labels[speech + 1].split(":")[0], "Your sound",
+                         "the reading line belongs under the listening ones")
+
+    def test_pressing_it_says_where_you_are_and_writes_nothing(self):
+        _game, _gp, bot = self._bot()
+        menu = self._open_menu(bot)
+        with mock.patch("libs.music_bot.controller.options.set") as store, \
+                mock.patch("libs.music_bot.controller.speak") as speech:
+            item = next(action for label, action in menu.items
+                        if norm(label).startswith("Your sound:"))
+            item()
+        self.assertFalse(store.called)
+        said = " ".join(str(call) for call in speech.call_args_list)
+        self.assertIn("No staff pan is moving your voice", said)
+        self.assertIn("where you stand", said)
+
+    def test_the_line_names_the_room_and_the_side_once_you_are_moved(self):
+        from libs.audio.cinema import pan as cinema_pan
+        _game, gp, bot = self._bot()
+        cinema_pan.table_for(gp).set("Somchai", 9, "j3", "left")
+        self.assertEqual(bot.own_sound_label(),
+                         "Your sound: heard from jukebox j3, towards the left "
+                         "of the room")
+        with mock.patch("libs.music_bot.controller.speak") as speech:
+            bot.announce_own_sound()
+        # One sentence, built by the pan module, said both here and at the
+        # moment a pan lands (pan.own_notice): the menu and the announcement
+        # cannot disagree about the room, the side, or the switches.
+        self.assertEqual(speech.call_args.args[0], cinema_pan.own_report(gp))
+        self.assertEqual(speech.call_args.args[0],
+                         cinema_pan.own_notice(gp, cinema_pan.own_entry(gp), None))
+
+    def test_a_client_that_does_not_know_its_channel_still_reads_a_line(self):
+        # The login snapshot may predate the field; the line must still be there
+        # (it just cannot name a room) rather than vanish from the menu.
+        _game, _gp, bot = self._bot(own=None)
+        self.assertIn("Your sound:", bot.own_sound_label())
+
+
 if __name__ == "__main__":
     unittest.main()

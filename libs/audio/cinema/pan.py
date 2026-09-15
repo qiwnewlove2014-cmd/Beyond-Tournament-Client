@@ -60,6 +60,19 @@ from ...deferred_log import log_deferred as log_line
 DIRECTIONS = ("auto", "front", "back", "left", "right", "centre")
 DEFAULT_DIRECTION = "auto"
 
+# The vocabulary as a player reads it, in the order a reader wants it. One table
+# for the picker *and* for anything that says where a sound went: two tables
+# would eventually disagree about what "left" is called, and a menu that names a
+# direction differently from the sentence confirming it reads like two features.
+DIRECTION_LABELS = (
+    ("auto", "As the room is mixed"),
+    ("front", "Towards the screen"),
+    ("back", "Towards the back of the room"),
+    ("left", "Towards the left of the room"),
+    ("right", "Towards the right of the room"),
+    ("centre", "Towards the centre of the room"),
+)
+
 # A direction is a *move*, not a death: the far side is cut hard but never to
 # nothing, and the near side is lifted, so a pan is heard as the sound going
 # somewhere instead of as a speaker being unplugged. The overall loudness is
@@ -303,6 +316,132 @@ def direction_for_channel(gameplay, channel):
 def panned(gameplay, channel):
     """Whether this talker is one a staff member moved."""
     return target_for_channel(gameplay, channel) is not None
+
+
+def direction_phrase(direction):
+    """The words a player hears for a direction, mid-sentence.
+
+    ``"auto"`` -- the room's own mix, and what clearing a pan restores -- is the
+    absence of a lean, so it has no phrase: a caller says nothing about
+    direction rather than inventing one.
+    """
+    value = normalize_direction(direction)
+    if value == DEFAULT_DIRECTION:
+        return ""
+    for candidate, label in DIRECTION_LABELS:
+        if candidate == value:
+            return label[0].lower() + label[1:]
+    return ""
+
+
+# ------------------------------------------------------------------ own sound
+# The other half of a pan: the player it moved. Staff own the decision and the
+# Server relays it, so what an owner can have is *sight* of it -- where other
+# players now hear them -- and never a veto (a pan is a performance decision,
+# not a setting on somebody else's machine). These helpers read that half out of
+# the same table the routing reads, so the answer a player is told and the
+# answer their voice follows cannot disagree.
+def own_name(gameplay):
+    """This client's own player name, or ``''`` when it is not known yet."""
+    return str(getattr(getattr(gameplay, "player", None), "name", "") or "").strip()
+
+
+def own_channel(gameplay):
+    """This client's own voice channel, or None when the Server has not said.
+
+    A player's own name never reaches their own client through a spawn packet
+    (``Map.add_player`` tells a joiner about everybody *except* them), so the
+    login snapshot carries the channel instead -- ``gameplay.own_voice_channel``
+    -- and that is the key a self-pan travels under.
+    """
+    return _channel_key(getattr(gameplay, "own_voice_channel", None))
+
+
+def moves_me(gameplay, entry):
+    """Whether one entry of the table is *this* client's own sound."""
+    if entry is None:
+        return False
+    name = own_name(gameplay)
+    if name and str(entry[0]).strip().lower() == name.lower():
+        return True
+    channel = own_channel(gameplay)
+    return channel is not None and entry[1] == channel
+
+
+def own_entry(gameplay):
+    """The pan that moves this client's own sound, or None.
+
+    Found by name first and then by channel, because a pan reaches the table
+    under whichever name its path uses: the instrument path sends the player's
+    name, the voice path their channel, and a packet that names nobody (a Server
+    resolving the target itself) still has to be recognised by the player whose
+    voice it moved. A client that knows neither is told nothing -- the
+    alternative is telling the wrong player about somebody else's pan.
+    """
+    table = table_for(gameplay, create=False)
+    if table is None:
+        return None
+    name = own_name(gameplay)
+    if name:
+        entry = table.for_name(name)
+        if entry is not None:
+            return entry
+    channel = own_channel(gameplay)
+    return None if channel is None else table.for_channel(channel)
+
+
+def own_label(gameplay):
+    """One line answering "where does my sound come out?", for a menu line."""
+    entry = own_entry(gameplay)
+    if entry is None:
+        return "Your sound: where you stand (no staff pan)"
+    phrase = direction_phrase(entry[3])
+    return (f"Your sound: heard from jukebox {entry[2]}"
+            + (f", {phrase}" if phrase else ""))
+
+
+def _hear_sentence(entry):
+    """The one sentence for "this is where other players hear you from".
+
+    Built here, once, because three places read it out: the moment a pan lands,
+    the line an owner can check by hand, and anything that later needs to say it
+    again. Two copies of it would eventually disagree about the room, the side,
+    or what the switches do.
+    """
+    phrase = direction_phrase(entry[3])
+    return (f"Other players now hear your voice from jukebox {entry[2]}"
+            + (f", {phrase}" if phrase else "")
+            + ". What you hear is up to your own listening switches.")
+
+
+def own_report(gameplay):
+    """Where other players hear this client's voice, or None when nobody moved it."""
+    entry = own_entry(gameplay)
+    return None if entry is None else _hear_sentence(entry)
+
+
+def own_notice(gameplay, entry, previous=None):
+    """What to say to the player whose own voice just moved (None = nothing).
+
+    Two questions are kept apart on purpose, because running them together is
+    how "the switches are off but I can still hear it" happened: **other
+    players** now hear this voice from another room -- that is all a pan is --
+    while what the owner hears is their own ``Cinema rooms``/``Instruments``/
+    ``Speech`` switches, which a pan never touches.
+
+    ``previous`` is the pan this client believed in before the packet arrived,
+    and it is what makes an *identical* pan silent: a map hands its pans over
+    again to a joiner (and a Server may repeat one), and being read the same
+    sentence on every arrival is how a real change stops being noticed.
+    """
+    if entry == previous:
+        return None
+    if entry is not None and moves_me(gameplay, entry):
+        return _hear_sentence(entry)
+    if previous is not None and moves_me(gameplay, previous):
+        return ("Your voice is no longer moved by staff: other players hear it "
+                "from where you stand.")
+    return None
 
 
 def apply_packet(gameplay, data):
