@@ -8,7 +8,15 @@ SOUNDPREPEND = "data/"
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 13000
 SERVER_SOUNDS_URL = "https://final-hour.net/sounds/"
-TIMEOUT = 5000
+# How long a login attempt tolerates *silence* from the server, in
+# milliseconds. This is a watchdog, not a budget: the clock restarts on every
+# packet the server sends and every request this client sends, so a slow
+# handshake, database lookup or snapshot no longer aborts a login the server is
+# still working on. The old fixed window from the moment the player pressed
+# "log in" did exactly that -- the client returned to the main menu while the
+# server finished authenticating, leaving a session on the map that nobody
+# owned (see client/libs/networking.py, Client.login_timed_out).
+TIMEOUT = 8000
 SETTINGS_KEY = b"mquBJ6q6YIMKxvf8PB880i-bL-DPNv3GPs63FZuD1yQ="
 CHANNEL_MISC = 0
 CHANNEL_SOUND = 1
@@ -34,4 +42,4 @@ SOUNDSPREPEND="/data/"
 VFS_CACHE_MB = 512
 
 # Update this variable to force clients to update their game
-CLIENT_VERSION = "BT-1.8.5"
+CLIENT_VERSION = "BT-1.8.6"

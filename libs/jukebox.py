@@ -1455,9 +1455,19 @@ class JukeboxPlayer:
                                 rebuilds.append(
                                     (jukebox_id, f"frame starvation ({fps:.1f} fps)")
                                 )
+                    # A room that ran low holds every speaker on purpose while
+                    # it rebuilds its depth (see CinemaSpeakerBank), which looks
+                    # exactly like "sources stopped with queued audio" from
+                    # here. It is not a dead room: the packet and output watches
+                    # below still own a room that never refills, so leave this
+                    # one alone rather than rebuilding a room that is
+                    # recovering (a rebuild would drop the audio it is holding).
+                    room_refilling = bool(getattr(entry.get("cinema"),
+                                                   "awaiting_refill", False))
                     stopped_sources = False
                     entry_sources = self._entry_sources(entry)
-                    if entry_sources and age >= self.RELAY_STARTUP_TIMEOUT:
+                    if (entry_sources and not room_refilling
+                            and age >= self.RELAY_STARTUP_TIMEOUT):
                         try:
                             # A room is as healthy as its busiest speaker: any
                             # one of them playing with audio queued means the

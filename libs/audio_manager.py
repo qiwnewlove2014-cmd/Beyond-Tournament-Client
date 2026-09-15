@@ -44,6 +44,36 @@ def _report_efx_armor_breach(f_id, site, label, finalizing):
     except Exception:
         pass
 
+
+def split_channel_buffer(provider, path, channel):
+    """One channel of a stereo sample (``'l'``/``'r'``), or None if it cannot split.
+
+    The split itself belongs to whoever holds the sample cache -- the piano and
+    the drums both expose ``load_stereo_split_buffers`` (their prepared
+    instrument cache, or a decoder + weak cache for anything else) and both
+    already serve the instruments' own stereo image with it.
+
+    None always means "play the whole file": a mono sample (whose loader
+    hands back the same buffer twice), a sample the cache is still preparing, a
+    provider that cannot split at all. A speaker of a cinema room going silent
+    because a sample happened to be mono would be far worse than a note that is
+    not panned, so the caller falls back rather than skipping the note.
+    """
+    if channel not in ("l", "r"):
+        return None
+    loader = getattr(provider, "load_stereo_split_buffers", None)
+    if not callable(loader):
+        return None
+    try:
+        halves = loader(path)
+    except Exception:
+        return None
+    if not halves or len(halves) < 2:
+        return None
+    buffer = halves[0] if channel == "l" else halves[1]
+    return buffer or None
+
+
 class AudioManager():
     @staticmethod
     def _open_context(cyal_device):
@@ -445,10 +475,18 @@ class AudioManager():
                     gain = (self.volume_categories[cat][0] / 100) * (source.volume / 100)
                     if not source.muted: source.source.gain = gain
 
-    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0, reference_distance=15.0, rolloff=1.0, max_distance=100.0, direct_filter=None):
+    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0, reference_distance=15.0, rolloff=1.0, max_distance=100.0, direct_filter=None, channel=None, stereo_provider=None):
         if self.muted and not looping: return
         direction=self.make_orientation(*direction)
-        buffer = self.load_buffer(path, instrument=not looping)
+        # A cinema room hands its screen-wall speakers one channel each, so the
+        # band keeps the room's stereo image (see libs/audio/cinema/live.py).
+        # Anything that cannot be split -- a mono sample, one the cache is
+        # still preparing -- falls back to the whole file below rather than
+        # playing nothing at that speaker.
+        buffer = split_channel_buffer(stereo_provider or getattr(self, "piano", None),
+                                      path, channel)
+        if buffer is None:
+            buffer = self.load_buffer(path, instrument=not looping)
         if not buffer: return
         if cat not in self.volume_categories:
             cat = "miscelaneous"

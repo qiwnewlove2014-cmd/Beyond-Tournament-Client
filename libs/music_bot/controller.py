@@ -25,6 +25,7 @@ from ..audio.cinema import (ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE,
                             set_live_instruments, set_rooms_enabled,
                             set_speech_enabled as set_cinema_speech,
                             speech_enabled as cinema_speech_enabled)
+from ..audio.cinema import peer as cinema_peer
 from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
@@ -170,6 +171,11 @@ class MapMusicBot:
         self.cinema_bank = None
         self.cinema_bank_key = None
         self.cinema_cabinet = None
+        # What the map has last been told about this bot's routing, and when:
+        # the announcement is repeated so a listener who joined mid-song (or
+        # missed a packet) hears the song out of the room like everyone else.
+        self._cinema_announced = None
+        self._cinema_announced_at = 0.0
 
         self.volume = options.get("music_bot_volume", 50)
         self.enabled = options.get("music_bot_enabled", True)
@@ -381,6 +387,12 @@ class MapMusicBot:
     # builder places or deletes mid-song is heard without touching the menu.
     CINEMA_RESHAPE_INTERVAL = 1.0
 
+    # How often the routing is re-announced while the song plays. A listener
+    # who joined the map, returned from another map, or lost the packet picks
+    # the room up within this long; the cost is one small reliable packet
+    # every few seconds, and nothing at all when the bot is not routed.
+    CINEMA_ANNOUNCE_INTERVAL = 3.0
+
     @staticmethod
     def _cinema_key(cabinet_id):
         """This bot feeds a cabinet under its own key.
@@ -564,6 +576,52 @@ class MapMusicBot:
         return ("This map has no Jukebox to build a cinema room around. Add one: "
                 "Builder menu (F8) -> Musical Instrument -> Jukebox.")
 
+    @property
+    def cinema_force_upload(self):
+        """Whether routing to a room means this bot must upload at all.
+
+        A room is a place other people stand in. A song routed into one and
+        then played only into the sender's own copy would leave the venue
+        silent -- which is exactly what happened before this existed, with the
+        bot in its default private mode and nobody else hearing anything.
+
+        The Broadcast switch itself is untouched: this only ORs into the
+        upload gate, so the account's own private-listening choice is still
+        what comes back the moment the routing is turned off.
+        """
+        return bool(self.cinema_active_target())
+
+    def announce_cinema_target(self, force=False):
+        """Tell the map which cabinet's room this bot is playing through.
+
+        Listeners cannot work this out for themselves: the room is a choice
+        made on this client. So it is announced when it changes (immediately,
+        reliably) and repeated at :data:`CINEMA_ANNOUNCE_INTERVAL` while a room
+        is in use, which is what makes a mid-song joiner hear the song from the
+        room rather than from a speaker on this character's back.
+        """
+        target = self.cinema_active_target()
+        # Read defensively: a bot object built by a test (or restored by an
+        # older build) may never have been through __init__. Announcing is
+        # never worth an exception on a path a menu click runs.
+        announced = getattr(self, "_cinema_announced", None)
+        now = time.monotonic()
+        if not force and target == announced:
+            if target is None:
+                return False
+            last = getattr(self, "_cinema_announced_at", 0.0)
+            if now - last < self.CINEMA_ANNOUNCE_INTERVAL:
+                return False
+        network = getattr(self.game, "network", None)
+        if network is None:
+            return False
+        from .. import consts
+        network.send(consts.CHANNEL_MISC, cinema_peer.ANNOUNCE_EVENT,
+                     {"cabinet": str(target or "")})
+        self._cinema_announced = target
+        self._cinema_announced_at = now
+        return True
+
     def set_cinema_target(self, cabinet_id):
         """Route (or un-route) this bot through a cabinet's speaker room.
 
@@ -597,11 +655,16 @@ class MapMusicBot:
                   f"Music will play at your ears.")
         else:
             speak(f"Music now plays through the speakers around jukebox {cabinet_id}: "
-                  f"{room.summary()}.")
+                  f"{room.summary()}. Everyone in the room hears it from those "
+                  f"speakers.")
         # Both directions move the running stream, not just the one that turns
         # the room on. Turning it off deletes the room's sources, which are
         # what the live streamer is feeding.
         self._restart_in_new_output()
+        # And both directions are announced: the listeners are playing this
+        # song out of a room they were told about, so a change that is not
+        # announced leaves them on the old one until the next song.
+        self.announce_cinema_target(force=True)
 
     def _restart_in_new_output(self):
         """Hand a playing track to whichever output now owns the stream.
@@ -3211,6 +3274,9 @@ class MapMusicBot:
         # permission still runs the release path that hands the track back.
         if getattr(self, "cinema_target", None):
             self._update_cinema_output()
+            # Keep the routing on the map fresh (a joiner, a return from
+            # another map, a lost packet), at most every few seconds.
+            self.announce_cinema_target()
 
         if not self.playing or self.paused:
             return
@@ -3264,8 +3330,14 @@ class MapMusicBot:
 
         Only ordinary Music Broadcast has a versioned timeline. Megaphone and
         private playback keep their existing paths and therefore return None.
+
+        A song routed into a cabinet's room counts as an ordinary broadcast:
+        the room is heard by other people and they play their own instrument
+        notes against this very clock, so the marker has to travel with them
+        even though the account's own Broadcast switch may be off.
         """
-        if (not self.broadcast_enabled or self.broadcast_to_megaphone
+        if (not (self.broadcast_enabled or self.cinema_force_upload)
+                or self.broadcast_to_megaphone
                 or self.paused or not self.playing):
             return None
         streamer = self.streamer

@@ -190,6 +190,25 @@ class SpeakerDelayTests(unittest.TestCase):
     def frame(self, tag):
         return frame(tag, size=self.SAMPLES)
 
+    def play_out(self, bank, frames=1):
+        """Play the room forward, the way OpenAL hands finished buffers back.
+
+        A speaker consumes what it is handed and the transport reclaims the
+        finished buffer into that speaker's own pool. The bare fake in this
+        file has no clock, so a test that keeps a room playing past its first
+        pool has to hand the buffers back itself -- and deliberate: only a
+        speaker that is *playing* consumes, which is exactly what a held
+        speaker does not do (see ``hold_frames``).
+        """
+        for slot, source in bank.slot_sources.items():
+            pool = bank._pools.get(slot)
+            if pool is None or source.state != cyal.SourceState.PLAYING:
+                continue
+            for _ in range(frames):
+                if not source.buffers:
+                    break
+                pool.append(source.buffers.pop(0))
+
     def test_a_trimmed_speaker_plays_the_same_audio_a_trim_later(self):
         bank = self.make({"front_l": 0.0, "front_r": 5.0})
         for tag in range(4):
@@ -212,19 +231,33 @@ class SpeakerDelayTests(unittest.TestCase):
         # applied either 0 or 10 ms and this would not line up.
         self.assertEqual(right, self.frame(1)[1][480:] + self.frame(2)[1][:480])
 
-    def test_a_trim_longer_than_a_frame_waits_for_the_history(self):
+    def test_a_trim_longer_than_a_frame_is_held_not_starved(self):
+        """A whole-frame trim costs the speaker no feeding at all.
+
+        It used to be queued as a cut, which meant the trimmed speaker could
+        not be fed until the room held that much audio -- and the room's start
+        then waited for *it*, which cancelled the trim (see
+        test_cinema_speaker_delay). A whole-frame trim is carried by holding
+        the speaker back instead, so it is fed every frame like any other and
+        its queue is already the room's own audio when its hold ends.
+        """
         bank = self.make({"front_l": 0.0, "front_r": 20.0})
-        # 20 ms is two frames: the first frames cannot be cut that far back, so
-        # the trimmed speaker is simply not fed yet -- never a silent buffer.
-        self.assertTrue(bank.queue_frame(*self.frame(0)))
-        self.assertEqual(bank.slot_sources["front_r"].buffers_queued, 0)
-        bank.queue_frame(*self.frame(1))
-        self.assertEqual(bank.slot_sources["front_r"].buffers_queued, 0)
-        bank.queue_frame(*self.frame(2))
-        self.assertEqual(bank.slot_sources["front_r"].buffers_queued, 1)
-        # Its first window is the whole first frame: 20 ms behind the room.
-        self.assertEqual(bank.slot_sources["front_r"].buffers[-1].data,
-                         self.frame(0)[1])
+        for tag in range(4):
+            self.assertTrue(bank.queue_frame(*self.frame(tag)))
+        for slot in ("front_l", "front_r"):
+            self.assertEqual(bank.slot_sources[slot].buffers_queued, 4, slot)
+        self.assertEqual(bank.frames_queued, 4)
+
+        # 20 ms is two frames of hold: level with the room only after that.
+        bank.start_playback()
+        self.assertTrue(bank.slot_sources["front_l"].state
+                        == cyal.SourceState.PLAYING)
+        self.assertNotEqual(bank.slot_sources["front_r"].state,
+                            cyal.SourceState.PLAYING)
+        for tag in range(4, 6):
+            bank.queue_frame(*self.frame(tag))
+        bank.start_playback()
+        self.assertTrue(bank.playing())
 
     def test_an_untouched_room_is_byte_for_byte_what_it_was(self):
         bank = self.make({"front_l": 0.0, "front_r": 0.0})
@@ -240,45 +273,82 @@ class SpeakerDelayTests(unittest.TestCase):
         for tag in range(6):
             bank.queue_frame(*self.frame(tag))
         bank.start_playback()
+        # 25 ms is three frames of hold: the room starts on its untrimmed
+        # speaker and the trimmed one is fed, still silent, until the frames
+        # its trim asks for are queued -- being started three frames later is
+        # the trim. Starving it instead is how the trim used to disappear.
+        self.assertEqual(bank.slot_sources["front_l"].state,
+                         cyal.SourceState.PLAYING)
+        self.assertNotEqual(bank.slot_sources["front_r"].state,
+                            cyal.SourceState.PLAYING)
+        self.assertGreater(bank.slot_sources["front_r"].buffers_queued, 0)
+        for tag in range(6, 9):
+            bank.queue_frame(*self.frame(tag))
+        bank.start_playback()
         self.assertTrue(bank.playing())
-        # The trimmed speaker holds less audio by design, and the room still
-        # reports a queue the transport can measure.
+        # The room still reports a queue the transport can measure and steer
+        # by, and the two speakers hold the same programme: the untrimmed one
+        # the live frame, the trimmed one that frame's end cut five
+        # milliseconds back (25 ms is three whole frames plus the cut).
         self.assertGreater(bank.queued_frames(), 0)
-        self.assertLess(bank.queued_frames(),
-                        bank.slot_sources["front_l"].buffers_queued)
+        self.assertEqual(bank.slot_sources["front_l"].buffers[-1].data,
+                         self.frame(8)[0])
+        self.assertEqual(bank.slot_sources["front_r"].buffers[-1].data,
+                         self.frame(7)[1][480:] + self.frame(8)[1][:480])
 
     def test_a_trim_deeper_than_the_room_can_hold_still_plays(self):
-        """Never a dead speaker: it plays the deepest cut the history reaches.
+        """Never a dead speaker, however badly the frames and the trim match.
 
-        The trim is played as a cut into audio the room still holds, so a
-        speaker asking for more history than the room keeps (tiny frames, a
-        deep trim) would otherwise never be fed at all -- silent for the whole
-        song with nothing on screen to say why.
+        A trim is carried by holding the speaker back, which costs it one
+        buffer per held frame -- so a room whose frames are tiny compared with
+        the trim (8 samples here, a 100 ms trim) would ask for more buffers
+        than it has and could never take a frame at all. The hold is capped by
+        what the pool can carry: the speaker plays a shorter delay and stays
+        audible, which is the only failure mode an installer can live with.
         """
         def tiny(tag):
             return frame(tag, size=8)                  # 8 samples, not 480
 
         bank = self.make({"front_l": 0.0, "front_r": 100.0})
-        for tag in range(12):
-            bank.queue_frame(*tiny(tag))
+        prebuffer = bank.wanted_for_start()
         right = bank.slot_sources["front_r"]
-        # 100 ms is 4800 samples, the room's history reaches 88, so it plays
-        # the oldest frame it still holds rather than nothing at all.
-        self.assertEqual(right.buffers_queued, 1)
-        self.assertEqual(right.buffers[-1].data, tiny(0)[1])
-        self.assertNotEqual(right.buffers[-1].data, tiny(11)[1])
+        index = 0
+        for _ in range(prebuffer):
+            self.assertTrue(bank.queue_frame(*tiny(index)), index)
+            index += 1
+        # The hold is capped by the pool, not by the trim: a held speaker does
+        # not consume what it is handed, so it can only be held as deep as the
+        # buffers a speaker has to spare (measured once a frame has said how
+        # big a frame is -- 100 ms is 600 of these, and 600 is the cap).
+        self.assertEqual(bank.hold_frames("front_r"),
+                         bank.buffers_per_slot - prebuffer - 1)
+        bank.start_playback()
+        self.assertNotEqual(right.state, cyal.SourceState.PLAYING)
+        # Play the song out: every tick the room consumes what it was handed
+        # and the transport queues the next frame, so the held speaker is fed
+        # with the rest of the room all the way to its (shorter) delay.
+        while index < 60:
+            self.play_out(bank)
+            self.assertTrue(bank.queue_frame(*tiny(index)), index)
+            bank.start_playback()
+            index += 1
+        self.assertTrue(bank.playing())
+        # 100 ms over 8-sample frames has no sub-frame remainder, so every
+        # frame it was handed is the live one -- and it was handed all of them,
+        # which is what the room's own queue plus its (capped) hold is.
+        self.assertEqual(right.buffers_queued,
+                         bank.slot_sources["front_l"].buffers_queued
+                         + bank.hold_frames("front_r"))
+        self.assertEqual(right.buffers[-1].data, tiny(index - 1)[1])
 
     def test_a_room_where_every_speaker_carries_a_trim_still_plays(self):
-        """Nothing else can seed the room's history once every speaker is late.
+        """Every speaker late is still every speaker fed and every speaker on.
 
-        A trim is played as a cut into the audio the room still holds, so a
-        trimmed speaker is only fed once that much audio is queued -- a speaker
-        starting a few milliseconds late is what a trim IS. That wait needs
-        some other speaker to queue the first frames, and a room whose every
-        speaker was given a delay has none: the room never queued its first
-        frame, so it never had the history it was waiting for and stayed silent
-        for the whole song (the reported "I set a delay on each speaker and
-        cinema mode went quiet").
+        Nothing about a trim needs a speaker that carries none: a room whose
+        every speaker was given a delay used to go silent for the whole song,
+        because each of them was waiting for the history an untrimmed speaker
+        would have seeded. Each is fed like any other speaker now, and the
+        shallowest trim is the one the others are held behind.
         """
         bank = self.make({"front_l": 20.0, "front_r": 20.0})
         for tag in range(6):
@@ -287,45 +357,148 @@ class SpeakerDelayTests(unittest.TestCase):
         for slot in ("front_l", "front_r"):
             self.assertEqual(bank.slot_sources[slot].buffers_queued, 6, slot)
         self.assertEqual(bank.frames_queued, 6)
-        # The first frames play a shorter cut (the room cannot reach 20 ms back
-        # yet); the full trim is in force as soon as the history is deep
-        # enough, which here is the same programme 20 ms -- one frame's worth --
-        # behind the live frame.
+        # Fed the room's own frames, not a cut of them: the trim is the hold,
+        # so the newest buffer on each speaker is the live frame (its own
+        # channel of it -- the front pair carries the stereo image).
         self.assertEqual(bank.slot_sources["front_l"].buffers[-1].data,
-                         self.frame(3)[0])
+                         self.frame(5)[0])
+        self.assertEqual(bank.slot_sources["front_r"].buffers[-1].data,
+                         self.frame(5)[1])
+        # Every speaker waits its *own* trim, so the room's start itself is
+        # two frames later -- and every speaker is fed the room's own frames
+        # the whole way while it waits, which is what the silence used to be.
+        bank.start_playback()
+        self.assertFalse(bank.playing())
+        for slot in ("front_l", "front_r"):
+            self.assertGreater(bank.slot_sources[slot].buffers_queued, 0, slot)
+        for tag in range(6, 8):
+            bank.queue_frame(*self.frame(tag))
+        bank.start_playback()
+        # Two speakers dialled in alike start level with each other: a trim is
+        # the delay that speaker plays at, not a difference from whoever
+        # happened to start the room.
+        self.assertTrue(bank.playing())
+        self.assertEqual(bank.slot_sources["front_l"].buffers_queued,
+                         bank.slot_sources["front_r"].buffers_queued)
 
-    def test_realign_refills_a_trimmed_speaker_with_trimmed_frames(self):
+    def test_realign_refills_an_emptied_speaker_with_trimmed_frames(self):
         """A refill hands it the delayed programme, never the live frame.
+
+        An underrun leaves a speaker with *nothing* queued, and that is the
+        case a refill exists for: it is filled from the window the room is
+        about to play, cut by its own delay, so it comes back the same trim
+        behind the room it was -- and a whole frame deeper than an untrimmed
+        one, or the fill would have handed it a delay it does not have.
 
         Filling it like an untrimmed speaker lets it catch up with the room
         for as long as that fill lasts and then jump backwards when the next
-        trimmed window arrives -- a slip in one speaker, right after a pause,
-        which is exactly when a room is most likely to be re-formed.
+        trimmed window arrives -- a slip in one speaker right after an
+        underrun, which is exactly when a room is re-formed (see
+        ``test_a_speaker_that_still_holds_frames_is_never_appended_to``).
         """
         bank = self.make({"front_l": 0.0, "front_r": 5.0})
-        for tag in range(8):
+        for tag in range(10):
             bank.queue_frame(*self.frame(tag))
         bank.start_playback()
+        bank.queue_frame(*self.frame(10))
+        bank.start_playback()          # the trimmed speaker's hold is over
+        self.assertTrue(bank.playing())
         right = bank.slot_sources["front_r"]
-        for _ in range(3):
-            right.buffers.pop(0)          # it comes back shallow
+        room_depth = bank.slot_sources["front_l"].buffers_queued
+        # The underrun itself: it played everything it held, and a source's
+        # finished buffers come back to its own pool through ``reclaim``.
+        right.pause()
+        right.buffers_processed = right.buffers_queued
+        bank.reclaim()
+        self.assertEqual(right.buffers_queued, 0, "the speaker was not empty")
         recorded = spy_render(bank.renderer)
 
         self.assertTrue(bank.realign(play=False))
 
-        # Every frame it is given is cut five milliseconds back from its own
-        # end, so its queue stays a trim behind the room instead of level with
-        # it. The oldest frame has no history to cut into, so it is skipped --
-        # exactly as it was while the room was first filling.
-        self.assertEqual(recorded, [
-            (self.frame(0)[0][480:] + self.frame(1)[0][:480],
-             self.frame(0)[1][480:] + self.frame(1)[1][:480]),
-            (self.frame(1)[0][480:] + self.frame(2)[0][:480],
-             self.frame(1)[1][480:] + self.frame(2)[1][:480]),
-            (self.frame(2)[0][480:] + self.frame(3)[0][:480],
-             self.frame(2)[1][480:] + self.frame(3)[1][:480]),
-        ])
-        self.assertEqual(right.buffers_queued, 7)
+        # Every frame it is given is cut its own five milliseconds back from
+        # its end: the programme, a trim late, never the live frame.
+        windows = [(self.frame(tag)[0][480:] + self.frame(tag + 1)[0][:480],
+                    self.frame(tag)[1][480:] + self.frame(tag + 1)[1][:480])
+                   for tag in range(11)]
+        self.assertTrue(recorded, "the refill handed it nothing")
+        self.assertEqual(recorded, windows[:len(recorded)])
+        # The oldest frame of the room's window has no history to cut into, so
+        # it is not fed at all -- exactly as it was while the room was first
+        # filling, and no speaker is ever handed silence for it.
+        self.assertEqual(len(recorded), 10, "the room's window, less its oldest")
+        # The room's own speaker is left where it was: re-anchoring the room on
+        # a trimmed speaker would push every untrimmed one back by a delay it
+        # does not have.
+        self.assertEqual(bank.slot_sources["front_l"].buffers_queued,
+                         room_depth)
+
+    def test_a_speaker_that_still_holds_frames_is_never_appended_to(self):
+        """Nothing is spliced onto a queue that already carries the programme.
+
+        A window cut from the room's history and put *after* frames a speaker
+        queued earlier leaves a step in that speaker's own stream: it would
+        play the room's instant, then the past, then the live edge -- heard as
+        one speaker stumbling, and left an instant of its own afterwards. That
+        is the "the delay moved by itself" report, and it is why a refill is
+        only ever a refill: a speaker that still holds frames is left exactly
+        as it is (a held one is in step by construction), and one whose queue
+        cannot be emptied is left as it is too.
+        """
+        bank = self.make({"front_l": 0.0, "front_r": 5.0})
+        for tag in range(10):
+            bank.queue_frame(*self.frame(tag))
+        bank.start_playback()
+        bank.queue_frame(*self.frame(10))
+        bank.start_playback()
+        self.assertTrue(bank.playing())
+        right = bank.slot_sources["front_r"]
+        right.pause()
+        for _ in range(3):
+            right.buffers.pop(0)          # a queue that is short, not empty
+        held = list(right.buffers)
+        recorded = spy_render(bank.renderer)
+
+        self.assertFalse(bank.realign(play=False))
+        self.assertEqual(recorded, [],
+                         "a window was spliced after the frames it held")
+        self.assertEqual(list(right.buffers), held)
+        self.assertEqual(right.buffers_queued, len(held))
+
+    def test_one_odd_frame_does_not_move_a_speaker_s_trim(self):
+        """A trim is read in the frames the transport really delivers.
+
+        A trim is a cut in samples *and* a hold in whole frames, so the frame's
+        own size is what turns "25 ms" into "one frame plus 5 ms". Measuring
+        that again on every frame let a single short one (a torn frame, a
+        warm-up replay, the tail of a resync) re-read every trimmed speaker's
+        delay for that frame -- the speaker moved by the difference and moved
+        back, which is a delay changing by itself.
+        """
+        bank = self.make({"front_l": 0.0, "front_r": 25.0})
+        for tag in range(4):
+            bank.queue_frame(*self.frame(tag))
+        bank.start_playback()
+        before = (bank.hold_frames("front_r"), bank._delay_samples("front_r"))
+        torn = self.frame(9)
+        bank.queue_frame(torn[0][:240], torn[1][:240])
+
+        self.assertEqual((bank.hold_frames("front_r"),
+                          bank._delay_samples("front_r")), before)
+        self.assertEqual(bank.frame_ms(), 10.0)
+        self.assertEqual(bank.frame_size_changes, 0)
+
+    def test_a_frame_size_that_keeps_arriving_is_believed(self):
+        """A transport that really changed size is followed -- once."""
+        bank = self.make({"front_l": 0.0, "front_r": 25.0})
+        for tag in range(4):
+            bank.queue_frame(*self.frame(tag))
+        bank.start_playback()
+        self.assertEqual(bank.frame_ms(), 10.0)
+        for tag in range(4, 8):
+            bank.queue_frame(*frame(tag, size=self.SAMPLES * 2))
+
+        self.assertEqual(bank.frame_ms(), 20.0)
+        self.assertEqual(bank.frame_size_changes, 1)
 
 
 class RoomLagMeasurementTests(unittest.TestCase):
@@ -573,20 +746,44 @@ class BankLockStepTests(unittest.TestCase):
         self.assertEqual(recorded, list(bank._recent)[-3:])
         self.assertTrue(bank.playing())
 
-    def test_a_shallow_speaker_gets_only_the_frames_it_is_missing(self):
+    def test_a_speaker_that_ran_dry_is_filled_from_the_room_s_window(self):
+        """An underrun empties a queue, and that is what the refill is for.
+
+        What such a speaker is missing is exactly the window the room is
+        about to play -- the frames the room still holds, in order -- so the
+        refill puts it back on the room's content instant instead of a queue's
+        worth ahead or behind it.
+        """
         game, bank = self.make(["front_l", "front_c", "front_r"])
         for index in range(3):
             bank.queue_frame(*frame(index))
         bank.start_playback()
         centre = bank.slot_sources["front_c"]
-        centre.buffers.pop(0)
-        centre.buffers.pop(0)          # holds one of the three
+        centre.buffers.clear()
+        centre.state = cyal.SourceState.STOPPED
         held = list(bank._recent)
         recorded = spy_render(bank.renderer)
         self.assertTrue(bank.realign(play=False))
         self.assertEqual(centre.buffers_queued, 3)
-        # The two frames before the one it still held -- not the two newest.
-        self.assertEqual(recorded, held[:-1])
+        self.assertEqual(recorded, held[-3:])
+
+    def test_a_playing_speaker_is_not_filled_with_audio_it_already_played(self):
+        """A playing speaker is at the live edge, so a short queue is *past*.
+
+        It consumes a buffer a frame and is handed one a frame, so a depth
+        below the room's is audio it has already played. Filling it from the
+        room's history replays that bar into it -- heard mid-start as the song
+        stumbling over one bar, and it threw every measured trim off too.
+        """
+        game, bank = self.make(["front_l", "front_c", "front_r"])
+        for index in range(3):
+            bank.queue_frame(*frame(index))
+        bank.start_playback()
+        centre = bank.slot_sources["front_c"]
+        centre.buffers.pop(0)          # one frame shallower than the room
+        recorded = spy_render(bank.renderer)
+        self.assertFalse(bank.realign(play=False))
+        self.assertEqual(recorded, [], "a playing speaker was topped up")
 
     def test_realign_does_nothing_when_the_room_is_already_level(self):
         game, bank = self.make(["front_l", "front_r"])
@@ -608,6 +805,135 @@ class BankLockStepTests(unittest.TestCase):
         self.assertEqual(states, {cyal.SourceState.PAUSED})
         self.assertTrue(bank.set_paused(False))
         self.assertTrue(bank.playing())
+
+
+class RoomHoldsTogetherTests(unittest.TestCase):
+    """A room that runs low holds as one unit, never one speaker at a time.
+
+    A room is only as in-step as its shallowest queue. When a channel drops
+    frames the queues drain, and letting them run out one at a time is how a
+    listener ends up with two speakers playing the same song from different
+    instants -- reported as "the delay came and went on its own", which no
+    amount of note scheduling can undo once it is audible. The room therefore
+    holds *every* speaker before that happens and starts again together.
+    """
+
+    def make(self, slots=None):
+        game = FakeGame()
+        slots = slots or ["front_l", "front_r"]
+        renderer = CinemaRenderer(ANCHOR, "front_only", specs=specs(slots))
+        bank = CinemaSpeakerBank(game, renderer, volume=100, cabinet_volume=100,
+                                 occlusion_provider=lambda *a: 0)
+        return game, bank
+
+    @staticmethod
+    def consume(bank, frames=1):
+        """Play the room forward, the way OpenAL hands finished buffers back.
+
+        A speaker consumes what it is handed and the finished buffer goes back
+        to that speaker's own pool -- the bare fake in this file has no clock,
+        so a room that plays past its first pool has to hand them back here.
+        """
+        for slot, source in bank.slot_sources.items():
+            pool = bank._pools.get(slot)
+            if pool is None or source.state != cyal.SourceState.PLAYING:
+                continue
+            for _ in range(frames):
+                if not source.buffers:
+                    break
+                pool.append(source.buffers.pop(0))
+
+    def drain_to(self, bank, depth):
+        """Leave every queue exactly ``depth`` frames deep."""
+        while min(source.buffers_queued for source in bank.sources) > depth:
+            before = min(source.buffers_queued for source in bank.sources)
+            self.consume(bank)
+            if min(source.buffers_queued for source in bank.sources) == before:
+                break
+
+    def started(self, bank, frames=6, ticks=8):
+        """Start the room, then play it: one frame in, one frame out, a tick."""
+        index = 0
+        for index in range(frames):
+            bank.queue_frame(*frame(index))
+        bank.start_playback()
+        self.assertTrue(bank.playing())
+        for _ in range(ticks):
+            index += 1
+            self.consume(bank)
+            bank.queue_frame(*frame(index))
+        return index
+
+    def test_an_empty_speaker_makes_the_whole_room_hold(self):
+        game, bank = self.make()
+        index = self.started(bank)
+        self.drain_to(bank, 1)
+        self.assertFalse(bank.awaiting_refill)
+
+        # The next frame finds the room on its floor: every speaker is held in
+        # the same call, so no speaker is left playing the song alone.
+        self.assertTrue(bank.queue_frame(*frame(index + 1)))
+        self.assertTrue(bank.awaiting_refill)
+        self.assertEqual({source.state for source in bank.sources},
+                         {cyal.SourceState.PAUSED})
+        self.assertEqual(bank.refill_holds, 1)
+
+        # The room starts again as one unit once its audio is back: every
+        # speaker plays, and they are all carrying the same queue.
+        index += 1
+        while bank.awaiting_refill:
+            index += 1
+            bank.queue_frame(*frame(index))
+            bank.start_playback()
+        self.assertTrue(bank.playing())
+        depths = {slot: source.buffers_queued
+                  for slot, source in bank.slot_sources.items()}
+        self.assertEqual(set(depths.values()), {min(depths.values())})
+        self.assertGreaterEqual(min(depths.values()), bank.wanted_for_start())
+
+    def test_a_listeners_own_pause_is_not_a_refill(self):
+        """Holding a room that is already held spends its position on nothing."""
+        game, bank = self.make()
+        index = self.started(bank)
+        bank.set_paused(True)
+        self.drain_to(bank, 0)
+        bank.queue_frame(*frame(index + 1))
+        self.assertFalse(bank.awaiting_refill)
+        self.assertEqual(bank.refill_holds, 0)
+        self.assertEqual({source.state for source in bank.sources},
+                         {cyal.SourceState.PAUSED})
+
+    def test_a_room_still_inside_its_start_is_not_held(self):
+        """A shallow queue while the room is filling is the pre-buffer."""
+        game, bank = self.make()
+        bank.queue_frame(*frame(0))
+        bank.start_playback()          # one frame: the caller's own choice
+        self.assertTrue(bank.queue_frame(*frame(1)))
+        self.assertFalse(bank.awaiting_refill)
+        self.assertEqual(bank.refill_holds, 0)
+        self.assertTrue(bank.slot_sources["front_l"].state
+                        == cyal.SourceState.PLAYING)
+
+    def test_a_speaker_waiting_out_its_trim_is_not_a_low_room(self):
+        """A trim is measured from the room's clock: holding spends it."""
+        game = FakeGame()
+        renderer = CinemaRenderer(ANCHOR, "front_only", specs=[
+            CinemaSpeakerSpec("front_l", ANCHOR),
+            CinemaSpeakerSpec("front_r", ANCHOR, delay_ms=60.0),
+        ])
+        bank = CinemaSpeakerBank(game, renderer, volume=100,
+                                 cabinet_volume=100,
+                                 occlusion_provider=lambda *a: 0)
+        for index in range(6):
+            bank.queue_frame(*frame(index))
+        bank.start_playback()
+        # The trimmed speaker is still silent (three frames of hold at 10 ms
+        # frames) while the untrimmed one plays: not a room that ran dry.
+        self.assertNotEqual(bank.slot_sources["front_r"].state,
+                            cyal.SourceState.PLAYING)
+        self.drain_to(bank, 1)
+        bank.queue_frame(*frame(6))
+        self.assertFalse(bank.awaiting_refill)
 
 
 class HostReshapeTests(unittest.TestCase):
@@ -1334,12 +1660,14 @@ class MusicBotLiveRoomTests(unittest.TestCase):
                                  volume=100, bot=SimpleNamespace(), cinema=bank)
         chunk = bytes(streamer.SAMPLES_PER_BUFFER * streamer.channels * 2)
 
-        # 60 ms of trim is three 20 ms frames: the trimmed speaker is simply
-        # not fed yet, and the stream must keep filling the room regardless.
+        # 60 ms of trim is three 20 ms frames of *hold*, not three frames of
+        # missing audio: the stream fills every speaker every frame, and the
+        # trim is what the start does with those frames.
         for _ in range(6):
             self.assertTrue(streamer._queue_local(chunk))
         self.assertEqual(bank.slot_sources["front_l"].buffers_queued, 6)
-        self.assertEqual(bank.slot_sources["front_r"].buffers_queued, 3)
+        self.assertEqual(bank.slot_sources["front_r"].buffers_queued, 6)
+        self.assertTrue(bank.queue_frame(*frame(9)))
 
     def test_the_room_reports_the_audio_it_has_actually_been_fed(self):
         """A room's fed position is how far into the song the output has got.

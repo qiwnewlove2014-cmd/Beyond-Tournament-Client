@@ -44,6 +44,29 @@ PREBUFFER_FRAMES = 4
 RESUME_FRAMES = 3
 MAX_QUEUED_FRAMES = 6
 
+# The floor a *playing* room never lets its shallowest speaker reach.
+#
+# Every speaker of a room is handed one frame per frame and consumes one per
+# frame, so they all carry the same queue depth -- until one of them empties,
+# which is the moment the room stops being one unit: that speaker reports
+# STOPPED, is left out of the feeding (see ``_feed_slots``) and only comes back
+# through ``realign`` a pump later, while the speakers that kept playing did
+# not. Two speakers playing the same song from different instants is heard as
+# "the delay came and went on its own", and no listener-side maths can undo it
+# once it is audible -- so the room holds instead (see ``_watch_low_queue``).
+LOW_QUEUE_FRAMES = 2
+
+# How many frames in a row must agree before a new frame size is believed.
+#
+# A frame's own size is what turns a millisecond trim into whole frames of hold
+# plus a sample remainder, so re-measuring it on every frame lets a single odd
+# frame silently re-measure every trimmed speaker's delay. The measured size is
+# therefore latched (see ``_learn_frame_size``).
+FRAME_SIZE_STABLE_FRAMES = 3
+
+# How often the routine sink is told a room had to hold for a refill.
+HOLD_REPORT_INTERVAL = 30.0
+
 SAMPLERATE = 48000
 
 # The cabinet's own playback uses its own category, not map music.
@@ -125,6 +148,23 @@ class CinemaSpeakerBank:
         self.frames_queued = 0
         self._frame_ms = 20.0
         self._plays_started = False
+        # The frame size actually measured from the audio handed over. Latched:
+        # a single frame of another size must never move a speaker's trim (see
+        # ``_learn_frame_size``).
+        self._frame_samples_seen = 0
+        self._frame_size_streak = 0
+        self.frame_size_changes = 0
+        # A room that ran low holds every speaker until the depth is back (see
+        # ``_watch_low_queue``), and a listener's own pause must never be
+        # mistaken for one.
+        self._refill_hold = False
+        self._paused = False
+        self.refill_holds = 0
+        self._hold_reported_at = None
+        # Frames the room had queued when its first speaker started playing.
+        # A delay trim is measured from there, so it survives the room's own
+        # start rules changing once playback has begun.
+        self._start_frame = None
         self._build()
 
     # ------------------------------------------------------------- lifetime
@@ -303,8 +343,8 @@ class CinemaSpeakerBank:
             # server relay hands 40 ms PCM frames). Measured from the audio
             # handed over, never assumed: see ``buffered_ms``.
             samples = len(left) // 2
-            if samples > 0:
-                self._frame_ms = samples * 1000.0 / SAMPLERATE
+            self._learn_frame_size(samples)
+            self._watch_low_queue()
             return True
         except Exception:
             # Return whatever was not queued, then reset the whole room so
@@ -342,6 +382,126 @@ class CinemaSpeakerBank:
             self.last_output_at = self._clock()
         return reclaimed
 
+    # ------------------------------------------------- frame size and floor
+
+    def _learn_frame_size(self, samples):
+        """Latch the size of a frame, and never let one odd frame move a trim.
+
+        A trim is *played* as a cut in samples inside the frame it was queued
+        in (``_delayed_window``) and its whole-frame part is a hold measured in
+        frames (``hold_frames``) -- so the frame's own size is what turns a
+        millisecond value into frames plus a remainder. Re-measuring that on
+        every frame means a single short frame (a torn one, a warm-up replay,
+        the tail of a resync) silently re-measures every trimmed speaker: a
+        50 ms trim read against 40 ms frames is "one frame plus 10 ms" and
+        against 20 ms frames "two frames plus 10 ms", and the speaker audibly
+        moves by the difference -- then moves back. A size is therefore
+        believed only after it has arrived ``FRAME_SIZE_STABLE_FRAMES`` times in
+        a row, which keeps the room at the size its transport really delivers
+        and ignores a frame that does not match.
+        """
+        if samples <= 0:
+            return
+        if samples == self._frame_samples_seen:
+            self._frame_size_streak += 1
+        else:
+            self._frame_samples_seen = samples
+            self._frame_size_streak = 1
+        measured = samples * 1000.0 / SAMPLERATE
+        if self._frame_ms > 0 and abs(measured - self._frame_ms) < 0.01:
+            return
+        # Before the room plays, the very first frame is the best evidence
+        # there is (the start rules need a frame size immediately). Once it is
+        # playing, only a size that keeps arriving is a new transport.
+        if self._plays_started and self._frame_size_streak < FRAME_SIZE_STABLE_FRAMES:
+            return
+        previous = self._frame_ms
+        self._frame_ms = measured
+        # Counted only while the room plays: that is when a change can move a
+        # speaker during a song (the first lock is simply the room learning its
+        # transport).
+        if (self._plays_started and previous > 0
+                and abs(previous - measured) >= 0.01):
+            self.frame_size_changes += 1
+            log_line(f"[Cinema] room frame size {previous:.0f} ms -> "
+                     f"{measured:.0f} ms")
+
+    @property
+    def awaiting_refill(self):
+        """True while the room is held because it ran out of queued audio."""
+        return self._refill_hold
+
+    def _watch_low_queue(self):
+        """Hold the whole room rather than let one speaker run out alone.
+
+        A room plays as one unit only while every speaker has audio in front
+        of it. The shallowest queue is what the room hears next, so it is the
+        shallowest queue that decides: at the floor every speaker is held
+        together -- the same pause a listener's own pause key uses, so nothing
+        is ever dropped or re-played -- the arriving frames rebuild the depth,
+        and the room starts again as one unit (``_play_ready``).
+
+        One short hold, level across the room, instead of one speaker stopping
+        alone and being put back a pump later while the rest kept playing.
+        """
+        if (self._refill_hold or self._paused or self._stopped
+                or not self._plays_started or not self.slot_sources):
+            return False
+        if self._start_frame is None:
+            return False
+        if self.frames_queued - self._start_frame < self.wanted_for_start():
+            # Still inside the room's own start: a shallow queue here is the
+            # pre-buffer the caller asked for, not a room that ran dry.
+            return False
+        if any(self._held(slot) for slot in self.slot_sources):
+            # A speaker still waiting out its delay trim is fed and silent by
+            # design, and a trim is measured from the room's own clock (see
+            # ``_held``) -- holding the room here would spend the trim on
+            # frames nobody played.
+            return False
+        if not self._playing_slots():
+            # Nothing is playing: the transport's own start path owns this room
+            # and holds it until ``wanted_for_start`` frames are queued.
+            return False
+        depth = min(self._queued_of(slot) for slot in self.slot_sources)
+        if depth > LOW_QUEUE_FRAMES:
+            return False
+        return self._begin_refill_hold(depth)
+
+    def _begin_refill_hold(self, depth):
+        self._refill_hold = True
+        self.refill_holds += 1
+        for source in self.slot_sources.values():
+            with contextlib.suppress(Exception):
+                source.pause()
+        self._report_refill_hold(depth)
+        return True
+
+    def _report_refill_hold(self, depth):
+        """Say once in a while that a room had to hold for more audio.
+
+        Routine (the deferred sink): a room that runs low is recovering from a
+        channel that dropped frames, not failing, and it must never be the
+        reason a gameplay frame stalls.
+        """
+        now = self._clock()
+        if (self._hold_reported_at is not None
+                and now - self._hold_reported_at < HOLD_REPORT_INTERVAL):
+            return
+        self._hold_reported_at = now
+        log_line(f"[Cinema] room ran low ({depth} frame(s) left of "
+                 f"{len(self.slot_sources)} speaker(s)): holding every speaker "
+                 f"until {self.wanted_for_start()} are queued")
+
+    def _end_refill_hold(self):
+        """Release the hold once the room has its audio again; True if it did."""
+        if not self._refill_hold:
+            return False
+        if self.queued_frames() < self.wanted_for_start():
+            return False
+        self._refill_hold = False
+        return True
+
     def _queued_of(self, slot):
         """Frames this speaker still holds, or 0 when it cannot say."""
         source = self.slot_sources.get(slot)
@@ -362,12 +522,68 @@ class CinemaSpeakerBank:
                 return []
         return slots
 
-    def _delay_samples(self, slot):
-        """Samples this speaker plays late, straight from its own delay trim."""
-        millis = float(self.renderer.layout.delay_ms(slot) or 0.0)
+    def _frame_samples(self):
+        """Samples of audio in one queued frame (20 ms until a frame says)."""
+        millis = self._frame_ms if self._frame_ms > 0 else 20.0
+        return max(1, int(round(millis * SAMPLERATE / 1000.0)))
+
+    def _trim_samples(self, slot):
+        """This speaker's delay trim, in samples, straight from the map."""
+        try:
+            millis = float(self.renderer.layout.delay_ms(slot) or 0.0)
+        except Exception:
+            return 0
         if millis <= 0.0:
             return 0
         return int(round(millis * SAMPLERATE / 1000.0))
+
+    def hold_frames(self, slot):
+        """Whole frames this speaker's delay trim is, rounded up.
+
+        A delay trim is *latency*: the speaker plays the same programme as its
+        neighbours, that many samples later, and every speaker is held back by
+        its own count from the one moment the room's clock starts. A queue can
+        only carry a delay in whole frames: its own remainder travels as the
+        sample-exact cut in ``_delay_samples``, and the two together land the
+        trim exactly on the sample. The cut costs the speaker the one frame of
+        feeding it takes the room to hold that much audio, which is why the
+        count rounds *up*.
+
+        Holding it is the whole point: feed a trimmed speaker the audio cut
+        back by its trim and it cannot queue that audio until the room holds
+        that much, which starves it by the very same amount -- the cut and the
+        starvation cancel out, its queue head lands on the sample an untrimmed
+        speaker is already playing, and the room starts both of them together.
+        The trim was then heard as nothing at all (reported as "the delays only
+        start working two or three minutes into the song", because a later
+        recovery fills a speaker from the frames the room holds and *that*
+        fill is not starved).
+        """
+        wanted = self._trim_samples(slot)
+        if wanted <= 0:
+            return 0
+        frame = self._frame_samples()
+        held = (wanted + frame - 1) // frame
+        # Bounded by the buffers a speaker actually has: a room whose frames are
+        # tiny next to the trim (a 100 ms trim over 8 sample frames) would ask
+        # for more buffers than exist and could never take a frame at all. It
+        # plays a shorter delay instead -- the one failure mode that is not
+        # silence, which is what the room's pre-buffer leaves to play with.
+        return min(held, max(0, self.buffers_per_slot - PREBUFFER_FRAMES - 1))
+
+    def _delay_samples(self, slot):
+        """The trim's sub-frame remainder: the cut only a sample can carry.
+
+        What is left of the trim once the queue depth has taken its whole
+        frames (``hold_frames``). It is zero for the trims an installer dials
+        in whole frames and up to one frame short of that otherwise, and it is
+        played -- not merely measured -- by ``_delayed_window``, so a 5 ms trim
+        is a 5 ms shift rather than "nothing" or "a whole frame".
+        """
+        wanted = self._trim_samples(slot)
+        if wanted <= 0:
+            return 0
+        return wanted % self._frame_samples()
 
     def _applied_trim(self, slot, history):
         """This speaker's delay, cut back to what the room's history reaches.
@@ -502,10 +718,17 @@ class CinemaSpeakerBank:
         edge, which is heard as one speaker lagging for the rest of the song.
         Left empty, it rejoins at the live frame instead (see realign(), which
         puts it back on the room's content instant first).
+
+        A speaker that is *waiting out its delay trim* is not in that
+        situation and must keep being fed: it has not played yet, the frames
+        it is waiting for are the room's own, and starving it is how its trim
+        disappears (see ``hold_frames``).
         """
         playing = self._playing_slots()
         if playing and len(playing) < len(self.slot_sources):
-            return playing
+            held = [slot for slot in self.slot_sources
+                    if slot not in playing and self._held(slot)]
+            return playing + held
         return list(self.slot_sources)
 
     def queued_frames(self):
@@ -570,35 +793,83 @@ class CinemaSpeakerBank:
         speaker is handed exactly what the deepest one is about to play and
         starts from the same instant. Nothing is ever removed from a queue:
         only added, which is all OpenAL allows.
+
+        Depths are compared *net of each speaker's own delay trim*: a trimmed
+        speaker is meant to sit that many frames deeper than one that carries
+        none (see ``hold_frames``), so the raw depth of a trimmed speaker is
+        not the room's reference -- reading it as one would fill the untrimmed
+        speakers with old audio to catch up with a delay they never had.
+
+        Only a speaker that is *not playing* is filled. A playing speaker is
+        at the live edge by construction -- it consumes one frame per frame
+        and is handed one per frame -- so a low queue depth there is audio it
+        has already played, and handing it frames from the room's history
+        replays the song into it (heard from a live test room as a speaker
+        stumbling over the same bar it just played).
+
+        And nothing is ever *appended* to a speaker that already holds audio:
+        a queue is a continuous run of the programme, so a window cut from
+        ``_recent`` and put after frames the speaker queued earlier would leave
+        a step in its own stream -- the speaker playing the song at an instant
+        of its own, which is exactly the "the delay came and went by itself"
+        report nothing on the listener's side can undo. A speaker that stopped
+        holding frames is therefore emptied first (``_empty_speaker``), and one
+        whose queue cannot be emptied is left exactly as it is.
+
+        While the room is held for a refill it is deliberately left alone: its
+        speakers are all paused and all being fed, so they are already
+        carrying the same run of the programme and only need the depth to
+        come back.
         """
-        if self._stopped or not self.slot_sources:
+        if self._stopped or self._refill_hold or not self.slot_sources:
             return False
         counts = {slot: self._queued_of(slot) for slot in self.slot_sources}
-        target = max(counts.values()) if counts else 0
-        if target <= 0:
+        holds = {slot: self.hold_frames(slot) for slot in self.slot_sources}
+        base = max((max(0, queued - holds[slot])
+                    for slot, queued in counts.items()), default=0)
+        if base <= 0:
             return False
         history = list(self._recent)
-        if target > len(history):
-            target = len(history)
-        if target <= 0:
-            return False
-        base = len(history) - target
         fed = 0
         for slot, queued in counts.items():
+            if self._playing(slot):
+                continue
+            if self._held(slot):
+                # Waiting out its own delay trim, not behind it: the frames it
+                # holds are the room's newest and the ones it is "missing" are
+                # the hold itself. Filling them would replay audio it is about
+                # to play, and starting it early is what the hold exists to
+                # prevent (see ``hold_frames``).
+                continue
+            if queued > 0:
+                # Frames are in front of it that cannot be taken back (a
+                # listener's pause, a buffer the backend will not unqueue). A
+                # speaker in step must not be touched, and a window spliced
+                # after what it holds would move it off the room's instant.
+                if not self._empty_speaker(slot):
+                    continue
+                queued = 0
+            target = base + holds[slot]
+            if target > len(history):
+                target = len(history)
             missing = target - queued
             if missing <= 0:
                 continue
-            # The frames this speaker is missing are the ones just before the
-            # queue it already holds (all of them when it holds nothing). Each
-            # one is cut to that speaker's own trim: handed the live frame
-            # instead, a trimmed speaker would catch up with the room for as
-            # long as that fill lasts and then jump backwards when the next
-            # trimmed window arrives.
+            # What it is missing is the window the room is about to play, so
+            # the fill starts `target` frames back from the live edge and runs
+            # forward -- for the empty queue an underrun leaves, that is the
+            # room's own window in its own order, which is what puts the
+            # speaker back on the room's content instant. Each frame is cut to
+            # that speaker's own trim remainder: handed the live frame instead,
+            # a trimmed speaker would catch up with the room for as long as
+            # that fill lasts and then jump backwards when the next trimmed
+            # window arrives.
+            origin = len(history) - target
             offset = self._applied_trim(slot, history)
             pool = self._pools.get(slot)
             speaker = self.slot_sources.get(slot)
             for step in range(missing):
-                pair = self._delayed_window(history, base + step, offset)
+                pair = self._delayed_window(history, origin + step, offset)
                 if pair is None:
                     continue
                 pcm = dict(self.renderer.render(*pair)).get(slot)
@@ -612,20 +883,139 @@ class CinemaSpeakerBank:
                     fed += 1
                 except Exception:
                     pool.append(buffer)
-        if fed and play:
-            self.play()
+        if play and self._play_ready():
+            fed = fed or 1
         return fed > 0
+
+    def _paused_at(self, slot):
+        """True while this speaker is held (a listener's pause, a refill)."""
+        source = self.slot_sources.get(slot)
+        if source is None:
+            return False
+        try:
+            return source.state == cyal.SourceState.PAUSED
+        except Exception:
+            # A state that cannot be read is treated as "held": leaving a
+            # speaker alone is always safe, stopping it is not.
+            return True
+
+    def _empty_speaker(self, slot):
+        """Stop a speaker and hand every buffer it holds back; True if empty.
+
+        A stopped source's queued buffers are finished as far as OpenAL is
+        concerned, so they can be unqueued and reused -- which is the only way
+        a speaker can be put back on the room's instant without leaving the
+        audio it was holding (already behind the live edge) in its queue. A
+        backend that will not give them back (or a source that still reports
+        frames after stopping) is reported as not emptied, and the caller
+        leaves that speaker alone rather than splicing a window after them.
+
+        A *held* speaker is never touched: it is in step by construction (it
+        was fed every frame it was held for), and stopping it would throw away
+        the audio it is holding, which OpenAL gives no way to put back.
+        """
+        source = self.slot_sources.get(slot)
+        if source is None or self._paused_at(slot):
+            return False
+        pool = self._pools.get(slot)
+        with contextlib.suppress(Exception):
+            source.stop()
+        if pool is None:
+            return False
+        with contextlib.suppress(Exception):
+            while source.buffers_processed > 0:
+                result = source.unqueue_buffers()
+                if result is None:
+                    break
+                try:
+                    pool.extend(result)
+                except TypeError:
+                    pool.append(result)
+            return self._queued_of(slot) == 0
+        return False
+
+    def _playing(self, slot):
+        """True while this speaker is playing (its queue is the live edge)."""
+        source = self.slot_sources.get(slot)
+        if source is None:
+            return False
+        try:
+            return source.state == cyal.SourceState.PLAYING
+        except Exception:
+            return False
+
+    def _held(self, slot):
+        """True while this speaker is deliberately waiting out its delay trim.
+
+        Counted in frames the *room* has queued since playback began, not from
+        the speaker's own queue: a trimmed speaker's queue is short by
+        construction while it waits, and reading that as "not ready yet" is
+        exactly how the trim used to be swallowed by the room's start.
+
+        Every speaker waits its *own* trim, the one that starts the room
+        included (see ``_play_ready``): the room's clock starts once, so the
+        trim a speaker was given is the delay it plays at. Letting the first
+        speaker start straight away while the rest waited out theirs put two
+        speakers dialled in alike a whole trim apart -- the trim read back as
+        the wrong number.
+        """
+        if self._start_frame is None:
+            return False
+        return (self.frames_queued - self._start_frame) < self.hold_frames(slot)
+
+    def _ready_to_play(self, slot):
+        """Whether this speaker may play: its own delay trim is filled.
+
+        How much the room needs buffered before it plays at all is the
+        *caller's* decision (``wanted_for_start``), taken before it asks; what
+        is added here is only the speaker's own trim.
+        """
+        return not self._held(slot)
+
+    def _play_ready(self):
+        """Start every speaker whose own pre-buffer and trim are filled.
+
+        A speaker that is still inside its hold is left playing nothing: it is
+        still being fed (see ``_feed_slots``), so a later call starts it once
+        the frames its trim holds it back by are queued -- and being started
+        that much later *is* the trim.
+
+        Every speaker is measured from the same instant -- the room's clock,
+        pinned on the first call -- so the deepest trim starts last and the
+        shallowest first, each by exactly its own delay. Nothing has to be
+        called the room's reference, which is what makes two speakers dialled
+        in alike come out level with each other.
+        """
+        self._end_refill_hold()
+        if self._refill_hold:
+            # The room ran out of audio and is rebuilding its depth: nothing
+            # starts until ``wanted_for_start`` frames are queued again, and
+            # then every speaker starts together.
+            return False
+        if self._start_frame is None:
+            # The room's clock starts the first time it is asked to play with
+            # a speaker that is not playing yet: every trim is measured from
+            # this one instant, so each speaker plays its own delay -- and the
+            # speaker that would start the room is held for its trim too. A
+            # speaker allowed to start straight away while the rest waited
+            # theirs out came out a whole trim early instead.
+            self._start_frame = self.frames_queued
+        started = False
+        for slot, source in self.slot_sources.items():
+            with contextlib.suppress(Exception):
+                if source.state == cyal.SourceState.PLAYING:
+                    continue
+            if not self._ready_to_play(slot):
+                continue
+            with contextlib.suppress(Exception):
+                source.play()
+                started = True
+        return started
 
     @_serialized
     def play(self):
-        """Start every speaker that is not already playing."""
-        started = False
-        for source in self.slot_sources.values():
-            with contextlib.suppress(Exception):
-                if source.state != cyal.SourceState.PLAYING:
-                    source.play()
-                    started = True
-        return started
+        """Start every speaker that is not already playing its own trim."""
+        return self._play_ready()
 
     @_serialized
     def start_playback(self):
@@ -634,14 +1024,23 @@ class CinemaSpeakerBank:
         ``realign`` runs first: whoever is being restarted is about to play
         while the rest of the room is still playing, and without the frames
         the room holds it would start at the wrong content instant for the
-        remainder of the song.
+        remainder of the song. A speaker whose delay trim is still filling is
+        left pending rather than started level with its neighbours, and the
+        caller (which retries while the room is not fully playing) starts it
+        as soon as its own hold is queued.
         """
         if self.playing():
             return True
-        self.realign(play=False)
-        self.play()
-        self._plays_started = True
-        return True
+        # End the hold first when the depth is back: the room then re-forms
+        # (``realign``) *before* it becomes audible again, which is what puts a
+        # speaker that ran dry back on the room's own instant.
+        self._end_refill_hold()
+        if not self._refill_hold:
+            self.realign(play=False)
+        started = self._play_ready()
+        if started:
+            self._plays_started = True
+        return started
 
     @_serialized
     def set_paused(self, paused):
@@ -655,7 +1054,14 @@ class CinemaSpeakerBank:
         """
         if self._stopped or not self.slot_sources:
             return False
-        if not paused:
+        if paused:
+            # The listener's own hold, not a refill: a room that runs low while
+            # it is already paused must not be held again (nothing is playing).
+            self._paused = True
+            self._refill_hold = False
+        else:
+            self._paused = False
+            self._refill_hold = False
             # Re-form the room before it becomes audible again: a speaker that
             # ran dry during the hold would otherwise come back a queue's
             # worth ahead of the others.
@@ -742,6 +1148,8 @@ class CinemaSpeakerBank:
         except Exception:
             pass
         self._plays_started = False
+        self._start_frame = None
+        self._refill_hold = False
 
     # ------------------------------------------------------------------ gain
 

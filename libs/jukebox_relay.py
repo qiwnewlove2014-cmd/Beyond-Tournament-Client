@@ -12,19 +12,30 @@ import time
 
 import cyal
 from .audio_diagnostics import probe as audio_probe
+from .deferred_log import log_deferred as log_line
 
 
 class JukeboxRelayReceiver(threading.Thread):
     main_thread_audio = True
-    # Hand-built instances (tests) bypass __init__; the room flag needs a
-    # default so the shared output paths still resolve.
+    # Hand-built instances (tests) bypass __init__; the room flag and the shed
+    # counters need defaults so the shared output paths still resolve.
     cinema = None
+    shed_frames = 0
+    last_shed_at = None
+    _shed_reported_at = None
     PREBUFFER_FRAMES = 4
     RESUME_FRAMES = 3
     MAX_PENDING_FRAMES = 32
     NUM_BUFFERS = 32
     MAX_QUEUED_BUFFERS = 10
     MAX_PCM_BYTES = 48000 * 2 * 2 * 120 // 1000
+    # Shedding a frame is the client catching up to the live edge, and it is
+    # only ever done because the queue grew past ``MAX_QUEUED_BUFFERS`` (a
+    # burst after a stall). It is worth saying out loud when it happens at all:
+    # every dropped frame is audio the listener never hears, and a burst of
+    # them is heard as the song jumping forward ("it speeds up for a moment").
+    # At most one line per interval; the count is always kept.
+    SHED_REPORT_INTERVAL = 30.0
 
     def __init__(self, game, source_l, source_r, volume, relay_id,
                  stream_epoch, reference_distance, max_distance,
@@ -68,6 +79,11 @@ class JukeboxRelayReceiver(threading.Thread):
         self.last_audio_activity = None
         self.last_output_at = None
         self.received_frames = 0
+        # Frames dropped to keep the queue at the live edge, and when the last
+        # one was (see ``_report_shed``).
+        self.shed_frames = 0
+        self.last_shed_at = None
+        self._shed_reported_at = None
         self.failure_reason = None
         self._retire_started = None
         self._retire_duration = 0.0
@@ -80,6 +96,36 @@ class JukeboxRelayReceiver(threading.Thread):
     def _check_owner(self):
         if threading.get_ident() != self._owner:
             raise RuntimeError("jukebox audio must be pumped/stopped by its owner")
+
+    def _shed_if_deep(self, backlog):
+        """True when this frame is dropped to keep the queue at the live edge.
+
+        Frames are only ever dropped once playback has started and the queue is
+        already ``MAX_QUEUED_BUFFERS`` deep: that is the client catching up to
+        the live edge after a burst, and every dropped frame is audio the
+        listener never hears. A burst of them is heard as the song jumping
+        forward, which is why they are counted (see ``_shed_frame``).
+        """
+        if not self._play_started or backlog < self.MAX_QUEUED_BUFFERS:
+            return False
+        self._shed_frame()
+        return True
+
+    def _shed_frame(self):
+        """Count a frame dropped for the live edge, and say so once in a while.
+
+        The count is what makes "the song sped up for a second" measurable:
+        without it the only evidence a listener ever has is their own ears.
+        """
+        self.shed_frames += 1
+        self.last_shed_at = self._clock()
+        now = self.last_shed_at
+        if (self._shed_reported_at is not None
+                and now - self._shed_reported_at < self.SHED_REPORT_INTERVAL):
+            return
+        self._shed_reported_at = now
+        log_line(f"[Jukebox] relay queue past {self.MAX_QUEUED_BUFFERS} frames: "
+                 f"shedding to the live edge ({self.shed_frames} frame(s) so far)")
 
     def _output_sources(self):
         """Every source this receiver feeds (2 plain, N in a cinema room)."""
@@ -410,7 +456,7 @@ class JukeboxRelayReceiver(threading.Thread):
                     backlog = self.cinema.queued_frames()
                 else:
                     backlog = max(self.source_l.buffers_queued, self.source_r.buffers_queued)
-                if self._play_started and backlog >= self.MAX_QUEUED_BUFFERS:
+                if self._shed_if_deep(backlog):
                     continue
                 if self._queue_pair(left, right):
                     queued_pairs += 1

@@ -111,6 +111,16 @@ class Gameplay(state.State):
         # the connected event enters this state.  Create the mapping here and
         # preserve it in enter() so those current-session packets are not lost.
         self.voice_channels = {}
+        # This client's OWN voice channel, from the login snapshot: the Server
+        # tells a joiner about everyone on the map except them, so it is the one
+        # channel that never arrives through ``voice_channels`` -- and the one a
+        # staff member needs to pan their own voice (libs/cinema_pan_menu.py).
+        # It is per player, not per map, so a map change must not clear it.
+        self.own_voice_channel = None
+        # The last staff sound test this client was answered about (libs/
+        # audio/cinema/sound_test.py). On the gameplay object like the pan
+        # table, so it dies with the map it describes.
+        self.cinema_sound_test = None
         self.voice_chat = None
         # Toggle-mode voice chat (tap the key, tap again to stop) must survive
         # opening menus and pressing other keys. menu.update's old PTT-era kill
@@ -146,6 +156,11 @@ class Gameplay(state.State):
             pygame.K_RETURN: self.buffer_options,
             kc.get("open_volume_mixer", pygame.K_F7): lambda mod: self.add_substate(volume_mixer.volume_mixer(self.game, parent=self)),
             kc.get("open_staff_menu", pygame.K_F8): self.open_staff_menu,
+            # The cinema pan menu has no key of its own: it used to sit on F6,
+            # which is the beacon toggle's key (default_keyconfig.json binds
+            # toggle_beacons to f6), so one of the two could never be reached.
+            # It is opened from the Builder/Technician menu instead, where the
+            # rest of the sound plumbing lives (see cinema_pan_menu's header).
             pygame.K_o: self.handle_o_key,  # PA Test Mode (no mod) or Options (ALT+O)
             kc.get("map_chat", pygame.K_SLASH): self.map_chat,
             kc.get("chat", pygame.K_QUOTE): self.chat,
@@ -1669,6 +1684,47 @@ class Gameplay(state.State):
     def open_staff_menu(self, mod):
         if getattr(self, "is_staff", False):
             self.game.network.send(consts.CHANNEL_MENUS, "staff_menu_open", {})
+
+    def open_cinema_pan(self, mod=None):
+        """Technicians and contributors: move a player's sound to a cabinet.
+
+        Reached from the Builder/Technician menu, which is where the Server
+        checks the permission (``can_use_cinema_pan``) before inviting this
+        client to open it -- and the menu refuses again here, so it cannot be
+        opened by an account that may not move somebody else's sound even if it
+        is reached another way. It has no key of its own any more: it sat on F6,
+        which is the beacon toggle's key.
+
+        Not a line in the Music Bot menu on purpose: that menu holds how *you*
+        hear the world, this holds where somebody else's sound comes out.
+        """
+        from . import cinema_pan_menu
+        if not cinema_pan_menu.allowed(self):
+            speak("Cinema panning is for technicians and contributors.")
+            return
+        cinema_pan_menu.open_menu(self.game, self)
+
+    def open_cinema_test(self, mod=None):
+        """Technicians and contributors: fire one test note at a cabinet.
+
+        The other half of the menu above, and opened the same way -- the Server
+        checks the rank before inviting this client and the menu refuses again
+        here, through the *same* flag the pan uses (``can_use_cinema_pan``): the
+        two actions have one rank, and a second flag that must always agree with
+        the first is a way for them to drift apart. A pan is resolved on every listener's
+        own machine, so this is how a destination is heard *and* checked
+        without needing a second client in the room: one short note, played by
+        each machine according to its own switches, with every one of them
+        reporting what it did (libs/audio/cinema/sound_test.py).
+
+        No key of its own, exactly like the pan: the Builder/Technician menu is
+        the only way in, and a menu line cannot collide with a binding.
+        """
+        from . import cinema_pan_menu
+        if not cinema_pan_menu.allowed(self):
+            speak("Cinema sound testing is for technicians and contributors.")
+            return
+        cinema_pan_menu.open_test_menu(self.game, self)
 
     def get_hp(self, mod):
         if self.player.lock_weapon: return

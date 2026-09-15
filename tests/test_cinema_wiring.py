@@ -517,6 +517,32 @@ class CinemaRelayTests(unittest.TestCase):
         bank.start_playback()
         self.assertTrue(bank.playing())
 
+    def test_a_frame_shed_for_the_live_edge_is_counted(self):
+        """A dropped frame is audio nobody hears: it is never silent about it.
+
+        The queue is kept at the live edge by dropping what arrives while it is
+        already deep (a burst after a stall), and a burst of drops is heard as
+        the song jumping forward. Counting them is what turns "it speeds up
+        for a moment sometimes" into a number a report can carry; the routine
+        line is rate-limited so a bad channel cannot fill the log with it.
+        """
+        from libs.jukebox_relay import JukeboxRelayReceiver
+        game = FakeGame()
+        renderer = CinemaRenderer((10.0, 20.0, 0.0), "front_only")
+        bank = CinemaSpeakerBank(game, renderer, occlusion_provider=lambda *a: 0)
+        receiver = JukeboxRelayReceiver(game, bank.primary_source,
+                                        bank.secondary_source, 100, 4, 2, 8.0, 40.0,
+                                        cinema=bank, clock=lambda: 7.5)
+        # Not playing yet: nothing is dropped, however deep the queue is.
+        self.assertFalse(receiver._shed_if_deep(40))
+        self.assertEqual(receiver.shed_frames, 0)
+        receiver._play_started = True
+        self.assertFalse(receiver._shed_if_deep(receiver.MAX_QUEUED_BUFFERS - 1))
+        self.assertTrue(receiver._shed_if_deep(receiver.MAX_QUEUED_BUFFERS))
+
+        self.assertEqual(receiver.shed_frames, 1)
+        self.assertEqual(receiver.last_shed_at, 7.5)
+
 
 class CinemaBankTests(unittest.TestCase):
     """The bank itself, driven with fake OpenAL objects."""

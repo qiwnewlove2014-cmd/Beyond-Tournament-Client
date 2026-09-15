@@ -15,10 +15,13 @@ from . import consts
 class DrumAudio:
     """Owns drum buffers, active voices, fades, and remote hit handoff."""
 
-    # Each kit is a 17-pad tuple of (display_name, path, volume_scale, polyphony_limit).
+    # Each kit is an 18-pad tuple of (display_name, path, volume_scale, polyphony_limit).
     # A path of None marks a silent pad (e.g. Salamander only has 2 toms, so Tom 3/4
-    # are silent rather than reusing Tom 2). Every kit MUST define exactly 17 pads in
-    # the canonical order so the pad ID contract (0-16) stays identical across kits.
+    # are silent rather than reusing Tom 2). Every kit MUST define exactly 18 pads in
+    # the canonical order so the pad ID contract (0-17) stays identical across kits.
+    # The top pad (17, the dedicated Rim) is the one the Server's play_drum_hit schema
+    # must ALSO accept: a pad past its maximum is dropped there, and a hit that is
+    # dropped is heard by the performer alone (see tools/drum_pad_range_test.js).
     KITS = {
         "default": (
             ("Kick", "drums/default/Drums.hit.Kick.ogg", 0.34, 6),
@@ -91,6 +94,10 @@ class DrumAudio:
     MAX_VOICES_PER_PEER = 32
     MAX_TOTAL_VOICES = 64
     MAX_PENDING_HITS_PER_UPDATE = 64
+    # A deferred hit waits at most this long for its sample; past the deadline
+    # it is dropped so a slow decode cannot fire hits far off the beat.
+    DEFERRED_HIT_TIMEOUT_S = 0.6
+    MAX_DEFERRED_HITS = 64
     CHOKE_SECONDS = 0.055
     STEAL_SECONDS = 0.025
 
@@ -100,6 +107,10 @@ class DrumAudio:
         self.active_voices = {}
         self._fades = []
         self._pending_hits = queue.Queue(maxsize=256)
+        # Remote hits whose sample is still preparing wait here (bounded)
+        # instead of being dropped, so a listener never permanently loses the
+        # first strike of a pad.
+        self._deferred_hits = []
         self._occlusion_filter = None
         self._light_occlusion_filter = None
         # Kit the local performer is currently playing. Remote hits carry their own
@@ -376,12 +387,20 @@ class DrumAudio:
         if game is None:
             return []
         from .audio.cinema import live as cinema_live
+        from .audio.cinema import pan as cinema_pan
         # The listener's own option -- the same one the piano asks and the one
         # the Music Bot menu's line edits -- so two instruments can never
         # answer differently about how this listener hears them. It is on for
         # everyone: a live note takes nothing from anybody.
-        if not cinema_live.live_instruments_enabled():
+        #
+        # The listener's own switches come first, always: a staff pan names
+        # *which* room this kit belongs to (and lets the drummer be nowhere near
+        # it), never whether this client hears a room at all -- somebody who
+        # asked for instruments where they stand keeps them there (see
+        # ``pan.py``).
+        if not cinema_live.note_reaches_a_room(game):
             return []
+        panned = cinema_pan.target_for_name(gameplay, peer_id)
         path = self.pad_defs(kit)[pad][1]
         if path is None:
             return []
@@ -389,8 +408,12 @@ class DrumAudio:
         bot_volume = (max(0.1, getattr(bot, "volume", 50) / 100.0)
                       * self.CINEMA_ROOM_VOLUME)
         sounds = [] if sink is None else sink
+        # The venue's own zone reverb, so a hit heard from the room is not
+        # drier than the kit standing in the same zone was (the positional copy
+        # this route now replaces carried exactly this one).
+        reverb = cinema_live.zone_reverb(game, (x, y, z))
 
-        def _spawn(px, py, pz, gain, tier, _delay_ms):
+        def _spawn(px, py, pz, gain, tier, _delay_ms, channel=None):
             volume = adjusted_volume * max(0.0, gain) * bot_volume
             if volume <= 0.0:
                 return
@@ -401,10 +424,16 @@ class DrumAudio:
                 reference_distance=ROOM_REFERENCE_DISTANCE, rolloff=0.0,
                 max_distance=ROOM_MAX_DISTANCE,
                 direct_filter=cinema_live.wall_filter(self, tier),
+                # A kit is recorded in stereo (the tom pans left in the file);
+                # the room's screen wall carries that image, one channel per
+                # speaker, exactly as it does for the song.
+                channel=channel, stereo_provider=self,
             )
             if sound is None:
                 return
             self._tag_sounds(sound, peer_id, pad)
+            if reverb is not None:
+                self.apply_effect_send(sound, 0, reverb)
             sounds.append(sound)
 
         cinema_live.route_to_room(
@@ -413,6 +442,7 @@ class DrumAudio:
                                        "occlusion_tier", None),
             schedule=getattr(game, "call_after", None),
             wanted=wanted,
+            pan=panned,
         )
         return sounds
 
@@ -441,24 +471,41 @@ class DrumAudio:
             partial_direct = (
                 self.get_light_occlusion_filter() if 0.0 < occlusion < 1.0 else None
             )
-        primary = self.am.play_unbound_stereo_spatial(
-            path, x, y, z, listener_x, listener_y, listener_z,
-            volume=adjusted_volume,
-            cat="miscelaneous",
-            max_distance=50.0,
-            as_3d_stereo=(peer_id != "local"),
-            occluded=(full_block and partial_direct is None),
-            direct_filter=partial_direct,
-            stereo_provider=self,
-            stereo_offset=1.5,
-            stereo_reference_distance=8.0,
-            stereo_gain_l=1.0,
-            stereo_gain_r=1.0,
-        )
-        if primary is None:
-            return None
-        self._tag_sounds(primary, peer_id, pad)
-        sounds = self._iter_sounds(primary)
+        # Is this hit heard from a venue's speakers on this client? Asked
+        # *before* the kit's own sound is made, because the answer is what
+        # decides whether it is made at all (see live.note_goes_to_a_room): a
+        # hit coming out of a hall must not also be heard at the kit standing
+        # in it. The drummer's own hit is exempt -- they are at the kit and in
+        # the room at once, and keep hearing both, exactly as before.
+        venue = False
+        if peer_id != "local":
+            with contextlib.suppress(Exception):
+                from .audio.cinema import live as cinema_live
+                from .audio.cinema import pan as cinema_pan
+                gameplay = self.gameplay
+                venue = cinema_live.note_goes_to_a_room(
+                    getattr(gameplay, "game", None), (x, y, z),
+                    pan=cinema_pan.target_for_name(gameplay, peer_id))
+        primary = None
+        if not venue:
+            primary = self.am.play_unbound_stereo_spatial(
+                path, x, y, z, listener_x, listener_y, listener_z,
+                volume=adjusted_volume,
+                cat="miscelaneous",
+                max_distance=50.0,
+                as_3d_stereo=(peer_id != "local"),
+                occluded=(full_block and partial_direct is None),
+                direct_filter=partial_direct,
+                stereo_provider=self,
+                stereo_offset=1.5,
+                stereo_reference_distance=8.0,
+                stereo_gain_l=1.0,
+                stereo_gain_r=1.0,
+            )
+            if primary is None:
+                return None
+            self._tag_sounds(primary, peer_id, pad)
+        sounds = self._iter_sounds(primary) if primary is not None else []
         # The record goes up before the PA and room copies are spawned, and the
         # room copies are appended into its own list: a hat choked (or a voice
         # stolen) while a trimmed speaker is still waiting would otherwise
@@ -488,6 +535,14 @@ class DrumAudio:
             peer_id = str(data["peer_id"])
             pad = data["pad"]
         except (KeyError, TypeError, ValueError):
+            return
+        # Wait (bounded) for the sample instead of dropping the hit: before
+        # this, the first strike of a pad outside the warmed kit was silent
+        # for listeners while the drummer heard it locally.
+        state = self._hit_sample_state(pad, data.get("kit"))
+        if state != "ready":
+            if state == "loading":
+                self._defer_hit(data)
             return
         # Occlusion ratio scales with wall thickness: a lone pillar tile
         # partially muffles (~0.33), a long wall fully blocks — see
@@ -557,6 +612,36 @@ class DrumAudio:
             else:
                 self.active_voices.pop(key, None)
 
+    def _hit_sample_state(self, pad, kit):
+        """ready/loading/failed for a pad's sample; requests it when missing."""
+        path = self.pad_defs(kit)[pad][1]
+        if path is None:
+            # Silent pad (e.g. Salamander's Tom 3/4): nothing to prepare.
+            return "ready"
+        return self.am.instrument_samples.status(path)
+
+    def _defer_hit(self, data):
+        """Hold one remote hit until its sample prepares or the deadline passes."""
+        deferred = self._deferred_hits
+        if len(deferred) >= self.MAX_DEFERRED_HITS:
+            deferred.pop(0)
+        deferred.append((time.monotonic() + self.DEFERRED_HIT_TIMEOUT_S, data))
+
+    def _retry_deferred_hits(self):
+        """Give deferred hits another chance once their sample is ready."""
+        if not self._deferred_hits:
+            return
+        now = time.monotonic()
+        remaining = []
+        for deadline, data in self._deferred_hits:
+            state = self._hit_sample_state(data.get("pad"), data.get("kit"))
+            if state == "ready":
+                self._play_remote_hit(data)
+            elif state == "loading" and now < deadline:
+                remaining.append((deadline, data))
+            # failed or past the deadline: drop the hit
+        self._deferred_hits = remaining
+
     def update(self):
         for _ in range(self.MAX_PENDING_HITS_PER_UPDATE):
             try:
@@ -564,6 +649,7 @@ class DrumAudio:
             except queue.Empty:
                 break
             self._play_remote_hit(data)
+        self._retry_deferred_hits()
         now = time.monotonic()
         self._finish_fades(now)
         self._prune_finished_voices()
@@ -605,6 +691,7 @@ class DrumAudio:
                 self._pending_hits.get_nowait()
             except queue.Empty:
                 break
+        self._deferred_hits = []
         # Return the occlusion filter to the pool instead of dropping it for
         # garbage collection (cyal Filter dealloc = crash-prone call).
         if self._occlusion_filter is not None:

@@ -82,15 +82,74 @@ class InstrumentAudioIntegrationTests(unittest.TestCase):
         ])
         Map_parser(world.game, world).load(data)
         self.assertEqual(len(requested), 2)
+        self.assertIn("piano/Piano.mf.B0.ogg", requested[0])
+        self.assertIn("piano/Piano.mf.C1.ogg", requested[0])
         self.assertIn("piano/Piano.mf.C3.ogg", requested[0])
         self.assertIn("piano/Piano.mf.B5.ogg", requested[0])
-        self.assertEqual(len(requested[0]), 36)
+        self.assertIn("piano/Piano.mf.B7.ogg", requested[0])
+        self.assertIn("piano/Piano.mf.C8.ogg", requested[0])
+        # 7 full octaves (C1..B7) plus the B0/C8 edges; Gb7 does not ship but
+        # is requested anyway so it warms itself if the sample ever appears.
+        self.assertEqual(len(requested[0]), 86)
+        self.assertEqual(len(set(requested[0])), 86)
         self.assertEqual(requested[1], tuple(path for _, path, _, _ in DrumAudio.pad_defs("diw") if path))
         self.assertEqual(audio.drums._active_kit, DrumAudio.DEFAULT_KIT)
         audio.drums._active_kit = "diw"
         world.spawn_instrument(instrument="Drumset")
         self.assertEqual(requested[-1], tuple(path for _, path, _, _ in DrumAudio.pad_defs("default") if path))
         self.assertEqual(audio.drums._active_kit, "diw")
+
+    def test_remote_piano_note_waits_for_its_sample_instead_of_dropping(self):
+        audio = SimpleNamespace(instrument_samples=SimpleNamespace(status=Mock(return_value="loading")))
+        piano = PianoAudio(audio)
+        piano.gameplay = SimpleNamespace(player=SimpleNamespace(x=0, y=0, z=0), map=None)
+        piano.play_note = Mock()
+        piano._play_queued_note({"peer_id": "kan", "note": "C2", "x": 1.0, "y": 2.0, "z": 0.0})
+        piano.play_note.assert_not_called()
+        self.assertEqual(len(piano._deferred_notes), 1)
+        # A failed sample never defers: retrying it would be futile.
+        audio.instrument_samples.status.return_value = "failed"
+        piano._play_queued_note({"peer_id": "kan", "note": "C2", "x": 1.0, "y": 2.0, "z": 0.0})
+        self.assertEqual(len(piano._deferred_notes), 1)
+        # Once the sample is ready, the retry plays exactly the deferred note.
+        audio.instrument_samples.status.return_value = "ready"
+        piano._retry_deferred_notes()
+        self.assertEqual(
+            [call.kwargs["note_name"] for call in piano.play_note.call_args_list], ["C2"]
+        )
+        self.assertEqual(piano._deferred_notes, [])
+
+    def test_deferred_piano_note_expires_and_is_purged_by_note_off(self):
+        audio = SimpleNamespace(instrument_samples=SimpleNamespace(status=Mock(return_value="loading")))
+        piano = PianoAudio(audio)
+        piano.gameplay = SimpleNamespace(player=SimpleNamespace(x=0, y=0, z=0), map=None)
+        piano.play_note = Mock()
+        piano.stop_note = Mock()
+        piano._play_queued_note({"peer_id": "kan", "note": "C2", "x": 1.0, "y": 2.0, "z": 0.0})
+        # Key released before the sample finished: the deferred note must not
+        # fire after its note-off.
+        piano._stop_queued_note({"peer_id": "kan", "note": "C2"})
+        self.assertEqual(piano._deferred_notes, [])
+        piano.stop_note.assert_called_once_with("kan", "C2")
+        # Past the deadline the note is dropped even though it still loads.
+        piano._deferred_notes = [(0.0, {"peer_id": "kan", "note": "C2"})]
+        piano._retry_deferred_notes()
+        self.assertEqual(piano._deferred_notes, [])
+        piano.play_note.assert_not_called()
+
+    def test_remote_drum_hit_waits_for_its_sample_instead_of_dropping(self):
+        audio = SimpleNamespace(instrument_samples=SimpleNamespace(status=Mock(return_value="loading")))
+        drums = DrumAudio(audio)
+        drums.gameplay = SimpleNamespace(player=SimpleNamespace(x=0, y=0, z=0), map=None)
+        drums.play_hit = Mock()
+        drums._play_remote_hit({"peer_id": "kan", "pad": 0, "x": 1.0, "y": 2.0, "z": 0.0})
+        drums.play_hit.assert_not_called()
+        self.assertEqual(len(drums._deferred_hits), 1)
+        audio.instrument_samples.status.return_value = "ready"
+        drums._retry_deferred_hits()
+        self.assertEqual(drums.play_hit.call_count, 1)
+        self.assertEqual(drums.play_hit.call_args[0][1], 0)
+        self.assertEqual(drums._deferred_hits, [])
 
     def test_audio_loop_pumps_before_instrument_events(self):
         from contextlib import nullcontext

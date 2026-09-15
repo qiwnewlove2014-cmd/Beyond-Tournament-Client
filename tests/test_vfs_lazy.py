@@ -229,7 +229,7 @@ class PackVFSHookTests(unittest.TestCase):
 
             # Paths outside the root delegate untouched.
             outside = fixture.root / "plain.txt"
-            outside.write_text("hello")
+            outside.write_text("hello", encoding="utf-8")
             self.assertTrue(os.path.exists(str(outside)))
 
             # Directory listing merges pack index without materializing all,

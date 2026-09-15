@@ -15,9 +15,38 @@ from .weapons import weapon
 from . import tickets
 # Speech through a cabinet's room: whether an incoming megaphone frame belongs
 # to a room (see libs/audio/cinema/speech.py).
+from .audio.cinema import pan as cinema_pan
+from .audio.cinema import peer as cinema_peer
+from .audio.cinema import sound_test as cinema_sound_test
 from .audio.cinema import speech as cinema_speech
 from pyogg import OpusDecoder
 from .audio_diagnostics import probe as audio_probe
+
+
+def _route_music_to_room(game, entity, channel_id):
+    """Send a peer's Music Bot frames into a cabinet's room instead of ears.
+
+    A player can route their bot into a cabinet's room (Music Bot menu ->
+    ``Cinema Speakers:``, see libs/audio/cinema/peer.py). That routing is
+    *theirs*; every listener follows it by playing the frames arriving on
+    that voice channel out of that same room, resolved from the listener's
+    own map, rather than out of a 3D speaker on the sender's back.
+
+    Only the routing is decided here -- the room itself is built on the main
+    thread, because it creates OpenAL sources (``_room_feed`` in MusicComp)
+    and this runs on the receive thread. Nothing is resolved when the sender
+    never routed anything, which is every ordinary broadcast.
+    """
+    compression = getattr(entity, "music_compression", None)
+    if compression is None or not hasattr(compression, "set_cinema_channel"):
+        return
+    room = cinema_peer.routing_for(game, channel_id)
+    if room and getattr(entity, "_party_sync_direct", False):
+        # A Party Sync guest hears the host privately, on purpose: that leg is
+        # never put in a shared room, whoever routed what.
+        room = None
+    compression.set_cinema_channel(channel_id if room else None)
+
 
 class EventHandeler:
     # Jam-note/jukebox alignment mode.
@@ -39,7 +68,13 @@ class EventHandeler:
     # Only used when SYNC_JAM_NOTES_WITH_JUKEBOX is True: compensates the
     # note's tail latency (playing-frame lead + queue drain).
     JAM_NOTE_ADVANCE_MS = 45
-
+    # A note heard through a cinema room at least this long after it was struck
+    # is reported (at most once per five seconds, on the routine sink): the
+    # numbers behind the hold are the only way to tell a room that is a queue
+    # behind apart from a performer who reported no lag of their own, and a
+    # probe low enough to catch the baseline also answers "it is not the hold"
+    # when no line appears at all.
+    JAM_LATENCY_REPORT_MS = 40
     def __init__(self, client, game):
         self.client = client
         self.game = game
@@ -58,6 +93,10 @@ class EventHandeler:
         # three seed it directly instead of crawling in via the EMA.
         self._clock_offset_samples = 0
         self._last_jam_sync_log = 0.0
+        # What the last ``_active_jukebox_buffer_ms`` measured, for the
+        # latency report below: the kind of output it read and its numbers.
+        self._jam_buffer_kind = None
+        self._jam_buffer_detail = None
 
     def _is_stale_jam_note(self, data):
         """Drop jam notes that arrive out of order (uint16 wrap-aware)."""
@@ -120,9 +159,39 @@ class EventHandeler:
         self.game.replace(m)
         speak(msg, False)
 
+    def password_changed(self, data):
+        """The server changed this account's password (slash command).
+
+        Refresh the saved login so the next automatic login keeps working
+        instead of failing on the stale stored password.
+        """
+        from . import options
+        password = data.get("password") if isinstance(data, dict) else None
+        if not isinstance(password, str) or not password:
+            return
+        username = options.get("username", "")
+        if not username:
+            return
+        accounts = options.get("accounts", [])
+        updated = False
+        for account in accounts:
+            if account.get("username") == username:
+                account["password"] = password
+                updated = True
+        if not updated:
+            accounts.append({"username": username, "password": password})
+        options.set("accounts", accounts)
+        options.set("password", password)
+
     def connected(self, data):
         self.game.reconnecting = False
         self.client.put(("connected", True))
+        # The login watchdog ends here: the snapshot is the proof the server
+        # finished authenticating this account (see
+        # networking.Client.login_timed_out). Being merely connected to the
+        # transport must not end it -- a handshake does not mean the login is
+        # done, and treating it as such let a slow server stay unanswered.
+        self.client.put(("logged_in", True))
         self.game.replace(self.gameplay)
         self.gameplay.player.name = data["username"]
         if hasattr(self.game, 'instance_mngr'):
@@ -158,6 +227,19 @@ class EventHandeler:
             self.gameplay.can_use_cinema_speakers = bool(
                 data.get("can_use_cinema_speakers", False)
             )
+            # Staff panning is the same rank as the cinema routing and one step
+            # further: a pan moves somebody *else*, so the Server owns the rule
+            # and the menu behind this key does not exist for anyone else.
+            self.gameplay.can_use_cinema_pan = bool(
+                data.get("can_use_cinema_pan", False)
+            )
+            # This client's own voice channel, needed to pan *yourself*: the
+            # Server tells a joiner about everyone on the map except them, so
+            # it never arrives in a spawn packet (libs/cinema_pan_menu.py).
+            # A Server that predates the field leaves it unset and self is
+            # simply not listed -- the old behaviour, never a guessed number.
+            if "voice_channel" in data:
+                self.gameplay.own_voice_channel = data.get("voice_channel")
         except Exception:
             self.gameplay.is_staff = False
             self.gameplay.is_builder = False
@@ -165,6 +247,7 @@ class EventHandeler:
             self.gameplay.can_broadcast_megaphone = False
             self.gameplay.can_use_music_bot = False
             self.gameplay.can_use_cinema_speakers = False
+            self.gameplay.can_use_cinema_pan = False
             
         # Reset PA Test Mode state
         if hasattr(self.gameplay, 'pa_test_mode'):
@@ -406,6 +489,12 @@ class EventHandeler:
         # the room again from the map that came back.
         with contextlib.suppress(Exception):
             cinema_speech.release_all(self.game)
+        # A peer's song in a cabinet's room is at those same speakers, and the
+        # voice channels are cleared with the map (so the key the routing is
+        # remembered by stops meaning anything): both halves of it go back,
+        # and the next announcement rebuilds the room from the new map.
+        with contextlib.suppress(Exception):
+            cinema_peer.release_all(self.game)
 
     @audio_probe.measured("map.sync_audio")
     def _finish_map_audio_reload(self):
@@ -1597,7 +1686,17 @@ class EventHandeler:
         small OpenAL staging queue (20ms buffers) plus any audible start
         that ran past the shared wall-clock deadline (slow yt-dlp/ffmpeg
         startup makes the local song trail the room).
+
+        A cinema room replaces the pair with one source per speaker, so the
+        room's frame queue is the backlog a note waits out there -- and only
+        the queue: the room plays its per-speaker delay trims when the note
+        is spawned at that speaker (``live.route_to_room``), so holding it
+        for the deepest trim as well made every speaker, untrimmed ones
+        included, late by it. What was measured is left behind in
+        ``_jam_buffer_kind/_jam_buffer_detail`` for the report below.
         """
+        self._jam_buffer_kind = None
+        self._jam_buffer_detail = None
         try:
             jp = getattr(self.gameplay, "jukebox_player", None)
             if jp is None:
@@ -1613,9 +1712,16 @@ class EventHandeler:
                         # A cinema room owns one source per speaker, so this
                         # receiver's own pair is deliberately None and its
                         # 40ms-per-frame backlog no longer exists: the room's
-                        # frame queue IS the backlog, and a per-speaker delay
-                        # trim is latency the song gains that no queue can see.
-                        return room.buffered_ms() + room.extra_latency_ms()
+                        # frame queue IS the backlog a note waits out. Its
+                        # per-speaker delay trims are NOT counted on top of
+                        # that -- each one is played when the note is spawned
+                        # at its own speaker, so adding the deepest trim here
+                        # delayed every speaker, the untrimmed ones included.
+                        self._jam_buffer_kind = "room"
+                        self._jam_buffer_detail = (
+                            f"room queue={room.buffered_ms()}ms"
+                            f" trims={room.extra_latency_ms()}ms")
+                        return room.buffered_ms()
                     try:
                         src = getattr(streamer, "source_l", None)
                         queued = int(src.buffers_queued) if src is not None else 0
@@ -1623,6 +1729,8 @@ class EventHandeler:
                         queued = 0
                     # OpenAL plays the queue at 40ms per frame; the queue depth
                     # is the listener's current distance behind the live edge.
+                    self._jam_buffer_kind = "relay"
+                    self._jam_buffer_detail = f"relay {max(queued, 1)} frames"
                     return max(queued, 1) * 40
                 if (getattr(streamer, "_direct_anchor", False)
                         and getattr(streamer, "running", False)
@@ -1644,11 +1752,15 @@ class EventHandeler:
                         # Cinema mode replaces the stereo pair with the room's
                         # own speakers, so the sources read below carry none of
                         # this song: measuring them reported about one frame of
-                        # backlog for a room that is really a whole queue plus
-                        # its delay trims behind, and the notes landed early by
-                        # the difference.
-                        return (room.buffered_ms() + room.extra_latency_ms()
-                                + late_ms)
+                        # backlog for a room that is really a whole queue
+                        # behind, and the notes landed early by the difference.
+                        # The trims are the room's own, played per speaker when
+                        # the note is spawned (see the relay branch above).
+                        self._jam_buffer_kind = "room"
+                        self._jam_buffer_detail = (
+                            f"room queue={room.buffered_ms()}ms"
+                            f" trims={room.extra_latency_ms()}ms late={late_ms}ms")
+                        return room.buffered_ms() + late_ms
                     try:
                         src = getattr(streamer, "spatial_src_l", None)
                         if src is None:
@@ -1656,6 +1768,9 @@ class EventHandeler:
                         queued = int(src.buffers_queued) if src is not None else 0
                     except Exception:
                         queued = 0
+                    self._jam_buffer_kind = "direct"
+                    self._jam_buffer_detail = (f"direct {max(queued, 1)} buffers"
+                                               f" late={late_ms}ms")
                     return max(queued, 1) * 20 + late_ms
             return None
         except Exception:
@@ -1711,6 +1826,12 @@ class EventHandeler:
             - sender_lag_ms - self.JAM_NOTE_ADVANCE_MS
         )
         delay = target_local - time.time() * 1000
+        # What the listener will actually hear, against the instant the
+        # performer struck (the same audio clock both ends measure against).
+        sound_local = target_local if delay > 0 else time.time() * 1000
+        self._report_room_note_latency(
+            sound_local - (server_time - self._clock_offset_ms),
+            buffer_ms, sender_lag_ms, delay)
         if delay > buffer_ms + 600:
             # Steady-state holds sit just under this listener's jukebox
             # backlog (relay queue depth or the direct lead-in); anything
@@ -1724,6 +1845,72 @@ class EventHandeler:
             # Cap guards against a wildly wrong offset stalling notes; the
             # intended hold never exceeds the backlog plus skew slack.
             self.game.call_after(min(int(delay), int(buffer_ms + 1000)), enqueue)
+
+    def _report_room_note_latency(self, heard_ms, buffer_ms, sender_lag_ms, delay):
+        """Say how late a note came out of a cinema room, and what held it.
+
+        Only a room is reported. That is the output a listener stands beside
+        and plays along with, and the one whose hold is bigger than the plain
+        pair's -- a room's frame queue, plus that speaker's own trim once the
+        note is spawned at it. The line names every component, because "the
+        drums feel late" cannot be told apart from "this machine's song is
+        behind the room" or "the performer is reporting no lag" without them.
+
+        Once per five seconds: a drum roll is twenty notes a second and every
+        one of them answers the same.
+        """
+        # Read defensively: the measurement is what records both, and it is
+        # the one thing a test (or an older build's caller) can replace.
+        if (getattr(self, "_jam_buffer_kind", None) != "room"
+                or heard_ms < self.JAM_LATENCY_REPORT_MS):
+            return
+        now = time.time()
+        if now - getattr(self, "_last_jam_sync_log", 0.0) < 5.0:
+            return
+        self._last_jam_sync_log = now
+        from .deferred_log import log_deferred as log_line
+        log_line(
+            f"[Cinema] a live note is heard {int(heard_ms)}ms after it was "
+            f"struck: {getattr(self, '_jam_buffer_detail', None)}"
+            f" - sender_lag={int(sender_lag_ms)}ms hold={int(max(delay, 0.0))}ms")
+
+    def _report_timeline_note_latency(self, data, compression, arrived_ms):
+        """Say how late a note scheduled on a room-fed song comes out.
+
+        The note waits for the frame the performer heard to reach THIS
+        client's own audible position, so the wait is the room's queue plus
+        whatever this machine is behind the broadcast. Only a room is
+        reported -- that is the output this feature is about -- and at most
+        once per five seconds, because a drum roll is twenty notes a second
+        and every one of them answers the same.
+        """
+        feed = getattr(compression, "cinema_feed", None)
+        if feed is None or not getattr(feed, "active", False):
+            return
+        try:
+            server_time = float(data.get("server_time"))
+        except (TypeError, ValueError):
+            return
+        now_ms = time.time() * 1000.0
+        heard_ms = now_ms - (server_time - self._clock_offset_ms)
+        if heard_ms < self.JAM_LATENCY_REPORT_MS:
+            return
+        if time.time() - getattr(self, "_last_jam_sync_log", 0.0) < 5.0:
+            return
+        self._last_jam_sync_log = time.time()
+        try:
+            room_ms = int(feed.latency_s() * 1000)
+        except Exception:
+            room_ms = 0
+        try:
+            sender_lag_ms = int(float(data.get("sender_lag_ms") or 0.0))
+        except (TypeError, ValueError):
+            sender_lag_ms = 0
+        from .deferred_log import log_deferred as log_line
+        log_line(
+            f"[Cinema] a live note is heard {int(heard_ms)}ms after it was "
+            f"struck: music timeline through a room (room queue={room_ms}ms)"
+            f" - sender_lag={sender_lag_ms}ms held={int(now_ms - arrived_ms)}ms")
 
     def _log_jam_sync_anomaly(self, delay, buffer_ms):
         """Rate-limited diagnostic when a jam-note hold exceeds 600ms."""
@@ -1771,7 +1958,17 @@ class EventHandeler:
             entity.music_compression = compression
         if compression is None:
             return False
-        return bool(compression.schedule_timeline_event(epoch, frame_seq, callback))
+        # A room-fed song is the case where a note's wait is worth saying out
+        # loud: the note lands on the frame the performer heard, and this
+        # client's own room plays that frame a pre-buffer behind the packets
+        # that arrive -- which is what a band means by "we feel late".
+        arrived_ms = time.time() * 1000.0
+
+        def _landed():
+            self._report_timeline_note_latency(data, compression, arrived_ms)
+            callback()
+
+        return bool(compression.schedule_timeline_event(epoch, frame_seq, _landed))
 
     def process_voice_data(self, data, channelID):
         if not options.get("voice_chat", True): return
@@ -1836,6 +2033,7 @@ class EventHandeler:
                     entity.music_compression.set_output_stereo(
                         bool(getattr(entity, "_party_sync_direct", False))
                     )
+                _route_music_to_room(self.game, entity, entity_channel_id)
                 try:
                     entity.music_compression.recieve(opus_data, music_src, None, entity_channel_id, self.gameplay)
                 except Exception as e:
@@ -1868,10 +2066,136 @@ class EventHandeler:
                 bool(getattr(entity, "_party_sync_direct", False))
             )
         entity._music_last_recv = time.time()
+        _route_music_to_room(self.game, entity, entity_channel_id)
         entity.music_compression.recieve_timeline(
             bytes(opus_data), music_src, None, entity_channel_id,
             self.gameplay, epoch, frame_seq,
         )
+
+    def staff_pan(self, data):
+        """Staff moved somebody's voice -- and their band -- to a cabinet.
+
+        Sent by the Server and relayed to the whole map, because the routing it
+        changes is decided on every *listener's* own machine: this client stores
+        the destination and resolves the room from its own map (see
+        ``libs/audio/cinema/pan.py``). An empty cabinet clears the pan, and the
+        voice goes back to the map's PA on the next frame.
+
+        This client's own switches are asked first and are the whole answer
+        (``live.note_reaches_a_room`` / ``speech.room_target``): a pan chooses
+        *which* room a sound belongs to, never whether this listener hears one,
+        so somebody who chose the map's PA keeps the PA and somebody who asked
+        for instruments where they stand keeps the instrument. What a pan does
+        override is the rule that the performer has to be standing at the
+        cabinet. A pan naming a cabinet this map does not have (or one the map
+        set to ``off``) resolves to nothing, and then nothing about this
+        client's behaviour changes.
+        """
+        if not isinstance(data, dict):
+            return
+        who = str(data.get("name") or "")
+        cabinet = str(data.get("cabinet") or "")
+
+        def _apply():
+            cinema_pan.apply_packet(self.gameplay, data)
+            me = str(getattr(getattr(self.gameplay, "player", None), "name", ""))
+            if who and me and who.lower() == me.lower():
+                # Only the player whose voice moved is told: everybody else
+                # hears the difference instead of being read a roll call.
+                if cabinet:
+                    speak(f"Your voice has been moved to jukebox {cabinet}.")
+                else:
+                    speak("Your voice is no longer moved by staff.")
+
+        # The table is read by the audio worker every frame, so everything that
+        # *writes* it happens on the main thread (the same inbox OpenAL work
+        # rides), and a reader only ever does a lookup.
+        with contextlib.suppress(Exception):
+            self.game.put(_apply)
+
+    def cinema_test(self, data):
+        """The Server relayed a staff sound test: play it here and answer.
+
+        One short note is played at the named cabinet's speakers -- through the
+        same route a panned band travels -- and this client then reports what
+        *it* did with it (played at n speakers, or the one reason it did not).
+        The answer is the point: the decision is this machine's, so nobody else
+        can say whether this machine heard it, and an old build that drops the
+        relay says nothing at all (which the tester is told, rather than being
+        shown a count that quietly shrank).
+
+        No rank is checked here: whoever hears the relay may answer it, and the
+        Server files the answer under the name it knows this connection by. The
+        note, the switches and the report are all read and made on the main
+        thread -- spawning OpenAL sources off it is what the inbox is for.
+        """
+        if not isinstance(data, dict):
+            return
+        cabinet = str(data.get("cabinet") or "").strip()
+        direction = str(data.get("direction") or "auto").strip().lower()
+        test_id = data.get("id")
+        if not cabinet or not isinstance(test_id, int) or isinstance(test_id, bool):
+            return
+
+        def _run():
+            report = cinema_sound_test.play(self.game, self.gameplay, cabinet,
+                                            direction, test_id=test_id)
+            cinema_sound_test.send_report(self.game, test_id, report)
+
+        with contextlib.suppress(Exception):
+            self.game.put(_run)
+
+    def cinema_test_result(self, data):
+        """The Server's summary of a test this client fired: keep it, and say it.
+
+        One line -- how many machines heard it -- and the per-client reasons are
+        kept for the menu (libs/cinema_pan_menu.py shows them behind one press),
+        because a tester firing shots at five cabinets wants the count at once
+        and the names only for the misses.
+        """
+        if not isinstance(data, dict):
+            return
+
+        def _apply():
+            result = cinema_sound_test.note_result(self.gameplay, data)
+            line = cinema_sound_test.spoken_summary(result)
+            if line:
+                speak(line)
+
+        with contextlib.suppress(Exception):
+            self.game.put(_apply)
+
+    def cinema_test_menu(self, data):
+        """The Builder/Technician menu asked for the sound test.
+
+        Same division as the pan menu beside it: the Server checks the rank
+        before sending this, and the menu the client then opens resolves the
+        cabinets from its own map and fires the shot.
+        """
+        opener = getattr(self.gameplay, "open_cinema_test", None)
+        if opener is None:
+            return
+        opener(None)
+
+    def music_bot_cinema(self, data):
+        """Which cabinet's room another player's Music Bot plays through.
+
+        Sent by the sender's own client (and repeated while the song plays,
+        so a listener who joined mid-song, or who missed a packet, is not left
+        on the plain feed), relayed by the Server to the map. The frames
+        themselves keep arriving on the ordinary music channel; this only says
+        where they belong -- see libs/audio/cinema/peer.py.
+
+        An empty cabinet is the sender turning it off, and it puts listeners
+        back on the plain feed on the next frame rather than at the end of the
+        song.
+        """
+        if not isinstance(data, dict):
+            return
+        channel = data.get("channel")
+        if not isinstance(channel, int):
+            return
+        cinema_peer.note_routing(self.game, channel, data.get("cabinet"))
 
     def has_radio(self, data):
         if not hasattr(self.gameplay, 'voice_channels') or not isinstance(self.gameplay.voice_channels, dict):
@@ -2149,6 +2473,22 @@ class EventHandeler:
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
+
+    def cinema_pan_menu(self, data):
+        """The Builder/Technician menu asked for the cinema pan menu.
+
+        Builders and sound technicians reach the pan from the menu they already
+        open for the sound plumbing (libs/builder/menu_manager.ts lists it
+        beside the Cinema Speaker entry), which is what the Server checks the
+        permission for before sending this. The menu itself is the client's
+        own (libs/cinema_pan_menu.py): it resolves the cabinets from this
+        map and sends the pan, so there is nothing for the Server to build
+        here -- and no key of its own to collide with another binding.
+        """
+        opener = getattr(self.gameplay, "open_cinema_pan", None)
+        if opener is None:
+            return
+        opener(None)
 
     def megaphone_settings_response(self, data):
         """Handle server response for megaphone settings permission"""
@@ -2457,6 +2797,10 @@ class EventHandeler:
         # A refresh from a Server that predates the cinema routing omits the
         # key; keeping the last known answer then is what stops an unrelated
         # rank change from silently switching a room off.
+        if "can_use_cinema_pan" in data:
+            # The same refusal rule as the routing above: a Server that predates
+            # the pan key must not be read as "you lost it".
+            gp.can_use_cinema_pan = bool(data.get("can_use_cinema_pan", False))
         if "can_use_cinema_speakers" in data:
             had_cinema_routing = bool(
                 getattr(gp, "can_use_cinema_speakers", False)

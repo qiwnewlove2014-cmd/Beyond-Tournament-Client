@@ -49,10 +49,18 @@ class PianoAudio:
         # Network handlers enqueue; update() drains on the main thread (inside the
         # AudioManager.context.batch() block) where OpenAL calls are safe.
         self._pending_notes = queue.Queue(maxsize=256)
+        # Remote notes whose sample is still preparing wait here (bounded)
+        # instead of being dropped, so a listener never permanently loses the
+        # first strike of a note.
+        self._deferred_notes = []
 
     # Maximum number of queued events to process per update tick. Bounds the
     # worst-case frame cost when a performer floods notes faster than 60 FPS.
     MAX_PENDING_NOTES_PER_UPDATE = 64
+    # A deferred note waits at most this long for its sample; past the deadline
+    # it is dropped so a slow decode cannot fire notes far off the beat.
+    DEFERRED_NOTE_TIMEOUT_S = 0.6
+    MAX_DEFERRED_NOTES = 64
 
     _FILTER_BASE_VALUES = {
         "normal": (1.0, 1.0),
@@ -85,12 +93,25 @@ class PianoAudio:
     )
 
     def preload(self):
-        """Warm common listening octaves when an existing map piano appears."""
-        self.am.instrument_samples.request(
+        """Warm the full shipped piano range when a map piano appears.
+
+        Listeners used to warm only octaves 3-5, so the first strike of any
+        note outside that range was silent until its sample finished
+        preparing. The complete set (B0..C8, 85 notes, ~98 MB prepared) fits
+        the shared instrument sample cache alongside a drum kit.
+        """
+        notes = ("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")
+        paths = [
             f"piano/Piano.mf.{note}{octave}.ogg"
-            for octave in (3, 4, 5)
-            for note in ("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")
-        )
+            for octave in range(1, 8)
+            for note in notes
+        ]
+        paths.append("piano/Piano.mf.B0.ogg")
+        paths.append("piano/Piano.mf.C8.ogg")
+        # The shipped set stops at Gb6, so Gb7 above resolves to one cached
+        # decode failure per generation - harmless, and it starts warming
+        # automatically if that sample ever ships.
+        self.am.instrument_samples.request(paths)
 
     def load_stereo_split_buffers(self, path: str):
         """Return split L/R buffers, or (None, None) while notes prepare.
@@ -623,6 +644,7 @@ class PianoAudio:
         # before we advance any pedal/bend/chorus transitions for them. This runs
         # on the main thread inside AudioManager.context.batch().
         self._process_pending_notes()
+        self._retry_deferred_notes()
         now = time.monotonic()
         transitioning_peers = set()
         base_values_by_mode = {}
@@ -759,6 +781,7 @@ class PianoAudio:
         self._light_occlusion_filter = None
         # Drop any queued events so a stale note doesn't fire after teardown.
         self._drain_pending_notes()
+        self._deferred_notes = []
         # Release preloaded piano buffers so memory does not accumulate across
         # map changes. Matches DrumAudio.reset() behavior.
         for key in [k for k in list(self.am._preloaded_buffers) if "piano/Piano" in k]:
@@ -854,6 +877,14 @@ class PianoAudio:
             return
         if not isinstance(note_name, str) or not note_name:
             return
+        # Wait (bounded) for the sample instead of dropping the note: before
+        # this, the first strike of any note outside the warmed range never
+        # sounded for listeners while the performer heard it locally.
+        state = self._note_sample_state(note_name)
+        if state != "ready":
+            if state == "loading":
+                self._defer_note(data)
+            return
         # Apply realtime pedal/bend/chorus state mirrored in the packet.
         # These setters now run on the main thread (where we are).
         if "piano_soft" in data:
@@ -897,6 +928,37 @@ class PianoAudio:
             if reverb and reverb.reverb:
                 self.apply_effect_send(snd, 0, reverb.reverb)
 
+    def _note_sample_state(self, note_name):
+        """ready/loading/failed for a note's sample; requests it when missing."""
+        if not isinstance(note_name, str) or not note_name:
+            return "failed"
+        return self.am.instrument_samples.status(
+            f"piano/Piano.mf.{note_name}.ogg"
+        )
+
+    def _defer_note(self, data):
+        """Hold one remote note until its sample prepares or the deadline passes."""
+        deferred = self._deferred_notes
+        if len(deferred) >= self.MAX_DEFERRED_NOTES:
+            deferred.pop(0)
+        deferred.append((time.monotonic() + self.DEFERRED_NOTE_TIMEOUT_S, data))
+
+    def _retry_deferred_notes(self):
+        """Give deferred notes another chance once their sample is ready."""
+        if not self._deferred_notes:
+            return
+        now = time.monotonic()
+        remaining = []
+        for deadline, data in self._deferred_notes:
+            note_name = data.get("note") or data.get("piano_note") or data.get("guitar_note")
+            state = self._note_sample_state(note_name)
+            if state == "ready":
+                self._play_queued_note(data)
+            elif state == "loading" and now < deadline:
+                remaining.append((deadline, data))
+            # failed or past the deadline: drop the note
+        self._deferred_notes = remaining
+
     def _stop_queued_note(self, data):
         """Main-thread note-off for a queued remote piano stop."""
         try:
@@ -904,6 +966,14 @@ class PianoAudio:
             note_name = data["note"]
         except (KeyError, TypeError):
             return
+        # A note still waiting for its sample must not fire after its key was
+        # already released.
+        self._deferred_notes = [
+            entry for entry in self._deferred_notes
+            if entry[1].get("peer_id") != peer_id
+            or (entry[1].get("note") or entry[1].get("piano_note")
+                or entry[1].get("guitar_note")) != note_name
+        ]
         self.stop_note(peer_id, note_name)
 
     def play_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False, soft=None, via_megaphone=False, occlusion=None):
@@ -928,28 +998,29 @@ class PianoAudio:
             # Thin obstacle (a lone pillar tile): only slightly dull the note
             # instead of the full behind-a-wall muffle.
             filter_obj = self.get_light_occlusion_filter()
-        snd = self.am.play_unbound_stereo_spatial(
-            path=f"piano/Piano.mf.{note_name}.ogg",
-            x=x, y=y, z=z,
-            listener_x=listener_x,
-            listener_y=listener_y,
-            listener_z=listener_z,
-            volume=volume,
-            cat="miscelaneous",
-            max_distance=50.0,
-            as_3d_stereo=not is_local,
-            occluded=(full_block and not partial),
-            direct_filter=filter_obj,
-            stereo_reference_distance=8.0,
-        )
-        if snd:
-            self._tag_sounds(snd, peer_id, filter_mode)
-            self.apply_chorus_send(snd, peer_id)
-            piano_key = f"{peer_id}-{note_name}"
-            # If the same peer plays the same note very rapidly, stop the old one first
-            if piano_key in self.active_piano_notes:
-                self.stop_note(peer_id, note_name)
-            self.active_piano_notes[piano_key] = snd
+        # Is this note heard from a venue's speakers on this client? Asked
+        # *before* the instrument's own sound is made, because the answer is
+        # what decides whether it is made at all: a note coming out of a hall
+        # must not also be heard at the piano standing in that hall (two copies
+        # of one note, one of them in the wrong place). The performer's own
+        # note is exempt -- they are at the instrument and in the room at once,
+        # and keep hearing both, exactly as before.
+        venue = False
+        if not is_local:
+            with contextlib.suppress(Exception):
+                from .audio.cinema import live as cinema_live
+                from .audio.cinema import pan as cinema_pan
+                gameplay = self.gameplay
+                venue = cinema_live.note_goes_to_a_room(
+                    getattr(gameplay, "game", None), (x, y, z),
+                    pan=cinema_pan.target_for_name(gameplay, peer_id))
+        snd = None
+        if not venue:
+            snd = self._play_positional_note(
+                peer_id, note_name, x, y, z,
+                listener_x, listener_y, listener_z, volume,
+                filter_mode, filter_obj, is_local,
+                occluded=(full_block and not partial))
 
         # Route through PA Megaphone speakers if via_megaphone is true
         if via_megaphone:
@@ -966,6 +1037,34 @@ class PianoAudio:
         except Exception:
             pass
 
+        return snd
+
+    def _play_positional_note(self, peer_id, note_name, x, y, z,
+                              listener_x, listener_y, listener_z, volume,
+                              filter_mode, filter_obj, is_local, occluded):
+        """The note at the instrument itself: the only sound a plain map has."""
+        snd = self.am.play_unbound_stereo_spatial(
+            path=f"piano/Piano.mf.{note_name}.ogg",
+            x=x, y=y, z=z,
+            listener_x=listener_x,
+            listener_y=listener_y,
+            listener_z=listener_z,
+            volume=volume,
+            cat="miscelaneous",
+            max_distance=50.0,
+            as_3d_stereo=not is_local,
+            occluded=occluded,
+            direct_filter=filter_obj,
+            stereo_reference_distance=8.0,
+        )
+        if snd:
+            self._tag_sounds(snd, peer_id, filter_mode)
+            self.apply_chorus_send(snd, peer_id)
+            piano_key = f"{peer_id}-{note_name}"
+            # If the same peer plays the same note very rapidly, stop the old one first
+            if piano_key in self.active_piano_notes:
+                self.stop_note(peer_id, note_name)
+            self.active_piano_notes[piano_key] = snd
         return snd
 
     # Live instruments come out of the cabinet's room at the same wall it is
@@ -997,22 +1096,78 @@ class PianoAudio:
         if game is None:
             return 0
         from .audio.cinema import live as cinema_live
+        from .audio.cinema import pan as cinema_pan
         from .audio.cinema import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
-        if not cinema_live.live_instruments_enabled():
+        # The listener's own switches come first, always: a staff pan names
+        # *which* room this note belongs to (and lets the performer be nowhere
+        # near it), never whether this client hears a room at all -- somebody
+        # who asked for instruments where they stand keeps them there (see
+        # ``pan.py``).
+        if not cinema_live.note_reaches_a_room(game):
             return 0
-        bot = getattr(gameplay, "music_bot", None)
-        bot_volume = (max(0.1, getattr(bot, "volume", 50) / 100.0)
-                      * self.CINEMA_ROOM_VOLUME)
+        panned = cinema_pan.target_for_name(gameplay, peer_id)
         path = f"piano/Piano.mf.{note_name}.ogg"
         key = f"cin-{peer_id}-{note_name}"
+        # The venue's own zone reverb, so a note heard from the room is not
+        # drier than the instrument standing in the same zone was (the
+        # positional copy this route now replaces carried exactly this one).
+        reverb = cinema_live.zone_reverb(game, (x, y, z))
         # Register the note before a single speaker is fed. A speaker carrying
         # a trim is spawned a few ms later, and a key released inside those
         # milliseconds must not be able to come out of the room afterwards:
         # stop_note retires this key, and that is what the deferred spawns ask.
         self.active_piano_notes.setdefault(key, [])
+        return cinema_live.route_to_room(
+            game, (x, y, z),
+            self._room_note_player(path, key, peer_id, base_volume, reverb,
+                                   self._room_note_gain()),
+            occlusion_provider=getattr(getattr(gameplay, "jukebox_player", None),
+                                       "occlusion_tier", None),
+            schedule=getattr(game, "call_after", None),
+            wanted=lambda: key in self.active_piano_notes,
+            pan=panned,
+        )
 
-        def _spawn(px, py, pz, gain, tier, _delay_ms):
-            volume = base_volume * max(0.0, gain) * bot_volume
+    # The staff sound test plays one short note at a cabinet's speakers: a pan
+    # is resolved on every listener's own machine, so "where did that go, and
+    # can they hear it" can only be answered by firing a note down the very
+    # path a panned band travels and asking each client what it did. It shares
+    # this class's room route deliberately -- a test taking a path of its own
+    # would answer a different question from the one it was fired to ask.
+    TEST_PEER = "cinema-test"
+    TEST_NOTE = "C4"
+    # Short on purpose: it is a test, not a performance, and the next shot has
+    # to be heard as its own note rather than as the tail of the last one.
+    TEST_DURATION_MS = 380
+
+    def _room_note_gain(self):
+        """The room's own loudness rule, for one note played at its speakers.
+
+        The Music Bot's volume, floored at 10% and scaled by the venue's own
+        constant: a band through a room is louder than the same band heard at
+        the instrument, but not so loud it drowns the song the room plays. Both
+        the band and the staff test ask this, so a test is heard at the level
+        the band it checks will be.
+        """
+        bot = getattr(self.gameplay, "music_bot", None)
+        return (max(0.1, getattr(bot, "volume", 50) / 100.0)
+                * self.CINEMA_ROOM_VOLUME)
+
+    def _room_note_player(self, path, key, peer_id, base_volume, reverb,
+                          room_gain):
+        """The ``play_one`` a room hands each of its speakers for one note.
+
+        Shared by the band's room copy and the staff sound test, because the
+        numbers here *are* the room: flat at the source (its own ramp already
+        shaped the note), the speakers' level folded in by the caller, the
+        wall's filter, the half of the stereo sample that speaker carries, and
+        the venue's reverb. Two copies of this would be two rooms.
+        """
+        from .audio.cinema import live as cinema_live
+        from .audio.cinema import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
+
+        def _spawn(px, py, pz, gain, tier, _delay_ms, channel=None):
+            volume = base_volume * max(0.0, gain) * room_gain
             if volume <= 0.0:
                 return
             sound = self.am.play_unbound(
@@ -1024,24 +1179,64 @@ class PianoAudio:
                 reference_distance=ROOM_REFERENCE_DISTANCE, rolloff=0.0,
                 max_distance=ROOM_MAX_DISTANCE,
                 direct_filter=cinema_live.wall_filter(self, tier),
+                # The room's screen wall keeps the stereo image it plays the
+                # song with: one channel per speaker (None = the whole note).
+                channel=channel, stereo_provider=self,
             )
             if sound is None:
                 return
             self._tag_sounds(sound, peer_id, "cinema")
             self.apply_chorus_send(sound, peer_id)
+            if reverb is not None:
+                self.apply_effect_send(sound, 0, reverb)
             tracked = self.active_piano_notes.setdefault(key, [])
             if not isinstance(tracked, list):
                 tracked = [tracked]
                 self.active_piano_notes[key] = tracked
             tracked.append(sound)
+        return _spawn
 
-        return cinema_live.route_to_room(
-            game, (x, y, z), _spawn,
+    def route_test_note_to_room(self, cabinet, direction, position, *,
+                                note_name=None, base_volume=300,
+                                duration_ms=None):
+        """Play one short note at a *named* cabinet's speakers, leaning
+        ``direction``: the note a staff sound test fires.
+
+        The room is named rather than derived from the performer's position,
+        exactly like a staff pan names its destination, and the note is played
+        at that room's speakers with its own numbers. Returns how many speakers
+        it reached (0 when the destination does not resolve here) -- the caller
+        reports that back, because that number is the whole point of the shot.
+        """
+        gameplay = self.gameplay
+        game = getattr(gameplay, "game", None) if gameplay is not None else None
+        if game is None:
+            return 0
+        from .audio.cinema import live as cinema_live
+        note_name = note_name or self.TEST_NOTE
+        key = f"cin-{self.TEST_PEER}-{note_name}"
+        # One test at a time: a note still ringing from the last shot is damped
+        # before the next one starts, so two shots cannot be heard as one room
+        # sounding twice.
+        self.stop_note(self.TEST_PEER, note_name)
+        reverb = cinema_live.zone_reverb(game, position)
+        self.active_piano_notes.setdefault(key, [])
+        spoken = cinema_live.route_to_room(
+            game, position,
+            self._room_note_player(f"piano/Piano.mf.{note_name}.ogg", key,
+                                   self.TEST_PEER, base_volume, reverb,
+                                   self._room_note_gain()),
             occlusion_provider=getattr(getattr(gameplay, "jukebox_player", None),
                                        "occlusion_tier", None),
             schedule=getattr(game, "call_after", None),
             wanted=lambda: key in self.active_piano_notes,
+            pan=(cabinet, direction),
         )
+        call_after = getattr(game, "call_after", None)
+        if callable(call_after):
+            call_after(int(duration_ms or self.TEST_DURATION_MS),
+                       lambda: self.stop_note(self.TEST_PEER, note_name))
+        return spoken
 
     def route_to_megaphone_speakers(self, peer_id, note_name, base_volume=300):
         """Spawn a piano note at every megaphone PA speaker position with PA filter & EQ.

@@ -70,6 +70,34 @@ def rooms_enabled():
     return _option_enabled()
 
 
+def listening_summary():
+    """One phrase for what *this client* hears out of a cabinet right now.
+
+    The three listening switches, each said the way its own menu line says it,
+    because the routing of a staff pan happens on the *listener's* machine: a
+    staff member testing with two clients sees the pan land on both and hears
+    it on neither, and a switch on the machine doing the listening is otherwise
+    indistinguishable from a room that would not resolve. ``pan.apply_packet``
+    logs this whenever a pan arrives and the pan menu says it back to whoever
+    just sent one, so the answer is in front of the person asking.
+
+    The switches are read live and asked rather than copied (the Music Bot
+    menu's lines edit them); everything here is ``libs``-only and makes no
+    sound, so it is safe to call from a menu callback.
+    """
+    from .live import live_instruments_enabled
+    from .speech import speech_enabled
+
+    return ", ".join((
+        "jukebox songs from the room" if _option_enabled()
+        else "jukebox songs at your ears",
+        "the band from the room" if live_instruments_enabled()
+        else "the band where they stand",
+        "voices from the room" if speech_enabled()
+        else "voices on the map's PA",
+    ))
+
+
 def set_rooms_enabled(game, enabled):
     """Record the listener's choice and apply it to a room already playing.
 

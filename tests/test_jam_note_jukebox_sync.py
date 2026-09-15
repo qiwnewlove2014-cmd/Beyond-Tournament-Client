@@ -119,7 +119,7 @@ class ActiveJukeboxBufferTests(unittest.TestCase):
         handler = _handler_with_jukebox(entry)
         self.assertIsNone(handler._active_jukebox_buffer_ms())
 
-    def test_a_relay_room_reports_the_rooms_own_queue_and_trims(self):
+    def test_a_relay_room_reports_the_rooms_own_queue(self):
         """A cinema room replaces the receiver's pair, so its queue is the lag.
 
         The 40ms-per-frame backlog belongs to the two plain sources, and in
@@ -130,14 +130,29 @@ class ActiveJukeboxBufferTests(unittest.TestCase):
         entry = _relay_entry(queued=4)
         entry["streamer"].cinema = _room(buffered_ms=140, extra_ms=60)
         handler = _handler_with_jukebox(entry)
-        self.assertEqual(handler._active_jukebox_buffer_ms(), 200)
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 140)
 
-    def test_a_direct_room_reports_queue_plus_trims_plus_lateness(self):
-        """The room's queue, its delay trims, and this machine's late start."""
+    def test_a_rooms_trims_are_not_held_for_on_top_of_its_queue(self):
+        """The room plays each trim at its own speaker when the note is spawned.
+
+        Holding the note for the DEEPEST trim as well delayed every speaker,
+        the untrimmed ones included, by that trim -- and it is the same note
+        that ``live.route_to_room`` then spawns at each speaker with that
+        speaker's own delay.
+        """
+        entry = _relay_entry(queued=4)
+        entry["streamer"].cinema = _room(buffered_ms=140, extra_ms=60)
+        handler = _handler_with_jukebox(entry)
+        handler._active_jukebox_buffer_ms()
+        self.assertEqual(handler._jam_buffer_kind, "room")
+        self.assertIn("trims=60ms", handler._jam_buffer_detail)
+
+    def test_a_direct_room_reports_queue_plus_lateness(self):
+        """The room's queue and this machine's own late start."""
         entry = _direct_entry(queued=5, late_s=1.5)
         entry["streamer"].cinema = _room(buffered_ms=140, extra_ms=60)
         handler = _handler_with_jukebox(entry)
-        self.assertEqual(handler._active_jukebox_buffer_ms(), 1700)
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 1640)
 
     def test_an_untrimmed_room_reports_only_its_queue(self):
         # The shipped jukebox has no trims, so nothing is added for them.
@@ -245,6 +260,45 @@ class ScheduleRemoteNoteTests(unittest.TestCase):
         # 2000 − 1500 − JAM_NOTE_ADVANCE_MS, no extra clamp.
         self.assertGreater(scheduled_ms, 300)
         self.assertLess(scheduled_ms, 600)
+
+    def test_a_note_held_by_a_room_says_how_late_it_will_be_heard(self):
+        """The one trace a listener has for "the band feels late".
+
+        A room's hold is its queue plus this machine's own late start, and a
+        performer who reports no lag of their own makes it bigger; without
+        the components there is no telling which of them it was, and the note
+        itself sounds at the right place either way.
+        """
+        entry = _relay_entry(queued=4)
+        entry["streamer"].cinema = _room(buffered_ms=400, extra_ms=60)
+        handler = _handler_with_jukebox(entry)
+        now_ms = time.time() * 1000.0
+        with mock.patch("libs.event_handeler.time.time",
+                        return_value=now_ms / 1000.0), \
+                mock.patch("libs.deferred_log.log_deferred") as log_line:
+            handler._schedule_remote_note({"server_time": now_ms}, mock.Mock())
+            self.assertEqual(len(log_line.call_args_list), 1)
+            line = log_line.call_args_list[0].args[0]
+            # The hold the note actually got: the room's queue, minus the
+            # note's own advance, and nothing for its trims.
+            self.assertIn("heard 355ms", line)
+            self.assertIn("room queue=400ms trims=60ms", line)
+            self.assertIn("sender_lag=0ms", line)
+            # A drum roll is twenty notes a second and they all answer the
+            # same; the listener needs the line once.
+            handler._schedule_remote_note({"server_time": now_ms}, mock.Mock())
+        self.assertEqual(len(log_line.call_args_list), 1)
+
+    def test_a_plain_pair_note_is_not_reported_as_a_room(self):
+        """The report is about the output a listener stands beside."""
+        entry = _relay_entry(queued=10)          # 400ms of plain pair backlog
+        handler = _handler_with_jukebox(entry)
+        now_ms = time.time() * 1000.0
+        with mock.patch("libs.event_handeler.time.time",
+                        return_value=now_ms / 1000.0), \
+                mock.patch("libs.deferred_log.log_deferred") as log_line:
+            handler._schedule_remote_note({"server_time": now_ms}, mock.Mock())
+        log_line.assert_not_called()
 
     def test_relay_hold_stays_uncapped_below_its_backlog(self):
         handler = _handler_with_jukebox(_relay_entry(queued=4))

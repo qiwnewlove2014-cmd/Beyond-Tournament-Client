@@ -306,7 +306,7 @@ class ServerConfigPackagingTests(unittest.TestCase):
                     # build members stay off disk even then.
                     materialized = vfs._INSTANCE.materialize("test.txt")
                     self.assertEqual(
-                        Path(materialized).read_text(), "asset"
+                        Path(materialized).read_text(encoding="utf-8"), "asset"
                     )
                     self.assertEqual(real_listdir(vfs.TEMP_DIR), ["test.txt"])
                 finally:

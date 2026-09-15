@@ -727,6 +727,12 @@ class AudioStreamer(threading.Thread):
                 self.bot.broadcast_enabled
                 or self.bot.broadcast_to_megaphone
                 or getattr(self.bot, "party_sync_force_upload", False)
+                # A song routed into a cabinet's room is uploaded whatever the
+                # Broadcast switch says: the room is a place other people
+                # stand in, and the frames are the only way it reaches them
+                # (see libs/audio/cinema/peer.py). The switch itself is
+                # untouched and comes back the moment the routing goes off.
+                or getattr(self.bot, "cinema_force_upload", False)
             ):
                 return
 

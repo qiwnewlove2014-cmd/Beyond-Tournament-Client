@@ -22,10 +22,71 @@ class Client(threading.Thread):
         self.address = enet.Address(host.encode(), port)
         self.net = enet.Host(None, 1, 256, 0, 0)
         self.peer = self.net.connect(self.address, 256)
+        # The server accepted the transport (ENet connect event).
         self.connected = False
+        # The login finished: the server's snapshot arrived. The login watchdog
+        # below guards only the window before this is set -- it is what a slow
+        # login needs (see login_timed_out).
+        self.logged_in = False
         self.should_poll = False
         self.disconnected = False  # whether an unexpected disconnect happened
+        self.closing = False  # close_socket already asked the worker to exit
         self.start()
+
+    def note_server_activity(self):
+        """Restart the login watchdog: the server said something, or we just
+        asked it something it owes an answer to. Any sign of life keeps the
+        attempt alive, however slow the machine behind it turns out to be.
+        """
+        self.timeout_clock.restart()
+
+    def note_handshake(self):
+        """The server accepted the connection (ENet connect event).
+
+        Note this only says the transport is up. It must NOT disarm the login
+        watchdog: whether the login is still pending is `logged_in`, not this.
+        """
+        self.connected = True
+        self.note_server_activity()
+
+    def login_timed_out(self):
+        """True when the server has gone quiet for too long during a login.
+
+        Silence is measured from the last sign of life, never from the moment
+        the player pressed log in: a handshake, a database lookup and a map
+        snapshot are all work the server may legitimately be slow at, and
+        giving up on it mid-way left a session nobody owned (which then
+        refused the player's next login for as long as ENet took to reap the
+        peer). `logged_in` is what ends the window -- timeouts only ever cover
+        a login that never finished.
+        """
+        return not self.logged_in and self.timeout_clock.elapsed >= TIMEOUT
+
+    def close_socket(self, polite=True):
+        """Release this client: ask the worker to disconnect and exit.
+
+        Never joins -- callers run inside the locked frame body, where joining
+        can deadlock (see tests/test_network_teardown.py). `polite` sends the
+        server a real disconnect so it can drop the session at once instead of
+        waiting for its own transport timeout to reap a peer that is still
+        registered.
+        """
+        if self.closing:
+            return
+        self.closing = True
+        if polite:
+            self.put(self._request_disconnect)
+        self.put(("should_poll", False))
+        self.put(None)
+
+    def _request_disconnect(self):
+        """Runs inside the worker thread, which is the thread that services the
+        ENet host, so the disconnect command is queued and flushed there."""
+        try:
+            self.peer.disconnect()
+            self.net.flush()
+        except Exception:
+            pass
 
     def put(self, value):
         """puts value into the event queue to be processed. value could be one of the following:
@@ -53,22 +114,31 @@ class Client(threading.Thread):
                 self.loop()
 
     def loop(self, ignore_timeout=False):
-        event = self.net.service(0)
-        if (
-            not ignore_timeout
-            and not self.connected
-            and self.timeout_clock.elapsed >= TIMEOUT
-        ):
-            # timeout
+        try:
+            event = self.net.service(0)
+        except OSError as e:
+            # The ENet socket died at the OS level (adapter change, sleep/resume,
+            # VPN switch, abrupt network loss). That is a disconnect, not a code
+            # crash: take the normal disconnect path instead of letting the
+            # exception kill this worker thread.
+            from .logger import log_exception
+            log_exception(e, "Client.loop enet service")
+            self.connected = False
+            self.disconnected = True
+            self.game.put(self.game.disconnected)
+            return
+        if not ignore_timeout and self.login_timed_out():
+            # silence: give up on this login attempt
             self.game.put(self.game.connection_error)
             self.disconnected = True
-        elif not self.connected and event.type == enet.EVENT_TYPE_CONNECT:
-            self.connected = True
+        elif event.type == enet.EVENT_TYPE_CONNECT:
+            self.note_handshake()
         elif event.type == enet.EVENT_TYPE_DISCONNECT:
             self.connected = False
             self.disconnected = True
             self.game.put(self.game.disconnected)
         elif event.type == enet.EVENT_TYPE_RECEIVE:
+            self.note_server_activity()
             try:
                 data = None
                 if event.channelID < consts.CHANNEL_VOICECHAT: 
@@ -131,3 +201,6 @@ class Client(threading.Thread):
             ),
         )
         self.peer.send(channel, packet)
+        # The server owes us an answer from this moment on: a login request
+        # that is slow to be answered must not look like a dead server.
+        self.note_server_activity()

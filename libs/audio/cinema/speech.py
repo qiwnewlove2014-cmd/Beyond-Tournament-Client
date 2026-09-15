@@ -39,10 +39,9 @@ voice come *out of that room* instead of out of a dry booth.
 import time
 from collections import deque
 from contextlib import suppress
-from math import sqrt
 
-from .layout import ROOM_RADIUS
 from .listener import occlusion_filter, restore_filter
+from .pan import DEFAULT_DIRECTION, target_for_channel
 
 # The listener's own choice, like ``cinema_live_instruments``: it is how *you*
 # hear a voice, it takes nothing from anybody (no source of anyone else's is
@@ -154,6 +153,7 @@ def local_position(gameplay):
 
 def _router(game):
     from .live import router_for
+
     router = router_for(getattr(game, "audio_mngr", None))
     if router.game is None:
         router.game = game
@@ -161,7 +161,7 @@ def _router(game):
 
 
 def room_target(game, gameplay, sender_id):
-    """``(cabinet_id, plan)`` for the room this talker stands in, or None.
+    """``(cabinet_id, plan)`` for the room this talker's voice belongs to.
 
     Cheap and safe on any thread: it reads one entity position and asks the
     same router the live instruments ask (which re-resolves at most once a
@@ -169,17 +169,77 @@ def room_target(game, gameplay, sender_id):
     worker decide PA-or-room per frame without touching the audio thread's
     objects.
 
-    The talker has to be *in* the room, not merely nearest to it: the router
-    answers "the cabinet closest to this point", and a speaker set is the
-    room's reach from its own cabinet (``ROOM_RADIUS``). Somebody standing
-    out in the map with one cabinet far behind them is on the map's PA -- the
-    room's speakers are all out of earshot of every listener anyway, so
-    routing them there would silence an announcement that the PA would have
-    carried everywhere.
+    This client's **own switch is asked first and is the whole answer**
+    (`cinema_speech`, the `Speech:` line): a staff pan decides *which* room a
+    voice belongs to, never whether *you* hear one, so somebody who chose the PA
+    keeps the PA -- which is where a panned voice goes for them, and still
+    reaches them everywhere on the map. It is deliberately the only switch this
+    path asks: `Cinema rooms:` is the jukebox's songs and `Instruments:` the
+    band, so turning one of those off cannot silently take a voice off the map's
+    PA with it (one listening choice per shape of sound -- see
+    ``plugin.listening_summary`` for the answer said out loud).
+
+    A **staff pan is asked next** and answers on its own (see ``pan.py``): it
+    names a cabinet, so the radius rule below is exactly what it overrides -- a
+    panned talker does not have to be standing in the destination's reach.
+
+    The rest of the time the talker has to be *in* the room, not merely nearest
+    to it: the router answers "the cabinet closest to this point", and a
+    speaker set is the room's reach from its own cabinet (``ROOM_RADIUS``).
+    Somebody standing out in the map with one cabinet far behind them is on the
+    map's PA -- the room's speakers are all out of earshot of every listener
+    anyway, so routing them there would silence an announcement that the PA
+    would have carried everywhere.
     """
     if game is None or gameplay is None:
         return None
+    if not speech_enabled():
+        return None
+    panned = _pan_target(game, gameplay, sender_id)
+    if panned is not None:
+        return panned
     return _target_at(game, talker_position(gameplay, sender_id))
+
+
+def _pan_target(game, gameplay, sender_id):
+    """``(cabinet_id, plan, direction)`` for a talker staff moved, or None.
+
+    Asked before the talker has to be anywhere near the cabinet, because that
+    is the rule a staff decision is *for*: a player panned into a hall does not
+    have to be standing in it. It is deliberately **not** asked before the
+    listener's own switches -- ``room_target`` does those first, so a pan is
+    where a voice is, not a way past somebody's listening choice (a listener
+    who chose the PA hears the panned voice on the PA). Everything else -- which
+    speakers, how loud, which wall, which reverb -- is the destination room's
+    own, exactly as if the talker had walked in.
+    """
+    try:
+        target = target_for_channel(gameplay, sender_id)
+    except Exception:
+        return None
+    if target is None:
+        return None
+    cabinet, direction = target
+    try:
+        room = _router(game).room_by_id(cabinet)
+    except Exception:
+        return None
+    if room is None:
+        return None
+    return (room[0], room[1], direction)
+
+
+def _target_parts(target):
+    """``(cabinet_id, plan, direction)`` from any target this module returns.
+
+    The direction only exists when a staff pan named one, and a two-tuple is
+    the shape every other caller and test already builds, so both are accepted
+    here rather than at each of the four places that unpack a target.
+    """
+    if target is None:
+        return None, None, DEFAULT_DIRECTION
+    direction = target[2] if len(target) > 2 else DEFAULT_DIRECTION
+    return target[0], target[1], direction
 
 
 def local_room_target(game, gameplay):
@@ -188,6 +248,11 @@ def local_room_target(game, gameplay):
     The same question as :func:`room_target`, asked about this client's own
     body: a player standing in a hall hears their own broadcast out of that
     hall's speakers, exactly like everyone else in it.
+
+    Deliberately *not* the staff pan: this leg is the talker's own monitor, so
+    it stays where they physically stand. A performer panned into the bar while
+    standing in the hall hears their own line from the hall (a monitor), while
+    everyone else hears them from the bar (the pan).
     """
     if game is None or gameplay is None:
         return None
@@ -209,28 +274,17 @@ def local_room_available(game, gameplay):
 
 def _target_at(game, position):
     """The room a point stands inside, or None (see :func:`room_target`)."""
+    from .live import inside_room
+
     if position is None or game is None or not speech_enabled():
         return None
     try:
         target = _router(game).route_for(position)
     except Exception:
         return None
-    if target is None or not _inside_room(target[1], position):
+    if target is None or not inside_room(target[1], position):
         return None
     return target
-
-
-def _inside_room(plan, position):
-    """Whether a point stands inside a resolved room's own reach."""
-    anchor = getattr(getattr(plan, "placement", None), "anchor", None)
-    if anchor is None:
-        return True
-    try:
-        gap = sqrt(sum((float(anchor[index]) - float(position[index])) ** 2
-                       for index in range(3)))
-    except Exception:
-        return True
-    return gap <= ROOM_RADIUS
 
 
 def routed(game, gameplay, sender_id):
@@ -527,6 +581,9 @@ class RoomSpeechLeg:
         self.cabinet_id = None
         self.plan = None
         self.signature = None
+        # The direction a staff pan leans this voice towards (see ``pan.py``):
+        # the room is the destination, this is how it is mixed for them.
+        self.direction = DEFAULT_DIRECTION
         self.sources = {}     # slot -> OpenAL source
         self.fresh = {}       # slot -> frames queued since a stopped source's last drain
         self.hold = {}        # slot -> frames waiting for that speaker's trim
@@ -562,13 +619,14 @@ class RoomSpeechLeg:
         return True
 
     def _follow(self, target):
-        """Re-shape for the room the talker is in now, at most once a second.
+        """Re-shape for the room the talker's voice belongs to now.
 
         A resolve that finds nothing keeps the room that is already playing: a
         builder deleting one speaker mid-sentence must not cut the voice off
         (the same rule the playing room follows for the song).
         """
-        cabinet_id, plan = target
+        cabinet_id, plan, direction = _target_parts(target)
+        self.direction = direction
         signature = _signature(plan)
         if self.plan is not None and cabinet_id == self.cabinet_id \
                 and signature == self.signature:
@@ -644,7 +702,10 @@ class RoomSpeechLeg:
                 with suppress(Exception):
                     source.gain = 0.0
                 continue
-            _slot, _spot, gain, _delay, tier = term
+            # Six fields since the note path started carrying a channel: a
+            # voice is one mono stream at every speaker of the room and has
+            # no half to take (see ``live.terms_for_plan``).
+            _slot, _spot, gain, _delay, tier, *_rest = term
             with suppress(Exception):
                 source.gain = max(0.0, volume * gain)
             if (tier == self.tiers.get(slot)
@@ -711,7 +772,8 @@ class RoomSpeechLeg:
         provider = getattr(getattr(self.gameplay, "jukebox_player", None),
                            "occlusion_tier", None)
         try:
-            terms = _router(game).terms_for_plan(self.plan, listener, provider)
+            terms = _router(game).terms_for_plan(self.plan, listener, provider,
+                                                 direction=self.direction)
         except Exception:
             return {}
         return {term[0]: term for term in terms}

@@ -45,6 +45,9 @@ class GameStub:
             def __init__(self):
                 self.elapsed = 0.0
 
+            def restart(self):
+                self.elapsed = 0
+
         return _Clock()
 
     def put(self, value):

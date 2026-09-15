@@ -243,6 +243,10 @@ class Game:
         if not username or not password:
             menus.no_account(self)
             return speak("No credentials menu", False)
+        # A client from an earlier attempt may still be around (a login that
+        # gave up used to leave its socket open and unserviced). Release it
+        # before a new one takes its place, or the two talk to one account.
+        self._close_network()
         try:
             self.network = self._new_network_client()
         except (OSError, server_config.ServerConfigError) as e:
@@ -254,10 +258,16 @@ class Game:
         self.replace(self.login2)
 
     def login2(self):
-        if self.network.timeout_clock.elapsed >= consts.TIMEOUT:
-            return self.connection_error()
+        """Wait for the transport, then ask the server to log this account in.
+
+        Both waits (handshake and login) are covered by the client's own
+        silence watchdog: it restarts on every packet from the server and every
+        request sent, so a slow server is waited for instead of being declared
+        dead mid-login (see networking.Client.login_timed_out).
+        """
         e = self.network.net.service(0)
-        if not self.network.connected and e.type == enet.EVENT_TYPE_CONNECT:
+        if e.type == enet.EVENT_TYPE_CONNECT:
+            self.network.note_handshake()
             speak("Logging in. Please wait...")
             self.network.send(
                 consts.CHANNEL_MISC,
@@ -269,7 +279,9 @@ class Game:
                     "capabilities": ["music_timeline_v1", "jam_notes_v1"],
                 },
             )
-            self.replace(self.network.loop)
+            return self.replace(self.network.loop)
+        if self.network.login_timed_out():
+            self.connection_error()
 
     def set_account(self):
         self.append(self.input.run("Enter your username.", handeler=self.set_account2))
@@ -373,7 +385,8 @@ class Game:
 
     def creating(self):
         e = self.network.net.service(0)
-        if not self.network.connected and e.type == enet.EVENT_TYPE_CONNECT:
+        if e.type == enet.EVENT_TYPE_CONNECT:
+            self.network.note_handshake()
             speak("Please wait. Creating your account...")
             self.network.send(
                 consts.CHANNEL_MISC,
@@ -386,11 +399,10 @@ class Game:
                 },
             )
             return self.replace(self.network.loop)
-        if (
-            not self.network.connected
-            and self.network.timeout_clock.elapsed >= consts.TIMEOUT
-        ):
-            self.network.timeout_clock.restart()
+        # No second timeout lives here: Client.loop owns the silence watchdog
+        # once the request is out (it restarts on every packet from the
+        # server), so one rule decides when an attempt is given up on.
+        if self.network.login_timed_out():
             self.connection_error()
 
     def exit(self):
@@ -739,7 +751,26 @@ class Game:
         else:
             menus.main_menu(self)
 
+    def _close_network(self, polite=True):
+        """Release the network client without joining its worker.
+
+        Joining inside the locked frame body can deadlock (see
+        tests/test_network_teardown.py), so this only asks the worker to
+        disconnect and exit. `polite` tells the server to drop the session
+        now instead of waiting for its own transport timeout to reap a peer
+        that still looks connected.
+        """
+        network = self.network
+        self.network = None
+        if network is not None:
+            network.close_socket(polite=polite)
+
     def connection_error(self):
+        # Drop the connection rather than leaving it open and unserviced: a
+        # half-finished login used to keep a session on the server that the
+        # player could not get back into ("user already logged in") for as long
+        # as ENet took to time the peer out.
+        self._close_network()
         if getattr(self, "reconnecting", False):
             self.replace(self.reconnect_state)
         else:
@@ -754,6 +785,10 @@ class Game:
         if self.reconnect_clock.elapsed >= 3000:
             self.reconnect_clock.restart()
             speak("Connecting to the server. Please wait...", False)
+            # The attempt that got us here may still hold a socket (a no-op when
+            # connection_error already released it): never leave one open while
+            # its replacement takes over.
+            self._close_network()
             try:
                 self.network = self._new_network_client()
                 self.replace(self.login2)

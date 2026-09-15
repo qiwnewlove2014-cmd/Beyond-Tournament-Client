@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -16,11 +17,12 @@ from libs import instance_manager as im
 
 
 def _compiled_lock_path():
-    return os.path.join(tempfile.gettempdir(), im.COMPILED_LOCK_NAME)
+    # Ask the manager's own module, so this follows a test that redirects it.
+    return os.path.join(im.tempfile.gettempdir(), im.COMPILED_LOCK_NAME)
 
 
 def _write_compiled_lock(pid):
-    with open(_compiled_lock_path(), "w") as f:
+    with open(_compiled_lock_path(), "w", encoding="utf-8") as f:
         f.write(str(pid))
 
 
@@ -41,16 +43,26 @@ class TestCmdlineMatch(unittest.TestCase):
 
 
 class TestInstanceManager(unittest.TestCase):
-    def tearDown(self):
-        # Clean any compiled lock we may have created/left behind.
-        _remove_compiled_lock()
-        # Remove any dev-slot locks we created (instance_1 is enough here).
-        for i in range(1, 11):
-            p = os.path.join(tempfile.gettempdir(), f"beyond_tournament_instance_{i}.lock")
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+    def setUp(self):
+        # The manager keeps its single-instance locks in the machine's temp
+        # directory under fixed names. Give every test a private directory
+        # instead: a suite that wrote and deleted those names would disturb a
+        # compiled client running on the same machine, and two suites could not
+        # run side by side.
+        self.temp = tempfile.TemporaryDirectory(prefix="bt-instance-locks-")
+        self.addCleanup(self.temp.cleanup)
+        patcher = mock.patch.object(im.tempfile, "gettempdir", return_value=self.temp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        restore_is_compiled = im.is_compiled
+        self.addCleanup(setattr, im, "is_compiled", restore_is_compiled)
+
+    def test_locks_live_in_the_test_directory_not_the_machine_one(self):
+        """The isolation above is what keeps a running client's lock untouched."""
+        im.is_compiled = lambda: True
+        mgr = im.InstanceManager()
+        self.addCleanup(mgr.release_lock)
+        self.assertEqual(os.path.dirname(mgr.lock_file_path), self.temp.name)
 
     def test_source_mode_acquires_dev_slot(self):
         """Running from source: picks a free dev slot and reports acquired."""
@@ -95,7 +107,7 @@ class TestInstanceManager(unittest.TestCase):
         try:
             self.assertTrue(mgr.acquired)
             # Stale lock was replaced by our own PID.
-            with open(mgr.lock_file_path, "r") as f:
+            with open(mgr.lock_file_path, "r", encoding="utf-8") as f:
                 self.assertEqual(int(f.read().strip()), os.getpid())
         finally:
             mgr.release_lock()

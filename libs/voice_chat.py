@@ -1233,6 +1233,13 @@ class MusicCompression(threading.Thread):
             # Party Sync guests receive TRUE STEREO frames from the host; the
             # decoder/source format follows the entity's direct-mode flag.
             self._stereo = False
+            # The cabinet's room this stream should play out of instead of the
+            # entity's own source (see libs/audio/cinema/peer.py), or None for
+            # the shipped feed. The room owns one source per speaker, so the
+            # whole queueing half of this class is skipped for it -- only the
+            # decode and the music timeline are shared.
+            self.cinema_channel = None
+            self.cinema_feed = None
             # Format-switch coordination (see set_output_stereo): the decoder
             # generation lets _play_music_frame drop frames decoded with a
             # stale format, and the pending flag performs the source flush on
@@ -1283,6 +1290,40 @@ class MusicCompression(threading.Thread):
         if music_source is None:
             return
         self.put(lambda: self.recieve_actual(data, music_source, radio_source, channelID, gameplay))
+
+    def set_cinema_channel(self, channel):
+        """Point this feed at a cabinet's room, or at nothing (None).
+
+        Called from the receive path once per frame, so it only ever records
+        which speaker's song this is; the room itself is resolved in
+        ``_room_feed`` on the main thread, because building one creates OpenAL
+        sources and the receive path is not the thread that owns those.
+        """
+        self.cinema_channel = None if channel is None else int(channel)
+
+    def _room_feed(self):
+        """MAIN THREAD ONLY: the room this stream should play through now.
+
+        The output is decided per frame rather than once per song, because the
+        sender can route, re-route or un-route the song at any moment and the
+        listener has to follow within a frame or two. A change flushes the
+        other output: whatever it still holds is the other output's audio, and
+        a queue's worth of that (240 ms of the previous song, or of the
+        previous position after a seek) arriving from the wrong place is heard
+        as an echo.
+        """
+        if self.cinema_channel is None:
+            feed = None
+        else:
+            try:
+                from .audio.cinema import peer as cinema_peer
+                feed = cinema_peer.route(self.game, self.cinema_channel)
+            except Exception:
+                feed = None
+        if feed is not self.cinema_feed:
+            self.cinema_feed = feed
+            self._pending_format_flush = True
+        return feed
 
     def set_output_stereo(self, stereo):
         """Switch this music feed between mono and true stereo output.
@@ -1453,6 +1494,10 @@ class MusicCompression(threading.Thread):
                 # AL_INVALID_OPERATION).
                 if generation is not None and generation != self._format_generation:
                     return
+                # Decide the output first: this is what sets the flush below
+                # when a cabinet's room took the stream over (or gave it back),
+                # so the switch happens on this very frame.
+                room_feed = self._room_feed()
                 if getattr(self, "_pending_format_flush", False):
                     self._pending_format_flush = False
                     self._flush_source(music_source)
@@ -1506,6 +1551,17 @@ class MusicCompression(threading.Thread):
                 elif epoch is not None:
                     self._timeline_last_received_seq = frame_seq
                 self._last_recv_time = now
+
+                # A cabinet's room is a second output for the very same
+                # frames: with one chosen, this feed plays out of the room's
+                # speakers instead of the entity's own source. Everything
+                # above is shared on purpose -- the session reset, the format
+                # flush and the timeline bookkeeping all describe the song,
+                # not the output it comes out of.
+                if room_feed is not None:
+                    self._play_room_frame(room_feed, pcm, epoch, frame_seq, stereo)
+                    self._dispatch_timeline_events()
+                    return
 
                 try:
                     state = music_source.state
@@ -1590,6 +1646,37 @@ class MusicCompression(threading.Thread):
 
         except Exception as e:
             logger.log_exception(e, "MusicCompression.recieve")
+
+    def _play_room_frame(self, feed, pcm, epoch, frame_seq, stereo):
+        """MAIN THREAD ONLY: play one decoded frame out of a cabinet's room.
+
+        The room owns one source per speaker and its own renderer, so there is
+        no buffer and no source queue to manage here: the frame is handed over
+        and the bank does the rest (per-speaker trim, wall filter, gain,
+        reverb). What is kept is the music timeline -- remote instrument notes
+        are scheduled against the sequence this feed has reached (see
+        ``schedule_timeline_event``).
+
+        The anchor is taken exactly as the plain source's is: the frame the
+        room starts playing is audible the moment ``start_playback`` returns,
+        and every later frame follows it one frame later, so the queue's own
+        depth is already in the sequence delta. Adding it here as well (the
+        anchor used to be moved out by the room's whole queue) put the clock a
+        pre-buffer ahead of the speakers' real position, and every live note
+        over a room-fed song waited that much too long before it was played.
+        """
+        try:
+            accepted = feed.push(pcm, stereo=stereo, epoch=epoch)
+        except Exception as e:
+            logger.log_exception(e, "MusicCompression._play_room_frame")
+            return
+        if accepted and frame_seq is not None and self._timeline_first_queued_seq is None:
+            self._timeline_first_queued_seq = frame_seq
+        if (feed.playing and self._timeline_anchor_time is None
+                and self._timeline_first_queued_seq is not None):
+            self._timeline_anchor_seq = self._timeline_first_queued_seq
+            self._timeline_anchor_time = time.perf_counter()
+        self._has_started = True
 
 
 def _queue_packet_to_source(gameplay, idx, src, play_packet,

@@ -24,10 +24,13 @@ ever was stays plain.
 import time
 from math import sqrt
 
+from ...deferred_log import log_deferred as log_line
 from .listener import distance_gain, speaker_aim_gain
+from .pan import DEFAULT_DIRECTION, apply_direction
 from .plugin import (CINEMA_AUTO, CINEMA_OFF, cabinet_anchors, preview_room,
                      room_diagnosis)
-from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
+from .profiles import get_profile
+from .layout import (ROOM_MAX_DISTANCE, ROOM_RADIUS, ROOM_REFERENCE_DISTANCE)
 
 # Player preference: whether live instruments are also played at the speakers
 # of the cabinet the performer stands at. It is a *listening* choice (like the
@@ -59,6 +62,82 @@ REFRESH_INTERVAL = 1.0
 # within the interval above: a drummer standing still costs nothing.
 STILL_METRES = 1.0
 
+# How long one "how loud is each speaker from where the listener stands"
+# answer is reused. A drum roll is twenty notes a second and every note needs
+# a distance, an aim and a wall ray per speaker, all of it on the main thread
+# before the sample is spawned -- and that tail is exactly the latency a live
+# band feels. Both the listener and the performer move at walking speed, so a
+# quarter of a second cannot be heard. A listener who has walked further than
+# ``TERMS_METRES``, or turned up in a different place, is measured again at
+# once, so stepping behind a wall muffles the band when it happens.
+TERMS_INTERVAL = 0.25
+TERMS_METRES = 0.5
+
+# How often this client may say that the room carrying a band is out of *its*
+# reach. A note is played twenty times a second and the ramp edge is crossed at
+# walking speed, so without a floor this would be a line every half metre.
+REACH_REPORT_INTERVAL = 5.0
+
+# Which half of a stereo sample a speaker plays: ``"l"``, ``"r"`` or None.
+# A room splits a *song* between its speakers (front_l is the left channel and
+# nothing else, front_r the right), and a live instrument is played at those
+# same speakers -- so it is split the same way, or the kit has no left and
+# right and a tom panned left arrives from every speaker of the room at once.
+CHANNEL_LEFT = "l"
+CHANNEL_RIGHT = "r"
+
+# How close to a whole channel a slot's weights have to be before it counts as
+# one side. Deliberately tight: only the screen-wall pair carries a whole
+# channel. The sides carry L-R (the *difference*, which is what widens the
+# room) and the rears lean across to the opposite channel, so those are a mix
+# no single sample half could stand in for -- handing a rear-left speaker the
+# right channel would be inventing an image the profile does not define.
+CHANNEL_EPSILON = 0.05
+
+
+def slot_channel(weights):
+    """``'l'``/``'r'`` when a profile gives this slot one whole channel, else None.
+
+    ``weights`` is the ``(left, right)`` pair the room's profile mixes into
+    that speaker for the *song*. A front pair that is exactly one channel is
+    the room's own definition of its stereo image, so a note belongs there --
+    at the very same gain the song gets at that speaker, which is what keeps
+    one speaker as loud for the band as for the song. Anything else (a centre
+    speaker, a side wall, a rear pair, a mono spread) returns None and keeps
+    the whole note, exactly as every speaker used to.
+    """
+    if not weights or len(weights) < 2:
+        return None
+    try:
+        gain_l = float(weights[0])
+        gain_r = float(weights[1])
+    except (TypeError, ValueError):
+        return None
+    if gain_l >= 1.0 - CHANNEL_EPSILON and abs(gain_r) <= CHANNEL_EPSILON:
+        return CHANNEL_LEFT
+    if gain_r >= 1.0 - CHANNEL_EPSILON and abs(gain_l) <= CHANNEL_EPSILON:
+        return CHANNEL_RIGHT
+    return None
+
+
+def plan_channels(plan):
+    """``{slot: 'l'|'r'}`` for the room's own profile, empty when it has none.
+
+    Read from the profile the room resolved rather than from the slot's name:
+    the profile is the very thing that divides the song, so the band divides
+    the same way by construction. An unknown profile simply splits nothing.
+    """
+    try:
+        profile = get_profile(getattr(plan, "profile", None))
+    except Exception:
+        return {}
+    channels = {}
+    for slot, weights in getattr(profile, "weights", {}).items():
+        channel = slot_channel(weights)
+        if channel is not None:
+            channels[slot] = channel
+    return channels
+
 
 def live_instruments_enabled():
     """Whether this client plays live instruments through a cabinet's rooms.
@@ -83,6 +162,45 @@ def live_instruments_enabled():
         return DEFAULT_ENABLED
 
 
+# Whether the switch's state has already been said out loud (None = not yet
+# read, True = it is on, False = its being off has been reported). Only the
+# *off* case is worth a line, and only once per time it goes off.
+_gate_reported = None
+
+
+def note_reaches_a_room(game=None):
+    """Whether a live note is played at a cabinet's speakers on this client.
+
+    Everything that plays a note asks this rather than the raw options, because
+    the one outcome that silences a band with no other trace - this listener's
+    own switch being off - would otherwise look exactly like a room that would
+    not resolve: everyone else hears the band out of the room, this client
+    hears the plain instrument, and nothing anywhere says why.
+
+    **This switch is the whole answer, and no staff pan overrides it** (see
+    ``pan.py``): a pan chooses *which* room a band belongs to, never whether
+    *you* hear one. It is the band's own line and nothing else -- ``Cinema
+    rooms:`` belongs to the jukebox's songs and ``Speech:`` to voices, so
+    turning one of those off never silently takes the band with it (one
+    listening choice per shape of sound is the whole model a player is asked to
+    keep). ``game`` is taken for the callers that have one to hand; nothing in
+    here needs a map.
+
+    The option is read live (the Music Bot menu's line edits it); only a
+    *change* of reason is reported, so a band of four costs one line.
+    """
+    global _gate_reported
+    if not live_instruments_enabled():
+        reason = "this client's Instruments switch is off"
+    else:
+        _gate_reported = None
+        return True
+    if _gate_reported != reason:
+        _gate_reported = reason
+        log_line(f"[Cinema] live instruments: {reason}")
+    return False
+
+
 def set_live_instruments(enabled):
     """Record the listener's choice; the menu line and the instruments share it.
 
@@ -100,6 +218,61 @@ def set_live_instruments(enabled):
 
 def _distance(first, second):
     return sqrt(sum((float(first[i]) - float(second[i])) ** 2 for i in range(3)))
+
+
+def _as_point(position):
+    """A 3-tuple of floats, or None when there is no point to measure from."""
+    if position is None:
+        return None
+    try:
+        return (float(position[0]), float(position[1]), float(position[2]))
+    except Exception:
+        return None
+
+
+def _same_point(first, second):
+    """Whether two points are the same place, with "no point" its own place."""
+    if first is None or second is None:
+        return first is None and second is None
+    return _distance(first, second) < 0.01
+
+
+def inside_room(plan, position, *, radius=ROOM_RADIUS):
+    """Whether a point stands inside a resolved room's own reach.
+
+    The measurement the room hands its speakers out by -- ``ROOM_RADIUS``
+    around the cabinet is where a speaker may stand to belong to it -- asked
+    about a person instead: a room is somewhere somebody can be *in*, and the
+    cabinet nearest a performer across the map is not their room. The voice
+    path has always required this (a talker out in the map keeps the PA); the
+    live-instrument path requires it too now, because its answer is no longer
+    taken per listener, and "the nearest cabinet is mine" would otherwise send
+    a band playing at the far end of a map into a room nobody can hear.
+
+    A plan with no anchor answers True: there is nothing to measure against,
+    and refusing would silence a room that resolves fine everywhere else.
+    """
+    anchor = getattr(getattr(plan, "placement", None), "anchor", None)
+    if anchor is None or position is None:
+        return True
+    try:
+        gap = _distance(anchor, position)
+    except Exception:
+        return True
+    return gap <= float(radius)
+
+
+def _provider_key(provider):
+    """A stable name for a wall provider: a bound method is a new object
+    every time it is read off its owner, so the owner and the function are
+    what identify it (a cached answer must never be served for a different
+    provider -- that is a test's fake provider, or another map's walls)."""
+    if provider is None:
+        return None
+    owner = getattr(provider, "__self__", None)
+    if owner is not None:
+        return (id(owner), getattr(provider, "__func__", None))
+    return provider
 
 
 def cabinet_mode(game, cabinet_id):
@@ -127,14 +300,30 @@ class LiveRoomRouter:
         self.game = game
         self.interval = float(interval)
         self._cache = None    # (stamp, point, result)
+        # (stamp, performer point, listener point, wall provider, the room's
+        # two distances, terms) for the notes of one burst -- TERMS_INTERVAL.
+        self._terms = None
+        # The last answer already said out loud, so a note every few
+        # milliseconds does not repeat it: this is the only place a listener
+        # can find out which room their instruments are (or are not) coming
+        # out of, because the performer's menu only describes the performer.
+        self._reported = None
+        # The last answer about whether the room carrying a band is audible
+        # *here*: a listener the room does not reach hears nothing of a note
+        # that belongs to it, and that silence is worth one line (see
+        # ``report_reach``).
+        self._reach = None
 
     def route_for(self, position):
-        """``(cabinet_id, plan)`` for the room nearest ``position``, or None.
+        """``(cabinet_id, plan)`` for the room ``position`` stands in, or None.
 
         A cabinet the map set to ``off`` is not a target: the map's decision
         about that cabinet outranks anything a performer does, exactly as it
         does for playback, and a cabinet with no speakers around it resolves to
-        no room at all instead of a synthetic ring nobody placed.
+        no room at all instead of a synthetic ring nobody placed. Neither is a
+        cabinet further away than the room's own reach (``inside_room``):
+        somebody out in the map is not in the nearest room to them, and the
+        answer must not depend on who is listening.
         """
         if position is None or self.game is None:
             return None
@@ -146,8 +335,53 @@ class LiveRoomRouter:
             if now - stamp < self.interval and _distance(last_point, point) < STILL_METRES:
                 return result
         result = self._resolve(point)
+        self._announce(result, point)
         self._cache = (now, point, result)
         return result
+
+    def _announce(self, result, point):
+        """Say which room live notes come out of, once per change (see __init__)."""
+        if result is not None:
+            cabinet_id, plan = result
+            said = reason = f"-> jukebox {cabinet_id} ({plan.profile})"
+        else:
+            reason = f": not in a room ({self.why_not(point)})"
+            said = reason
+        if said == self._reported:
+            return
+        self._reported = said
+        log_line(f"[Cinema] live instruments {reason}")
+
+    def report_reach(self, cabinet_id, terms):
+        """Say it when a room carries a band and this listener hears none of it.
+
+        A note that belongs to a room is not played at the instrument any more
+        (``note_goes_to_a_room``), so a listener the room's own ramp does not
+        reach hears *nothing* of it -- and silence is the one outcome of a room
+        that leaves no trace of its own. This is that trace, said on the client
+        that is deaf to it: the performer's menu and log only ever describe the
+        performer's client, so nobody else can report it.
+
+        Said once per change of state, and no more often than
+        ``REACH_REPORT_INTERVAL``: the ramp edge is crossed at walking speed and
+        a note arrives twenty times a second, so without a floor this would be
+        a line every half metre. Only the deaf state is floored -- hearing the
+        band again is recorded at once (it needs no announcement) so that
+        walking back out of the room is reported instead of being swallowed.
+        """
+        now = time.monotonic()
+        state = (str(cabinet_id), bool(terms))
+        last = self._reach
+        if last is not None and last[0] == state:
+            return
+        if terms:
+            self._reach = (state, now)
+            return
+        if last is not None and now - last[1] < REACH_REPORT_INTERVAL:
+            return          # said recently: the next note tries again
+        self._reach = (state, now)
+        log_line(f"[Cinema] live instruments -> jukebox {cabinet_id}: out "
+                 f"of reach here (this listener hears nothing of it)")
 
     def _resolve(self, point):
         best = None
@@ -157,35 +391,82 @@ class LiveRoomRouter:
                 best = (cabinet_id, anchor, gap)
         if best is None:
             return None
-        cabinet_id, anchor, _gap = best
+        cabinet_id, anchor, gap = best
         if cabinet_mode(self.game, cabinet_id) == CINEMA_OFF:
+            return None
+        if gap > ROOM_RADIUS:
             return None
         plan = preview_room(self.game, anchor, room_id=cabinet_id)
         if plan is None:
             return None
         return (cabinet_id, plan)
 
+    def room_by_id(self, cabinet_id):
+        """``(cabinet_id, plan)`` for the cabinet with this id, or None.
+
+        The same resolution ``route_for`` does, asked about one named cabinet
+        instead of the one nearest a point -- a staff pan names its destination
+        (see ``pan.py``), and the two questions have to agree: a cabinet the
+        map set to ``off``, or one that is not on this map at all, resolves to
+        nothing here too, so a stale pan puts the voice back on the map's PA
+        rather than into a room nobody placed.
+        """
+        key = str(cabinet_id or "").strip()
+        if not key or self.game is None:
+            return None
+        for found_id, anchor in cabinet_anchors(self.game):
+            if str(found_id) != key:
+                continue
+            if cabinet_mode(self.game, found_id) == CINEMA_OFF:
+                return None
+            plan = preview_room(self.game, anchor, room_id=found_id)
+            if plan is None:
+                return None
+            return (found_id, plan)
+        return None
+
     def speaker_terms(self, position, listener=None, occlusion_provider=None,
                       reference_distance=ROOM_REFERENCE_DISTANCE,
-                      max_distance=ROOM_MAX_DISTANCE):
+                      max_distance=ROOM_MAX_DISTANCE,
+                      direction=DEFAULT_DIRECTION):
         """One term per speaker of the room near ``position``.
 
-        Each term is ``(slot, world position, gain, delay_ms, wall tier)``.
-        ``gain`` folds in the map's own level for that speaker, the room's
-        distance ramp at the listener and the speaker's aim; the tier is the
-        same wall measurement the room applies to the song (0 clear, 1 light,
-        2 heavy) so a note behind a wall is muffled rather than silenced.
-        An empty list means "nothing to play into", never an error.
+        Each term is ``(slot, world position, gain, delay_ms, wall tier,
+        channel)``. ``gain`` folds in the map's own level for that speaker,
+        the room's distance ramp at the listener and the speaker's aim; the
+        tier is the same wall measurement the room applies to the song (0
+        clear, 1 light, 2 heavy) so a note behind a wall is muffled rather
+        than silenced; ``channel`` is the half of a stereo sample that
+        speaker carries (``'l'``/``'r'``), or None when it plays the whole
+        note. An empty list means "nothing to play into", never an error.
         """
         target = self.route_for(position)
         if target is None:
             return []
-        return self.terms_for_plan(target[1], listener, occlusion_provider,
-                                   reference_distance, max_distance)
+        point = _as_point(position)
+        heard = _as_point(listener)
+        provider = _provider_key(occlusion_provider)
+        shape = (reference_distance, max_distance, direction)
+        now = time.monotonic()
+        cached = self._terms
+        if cached is not None:
+            stamp, last_point, last_heard, last_provider, last_shape, terms = cached
+            if (now - stamp < TERMS_INTERVAL
+                    and _distance(last_point, point) < TERMS_METRES
+                    and _same_point(last_heard, heard)
+                    and last_provider == provider
+                    and last_shape == shape):
+                return list(terms)
+        terms = self.terms_for_plan(target[1], listener, occlusion_provider,
+                                   reference_distance, max_distance,
+                                   direction=direction)
+        self._terms = (now, point, heard, provider, shape, terms)
+        return list(terms)
 
     def terms_for_plan(self, plan, listener=None, occlusion_provider=None,
                        reference_distance=ROOM_REFERENCE_DISTANCE,
-                       max_distance=ROOM_MAX_DISTANCE):
+                       max_distance=ROOM_MAX_DISTANCE,
+                       direction=DEFAULT_DIRECTION):
         """The same terms, for a caller that already resolved the room.
 
         A legacy of the split: the note path resolves per strike, but a voice
@@ -195,6 +476,7 @@ class LiveRoomRouter:
         one speaker is exactly as loud for speech as it is for the band.
         """
         placement = getattr(plan, "placement", None)
+        channels = plan_channels(plan)
         terms = []
         for slot in getattr(placement, "slots", ()):
             spec = placement.speakers[slot].spec
@@ -205,7 +487,13 @@ class LiveRoomRouter:
             if gain <= 0.0:
                 continue
             tier = self._wall_tier(spot, listener, occlusion_provider, max_distance)
-            terms.append((slot, spot, gain, float(spec.delay_ms), tier))
+            terms.append((slot, spot, gain, float(spec.delay_ms), tier,
+                          channels.get(slot)))
+        # A staff pan leans the room towards a side of itself, at the same
+        # overall energy: the direction law is pure arithmetic and lives in
+        # ``pan.py``, and ``auto`` (the default) leaves these terms untouched.
+        if direction != DEFAULT_DIRECTION:
+            terms = list(apply_direction(terms, direction))
         return terms
 
     @staticmethod
@@ -229,9 +517,12 @@ class LiveRoomRouter:
                 best = (cabinet_id, anchor, gap)
         if best is None:
             return "this map has no jukebox"
-        cabinet_id, anchor, _gap = best
+        cabinet_id, anchor, gap = best
         if cabinet_mode(self.game, cabinet_id) == CINEMA_OFF:
             return f"jukebox {cabinet_id} is set to play its own stereo (off)"
+        if gap > ROOM_RADIUS:
+            return (f"jukebox {cabinet_id} is {gap:.0f} m away "
+                    f"(a room reaches {ROOM_RADIUS:.0f} m)")
         return room_diagnosis(self.game, anchor, room_id=cabinet_id)
 
 
@@ -272,16 +563,155 @@ def wall_filter(owner, tier):
     return None
 
 
+def _router_for(game):
+    """The router this client plays through, with its game filled in.
+
+    ``router_for`` keys one router per audio manager, and the manager holds no
+    back reference to the game: the first note that arrives tells it which map
+    it is standing on.
+    """
+    router = router_for(getattr(game, "audio_mngr", None))
+    if router.game is None:
+        router.game = game
+    return router
+
+
+def room_for(game, position, *, pan=None):
+    """``(cabinet_id, plan)`` for the room a live note belongs to, or None.
+
+    The answer every machine gives for one performer, because nothing here
+    measures a listener: a staff pan names its cabinet (``room_by_id``) and
+    with no pan the room is the one the performer is standing *in*
+    (``route_for``, which applies the room's own reach -- see ``inside_room``).
+    That equality is the point -- it is what makes "no pan" mean one thing on
+    every client, and what lets a listener be told *where* a band belongs
+    without the answer depending on where that listener is standing.
+
+    A destination that does not resolve (a cabinet the map turned to ``off``,
+    a speaker set with no stereo front pair left) answers None here too, so a
+    caller falls back to the instrument rather than into an invented room.
+    """
+    if position is None or game is None:
+        return None
+    if getattr(game, "gameplay", None) is None:
+        return None
+    router = _router_for(game)
+    if pan is None:
+        return router.route_for(position)
+    try:
+        cabinet = pan[0]
+    except (TypeError, IndexError):
+        return None
+    return router.room_by_id(cabinet)
+
+
+def room_terms_for(game, position, *, pan=None, listener=None,
+                   occlusion_provider=None):
+    """The speakers a live note plays at through a room, or ``()`` for none.
+
+    The one answer both instruments and :func:`route_to_room` work from, and
+    the *listener's* half of the question: ``room_for`` decides which room the
+    note belongs to, and this says how loud each of that room's speakers is at
+    these ears. ``terms_for_plan`` already drops a speaker that does not reach
+    this listener at all (its gain is zero), so an empty tuple is the honest
+    "that room is out of reach here" -- the note is then heard by nobody on
+    this client rather than at the instrument (``note_goes_to_a_room``).
+    """
+    if position is None or game is None:
+        return ()
+    if getattr(game, "gameplay", None) is None:
+        return ()
+    position = tuple(float(value) for value in position)
+    router = _router_for(game)
+    if listener is None:
+        listener = getattr(getattr(game, "audio_mngr", None), "position", None)
+    if pan is None:
+        return tuple(router.speaker_terms(position, listener,
+                                          occlusion_provider))
+    cabinet, direction = (pan[0], pan[1] if len(pan) > 1
+                          else DEFAULT_DIRECTION)
+    room = router.room_by_id(cabinet)
+    if room is None:
+        return ()
+    return tuple(router.terms_for_plan(room[1], listener, occlusion_provider,
+                                      direction=direction))
+
+
+def note_goes_to_a_room(game, position, *, pan=None):
+    """Whether a live note is heard from a room on this client at all.
+
+    Asked *before* the note is played, because the answer is what decides
+    whether the instrument itself makes a sound: a note coming out of a hall's
+    speakers must not also be heard at the instrument standing in that hall,
+    which is two copies of one note -- one of them in the wrong place.
+
+    This client's own switches come first and are the whole answer
+    (``note_reaches_a_room``): a pan names *which* room a band belongs to, never
+    whether *you* hear one, so a listener who turned the rooms off hears the
+    band where they asked for it -- at the instrument. What the answer does
+    **not** depend on is where this listener is standing: the room carrying a
+    band is the performer's room, decided identically on every client
+    (``room_for``), so "no pan" and "pan cleared" are one answer everywhere
+    instead of one per pair of ears. How much of that room is audible here is
+    the room's own ramp (``room_terms_for``): a listener it does not reach
+    hears *nothing* of the note -- the room replaces the instrument, it does
+    not join it -- and that silence is reported by ``report_reach`` so it
+    cannot be mistaken for a broken instrument.
+    """
+    if not note_reaches_a_room(game):
+        return False
+    return room_for(game, position, pan=pan) is not None
+
+
+def _report_reach(game, position, pan, terms):
+    """Hand one note's outcome to the router, for the "out of reach" line.
+
+    Only when a room actually owns the note: with no room to play into, the
+    instrument was heard instead and there is nothing to report. The cabinet is
+    the pan's own name, or the room ``route_for`` already cached for a
+    performer nobody moved, so this costs no resolution of its own.
+    """
+    if game is None:
+        return
+    room = room_for(game, position, pan=pan)
+    if room is None:
+        return
+    _router_for(game).report_reach(room[0], terms)
+
+
+def zone_reverb(game, position):
+    """The map's reverb at a point, or None when there is none to send.
+
+    The note's own room, not the listener's: a venue copy without it was heard
+    drier than the instrument standing in the same zone used to be.
+    """
+    gameplay = getattr(game, "gameplay", None)
+    getter = getattr(getattr(gameplay, "map", None), "get_reverb_at", None)
+    if position is None or not callable(getter):
+        return None
+    try:
+        entry = getter(position[0], position[1], position[2])
+    except Exception:
+        return None
+    return getattr(entry, "reverb", None) or None
+
+
 def route_to_room(game, position, play_one, *, listener=None,
-                  occlusion_provider=None, schedule=None, wanted=None):
+                  occlusion_provider=None, schedule=None, wanted=None,
+                  pan=None):
     """Play one live note at every speaker of the room nearest ``position``.
 
-    ``play_one(x, y, z, gain, tier, delay_ms)`` is the caller's own "spawn this
-    sample here": each instrument keeps its own buffers, volume rule and
-    tracking, and this decides *where* and *how loud*. ``schedule(ms, fn)`` is
-    the game's main-thread timer, used only for a speaker carrying a trim --
-    without it a trimmed speaker would strike with the room's other speakers
-    and then be late against its own song.
+    ``play_one(x, y, z, gain, tier, delay_ms, channel)`` is the caller's own
+    "spawn this sample here": each instrument keeps its own buffers, volume
+    rule and tracking, and this decides *where*, *how loud* and *which half of
+    the sample*. ``channel`` is ``'l'``/``'r'`` at the speakers the room's
+    profile gives a whole channel to (its screen-wall pair) and None
+    everywhere else, so a tom the kit pans left comes out of the left speaker
+    the way the song's left channel does -- an instrument is only ever handed
+    a half the room itself plays. ``schedule(ms, fn)`` is the game's
+    main-thread timer, used only for a speaker carrying a trim -- without it a
+    trimmed speaker would strike with the room's other speakers and then be
+    late against its own song.
 
     ``wanted()`` is asked immediately before each speaker plays, and it exists
     because of exactly that timer: a copy that waits for its trim can outlive
@@ -290,24 +720,30 @@ def route_to_room(game, position, play_one, *, listener=None,
     speaker would ring on with no note under it -- the copy has to know it is
     no longer wanted rather than trust that the note is still there.
 
+    ``pan`` is ``(cabinet, direction)`` when staff moved this performer (see
+    ``pan.py``). It replaces *where the note comes out* -- the named cabinet
+    rather than the room nearest the performer -- and leans that room towards
+    the direction, so the performer's position stops deciding anything. A
+    destination that no longer resolves (a deleted speaker set, a cabinet the
+    map turned to ``off``) plays the note nowhere instead of inventing a room.
+
     Returns the number of speakers the note reached, so a caller can log or
-    test "did anything come out" without guessing.
+    test "did anything come out" without guessing. Zero is a real answer in
+    two different situations -- a room with no terms for these ears, and a room
+    that does not resolve -- and only the first one is silence where a band was
+    expected, so that one says so once (``report_reach``).
     """
     if position is None or game is None:
         return 0
-    position = tuple(float(value) for value in position)
-    gameplay = getattr(game, "gameplay", None)
-    if gameplay is None:
+    if getattr(game, "gameplay", None) is None:
         return 0
-    router = router_for(getattr(game, "audio_mngr", None))
-    if router.game is None:
-        router.game = game
-    if listener is None:
-        listener = getattr(getattr(game, "audio_mngr", None), "position", None)
-    terms = router.speaker_terms(position, listener, occlusion_provider)
+    terms = room_terms_for(game, position, pan=pan, listener=listener,
+                           occlusion_provider=occlusion_provider)
+    _report_reach(game, position, pan, terms)
     spoken = 0
-    for slot, spot, gain, delay_ms, tier in terms:
-        def _spawn(spot=spot, gain=gain, tier=tier, slot=slot, delay_ms=delay_ms):
+    for slot, spot, gain, delay_ms, tier, channel in terms:
+        def _spawn(spot=spot, gain=gain, tier=tier, slot=slot, delay_ms=delay_ms,
+                   channel=channel):
             if wanted is not None:
                 try:
                     if not wanted():
@@ -315,7 +751,7 @@ def route_to_room(game, position, play_one, *, listener=None,
                 except Exception:
                     return
             try:
-                play_one(spot[0], spot[1], spot[2], gain, tier, delay_ms)
+                play_one(spot[0], spot[1], spot[2], gain, tier, delay_ms, channel)
             except Exception:
                 return
         if delay_ms > 0.5 and callable(schedule):
