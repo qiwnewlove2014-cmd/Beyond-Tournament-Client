@@ -156,13 +156,17 @@ class FakeBot:
 
 def make_game(speakers=(("front_l", 6.5, 26.5), ("front_r", 13.5, 26.5)),
               cabinets=(("j1", ANCHOR),), position=(10.0, 25.0, 0.0),
-              bot=None, modes=None, trims=None, live=True, rooms=True):
+              bot=None, modes=None, trims=None, live=True, rooms=True,
+              tones=None, crossovers=None):
     """A map with cabinets and cinema speakers, and one performer standing on it.
 
     The speakers are placed with the labels the room expects, so a real
     resolver runs; nothing here hand-builds a placement. ``live`` arms the
     listener's option -- on is the shipped default, and off is a listener who
-    asked for a plain concert.
+    asked for a plain concert. ``tones`` is the map's own voicing per speaker
+    (``{"rear_l": 40}``), a percentage where 100 is "as placed", and
+    ``crossovers`` is each speaker's own crossover mark (``{"front_l": 120}``),
+    signed: positive keeps the bottom, negative the top.
     """
     from libs import options
     options.prefs[LIVE_KEY] = bool(live)
@@ -171,11 +175,15 @@ def make_game(speakers=(("front_l", 6.5, 26.5), ("front_r", 13.5, 26.5)),
     game.audio_mngr = FakeAudio(position)
     map_obj = Map(game)
     trims = dict(trims or {})
+    tones = dict(tones or {})
+    crossovers = dict(crossovers or {})
     for name, x, y in speakers:
         level, delay = trims.get(name, (100.0, 0.0))
         map_obj.spawn_cinemaSpeaker(minx=x - 0.5, maxx=x + 0.5, miny=y - 0.5,
                                     maxy=y + 0.5, minz=0, maxz=1, id=name,
-                                    channel=name, level=level, delay=delay)
+                                    channel=name, level=level, delay=delay,
+                                    tone=tones.get(name, 100),
+                                    crossover=crossovers.get(name, 0))
     map_obj.jukebox_list = [SimpleNamespace(id=cabinet_id, center=center)
                             for cabinet_id, center in cabinets]
     modes = dict(modes or {})
@@ -303,7 +311,7 @@ class LiveRoomRoutingTests(unittest.TestCase):
         router = LiveRoomRouter(game)
         # A listener standing among the speakers: everything the room has, full.
         terms = dict((slot, gain)
-                     for slot, _pos, gain, _delay, _tier, _channel
+                     for slot, _pos, gain, _delay, _tier, *_rest
                      in router.speaker_terms((10.0, 25.0, 0.0), (10.0, 25.0, 0.0)))
         self.assertEqual(set(terms), {"front_l", "front_r"})
         for gain in terms.values():
@@ -315,7 +323,7 @@ class LiveRoomRoutingTests(unittest.TestCase):
     def test_the_rooms_own_level_and_trim_reach_the_note(self):
         game = make_game(trims={"front_l": (50.0, 40.0)})
         terms = dict((slot, (gain, delay))
-                     for slot, _pos, gain, delay, _tier, _channel
+                     for slot, _pos, gain, delay, _tier, *_rest
                      in LiveRoomRouter(game).speaker_terms((10.0, 25.0, 0.0),
                                                            (10.0, 25.0, 0.0)))
         self.assertAlmostEqual(terms["front_l"][0], 0.5, places=6)
@@ -330,7 +338,7 @@ class LiveRoomRoutingTests(unittest.TestCase):
             (10.0, 25.0, 0.0), (10.0, 25.0, 0.0), occlusion_provider=provider)
         self.assertEqual(len(terms), 2)
         self.assertTrue(all(tier == 2
-                            for _s, _p, _g, _d, tier, _c in terms))
+                            for _s, _p, _g, _d, tier, *_rest in terms))
 
     def test_a_burst_of_notes_measures_the_room_once(self):
         """A drum roll is twenty notes a second, and every note needs a
@@ -365,11 +373,11 @@ class LiveRoomRoutingTests(unittest.TestCase):
                                               (10.0, 25.0, 0.0),
                                               occlusion_provider=blocked)
         self.assertTrue(all(tier == 2
-                            for _s, _p, _g, _d, tier, _c in through_a_wall))
+                            for _s, _p, _g, _d, tier, *_rest in through_a_wall))
         open_air = router.speaker_terms((10.0, 25.0, 0.0), (10.0, 25.0, 0.0),
                                         occlusion_provider=clear)
         self.assertTrue(all(tier == 0
-                            for _s, _p, _g, _d, tier, _c in open_air))
+                            for _s, _p, _g, _d, tier, *_rest in open_air))
 
     def test_which_room_the_band_comes_out_of_is_said_once_per_change(self):
         """A listener hearing the band from the instrument itself has no other
@@ -497,7 +505,8 @@ class SpeakerImageTests(unittest.TestCase):
                ("rear_l", 6.5, 17.0), ("rear_r", 13.5, 17.0))
 
     def channels(self, game):
-        return {slot: channel for slot, _pos, _gain, _delay, _tier, channel
+        return {slot: rest[0] if rest else None
+                for slot, _pos, _gain, _delay, _tier, *rest
                 in LiveRoomRouter(game).speaker_terms((10.0, 25.0, 0.0),
                                                       (10.0, 25.0, 0.0))}
 
@@ -582,6 +591,65 @@ class SpeakerChannelSampleTests(unittest.TestCase):
         self.assertEqual(split_channel_buffer(provider, "mono", "l"), "M")
         self.assertEqual(split_channel_buffer(provider, "mono", "r"), "M")
 
+    def test_play_unbound_plays_the_crossed_copy_before_anything_else(self):
+        """A crossed speaker gets its own copy, and never a missing note."""
+        from libs.audio_manager import AudioManager
+
+        class Cache:
+            def __init__(self, ready):
+                self.ready, self.asked = ready, []
+
+            def get(self, path, mark, channel=None):
+                self.asked.append((path, mark, channel))
+                return "crossed" if self.ready else None
+
+        provider = SimpleNamespace(load_stereo_split_buffers=lambda path: ("L", "R"))
+
+        def harness(cache=None):
+            audio = AudioManager.__new__(AudioManager)
+            audio.muted = False
+            audio.volume_categories = {"miscelaneous": [100, set()],
+                                       "master": [100, set()]}
+            audio.filter = []
+            audio.sends = []
+            audio.unbound_sources = []
+            audio.context = FakeContext()
+            audio.efx = FakeEfx()
+            audio.make_orientation = lambda *direction: (0.0, 0.0, 0.0)
+            audio.load_buffer = lambda path, instrument=True: "whole"
+            if cache is not None:
+                audio.crossed_samples = cache
+            return audio
+
+        ready = Cache(True)
+        audio = harness(ready)
+        audio.play_unbound("piano/x.ogg", 1, 2, 3, channel="l",
+                           stereo_provider=provider, crossed=120)
+        self.assertEqual(audio.context.created[0].buffer, "crossed")
+        # The mark the map set, and the half this speaker carries, are what the
+        # copy was made for.
+        self.assertEqual(ready.asked, [("piano/x.ogg", 120, "l")])
+
+        # Not ready yet (or a sample that cannot be crossed at all): the
+        # speaker plays the sample it played before, not silence.
+        audio = harness(Cache(False))
+        audio.play_unbound("piano/x.ogg", 1, 2, 3, channel="l",
+                           stereo_provider=provider, crossed=-3000)
+        self.assertEqual(audio.context.created[0].buffer, "L")
+
+        # A sensor with no mark at all never asks for a copy, and neither does
+        # a manager from before this cache existed.
+        untouched = Cache(True)
+        audio = harness(untouched)
+        audio.play_unbound("piano/x.ogg", 1, 2, 3, channel="l",
+                           stereo_provider=provider)
+        self.assertEqual(untouched.asked, [])
+        self.assertEqual(audio.context.created[0].buffer, "L")
+        audio = harness()
+        audio.play_unbound("piano/x.ogg", 1, 2, 3, channel="l",
+                           stereo_provider=provider, crossed=120)
+        self.assertEqual(audio.context.created[0].buffer, "L")
+
     def test_play_unbound_takes_the_half_it_was_asked_for(self):
         """The wiring itself: the channel reaches OpenAL's buffer."""
         from libs.audio_manager import AudioManager
@@ -650,7 +718,7 @@ class LiveGainAgreesWithTheRoomTests(unittest.TestCase):
         bank = CinemaSpeakerBank(game, renderer, occlusion_provider=lambda *a: 0)
         for listener in ((10.0, 25.0, 0.0), (10.0, 26.5, 0.0), (60.0, 25.0, 0.0)):
             live = dict((slot, gain)
-                        for slot, _pos, gain, _delay, _tier, _channel
+                        for slot, _pos, gain, _delay, _tier, *_rest
                         in router.speaker_terms((10.0, 25.0, 0.0), listener))
             for slot in bank.slot_sources:
                 self.assertAlmostEqual(live.get(slot, 0.0),
@@ -1049,6 +1117,158 @@ class NoteHeardFromTheVenueTests(unittest.TestCase):
         self.assertEqual(lines(), [])
         with mock.patch.object(cinema_live, "REACH_REPORT_INTERVAL", 0.0):
             self.assertEqual(len(lines()), 1)
+
+
+class SpeakerVoicingTests(unittest.TestCase):
+    """The band comes out of the speakers the map voiced, as dull as they are.
+
+    The map's ``tone`` is a percentage on the speaker element (100 = as
+    placed). A live note is a *separate sample per speaker*, so it carries that
+    speaker's voicing in the eighth field of the term rather than borrowing the
+    room's own filter -- and because it is played at the speaker, the note a
+    builder dulled sounds as dull as the song does coming out of it.
+    """
+
+    def test_a_dulled_speaker_plays_the_note_through_its_own_filter(self):
+        game = make_game(tones={"front_l": 40})
+        from libs.piano import PianoAudio
+        piano = PianoAudio(game.audio_mngr)
+        piano.gameplay = game.gameplay
+        piano.route_to_cinema_room("peer", "C4", 10.0, 25.0, 0.0, 300)
+        by_x = {spot[0]: kwargs
+                for _path, spot, kwargs in game.audio_mngr.played}
+        from libs.audio.cinema.listener import tone_gainhf
+        filt = by_x[6.5]["direct_filter"]
+        self.assertAlmostEqual(filt[2][0][1], tone_gainhf(0.4), places=6)
+        # Not quieter: the room's ramp and the map's level decide loudness.
+        self.assertAlmostEqual(filt[2][1][1], 1.0, places=6)
+        # The speaker nobody dulled is played with no filter at all.
+        self.assertIsNone(by_x[13.5]["direct_filter"])
+
+    def test_the_kit_is_dulled_by_the_room_the_same_way(self):
+        game = make_game(tones={"front_l": 40})
+        from libs.drums import DrumAudio
+        drums = DrumAudio(game.audio_mngr)
+        drums.gameplay = game.gameplay
+        drums.route_to_cinema_room("peer", 0, 10.0, 25.0, 0.0, 100.0)
+        by_x = {spot[0]: kwargs
+                for _path, spot, kwargs in game.audio_mngr.played}
+        self.assertIsNotNone(by_x[6.5]["direct_filter"])
+        self.assertIsNone(by_x[13.5]["direct_filter"])
+
+    def test_a_dulled_speaker_behind_a_wall_is_both(self):
+        game = make_game(tones={"front_l": 40})
+        from libs.piano import PianoAudio
+        from libs.audio.cinema.listener import (occlusion_filter, tone_gainhf,
+                                                wall_params)
+        piano = PianoAudio(game.audio_mngr)
+        piano.gameplay = game.gameplay
+        # The room's own wall measurement, the way the game hands it in.
+        game.gameplay.jukebox_player.occlusion_tier = lambda *args: 2
+        piano.route_to_cinema_room("peer", "C4", 10.0, 25.0, 0.0, 300)
+        by_x = {spot[0]: kwargs
+                for _path, spot, kwargs in game.audio_mngr.played}
+        filt = by_x[6.5]["direct_filter"]
+        wall_hf, wall_gain = wall_params(2)
+        self.assertAlmostEqual(filt[2][0][1], wall_hf * tone_gainhf(0.4), places=6)
+        self.assertAlmostEqual(filt[2][1][1], wall_gain, places=6)
+        # ...and the wall on its own is a *different* filter, so a note behind
+        # a wall out of a dulled speaker is not one of the two ignored.
+        self.assertNotEqual(filt, occlusion_filter(game.audio_mngr, 2, {}))
+
+
+class CrossedSpeakerNoteTests(unittest.TestCase):
+    """A note at a crossed speaker is that speaker's own side of the split.
+
+    The room already feeds its *song* through each speaker's crossover (its
+    frames are cut to the speaker's side, see ``test_cinema_crossover``). A
+    live note is not a frame: it is one sample per speaker, spawned at that
+    speaker with its own trim and wall, so the mark travels as the ninth field
+    of the term and the note is played as that speaker's own filtered copy of
+    the sample (``libs/crossed_samples.py``).
+    """
+
+    def played_by_x(self, game):
+        return {spot[0]: kwargs for _path, spot, kwargs in game.audio_mngr.played}
+
+    def test_each_speaker_is_asked_for_its_own_mark(self):
+        game = make_game(crossovers={"front_l": 120, "front_r": -3000})
+        from libs.piano import PianoAudio
+        piano = PianoAudio(game.audio_mngr)
+        piano.gameplay = game.gameplay
+        piano.route_to_cinema_room("peer", "C4", 10.0, 25.0, 0.0, 300)
+        played = self.played_by_x(game)
+        self.assertEqual(played[6.5]["crossed"], 120.0)
+        self.assertEqual(played[13.5]["crossed"], -3000.0)
+        # ...and nothing else about the note moved: its half, its room, its
+        # provider. A crossover is one field, not a second copy of the note.
+        self.assertEqual(played[6.5]["channel"], "l")
+        self.assertEqual(played[13.5]["channel"], "r")
+        self.assertIs(played[6.5]["stereo_provider"], piano)
+        self.assertIsNone(played[6.5]["direct_filter"])
+
+    def test_the_kit_is_crossed_by_the_room_the_same_way(self):
+        game = make_game(crossovers={"front_l": 120})
+        from libs.drums import DrumAudio
+        drums = DrumAudio(game.audio_mngr)
+        drums.gameplay = game.gameplay
+        drums.route_to_cinema_room("peer", 0, 10.0, 25.0, 0.0, 100.0)
+        played = self.played_by_x(game)
+        self.assertEqual(played[6.5]["crossed"], 120.0)
+        self.assertIsNone(played[13.5]["crossed"])
+
+    def test_a_plain_room_still_plays_the_whole_note(self):
+        game = make_game()
+        from libs.piano import PianoAudio
+        piano = PianoAudio(game.audio_mngr)
+        piano.gameplay = game.gameplay
+        piano.route_to_cinema_room("peer", "C4", 10.0, 25.0, 0.0, 300)
+        for kwargs in self.played_by_x(game).values():
+            self.assertIsNone(kwargs["crossed"])
+
+    def test_the_route_hands_a_crossed_speaker_one_field_more(self):
+        """The term itself: seven fields plain, nine crossed, eight dulled."""
+        game = make_game(crossovers={"front_l": 120})
+        seen = {}
+
+        def play_one(*args):
+            seen[args[0]] = args
+
+        cinema_live.route_to_room(game, (10.0, 25.0, 0.0), play_one)
+        self.assertEqual(len(seen[6.5]), 9)
+        self.assertEqual(seen[6.5][6], "l")       # the half, where it was
+        self.assertEqual(seen[6.5][7], 1.0)       # the voicing, untouched
+        self.assertEqual(seen[6.5][8], 120.0)     # and the mark itself
+        self.assertEqual(len(seen[13.5]), 7)      # a plain speaker, unchanged
+        self.assertEqual(seen[13.5][6], "r")
+
+    def test_a_dulled_crossed_speaker_carries_its_voicing_too(self):
+        """Both live on one element, so an instrument that reads one reads both."""
+        game = make_game(crossovers={"front_l": 120}, tones={"front_l": 40})
+        seen = {}
+
+        def play_one(*args):
+            seen[args[0]] = args
+
+        cinema_live.route_to_room(game, (10.0, 25.0, 0.0), play_one)
+        self.assertEqual(len(seen[6.5]), 9)
+        self.assertAlmostEqual(seen[6.5][7], 0.4, places=6)
+        self.assertEqual(seen[6.5][8], 120.0)
+
+    def test_the_note_still_arrives_at_a_trimmed_crossed_speaker(self):
+        """A crossover does not touch the trim: the mark travels with it."""
+        game = make_game(crossovers={"front_l": 120},
+                         trims={"front_l": (100.0, 30.0)})
+        from libs.piano import PianoAudio
+        piano = PianoAudio(game.audio_mngr)
+        piano.gameplay = game.gameplay
+        LATER.clear()
+        piano.route_to_cinema_room("peer", "C4", 10.0, 25.0, 0.0, 300)
+        self.assertEqual([ms for ms, _fn in LATER], [30])
+        for _ms, fn in LATER:
+            fn()
+        played = self.played_by_x(game)
+        self.assertEqual(played[6.5]["crossed"], 120.0)
 
 
 if __name__ == "__main__":

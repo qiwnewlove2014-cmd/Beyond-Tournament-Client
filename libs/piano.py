@@ -33,6 +33,10 @@ class PianoAudio:
         self.active_piano_notes = {}
         self._occlusion_filter = None
         self._light_occlusion_filter = None
+        # A room speaker's own voicing, composed with the wall in the way (see
+        # ``get_room_tone_filter``): one filter per (wall, voicing) pair the
+        # map uses, never one per note.
+        self._room_tone_filters = {}
         self.soft_pedal_states = {}
         self._pedal_filters = {}
         self._pedal_filter_values = {}
@@ -211,6 +215,18 @@ class PianoAudio:
                 ("GAIN", 0.75)
             )
         return self._light_occlusion_filter
+
+    def room_tone_filter(self, tier, tone):
+        """A room speaker's own voicing plus the wall in the way, as one filter.
+
+        A speaker holds one direct filter, so a note played at a speaker the
+        map made dull has to be dulled by *that* filter rather than by a second
+        one beside the wall's. The numbers live in
+        ``libs/audio/cinema/listener.py`` so the song, the band and a voice
+        dull the same speaker by the same amount.
+        """
+        from .audio.cinema.listener import speaker_filter
+        return speaker_filter(self.am, tier, tone, self._room_tone_filters)
 
     @staticmethod
     def _read_filter_values(filter_obj, defaults):
@@ -1179,18 +1195,20 @@ class PianoAudio:
 
     def _room_note_player(self, path, key, peer_id, base_volume, reverb,
                           room_gain):
-        """The ``play_one`` a room hands each of its speakers for one note.
+        """        The ``play_one`` a room hands each of its speakers for one note.
 
         Shared by the band's room copy and the staff sound test, because the
         numbers here *are* the room: flat at the source (its own ramp already
         shaped the note), the speakers' level folded in by the caller, the
-        wall's filter, the half of the stereo sample that speaker carries, and
-        the venue's reverb. Two copies of this would be two rooms.
+        wall's filter, the half of the stereo sample that speaker carries, the
+        speaker's own crossover (a bass cabinet's copy of the note is not the
+        note), and the venue's reverb. Two copies of this would be two rooms.
         """
         from .audio.cinema import live as cinema_live
         from .audio.cinema import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
 
-        def _spawn(px, py, pz, gain, tier, _delay_ms, channel=None):
+        def _spawn(px, py, pz, gain, tier, _delay_ms, channel=None, tone=None,
+                   crossed=None):
             volume = base_volume * max(0.0, gain) * room_gain
             if volume <= 0.0:
                 return
@@ -1202,10 +1220,12 @@ class PianoAudio:
                 # same speaker twice.
                 reference_distance=ROOM_REFERENCE_DISTANCE, rolloff=0.0,
                 max_distance=ROOM_MAX_DISTANCE,
-                direct_filter=cinema_live.wall_filter(self, tier),
+                direct_filter=cinema_live.wall_filter(self, tier, tone),
                 # The room's screen wall keeps the stereo image it plays the
-                # song with: one channel per speaker (None = the whole note).
-                channel=channel, stereo_provider=self,
+                # song with: one channel per speaker (None = the whole note),
+                # and a speaker with a crossover hears its own side of the
+                # split, exactly as the song does at that speaker.
+                channel=channel, stereo_provider=self, crossed=crossed,
             )
             if sound is None:
                 return

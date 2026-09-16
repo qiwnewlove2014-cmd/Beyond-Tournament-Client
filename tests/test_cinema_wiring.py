@@ -20,7 +20,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs import jukebox
 from libs.audio.cinema import (ROOM_MAX_DISTANCE, ROOM_RADIUS,
                                ROOM_REFERENCE_DISTANCE, CinemaRenderer,
-                               CinemaSpeakerBank, host_for, room_plan, set_enabled)
+                               CinemaSpeakerBank, CinemaSpeakerSpec, host_for,
+                               room_plan, set_enabled)
+from libs.audio.cinema.listener import (occlusion_filter, speaker_filter,
+                                        tone_gainhf, wall_params)
 from libs.world_map import CinemaSpeakerZone, Map
 
 
@@ -484,6 +487,74 @@ class CinemaRoomFromMapTests(unittest.TestCase):
         map_obj.spawn_cinemaSpeaker(minx=6.0, maxx=7.0, miny=26.0, maxy=27.0,
                                     minz=0, maxz=1, id="a", channel="front_l")
         self.assertEqual(len(map_obj.get_cinema_speakers()), 2)
+
+
+class SpeakerVoicingTests(unittest.TestCase):
+    """The map's own voicing on the speakers the *song* is played out of.
+
+    The reported wish was to make a room's rear pair duller than the screen
+    wall without moving anything, from the speaker's own element menu. The
+    attribute is a percentage on the element (100 = as placed); what makes it
+    worth a test of its own is that it shares one OpenAL filter with the wall
+    between that speaker and these ears -- so it is composed by
+    ``listener.speaker_filter`` and nothing about a map with no tone moves.
+    """
+
+    def bank(self, tones=None, tier=0, occlusion_provider=None):
+        tones = dict(tones or {})
+        specs = [CinemaSpeakerSpec("front_l", (6.5, 26.5, 0.0),
+                                   tone=tones.get("front_l", 1.0)),
+                 CinemaSpeakerSpec("front_r", (13.5, 26.5, 0.0),
+                                   tone=tones.get("front_r", 1.0))]
+        renderer = CinemaRenderer((10.0, 20.0, 0.0), "front_only", specs=specs)
+        provider = occlusion_provider or (lambda *args: tier)
+        return CinemaSpeakerBank(FakeGame(), renderer,
+                                 occlusion_provider=provider)
+
+    def test_a_speaker_the_map_dulled_plays_the_song_duller(self):
+        bank = self.bank(tones={"front_l": 0.4})
+        bank.update_output()
+        filt = bank.slot_sources["front_l"].direct_filter
+        self.assertAlmostEqual(filt[2][0][1], tone_gainhf(0.4), places=6)
+        # Not quieter: loudness is the map's ``level``.
+        self.assertAlmostEqual(filt[2][1][1], 1.0, places=6)
+        # And the speakers nobody dulled on a clear path carry no filter at
+        # all (the attribute is deleted, not left holding a stale one),
+        # exactly as before this attribute existed.
+        self.assertIsNone(getattr(bank.slot_sources["front_r"],
+                                  "direct_filter", None))
+
+    def test_the_wall_and_the_voicing_are_one_filter_not_two(self):
+        bank = self.bank(tones={"front_l": 0.4}, tier=2)
+        bank.update_output()
+        filt = bank.slot_sources["front_l"].direct_filter
+        wall_hf, wall_gain = wall_params(2)
+        self.assertAlmostEqual(filt[2][0][1], wall_hf * tone_gainhf(0.4), places=6)
+        self.assertAlmostEqual(filt[2][1][1], wall_gain, places=6)
+        self.assertNotEqual(filt, bank.slot_sources["front_r"].direct_filter)
+
+    def test_the_voice_and_the_band_read_the_same_numbers(self):
+        """One home for the arithmetic (``listener.speaker_filter``): the
+        room's own cache is the only difference between them."""
+        audio = FakeAudio()
+        bank = self.bank(tones={"front_l": 0.4}, tier=1)
+        bank.audio = audio
+        composed = speaker_filter(audio, 1, 0.4, {})
+        self.assertEqual(bank._speaker_filter(audio, 1, 0.4), composed)
+
+    def test_a_speaker_that_is_not_playing_is_left_alone(self):
+        """A voicing is not a reason to touch a stopped room's sources."""
+        bank = self.bank(tones={"front_l": 0.4})
+        bank._stopped = True
+        bank.update_output()
+        self.assertIsNone(bank.slot_sources["front_l"].direct_filter)
+
+    def test_a_map_with_no_voicing_still_gets_the_wall_filter_it_always_did(self):
+        audio = FakeAudio()
+        bank = self.bank(tier=1)
+        bank.update_output()
+        self.assertEqual(bank.slot_sources["front_l"].direct_filter,
+                         occlusion_filter(audio, 1, {}))
 
 
 class CinemaRelayTests(unittest.TestCase):

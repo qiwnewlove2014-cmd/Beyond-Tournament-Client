@@ -254,6 +254,10 @@ class InstrumentAudioIntegrationTests(unittest.TestCase):
         audio.context = SimpleNamespace(batch=nullcontext)
         audio._drain_audio_inbox = lambda: calls.append("inbox")
         audio.instrument_samples = SimpleNamespace(pump=lambda **kwargs: calls.append(("pump", kwargs)))
+        # A crossed note's own copy is uploaded on the same owner, right after
+        # the instrument samples it was made from (see ``crossed_samples``).
+        audio.crossed_samples = SimpleNamespace(
+            pump=lambda **kwargs: calls.append(("crossed", kwargs)))
         audio.piano = SimpleNamespace(update=lambda: calls.append("piano"))
         audio.drums = SimpleNamespace(update=lambda: calls.append("drums"))
         audio.unbound_sources = []
@@ -262,7 +266,8 @@ class InstrumentAudioIntegrationTests(unittest.TestCase):
         self.assertEqual(calls, ["inbox", ("pump", {
             "max_uploads": 4, "budget_seconds": 0.002,
             "max_bytes": AudioManager.INSTRUMENT_UPLOAD_BYTES_PER_FRAME,
-        }), "piano", "drums"])
+        }), ("crossed", {"max_uploads": 2, "budget_seconds": 0.002}),
+            "piano", "drums"])
 
     def test_blocked_decoder_does_not_block_main_audio_loop(self):
         started, release = threading.Event(), threading.Event()

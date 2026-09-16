@@ -40,6 +40,7 @@ the cabinet's *own* playback rather than a veto over somebody else's stream.
 import time
 
 from ...deferred_log import log_deferred as log_line
+from .crossover import crossover_hz
 from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
 from .plugin import (acquire_bank, cabinet_anchor, preview_room,
                      release_renderer, room_diagnosis, rooms_enabled)
@@ -453,13 +454,27 @@ class PeerRoomFeed:
 
     @staticmethod
     def _signature(plan):
+        """What makes a freshly resolved plan still the room being played.
+
+        The map's own numbers for each speaker are part of that answer: a
+        speaker the builder made duller (``tone``) or marked as a bass cabinet
+        or a tweeter (``crossover``, whose sign is the side it keeps) is a room
+        this feed has to re-acquire, or a listener hears the room the map no
+        longer describes until the next song. Position, level, aim and trim were already here; the two shaping
+        marks are the ones that were left out, which is why they were the ones
+        that arrived last (or never).
+        """
         placement = getattr(plan, "placement", None)
         parts = []
         for slot in getattr(placement, "slots", ()) or ():
             spec = placement.speakers[slot].spec
+            tone = getattr(spec, "tone", None)
             parts.append((slot, tuple(spec.position), float(spec.level),
                           float(getattr(spec, "delay_ms", 0.0)),
-                          getattr(spec, "aim_yaw", None)))
+                          getattr(spec, "aim_yaw", None),
+                          None if tone is None else round(float(tone), 4),
+                          round(crossover_hz(getattr(spec, "crossover", None)),
+                                4)))
         return (str(getattr(plan, "profile", "")), tuple(parts))
 
     def adopt(self, plan, bank):

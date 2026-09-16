@@ -671,6 +671,7 @@ class Game:
                         self.audio_mngr.muted = True
                 if len(self.stack) == 0:
                     self.audio_mngr.instrument_samples.close()
+                    self.audio_mngr.crossed_samples.close()
                     self.audio_mngr.map_sounds.close()
                     self.presence_sounds.shutdown()
                     self.midi_hub.shutdown()

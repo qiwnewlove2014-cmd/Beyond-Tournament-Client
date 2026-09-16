@@ -10,6 +10,8 @@ itself -- while a talker with no room around them keeps the PA path exactly as
 it shipped, byte for byte.
 """
 
+import array
+import math
 import os
 import sys
 import unittest
@@ -23,7 +25,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.audio.cinema import ROOM_MAX_DISTANCE, speech_enabled
 from libs.audio.cinema import speech as cinema_speech
 from libs.audio.cinema.bank import CinemaSpeakerBank
-from libs.audio.cinema.listener import occlusion_filter
+from libs.audio.cinema.crossover import apply as crossover_apply
+# The bass cabinet's frame helpers are the crossover tests' own (one DFT and
+# one fingerprint, shared rather than re-implemented -- a second copy of the
+# measurement is how two files end up disagreeing about the same sound).
+from test_cinema_crossover import SAMPLERATE, digests, magnitude
+from libs.audio.cinema.listener import (occlusion_filter, speaker_filter,
+                                        tone_gainhf, wall_params)
 from libs.world_map import Map
 
 ANCHOR = (10.0, 20.0, 0.0)
@@ -183,14 +191,15 @@ def make_game(speakers=(("front_l", 6.5, 26.5, 100.0, 0.0),
                         ("front_r", 13.5, 26.5, 100.0, 0.0)),
               cabinets=(("j1", ANCHOR),), listener=ANCHOR, modes=None,
               tier=0, talkers=((7, ANCHOR),), jukebox_volume=100,
-              reverb=None, cabinet_eq=None):
+              reverb=None, cabinet_eq=None, tones=None, crossovers=None):
     """A map with cabinets, cinema speakers and one talker standing on it.
 
     The speakers are spawned with the labels the room expects, so a real
     resolver runs; nothing here hand-builds a placement. ``reverb`` is the
     effect slot of the reverb zone standing where the cabinets are (None = a
     map with no reverb zone at all), and ``cabinet_eq`` the slot the cabinet
-    resolves its EQ to.
+    resolves its EQ to. ``tones`` is the map's own voicing per slot
+    (``{"front_l": 40}``), a percentage where 100 is "as placed".
     """
     game = SimpleNamespace()
     audio = FakeAudio(listener, jukebox_volume)
@@ -201,6 +210,8 @@ def make_game(speakers=(("front_l", 6.5, 26.5, 100.0, 0.0),
                                               bounds=(ANCHOR[0] - 20, ANCHOR[0] + 20,
                                                       ANCHOR[1] - 20, ANCHOR[1] + 20,
                                                       -10.0, 10.0)))
+    tones = dict(tones or {})
+    crossovers = dict(crossovers or {})
     for index, (name, x, y, level, delay) in enumerate(speakers):
         # A unique element id per speaker (the map keys on it), with the slot
         # name as the channel: two cabinets in one map have to be two real
@@ -208,7 +219,9 @@ def make_game(speakers=(("front_l", 6.5, 26.5, 100.0, 0.0),
         map_obj.spawn_cinemaSpeaker(minx=x - 0.5, maxx=x + 0.5, miny=y - 0.5,
                                     maxy=y + 0.5, minz=0, maxz=1,
                                     id=f"spk{index}", channel=name,
-                                    level=level, delay=delay)
+                                    level=level, delay=delay,
+                                    tone=tones.get(name, 100),
+                                    crossover=crossovers.get(name, 0))
     map_obj.jukebox_list = [SimpleNamespace(id=cabinet_id, center=center)
                             for cabinet_id, center in cabinets]
     modes = dict(modes or {})
@@ -424,6 +437,29 @@ class RoomLegTests(unittest.TestCase):
                 SimpleNamespace(_occlusion_filters=dict(cached)),
                 audio, heavy=heavy)
             self.assertEqual(song, occlusion_filter(audio, tier, dict(cached)))
+
+    def test_a_dulled_speaker_dulls_the_voice_too(self):
+        """A voice is heard out of the same speaker the song is, so a speaker
+        the map made dull must dull the voice by the same amount."""
+        game = make_game(tones={"front_l": 40})
+        leg = self.leg(game)
+        self.assertEqual(leg.sources["front_l"].direct_filter,
+                         speaker_filter(game.audio_mngr, 0, 0.4, {}))
+        # The speaker nobody dulled keeps the call it always did: no filter on
+        # a clear path.
+        self.assertIsNone(getattr(leg.sources["front_r"], "direct_filter", None))
+
+    def test_a_dulled_speaker_behind_a_wall_is_both_and_neither_twice(self):
+        """One direct filter per source: the voicing and the wall are composed,
+        and the wall's own loudness dip survives the composition."""
+        game = make_game(tones={"front_l": 40}, tier=2)
+        leg = self.leg(game)
+        filt = leg.sources["front_l"].direct_filter
+        wall_hf, wall_gain = wall_params(2)
+        self.assertAlmostEqual(filt[2][0][1], wall_hf * tone_gainhf(0.4),
+                               places=6)
+        self.assertAlmostEqual(filt[2][1][1], wall_gain, places=6)
+        self.assertNotEqual(filt, occlusion_filter(game.audio_mngr, 2, {}))
 
     def test_a_speaker_placed_mid_sentence_joins_in_place(self):
         game = make_game()
@@ -1074,6 +1110,140 @@ class SendChannelTests(unittest.TestCase):
         self.assertIsNone(gp.voice_chat.vc_compression)
         self.assertTrue(gp.voice_chat.recording)
         gp.voice_chat.audio_input.start.assert_called_once()
+
+
+def voiced_frame(index, samples=960, low=80.0, top=4000.0):
+    """A voice-like frame: a low fundamental and a bright formant together.
+
+    The fundamental sits below the crossover these tests dial in (120 Hz), so
+    "the bass is kept" is measured where the filter really does pass it -- at
+    the corner itself a cascade is already a few dB down, which is the filter
+    working as designed rather than the bass being lost.
+    """
+    values = []
+    for step in range(samples):
+        when = (index * samples + step) / float(SAMPLERATE)
+        values.append(int(6000 * math.sin(2 * math.pi * low * when)
+                          + 6000 * math.sin(2 * math.pi * top * when)))
+    return array.array("h", values).tobytes()
+
+
+class BassCabinetVoiceTests(unittest.TestCase):
+    """A cabinet that is a sub plays the low end of the room's voice -- and only it.
+
+    A voice reaches a room the way a note does, at its speakers rather than
+    through a frame queue, so a bass cabinet needs the same crossover the song
+    gets: applied to the frames this leg is about to hand that one speaker
+    (``speech._voiced``), carrying its state across frames the way a stream
+    has to. A frame the holder had no buffer for is not walked through the
+    filter on its way to the bin.
+    """
+
+    def leg(self, game, sender_id=7):
+        self.assertTrue(cinema_speech.feed(game, game.gameplay, sender_id,
+                                           voiced_frame(0)))
+        return game.audio_mngr.cinema_speech.legs[sender_id]
+
+    def test_only_the_marked_speaker_loses_the_top(self):
+        game = make_game(crossovers={"front_l": 120})
+        leg = self.leg(game)
+        for index in range(1, 5):
+            cinema_speech.feed(game, game.gameplay, 7, voiced_frame(index))
+        raw = voiced_frame(4)
+        plain = leg.sources["front_r"].queued[-1].data
+        cabinet = leg.sources["front_l"].queued[-1].data
+        self.assertEqual(plain, raw,
+                         "an unmarked speaker is handed the frame as it is")
+        self.assertLess(magnitude(cabinet, 4000.0),
+                        0.02 * magnitude(raw, 4000.0))
+        self.assertGreater(magnitude(cabinet, 80.0),
+                           0.5 * magnitude(raw, 80.0))
+
+    def test_the_voice_filter_carries_across_frames(self):
+        """A stream, like the song: a per-frame filter would click every 20 ms."""
+        game = make_game(crossovers={"front_l": 120})
+        leg = self.leg(game)
+        frames = [voiced_frame(index) for index in range(6)]
+        for frame in frames[1:]:
+            cinema_speech.feed(game, game.gameplay, 7, frame)
+        reference = []
+        state = None
+        for frame in frames:
+            (voiced,), state = crossover_apply((frame,), state, 120)
+            reference.append(voiced)
+        published = [buffer.data for buffer in leg.sources["front_l"].queued]
+        self.assertEqual(digests(published), digests(reference))
+
+    def test_a_frame_with_no_buffer_does_not_walk_the_filter_on(self):
+        game = make_game(crossovers={"front_l": 120})
+        leg = self.leg(game)
+        before = leg.filters["front_l"]
+        frame = voiced_frame(1)
+        holder = game.audio_mngr.cinema_speech
+        with mock.patch.object(holder, "take_buffer", lambda: None):
+            self.assertTrue(cinema_speech.feed(game, game.gameplay, 7, frame))
+        self.assertEqual(leg.filters["front_l"], before,
+                         "a frame nobody played advanced the cabinet's filter")
+        cinema_speech.feed(game, game.gameplay, 7, frame)
+        reference = []
+        state = None
+        for chunk in (voiced_frame(0), frame):
+            (voiced,), state = crossover_apply((chunk,), state, 120)
+            reference.append(voiced)
+        published = [buffer.data for buffer in leg.sources["front_l"].queued]
+        self.assertEqual(digests(published), digests(reference))
+
+    def test_a_mark_dialled_mid_sentence_re_cuts_the_speaker(self):
+        """The map is live for a voice too: the mark is read again, not kept.
+
+        The speaker was marked only when it was created, so a builder dialling
+        a crossover heard it on the next talker -- and the same speaker's own
+        voicing waited the same way. Nothing is rebuilt here: the room's
+        speakers are the ones already carrying the voice.
+        """
+        game = make_game()
+        leg = self.leg(game)
+        self.assertEqual(leg.crossovers["front_l"], 0.0)
+        source = leg.sources["front_l"]
+        # The builder's edit, on the element the room resolves from.
+        next(spec for spec in game.gameplay.map.cinema_speaker_list
+             if spec.channel == "front_l").crossover = 120
+        # The router re-resolves the room at most once a second (a room that
+        # answers the map that fast is what a live edit expects); this test is
+        # about the leg, so the cache is dropped to make the edit visible now.
+        cinema_speech._router(game)._cache = None
+        frame = voiced_frame(1)
+        cinema_speech.feed(game, game.gameplay, 7, frame)
+        self.assertEqual(leg.crossovers["front_l"], 120.0,
+                         "the mark never reached the voice's room")
+        self.assertIs(leg.sources["front_l"], source,
+                      "the room was rebuilt for a mark")
+        self.assertLess(magnitude(source.queued[-1].data, 4000.0),
+                        0.02 * magnitude(frame, 4000.0))
+        self.assertEqual(leg.sources["front_r"].queued[-1].data, frame,
+                         "the speaker nobody marked was touched")
+
+    def test_a_mark_taken_away_gives_the_voice_back_untouched(self):
+        game = make_game(crossovers={"front_l": 120})
+        leg = self.leg(game)
+        source = leg.sources["front_l"]
+        next(spec for spec in game.gameplay.map.cinema_speaker_list
+             if spec.channel == "front_l").crossover = 0
+        cinema_speech._router(game)._cache = None
+        cinema_speech.feed(game, game.gameplay, 7, voiced_frame(1))
+        self.assertEqual(leg.crossovers["front_l"], 0.0)
+        self.assertIs(leg.sources["front_l"], source, "the room was rebuilt")
+        self.assertEqual(source.queued[-1].data, voiced_frame(1),
+                         "a full-range speaker must be handed the voice itself")
+
+    def test_a_room_that_is_not_a_bass_cabinet_is_handed_the_frame_untouched(self):
+        game = make_game()
+        leg = self.leg(game)
+        for index in range(1, 4):
+            cinema_speech.feed(game, game.gameplay, 7, voiced_frame(index))
+        for slot in ("front_l", "front_r"):
+            self.assertEqual(leg.sources[slot].queued[-1].data, voiced_frame(3))
+            self.assertEqual(leg.crossovers[slot], 0.0)
 
 
 if __name__ == "__main__":

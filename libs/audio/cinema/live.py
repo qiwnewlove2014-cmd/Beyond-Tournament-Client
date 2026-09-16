@@ -25,7 +25,9 @@ import time
 from math import sqrt
 
 from ...deferred_log import log_deferred as log_line
-from .listener import distance_gain, speaker_aim_gain
+from .crossover import FULL_RANGE, crossover_hz
+from .listener import (distance_gain, speaker_aim_gain, tone_openness,
+                       TONE_NEUTRAL)
 from .pan import DEFAULT_DIRECTION, apply_direction
 from .plugin import (CINEMA_AUTO, CINEMA_OFF, cabinet_anchors, preview_room,
                      room_diagnosis)
@@ -432,13 +434,20 @@ class LiveRoomRouter:
         """One term per speaker of the room near ``position``.
 
         Each term is ``(slot, world position, gain, delay_ms, wall tier,
-        channel)``. ``gain`` folds in the map's own level for that speaker,
-        the room's distance ramp at the listener and the speaker's aim; the
-        tier is the same wall measurement the room applies to the song (0
-        clear, 1 light, 2 heavy) so a note behind a wall is muffled rather
-        than silenced; ``channel`` is the half of a stereo sample that
-        speaker carries (``'l'``/``'r'``), or None when it plays the whole
-        note. An empty list means "nothing to play into", never an error.
+        channel, tone, crossover)``. ``gain`` folds in the map's own level for
+        that speaker, the room's distance ramp at the listener and the
+        speaker's aim; the tier is the same wall measurement the room applies
+        to the song (0 clear, 1 light, 2 heavy) so a note behind a wall is
+        muffled rather than silenced; ``channel`` is the half of a stereo
+        sample that speaker carries (``'l'``/``'r'``), or None when it plays
+        the whole note; ``tone`` is the map's own voicing for that speaker
+        (1.0 = as it was placed) so a note comes out of a dulled speaker as
+        dull as the song does; and ``crossover`` is that speaker's signed
+        crossover mark (``FULL_RANGE`` for the speakers every map had before
+        it), so a bass cabinet plays the band's notes as bass and a tweeter
+        plays only their top -- the last shape of sound the room carries that
+        used to come out of a crossed speaker whole. An empty list means
+        "nothing to play into", never an error.
         """
         target = self.route_for(position)
         if target is None:
@@ -488,7 +497,8 @@ class LiveRoomRouter:
                 continue
             tier = self._wall_tier(spot, listener, occlusion_provider, max_distance)
             terms.append((slot, spot, gain, float(spec.delay_ms), tier,
-                          channels.get(slot)))
+                          channels.get(slot), float(getattr(spec, "tone", 1.0)),
+                          crossover_hz(getattr(spec, "crossover", None))))
         # A staff pan leans the room towards a side of itself, at the same
         # overall energy: the direction law is pure arithmetic and lives in
         # ``pan.py``, and ``auto`` (the default) leaves these terms untouched.
@@ -544,15 +554,31 @@ def router_for(audio):
     return router
 
 
-def wall_filter(owner, tier):
-    """The room's wall, as a filter: muffled, never silenced.
+def wall_filter(owner, tier, tone=None):
+    """The room's wall -- and the speaker's own voicing -- as one filter.
 
     ``tier`` is the same measurement the room applies to the song -- one tile
     of wall is a light lowpass, three or more is the heavy one -- so a note
     played behind a wall sounds the way the song does behind that same wall.
     ``owner`` is whatever holds the filters (the piano or drum audio), so both
     instruments muffled by the same wall get the same filter object.
+
+    ``tone`` is the map's own voicing for the speaker this copy is going to
+    (the seventh field of every term). A speaker holds one direct filter, so a
+    dulled speaker and a wall in the way are composed by
+    ``listener.speaker_filter`` rather than stacked -- and a caller that never
+    learned about voicing (an older instrument, a test's own ``play_one``)
+    keeps exactly the wall it always got.
     """
+    openness = tone_openness(tone)
+    if openness is not None and openness < TONE_NEUTRAL:
+        getter = getattr(owner, "room_tone_filter", None)
+        if callable(getter):
+            try:
+                return getter(tier, openness)
+            except Exception:
+                return None
+        return None
     try:
         if tier >= 2:
             return owner.get_occlusion_filter()
@@ -708,10 +734,14 @@ def route_to_room(game, position, play_one, *, listener=None,
     profile gives a whole channel to (its screen-wall pair) and None
     everywhere else, so a tom the kit pans left comes out of the left speaker
     the way the song's left channel does -- an instrument is only ever handed
-    a half the room itself plays. ``schedule(ms, fn)`` is the game's
-    main-thread timer, used only for a speaker carrying a trim -- without it a
-    trimmed speaker would strike with the room's other speakers and then be
-    late against its own song.
+    a half the room itself plays. A speaker with a crossover is handed one
+    field more, the mark itself (``crossed_samples`` makes that speaker's own
+    copy of the note); the eighth field, the speaker's voicing, is sent
+    whenever either of the two means something, since an instrument that has
+    learned the ninth has learned the eighth. ``schedule(ms, fn)`` is the
+    game's main-thread timer, used only for a speaker carrying a trim --
+    without it a trimmed speaker would strike with the room's other speakers
+    and then be late against its own song.
 
     ``wanted()`` is asked immediately before each speaker plays, and it exists
     because of exactly that timer: a copy that waits for its trim can outlive
@@ -741,9 +771,12 @@ def route_to_room(game, position, play_one, *, listener=None,
                            occlusion_provider=occlusion_provider)
     _report_reach(game, position, pan, terms)
     spoken = 0
-    for slot, spot, gain, delay_ms, tier, channel in terms:
+    for slot, spot, gain, delay_ms, tier, *rest in terms:
+        channel = rest[0] if rest else None
+        tone = rest[1] if len(rest) > 1 else None
+        crossed = rest[2] if len(rest) > 2 else FULL_RANGE
         def _spawn(spot=spot, gain=gain, tier=tier, slot=slot, delay_ms=delay_ms,
-                   channel=channel):
+                   channel=channel, tone=tone, crossed=crossed):
             if wanted is not None:
                 try:
                     if not wanted():
@@ -751,7 +784,26 @@ def route_to_room(game, position, play_one, *, listener=None,
                 except Exception:
                     return
             try:
-                play_one(spot[0], spot[1], spot[2], gain, tier, delay_ms, channel)
+                openness = tone_openness(tone)
+                dulled = openness is not None and openness < TONE_NEUTRAL
+                where = (spot[0], spot[1], spot[2], gain, tier, delay_ms, channel)
+                if crossed != FULL_RANGE:
+                    # The ninth field is this speaker's own crossover: a note
+                    # played at a bass cabinet is that cabinet's copy of the
+                    # note, and at a tweeter only its top. The speaker's
+                    # voicing travels with it (None when the map set none),
+                    # because the two are decided by the same element and an
+                    # instrument reading one of them reads both.
+                    play_one(*where, tone, crossed)
+                elif dulled:
+                    # The eighth field is the speaker's own voicing, and it is
+                    # only ever sent when the map actually set one, so a caller
+                    # that has not learned about tone is never handed it.
+                    play_one(*where, tone)
+                else:
+                    # A speaker the map never dulled or crossed: the
+                    # seven-field call an instrument has always received.
+                    play_one(*where)
             except Exception:
                 return
         if delay_ms > 0.5 and callable(schedule):

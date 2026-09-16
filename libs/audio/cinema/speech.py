@@ -40,7 +40,10 @@ import time
 from collections import deque
 from contextlib import suppress
 
-from .listener import occlusion_filter, restore_filter
+from .crossover import FULL_RANGE
+from .crossover import apply as crossover_apply
+from .crossover import crossover_hz
+from .listener import restore_filter, speaker_filter
 from .pan import DEFAULT_DIRECTION, target_for_channel
 
 # The listener's own choice, like ``cinema_live_instruments``: it is how *you*
@@ -589,6 +592,15 @@ class RoomSpeechLeg:
         self.hold = {}        # slot -> frames waiting for that speaker's trim
         self.holds = {}       # slot -> how many frames that speaker holds
         self.tiers = {}       # slot -> the wall tier last applied
+        self.tones = {}       # slot -> the map's own voicing last applied
+        # slot -> the crossover mark this speaker carries (0 = full range, a
+        # positive mark a bass cabinet, a negative one a tweeter) and the state
+        # that mark's own filter carries from one voice frame to the next (see
+        # ``crossover``). A voice is a stream like the song, so a per-frame
+        # filter would click at every frame boundary; and it is per *speaker*,
+        # because each one is a stream of its own.
+        self.crossovers = {}
+        self.filters = {}
         self.environments = {}  # slot -> the (reverb, EQ) pair last applied
         self._environment_value = (None, None)
         self._environment_at = 0.0
@@ -648,6 +660,15 @@ class RoomSpeechLeg:
                 self._retire(slot)
         for slot, spec in specs.items():
             if slot in self.sources:
+                # The map is live: a speaker that is already playing a voice is
+                # handed whatever the map says *now* rather than the values it
+                # was born with, or the builder's crossover (and voicing) would
+                # wait for the next talker to be heard. The marked speaker's
+                # own filter state is deliberately kept -- it is a stream, and
+                # a filter that starts from silence clicks (see ``crossover``).
+                self.crossovers[slot] = crossover_hz(
+                    getattr(spec, "crossover", None))
+                self.tones[slot] = None   # re-apply the map's voicing too
                 continue
             source = self._new_source(spec)
             if source is None:
@@ -657,7 +678,10 @@ class RoomSpeechLeg:
             self.holds[slot] = (0 if self.monitor
                                 else _trim_frames(getattr(spec, "delay_ms", 0.0)))
             self.tiers[slot] = None       # force the wall to be measured
+            self.tones[slot] = None       # and the speaker's voicing to be read
             self.environments[slot] = None  # and the room's reverb to be sent
+            self.crossovers[slot] = crossover_hz(getattr(spec, "crossover", None))
+            self.filters[slot] = None     # a marked speaker starts from silence
         if not self.sources:
             # Nothing could be created (a dead context, or a room with no
             # speakers left): do not claim to be following it, so the next
@@ -702,18 +726,23 @@ class RoomSpeechLeg:
                 with suppress(Exception):
                     source.gain = 0.0
                 continue
-            # Six fields since the note path started carrying a channel: a
+            # Seven fields since the note path started carrying a channel: a
             # voice is one mono stream at every speaker of the room and has
-            # no half to take (see ``live.terms_for_plan``).
+            # no half to take, but it is heard through the speaker's own
+            # voicing like everything else the room carries (see
+            # ``live.terms_for_plan``).
             _slot, _spot, gain, _delay, tier, *_rest = term
+            tone = _rest[1] if len(_rest) > 1 else None
             with suppress(Exception):
                 source.gain = max(0.0, volume * gain)
             if (tier == self.tiers.get(slot)
+                    and tone == self.tones.get(slot)
                     and environment == self.environments.get(slot)):
                 continue
             self.tiers[slot] = tier
+            self.tones[slot] = tone
             self.environments[slot] = environment
-            filt = occlusion_filter(audio, tier, self.holder.filters)
+            filt = speaker_filter(audio, tier, tone, self.holder.filters)
             with suppress(Exception):
                 if filt is not None:
                     source.direct_filter = filt
@@ -819,6 +848,7 @@ class RoomSpeechLeg:
         buffer = self.holder.take_buffer()
         if buffer is None:
             return
+        frame = self._voiced(slot, frame)
         try:
             buffer.set_data(frame, sample_rate=SAMPLE_RATE,
                             format=cyal.BufferFormat.MONO16)
@@ -840,13 +870,35 @@ class RoomSpeechLeg:
         except Exception:
             pass
 
+    def _voiced(self, slot, frame):
+        """This speaker's own crossover: the room's voice, shaped by the mark.
+
+        A bass cabinet plays the low end of it and nothing above, a tweeter the
+        top of it and nothing below; a speaker with no mark is handed the frame
+        it was given.
+
+        Filtered here, in the one place a frame is really about to be queued,
+        so a frame the holder had no buffer for is not walked through the
+        filter on its way to the bin: the state a marked speaker carries
+        belongs to the frames it actually plays.
+        """
+        mark = self.crossovers.get(slot, FULL_RANGE)
+        if mark == FULL_RANGE:
+            return frame
+        voiced, state = crossover_apply((frame,), self.filters.get(slot), mark)
+        self.filters[slot] = state
+        return voiced[0]
+
     def _retire(self, slot):
         source = self.sources.pop(slot, None)
         self.fresh.pop(slot, None)
         self.hold.pop(slot, None)
         self.holds.pop(slot, None)
         self.tiers.pop(slot, None)
+        self.tones.pop(slot, None)
         self.environments.pop(slot, None)
+        self.crossovers.pop(slot, None)
+        self.filters.pop(slot, None)
         if source is not None:
             self._destroy(source)
 
@@ -893,16 +945,20 @@ def _specs(plan):
 def _signature(plan):
     """What makes this room *this* room, for reuse without rebuilding.
 
-    Position, level, aim and trim per slot: a builder placing or moving a
-    speaker mid-sentence is followed, while a re-resolve that returns the same
-    room keeps the speakers that are already playing (rebuilding them would
-    drop a queue's worth of voice).
+    Position, level, aim, trim, voicing and crossover per slot: a builder
+    placing or moving a speaker mid-sentence is followed, a speaker re-marked
+    as a bass cabinet (or a tweeter) is re-cut, and a re-resolve that returns
+    the same room keeps the speakers that are already playing (rebuilding them
+    would drop a queue's worth of voice).
     """
     placement = getattr(plan, "placement", None)
     parts = []
     for slot in getattr(placement, "slots", ()):
         spec = placement.speakers[slot].spec
+        tone = getattr(spec, "tone", None)
         parts.append((slot, tuple(spec.position), float(spec.level),
                       float(getattr(spec, "delay_ms", 0.0)),
-                      getattr(spec, "aim_yaw", None)))
+                      getattr(spec, "aim_yaw", None),
+                      None if tone is None else round(float(tone), 4),
+                      round(crossover_hz(getattr(spec, "crossover", None)), 4)))
     return tuple(parts)

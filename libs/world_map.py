@@ -722,6 +722,8 @@ class Map:
         room="",
         level=100,
         delay=0.0,
+        tone=100,
+        crossover=0,
         **kwargs,
     ):
         """Spawns a cinema speaker element (one speaker of a room)."""
@@ -736,7 +738,8 @@ class Map:
                 pass
         obj = CinemaSpeakerZone(
             id, minx, maxx, miny, maxy, minz, maxz,
-            channel=channel, room=room, level=level, delay=delay,
+            channel=channel, room=room, level=level, delay=delay, tone=tone,
+            crossover=crossover,
             aim_yaw=kwargs.get("aim_yaw"),
             cone_inner=kwargs.get("inner_cone_angle"),
             cone_outer=kwargs.get("outer_cone_angle"),
@@ -1638,8 +1641,9 @@ class CinemaSpeakerZone(BaseMapObj):
     """
 
     def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, channel="auto",
-                 room="", level=100, delay=0.0, aim_yaw=None, cone_inner=None,
-                 cone_outer=None, cone_outer_gain=None, **kwargs):
+                 room="", level=100, delay=0.0, tone=100, crossover=0,
+                 aim_yaw=None, cone_inner=None, cone_outer=None,
+                 cone_outer_gain=None, **kwargs):
         super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "cinemaSpeaker")
         self.label = "Cinema Speaker"
         self.channel = str(channel or "auto").strip().lower()
@@ -1652,6 +1656,21 @@ class CinemaSpeakerZone(BaseMapObj):
             self.delay = float(delay)
         except (TypeError, ValueError):
             self.delay = 0.0
+        # The map's own voicing for this speaker, a percentage where 100 is
+        # "as I placed it". It only ever cuts highs: a builder's way of making
+        # the rear pair duller than the screen wall without moving anything.
+        try:
+            self.tone = float(tone)
+        except (TypeError, ValueError):
+            self.tone = 100.0
+        # The crossover mark: positive = a bass cabinet (nothing above that
+        # frequency reaches it), negative = a tweeter (nothing below it),
+        # 0 = full range, which is every speaker placed before this existed.
+        # Stored as written, sign and all; the room decides what it means.
+        try:
+            self.crossover = float(crossover)
+        except (TypeError, ValueError):
+            self.crossover = 0.0
         self.aim_yaw = aim_yaw
         self.cone_inner = cone_inner
         self.cone_outer = cone_outer
@@ -1676,6 +1695,8 @@ class CinemaSpeakerZone(BaseMapObj):
             "room": self.room,
             "level": self.level,
             "delay_ms": self.delay,
+            "tone": self.tone,
+            "crossover": self.crossover,
         }
         x, y, z = self.position
         spec["x"], spec["y"], spec["z"] = x, y, z

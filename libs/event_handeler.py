@@ -1597,6 +1597,19 @@ class EventHandeler:
 
         if stage == 'volume':
             min_val, max_val = 0, 100
+        elif stage == 'cinema_tone':
+            # A cinema speaker's own voicing, in percent (100 = as placed).
+            # The Server sends this range with the prompt too; this is the
+            # fallback for it.
+            min_val, max_val = 0, 100
+        elif stage == 'cinema_crossover':
+            # A cinema speaker's crossover: the sign is the side the speaker
+            # keeps, so the one field spans both bands -- 40-300 Hz is a bass
+            # cabinet (nothing above it), -800 to -6000 Hz is a tweeter
+            # (nothing below it) and 0 is the full-range speaker. The Server
+            # sends these two numbers with the prompt too; this is the
+            # fallback for it.
+            min_val, max_val = -6000, 300
         elif stage == 'cinema_delay':
             # A cinema speaker's trim in milliseconds. It deliberately does not
             # share the `delay` stage below: that one is the megaphone

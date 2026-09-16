@@ -15,6 +15,7 @@ from .audio.sound import Sound
 from .piano import PianoAudio
 from .drums import DrumAudio
 from .instrument_samples import InstrumentSampleCache
+from .crossed_samples import CrossedSampleCache
 from .map_sound_cache import MapSoundCache
 from .audio_diagnostics import probe as audio_probe
 from . import options
@@ -160,6 +161,15 @@ class AudioManager():
         )
         self.map_sounds = MapSoundCache(
             self._resolve_map_sound_path, self._decode_map_sound, self._upload_instrument_sample,
+        )
+        # A live note played at a cinema speaker that carries a crossover is
+        # that sample filtered by the room's own crossover (see
+        # ``crossed_samples``). Made off the frame path and kept: see the module
+        # for why a note cannot wait for its own copy.
+        self.crossed_samples = CrossedSampleCache(
+            self._resolve_instrument_sample_path,
+            self._decode_instrument_sample,
+            self._upload_instrument_sample,
         )
         self._unbound_occlusion_filter = None
         self._light_unbound_occlusion_filter = None
@@ -475,16 +485,29 @@ class AudioManager():
                     gain = (self.volume_categories[cat][0] / 100) * (source.volume / 100)
                     if not source.muted: source.source.gain = gain
 
-    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0, reference_distance=15.0, rolloff=1.0, max_distance=100.0, direct_filter=None, channel=None, stereo_provider=None):
+    def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0, reference_distance=15.0, rolloff=1.0, max_distance=100.0, direct_filter=None, channel=None, stereo_provider=None, crossed=None):
         if self.muted and not looping: return
         direction=self.make_orientation(*direction)
+        # A cinema speaker a builder gave a crossover plays its own side of the
+        # split, and for a *note* that means this sample run through the room's
+        # own filter once (see libs/crossed_samples.py -- OpenAL has no filter
+        # that can say "this speaker plays the bass"). While that copy is being
+        # made, or when the sample cannot be crossed at all, the speaker plays
+        # the sample it played before rather than nothing: a note a little early
+        # in its life is better than one that is missing or late.
+        buffer = None
+        if crossed is not None:
+            cache = getattr(self, "crossed_samples", None)
+            if cache is not None:
+                buffer = cache.get(path, crossed, channel)
         # A cinema room hands its screen-wall speakers one channel each, so the
         # band keeps the room's stereo image (see libs/audio/cinema/live.py).
         # Anything that cannot be split -- a mono sample, one the cache is
         # still preparing -- falls back to the whole file below rather than
         # playing nothing at that speaker.
-        buffer = split_channel_buffer(stereo_provider or getattr(self, "piano", None),
-                                      path, channel)
+        if buffer is None:
+            buffer = split_channel_buffer(stereo_provider or getattr(self, "piano", None),
+                                          path, channel)
         if buffer is None:
             buffer = self.load_buffer(path, instrument=not looping)
         if not buffer: return
@@ -812,6 +835,8 @@ class AudioManager():
                 audio_probe.call("audio.instrument_upload", self.instrument_samples.pump,
                                  max_uploads=4, budget_seconds=0.002,
                                  max_bytes=self.INSTRUMENT_UPLOAD_BYTES_PER_FRAME)
+                audio_probe.call("audio.crossed_upload", self.crossed_samples.pump,
+                                 max_uploads=2, budget_seconds=0.002)
                 map_sounds = getattr(self, "map_sounds", None)
                 if map_sounds is not None:
                     audio_probe.call("audio.map_upload", map_sounds.pump,

@@ -24,7 +24,7 @@ Two questions this answers directly:
 megaphone speakers: 0 is +Y, +90 is +X, so an aim of 270 points along -X.
 """
 
-from math import asin, atan2, cos, degrees, radians, sin, sqrt
+from math import asin, atan2, cos, degrees, isfinite, radians, sin, sqrt
 
 # Below this many degrees off-axis a speaker counts as dead ahead / dead
 # behind; a panning calculation that flips sides while someone breathes is
@@ -142,6 +142,61 @@ def speaker_aim_gain(listener, position, spec):
                      else 0.0)
 
 
+# The wall's own numbers, in one place: a light wall (one tile between a
+# speaker and the listener) only dulls the top, a heavy one muffles hard. The
+# song, a live note and a voice all read them from here, so the same wall
+# sounds like the same wall to everything the room carries.
+WALL_PARAMS = {1: (0.45, 0.75), 2: (0.05, 0.22)}
+
+# A speaker's own voicing (the map's ``tone`` attribute). 1.0 is the map's
+# voicing untouched, 0.0 is the darkest a speaker can be made -- deliberately
+# well short of the water's own 0.02, or a rear speaker would sound like it was
+# at the bottom of a lake rather than at the back of a room.
+TONE_HF_FLOOR = 0.28
+TONE_NEUTRAL = 0.995
+
+
+def wall_params(tier):
+    """The wall's (GAINHF, GAIN) pair for a tier, or None for a clear path."""
+    if tier is None:
+        return None
+    try:
+        level = int(tier)
+    except (TypeError, ValueError):
+        return None
+    if level <= 0:
+        return None
+    return WALL_PARAMS[2] if level >= 2 else WALL_PARAMS[1]
+
+
+def tone_openness(tone):
+    """A speaker's voicing as an openness in 0..1, or None when unreadable.
+
+    This is the **resolved** value: the map writes a percentage and
+    ``layout`` converts it once (100% = as placed), so everything downstream --
+    the terms a live note travels in, the spec a bank reads -- carries the same
+    fraction. A caller can therefore never disagree with another caller about
+    what a map wrote.
+    """
+    if tone is None:
+        return None
+    try:
+        value = float(tone)
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(value):
+        return None
+    return max(0.0, min(1.0, value))
+
+
+def tone_gainhf(tone):
+    """A speaker's own openness as the high-cut it applies, 1.0 = untouched."""
+    openness = tone_openness(tone)
+    if openness is None:
+        return 1.0
+    return TONE_HF_FLOOR + (1.0 - TONE_HF_FLOOR) * openness
+
+
 def occlusion_filter(audio, tier, cache=None):
     """The wall between a speaker and the listener, as an OpenAL filter.
 
@@ -151,17 +206,60 @@ def occlusion_filter(audio, tier, cache=None):
     1 light, 2 heavy) and ``cache`` is an optional dict the caller owns, so a
     room builds two filter objects once instead of one per speaker per frame.
     """
-    if tier is None or tier <= 0:
+    params = wall_params(tier)
+    if params is None:
         return None
-    heavy = tier >= 2
+    heavy = int(tier) >= 2
     key = "heavy" if heavy else "light"
     if cache is not None and key in cache:
         return cache[key]
     if not hasattr(audio, "gen_filter"):
         return None
-    params = (("GAINHF", 0.05), ("GAIN", 0.22)) if heavy else (("GAINHF", 0.45), ("GAIN", 0.75))
     try:
-        filt = audio.gen_filter("LOWPASS", *params)
+        filt = audio.gen_filter("LOWPASS", ("GAINHF", params[0]), ("GAIN", params[1]))
+    except Exception:
+        filt = None
+    if cache is not None:
+        cache[key] = filt
+    return filt
+
+
+def speaker_filter(audio, tier, tone=None, cache=None):
+    """One speaker's own filter: the map's voicing and the wall, together.
+
+    A source holds exactly **one** direct filter, so a voicing the map set and
+    a wall standing in the way cannot be two filters -- they are one, with the
+    two high-cuts multiplied and the wall's own loudness dip kept. This is the
+    single home for that arithmetic: the song's speakers, a live note and a
+    voice all ask it (or :func:`occlusion_filter`, which is the same wall at a
+    neutral voicing), so one speaker sounds like one speaker whatever is
+    coming out of it.
+
+    Tone only ever **cuts**: a speaker cannot be made brighter than the map
+    placed it, and a value the map cannot mean (a missing attribute, an
+    unusable string) leaves the room exactly as it shipped. A neutral voicing
+    with no wall returns None, and a neutral voicing with a wall returns the
+    room's shared wall filter -- the very object it returned before this
+    attribute existed.
+    """
+    openness = tone_openness(tone)
+    params = wall_params(tier)
+    if openness is None or openness >= TONE_NEUTRAL:
+        return occlusion_filter(audio, tier, cache)
+    if params is None:
+        # No wall: the voicing on its own, with no loudness change. A dark
+        # speaker the builder placed is dull, not quieter -- level is the map's
+        # own tool for loudness (see ``CinemaSpeakerSpec.level``).
+        params = (1.0, 1.0)
+    factor = TONE_HF_FLOOR + (1.0 - TONE_HF_FLOOR) * openness
+    key = ("tone", int(tier or 0), round(openness, 2))
+    if cache is not None and key in cache:
+        return cache[key]
+    if not hasattr(audio, "gen_filter"):
+        return None
+    try:
+        filt = audio.gen_filter("LOWPASS", ("GAINHF", params[0] * factor),
+                                ("GAIN", params[1]))
     except Exception:
         filt = None
     if cache is not None:

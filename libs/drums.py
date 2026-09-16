@@ -113,6 +113,10 @@ class DrumAudio:
         self._deferred_hits = []
         self._occlusion_filter = None
         self._light_occlusion_filter = None
+        # A room speaker's own voicing, composed with the wall in the way (see
+        # ``room_tone_filter``): one filter per (wall, voicing) pair the map
+        # uses, never one per hit.
+        self._room_tone_filters = {}
         # Kit the local performer is currently playing. Remote hits carry their own
         # kit id in the packet, so this only governs local (client-prediction) hits.
         self._active_kit = self.DEFAULT_KIT
@@ -187,6 +191,17 @@ class DrumAudio:
                 "LOWPASS", ("GAINHF", 0.45), ("GAIN", 0.75)
             )
         return self._light_occlusion_filter
+
+    def room_tone_filter(self, tier, tone):
+        """A room speaker's own voicing plus the wall in the way, as one filter.
+
+        A kit routed into a room is played at that room's speakers, so a hit
+        that comes out of a speaker the map made dull has to be dulled by the
+        same filter the song is (``libs/audio/cinema/listener.py`` owns the
+        numbers).
+        """
+        from .audio.cinema.listener import speaker_filter
+        return speaker_filter(self.am, tier, tone, self._room_tone_filters)
 
     def preload(self, kit=None):
         """Request a kit without decoding or uploading on the caller's frame."""
@@ -370,8 +385,8 @@ class DrumAudio:
 
         One sample per speaker of that room, shaped by the room's own numbers
         (its distance ramp, the map's level per speaker, each speaker's trim,
-        the wall between) so a drummer in a hall is heard through the hall
-        rather than only from the kit.
+        the wall between, the speaker's own crossover) so a drummer in a hall
+        is heard through the hall rather than only from the kit.
 
         A hit has no note-off: what stops it is the caller's own voice record
         (a hi-hat choke, a stolen voice). The copies therefore go into ``sink``
@@ -413,7 +428,8 @@ class DrumAudio:
         # this route now replaces carried exactly this one).
         reverb = cinema_live.zone_reverb(game, (x, y, z))
 
-        def _spawn(px, py, pz, gain, tier, _delay_ms, channel=None):
+        def _spawn(px, py, pz, gain, tier, _delay_ms, channel=None, tone=None,
+                   crossed=None):
             volume = adjusted_volume * max(0.0, gain) * bot_volume
             if volume <= 0.0:
                 return
@@ -423,11 +439,12 @@ class DrumAudio:
                 # Flat at the source: the room's ramp already shaped this hit.
                 reference_distance=ROOM_REFERENCE_DISTANCE, rolloff=0.0,
                 max_distance=ROOM_MAX_DISTANCE,
-                direct_filter=cinema_live.wall_filter(self, tier),
+                direct_filter=cinema_live.wall_filter(self, tier, tone),
                 # A kit is recorded in stereo (the tom pans left in the file);
                 # the room's screen wall carries that image, one channel per
-                # speaker, exactly as it does for the song.
-                channel=channel, stereo_provider=self,
+                # speaker, exactly as it does for the song, and a speaker with
+                # a crossover hears its own side of the split.
+                channel=channel, stereo_provider=self, crossed=crossed,
             )
             if sound is None:
                 return

@@ -31,9 +31,12 @@ from collections import deque
 import cyal
 
 from ...deferred_log import log_deferred as log_line
+from .crossover import FULL_RANGE
+from .crossover import apply as crossover_apply
+from .crossover import crossover_hz
 from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
 from .listener import (distance_gain, occlusion_filter, restore_filter,
-                       speaker_aim_gain)
+                       speaker_aim_gain, speaker_filter)
 
 # One pool and one queue allowance per speaker. The ratio between them keeps
 # the same shape as the plain jukebox (32 buffers, 10 queued): enough head-
@@ -155,6 +158,21 @@ class CinemaSpeakerBank:
         self._fade_duration = 0.0
         self._environment_dirty = True
         self._slot_tier = {}
+        # The map's own voicing last applied to each speaker, so a room whose
+        # map was edited (or reloaded with the same speakers and a different
+        # tone) re-voices them instead of keeping the old filter.
+        self._slot_tone = {}
+        # Which speakers carry a crossover mark, and the two things a *stream*
+        # needs that an OpenAL filter does not: the state a crossover carries
+        # from one frame to the next, and the frames it has already produced
+        # (a delay trim is cut into audio the speaker really played, which for
+        # a marked speaker is its own filtered history -- see ``crossover``).
+        # Both are per *mark*, not per speaker: speakers dialled alike are fed
+        # one filtered programme rather than one each, and a bass cabinet and a
+        # tweeter are two different marks even when they meet at the same
+        # frequency.
+        self._slot_crossover = {}
+        self._crossover_streams = {}
         self._occlusion_filters = {}
         self._retired = False
         self._stopped = False
@@ -231,7 +249,16 @@ class CinemaSpeakerBank:
             self._pools[slot] = self._make_speaker(audio, slot)
 
     def _make_speaker(self, audio, slot):
-        """Create one speaker: its source, its position and its buffer pool."""
+        """Create one speaker: its source, its position and its buffer pool.
+
+        The map's crossover for this speaker is read here, at creation, so a
+        speaker that joins a room already playing (``reconfigure``) is born
+        with the mark the map carries -- it used to be read only in
+        ``_build``, which left every speaker a builder placed mid-song at full
+        range for the rest of the track. It is a read, not a rule: what the
+        number means is ``crossover_hz``'s, and a live change is applied by
+        ``_sync_crossovers`` rather than by being created again.
+        """
         context = audio.context
         source = context.gen_source()
         position = self.renderer.layout.position(slot)
@@ -263,6 +290,18 @@ class CinemaSpeakerBank:
                 source.delete()
             self.slot_sources.pop(slot, None)
             raise RuntimeError("cinema speakers could not allocate buffers")
+        # Which stream this speaker is fed, recorded where the speaker is,
+        # because a room's speakers are not all created at the same moment
+        # (see the docstring). Written last, so a speaker that never came to
+        # be (a dead context, no buffers) leaves no mark behind.
+        mark = crossover_hz(self.renderer.layout.crossover(slot))
+        self._slot_crossover[slot] = mark
+        # A marked speaker joining a room that is already playing is filled
+        # from this stream on the very frame it appears (``realign``), so it
+        # has to exist with the frames the room still holds -- from the room's
+        # own unfiltered history it would come back with the band it exists to
+        # remove on its first queue.
+        self._warm_stream(mark)
         return pool
 
     def _dispose_speaker(self, source):
@@ -298,6 +337,7 @@ class CinemaSpeakerBank:
         self._reset_output(stamp=False)
         self.release_buffers()
         self._recent.clear()
+        self._crossover_streams.clear()
 
     def release_buffers(self):
         """Drop buffer references so they are collected like any other pool."""
@@ -310,6 +350,7 @@ class CinemaSpeakerBank:
         """Called once the owning player has deleted the OpenAL sources."""
         self.slot_sources.clear()
         self._recent.clear()
+        self._crossover_streams.clear()
         self._stopped = True
 
     # ---------------------------------------------------------------- output
@@ -328,7 +369,8 @@ class CinemaSpeakerBank:
         if self._stopped or not self.slot_sources:
             return False
         targets = set(self._feed_slots())
-        feeds = self._slot_feeds(left, right, targets)
+        programmes = self._programme(left, right, targets)
+        feeds = self._slot_feeds(programmes, targets)
         if not feeds:
             return False
         claimed = []
@@ -353,7 +395,7 @@ class CinemaSpeakerBank:
                 self.slot_sources[slot].queue_buffers(buffer)
                 queued += 1
             self.frames_queued += 1
-            self._recent.append((left, right))
+            self._commit(left, right, programmes)
             # One frame per speaker per call, so the queued depth IS a duration
             # once the frame's own size is known -- and the transports do not
             # agree on it (the direct streamer decodes 20 ms at a time, the
@@ -684,6 +726,126 @@ class CinemaSpeakerBank:
         per_frame = max(1, len(history[-1][0]) // 2)
         return min(want, (len(history) - 1) * per_frame)
 
+    def _programme(self, left, right, targets):
+        """What each crossover group *would* be fed this frame, uncommitted.
+
+        One window per distinct *mark* among the speakers being fed, plus the
+        history that window is cut from. A room with no mark anywhere -- every
+        map before this attribute existed -- is the single unfiltered group it
+        has always been, and the frames it is handed are the very objects they
+        were, byte for byte.
+
+        A marked group is a *stream*, not a per-frame effect: the filter carries
+        its state from one frame to the next (see ``crossover``), and the frames
+        it has already produced are kept so a delay trim can still be cut into
+        audio that group actually played -- a bass cabinet whose trim was cut
+        out of the room's unfiltered history would be handed its own mids back,
+        and a tweeter its own bass.
+
+        Nothing is committed here. A frame the room cannot queue (no free
+        buffer) must not advance a filter or enter a history, or the refused
+        frame the transport offers again would be filtered twice and the room
+        would play a seam it does not have. The result is handed to ``_commit``
+        only once the frame is on every speaker.
+        """
+        groups = {}
+        for slot in targets:
+            groups.setdefault(self._slot_crossover.get(slot, FULL_RANGE), None)
+        programmes = {}
+        for mark in groups:
+            if mark == FULL_RANGE:
+                history = list(self._recent)
+                history.append((left, right))
+                programmes[mark] = (history, len(history) - 1, None, None)
+                continue
+            group = self._crossover_streams.get(mark)
+            filtered, state = crossover_apply((left, right),
+                                              group["state"] if group else None,
+                                              mark)
+            history = list(group["history"]) if group else []
+            history.append(filtered)
+            programmes[mark] = (history, len(history) - 1, filtered, state)
+        return programmes
+
+    def _commit(self, left, right, programmes):
+        """Accept a queued frame into the room's own history, and each group's."""
+        self._recent.append((left, right))
+        for mark, (_history, _index, filtered, state) in programmes.items():
+            if mark == FULL_RANGE or filtered is None:
+                continue
+            group = self._crossover_streams.get(mark)
+            if group is None:
+                group = {"history": deque(maxlen=self._recent.maxlen),
+                         "state": None}
+                self._crossover_streams[mark] = group
+            group["history"].append(filtered)
+            group["state"] = state
+
+    def _history_for(self, slot):
+        """The programme this speaker is fed, newest last (see ``_programme``).
+
+        A marked speaker's own filtered frames -- a bass cabinet's, or a
+        tweeter's -- or the room's for every speaker that carries no mark: what
+        ``realign`` puts a stalled speaker back in step with has to be the
+        audio that speaker plays.
+        """
+        mark = self._slot_crossover.get(slot, FULL_RANGE)
+        if mark != FULL_RANGE:
+            group = self._crossover_streams.get(mark)
+            if group is not None and group["history"]:
+                return list(group["history"])
+        return list(self._recent)
+
+    def _sync_crossovers(self):
+        """Follow the map's crossover mark for every slot; the changed ones' names.
+
+        The map is a live document, so what a speaker is fed has to be re-read
+        from it rather than only where the speaker was created: a builder
+        dialling a crossover used to hear nothing until the room was rebuilt,
+        which meant the next track (or a Reload Map Data and another wait),
+        and every speaker a builder *placed* mid-song kept the full-range
+        stream it was born with for the rest of the song.
+
+        A stream that is already running is left alone -- it is aligned with
+        the room frame for frame -- while a mark nobody was using is warmed
+        from the frames the room already holds (``_warm_stream``), so the
+        speaker that just started using it can be filled with audio it really
+        plays instead of the room's unfiltered history.
+        """
+        changed = []
+        for slot in self.renderer.slots:
+            mark = crossover_hz(self.renderer.layout.crossover(slot))
+            if self._slot_crossover.get(slot, FULL_RANGE) != mark:
+                changed.append(slot)
+                self._slot_crossover[slot] = mark
+        for slot in changed:
+            self._warm_stream(self._slot_crossover[slot])
+        return changed
+
+    def _warm_stream(self, mark):
+        """Give a crossover mark the frames the room already holds, or rebuild it.
+
+        A *new* mark has no filtered audio behind it yet, and a stream whose
+        last speaker was dialled away from it stopped growing with the room, so
+        its history ends a queue's worth ago. Either one is walked through the
+        filter here, oldest frame first, so the history ends on the very frame
+        the room is about to queue and the speaker filled from it lands on the
+        room's instant with this mark's own filter already on it. Trusting a
+        stream that is not the room's own length would put that speaker behind
+        the song, which is the one thing the fill exists to prevent.
+        """
+        if mark == FULL_RANGE:
+            return
+        group = self._crossover_streams.get(mark)
+        if group is not None and len(group["history"]) == len(self._recent):
+            return
+        group = {"history": deque(maxlen=self._recent.maxlen), "state": None}
+        for left, right in list(self._recent):
+            filtered, group["state"] = crossover_apply((left, right),
+                                                       group["state"], mark)
+            group["history"].append(filtered)
+        self._crossover_streams[mark] = group
+
     def _delayed_window(self, history, index, samples):
         """The ``(left, right)`` programme ``samples`` samples behind that frame.
 
@@ -725,19 +887,17 @@ class CinemaSpeakerBank:
             return None
         return lefts[start:end], rights[start:end]
 
-    def _slot_feeds(self, left, right, targets):
+    def _slot_feeds(self, programmes, targets):
         """``[(slot, mono_pcm16), ...]`` for one frame, each at its own delay.
 
-        Slots are grouped by the trim they carry, so a room with one alignment
-        on its side pair and none on the screen wall renders each source frame
-        once per distinct offset instead of once per speaker. A room with no
-        trims at all (the shipped jukebox) takes exactly the path it always
-        did: one render of the live frame, byte for byte.
+        Slots are grouped by the trim they carry *and* the crossover they are
+        fed through, so a room with one alignment on its side pair and none on
+        the screen wall renders each source frame once per distinct
+        (crossover, offset) instead of once per speaker. A room with neither
+        trims nor crossovers (the shipped jukebox) takes exactly the path it
+        always did: one render of the live frame, byte for byte.
         """
-        history = list(self._recent)
-        history.append((left, right))
-        index = len(history) - 1
-        feeds = self._feeds_for(history, index, targets, bound=False)
+        feeds = self._feeds_for(programmes, targets, bound=False)
         if feeds:
             return feeds
         # Nobody could be fed: every speaker of this room carries a trim deeper
@@ -751,21 +911,26 @@ class CinemaSpeakerBank:
         # mode went quiet"). Cut every trim back to what this frame can reach:
         # each speaker starts a little early for the few frames the room needs
         # and carries its real trim from then on.
-        return self._feeds_for(history, index, targets, bound=True)
+        return self._feeds_for(programmes, targets, bound=True)
 
-    def _feeds_for(self, history, index, targets, bound):
-        """One render per distinct trim, or nothing when none is reachable."""
+    def _feeds_for(self, programmes, targets, bound):
+        """One render per distinct (mark, trim), or nothing if unreachable."""
         groups = {}
         for slot in targets:
-            samples = (self._reachable_trim(slot, history) if bound
-                       else self._applied_trim(slot, history))
-            groups.setdefault(samples, []).append(slot)
+            mark = self._slot_crossover.get(slot, FULL_RANGE)
+            window = programmes.get(mark)
+            if window is None:
+                continue
+            samples = (self._reachable_trim(slot, window[0]) if bound
+                       else self._applied_trim(slot, window[0]))
+            groups.setdefault((mark, samples), []).append(slot)
         feeds = []
-        for samples in sorted(groups):
+        for mark, samples in sorted(groups):
+            history, index = programmes[mark][0], programmes[mark][1]
             source = self._delayed_window(history, index, samples)
             if source is None:
                 continue
-            wanted = set(groups[samples])
+            wanted = set(groups[(mark, samples)])
             for slot, pcm in self.renderer.render(*source):
                 if slot in wanted:
                     feeds.append((slot, pcm))
@@ -869,7 +1034,10 @@ class CinemaSpeakerBank:
 
         The frames the room still holds are in ``_recent``, so a shallow
         speaker is handed exactly what the deepest one is about to play and
-        starts from the same instant. Nothing is ever removed from a queue:
+        starts from the same instant. A speaker fed through a crossover is
+        filled from that crossover's own history instead (``_history_for``):
+        the same instant of the same programme, with the bass cabinet's own
+        low-pass already on it. Nothing is ever removed from a queue:
         only added, which is all OpenAL allows.
 
         Depths are compared *net of each speaker's own delay trim*: a trimmed
@@ -907,11 +1075,17 @@ class CinemaSpeakerBank:
                     for slot, queued in counts.items()), default=0)
         if base <= 0:
             return False
-        history = list(self._recent)
         fed = 0
         for slot, queued in counts.items():
             if self._playing(slot):
                 continue
+            # The programme this speaker is fed: the room's frames, or a
+            # marked speaker's own filtered ones (see ``_history_for``). The
+            # *counts* above are frame counts either way -- a crossover changes
+            # the audio, never the room's step -- so the fill still starts
+            # `target` frames back from the live edge of whatever this speaker
+            # plays.
+            stream = self._history_for(slot)
             if self._held(slot):
                 # Waiting out its own delay trim, not behind it: the frames it
                 # holds are the room's newest and the ones it is "missing" are
@@ -928,8 +1102,8 @@ class CinemaSpeakerBank:
                     continue
                 queued = 0
             target = base + holds[slot]
-            if target > len(history):
-                target = len(history)
+            if target > len(stream):
+                target = len(stream)
             missing = target - queued
             if missing <= 0:
                 continue
@@ -942,12 +1116,12 @@ class CinemaSpeakerBank:
             # a trimmed speaker would catch up with the room for as long as
             # that fill lasts and then jump backwards when the next trimmed
             # window arrives.
-            origin = len(history) - target
-            offset = self._applied_trim(slot, history)
+            origin = len(stream) - target
+            offset = self._applied_trim(slot, stream)
             pool = self._pools.get(slot)
             speaker = self.slot_sources.get(slot)
             for step in range(missing):
-                pair = self._delayed_window(history, origin + step, offset)
+                pair = self._delayed_window(stream, origin + step, offset)
                 if pair is None:
                     continue
                 pcm = dict(self.renderer.render(*pair)).get(slot)
@@ -1153,6 +1327,47 @@ class CinemaSpeakerBank:
         return True
 
     @_serialized
+    def _follow_crossovers(self):
+        """Switch the speakers whose crossover mark changed onto their new stream.
+
+        Played, not merely re-remembered: a speaker whose crossover changed is
+        holding frames of the *old* programme, and appending the new one behind
+        them would leave a step in that speaker's own stream (the room's instant,
+        then a different timbre). So it is emptied and put back on the room's
+        own instant out of the new stream -- the same treatment ``realign``
+        gives a speaker that ran dry -- one speaker at a time, so the speakers
+        that did not change (or the ones done before it) are still playing and
+        the room keeps its clock. Nothing else is stopped and the song is not
+        restarted: what changes is one speaker's programme at the live edge.
+
+        A speaker still waiting out its own delay trim is left alone: it is fed
+        every frame by construction, so it takes the new stream with the next
+        one, and stopping it would throw away the audio its trim is holding.
+
+        Returns how many speakers were switched.
+        """
+        changed = self._sync_crossovers()
+        if not changed:
+            return 0
+        playing = bool(self.slot_sources) and self.playing()
+        switched = 0
+        for slot in changed:
+            if self.slot_sources.get(slot) is None or self._held(slot):
+                continue
+            if not self._empty_speaker(slot):
+                # A speaker the backend will not let go of keeps the frames it
+                # holds and takes the new stream from the next one: a seam in
+                # that speaker, rather than the room losing its instant.
+                continue
+            switched += 1
+            if playing:
+                self.start_playback()
+        if switched:
+            log_line(f"[Cinema] room {self.renderer.profile.name}: "
+                     f"{switched} speaker(s) re-cut to their crossover")
+        return switched
+
+    @_serialized
     def reconfigure(self, renderer):
         """Re-shape the room in place after the map changed under it.
 
@@ -1180,6 +1395,7 @@ class CinemaSpeakerBank:
             self._pools.pop(slot, None)
             self.slot_sources.pop(slot, None)
             self._slot_tier.pop(slot, None)
+            self._slot_crossover.pop(slot, None)
             self._dispose_speaker(old_sources[slot])
         changes = []
         if added:
@@ -1206,7 +1422,12 @@ class CinemaSpeakerBank:
                 self._pools[slot] = self._make_speaker(audio, slot)
             except Exception:
                 self.failure_reason = "cinema speaker could not join the room"
-        if added:
+        # A speaker whose *crossover mark* changed was never part of this
+        # method's arithmetic: it is the same speaker, fed a different
+        # programme (see _follow_crossovers, which puts it back on the room's
+        # own instant).
+        switched = self._follow_crossovers()
+        if added or switched:
             # Every speaker holds the same frames again, so the new ones start
             # on the beat the room is already playing.
             self.realign(play=False)
@@ -1334,14 +1555,18 @@ class CinemaSpeakerBank:
             if listener is None:
                 continue
             tier = self._wall_tier(slot, listener)
-            if tier == self._slot_tier.get(slot) and not self._environment_dirty:
+            tone = self.renderer.layout.tone(slot)
+            if (tier == self._slot_tier.get(slot)
+                    and tone == self._slot_tone.get(slot)
+                    and not self._environment_dirty):
                 continue
             self._slot_tier[slot] = tier
-            filt = None
-            if tier == 2:
-                filt = self._occlusion_filter(audio, heavy=True)
-            elif tier == 1:
-                filt = self._occlusion_filter(audio, heavy=False)
+            self._slot_tone[slot] = tone
+            # One filter per speaker, not two: the map's own voicing and the
+            # wall between this speaker and these ears are the same OpenAL
+            # slot, so they are composed rather than stacked (a second one
+            # would silently replace the first).
+            filt = self._speaker_filter(audio, tier, tone)
             with contextlib.suppress(Exception):
                 if filt is not None:
                     source.direct_filter = filt
@@ -1369,17 +1594,21 @@ class CinemaSpeakerBank:
         except Exception:
             return 0
 
-    def _occlusion_filter(self, audio, *, heavy):
-        """The room's wall filters, shared with the live and speech paths.
+    def _speaker_filter(self, audio, tier, tone=None):
+        """The room's own filter for one speaker: its voicing plus that wall.
 
-        The params live in :func:`listener.occlusion_filter` and nowhere else:
-        the song, a live note and a voice played behind the same wall have to
-        be muffled by the same filters, or the room sounds like three
-        different rooms depending on what is coming out of it.
+        The params live in :func:`listener.speaker_filter` (and its
+        :func:`listener.occlusion_filter` for the wall alone) and nowhere
+        else: the song, a live note and a voice played behind the same wall --
+        or out of the same dulled speaker -- have to be shaped by the same
+        numbers, or the room sounds like three different rooms depending on
+        what is coming out of it.
         """
-        return occlusion_filter(audio, 2 if heavy else 1, self._occlusion_filters)
+        return speaker_filter(audio, tier, tone, self._occlusion_filters)
 
-    # -------------------------------------------------------------- settings
+    def _occlusion_filter(self, audio, *, heavy):
+        """The room's wall filter alone, for a caller that knows only the tier."""
+        return occlusion_filter(audio, 2 if heavy else 1, self._occlusion_filters)
 
     def set_reverb(self, slot):
         if slot is not self.reverb_slot:
@@ -1395,11 +1624,13 @@ class CinemaSpeakerBank:
         """Swap the room's profile live and re-aim the room's speakers."""
         self.renderer.set_profile(profile)
         self._slot_tier.clear()
+        self._slot_tone.clear()
         self._environment_dirty = True
 
     def touch_environment(self):
         """Force the next refresh to re-send occlusion and environment."""
         self._slot_tier.clear()
+        self._slot_tone.clear()
         self._environment_dirty = True
 
     def __repr__(self):

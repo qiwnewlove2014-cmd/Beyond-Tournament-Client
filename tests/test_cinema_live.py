@@ -999,6 +999,40 @@ class HostReshapeTests(unittest.TestCase):
         self.assertIs(bank.renderer, first_renderer)
         self.assertIs(bank.slot_sources["front_l"], first_source)
 
+    def test_a_crossover_set_mid_song_re_cuts_the_speaker_in_place(self):
+        """The builder's bass mark reaches the room that is already playing.
+
+        A crossover is not part of a room's *shape*, so a re-resolve that found
+        the same speakers and profile treated it as the same room and handed
+        back the renderer the bank already held: the new number was never read,
+        and the cabinet went on playing full range until the track ended (or
+        until a Reload Map Data and a wait of minutes). Nothing about the room
+        is rebuilt here -- the same bank, the same sources, still playing.
+        """
+        game = self.build([("front_l", -30), ("front_r", 30)])
+        host = host_for(game)
+        bank = self.acquire(host, game)
+        for index in range(3):
+            bank.queue_frame(*frame(index))
+        bank.start_playback()
+        left = bank.slot_sources["front_l"]
+        plays = left.played
+
+        # The builder's edit, written on the element the room resolves from.
+        front_right = next(spec for spec in self.map.cinema_speaker_list
+                           if spec.channel == "front_r")
+        front_right.crossover = 120
+
+        self.assertIs(self.acquire(host, game), bank)
+        self.assertEqual(bank._slot_crossover["front_r"], 120.0,
+                         "the mark never reached the room that was playing")
+        self.assertEqual(bank._slot_crossover["front_l"], 0.0)
+        self.assertIs(bank.slot_sources["front_l"], left)
+        self.assertEqual(left.played, plays, "the room was restarted")
+        self.assertTrue(bank.playing())
+        self.assertTrue(bank.slot_sources["front_r"].buffers,
+                        "the re-cut cabinet was left with nothing to play")
+
     def test_a_cabinet_anchor_is_read_from_the_map(self):
         from libs.audio.cinema import cabinet_anchor
         game = self.build([("front_l", -30), ("front_r", 30)])

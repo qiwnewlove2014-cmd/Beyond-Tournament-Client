@@ -120,19 +120,47 @@ class CinemaSpeakerSpec:
     listener stands in front of or behind that particular speaker; a speaker
     without an aim is omnidirectional, which is the right default for a
     cinema room where every seat has to hear every wall.
+
+    ``tone`` is the speaker's own voicing, an openness in 0..1 where 1.0 is
+    the map's voicing untouched: the builder's way of saying "this one is
+    duller than the others" -- a rear pair darker than the screen wall, a
+    speaker inside a booth. It only ever cuts highs (it is not a level, and it
+    is not a wall: ``level`` is the map's tool for loudness, and a wall is
+    measured from geometry), and it is applied by ``listener.speaker_filter``
+    together with whatever wall stands between that speaker and these ears.
+
+    ``crossover`` is the map's *crossover* mark, and its sign is the side the
+    speaker keeps: a positive number is a bass cabinet (nothing above that
+    frequency is fed to it) and a negative one is a tweeter (nothing below it).
+    It is carried here exactly as the map wrote it (``None`` = full range,
+    which is every speaker that existed before this attribute), and what the
+    number *means* is decided in one place where it is used -- the room's own
+    ``crossover`` -- rather than clamped into the right band by whoever reads
+    it next.
     """
 
-    __slots__ = ("slot", "position", "level", "delay_ms", "name",
-                 "room", "aim_yaw", "cone_inner", "cone_outer",
+    __slots__ = ("slot", "position", "level", "delay_ms", "tone", "crossover",
+                 "name", "room", "aim_yaw", "cone_inner", "cone_outer",
                  "cone_outer_gain", "declared")
 
-    def __init__(self, slot, position, level=1.0, delay_ms=0.0, name=None,
-                 room=None, aim_yaw=None, cone_inner=None, cone_outer=None,
-                 cone_outer_gain=None, declared=None):
+    def __init__(self, slot, position, level=1.0, delay_ms=0.0, tone=1.0,
+                 name=None, room=None, aim_yaw=None, cone_inner=None,
+                 cone_outer=None, cone_outer_gain=None, declared=None,
+                 crossover=None):
         self.slot = str(slot or AUTO_SLOT).strip().lower()
         self.position = (float(position[0]), float(position[1]), float(position[2]))
         self.level = max(0.0, min(4.0, float(level)))
         self.delay_ms = max(0.0, min(MAX_TRIM_MS, float(delay_ms)))
+        self.tone = max(0.0, min(1.0, float(tone)))
+        # As the map wrote it, *including its sign*: the sign is the side the
+        # speaker keeps (positive = a bass cabinet, negative = a tweeter), 0
+        # and None both mean "full range", and an unusable value is the map
+        # saying nothing rather than a corner frequency nobody can explain.
+        # See ``cinema.crossover``.
+        try:
+            self.crossover = None if crossover is None else float(crossover)
+        except (TypeError, ValueError):
+            self.crossover = None
         self.name = name
         self.room = str(room or "").strip()
         self.aim_yaw = None if aim_yaw is None else float(aim_yaw) % 360.0
@@ -153,7 +181,8 @@ class CinemaSpeakerSpec:
 
     def __repr__(self):
         return (f"CinemaSpeakerSpec({self.slot!r}, level={self.level}, "
-                f"delay_ms={self.delay_ms}, aim={self.aim_yaw})")
+                f"delay_ms={self.delay_ms}, tone={self.tone}, "
+                f"aim={self.aim_yaw})")
 
 
 # Percent-scaled attributes a builder types into a map element. ``level`` and
@@ -217,6 +246,7 @@ def coerce_spec(raw):
         source = {key: getattr(raw, key) for key in (
             "x", "y", "z", "minx", "maxx", "miny", "maxy", "minz", "maxz",
             "channel", "slot", "room", "level", "volume", "delay", "delay_ms",
+            "tone", "crossover",
             "aim_yaw", "aim_pitch", "inner_cone_angle", "outer_cone_angle",
             "outer_cone_gain", "id") if hasattr(raw, key)}
         position = getattr(raw, "position", None)
@@ -235,11 +265,24 @@ def coerce_spec(raw):
     delay_ms = _number(_first(source, ("delay_ms",)), None)
     if delay_ms is None:
         delay_ms = _number(_first(source, ("delay",)), 0.0)
+    # A speaker's voicing is written as a **percentage, always** (100 = as
+    # placed, 0 = the darkest a speaker can be made) and converted to the
+    # spec's 0..1 openness here -- in one place, so the menu, the map file and
+    # every reader of a term agree about what a number means. It deliberately
+    # does not borrow ``level``'s "above 4.0 is a percentage" idiom: that rule
+    # makes a builder typing 1 mean unity, which is a change the room would
+    # silently swallow, whereas percent-always has no silent band.
+    tone = _number(_first(source, ("tone",)), None)
+    if tone is None:
+        tone = 100.0
+    tone = tone / 100.0
     return CinemaSpeakerSpec(
         declared if declared else AUTO_SLOT,
         position,
         level=level,
         delay_ms=delay_ms,
+        tone=tone,
+        crossover=_number(_first(source, ("crossover",)), None),
         name=_first(source, ("id", "name")),
         room=_first(source, ("room",), ""),
         aim_yaw=_number(_first(source, ("aim_yaw",))),
@@ -351,6 +394,35 @@ class CinemaLayout:
     def delay_ms(self, slot):
         spec = self._specs.get(slot)
         return spec.delay_ms if spec is not None else 0.0
+
+    def tone(self, slot):
+        """The map's own voicing for a slot, 1.0 when it placed no preference.
+
+        A ring speaker (no map element behind it) has no tone to read, so it
+        is as open as the profile gives it -- the attribute belongs to a
+        speaker a builder placed, not to a slot a profile invented.
+        """
+        spec = self._specs.get(slot)
+        return spec.tone if spec is not None else 1.0
+
+    def crossover(self, slot):
+        """This slot's crossover mark, signed, 0.0 when it has none.
+
+        The sign is the side the speaker keeps -- a positive mark is a bass
+        cabinet, a negative one a tweeter -- and ``crossover_hz`` is the one
+        place that says what a mark means. Same rule as ``tone``: a ring
+        speaker (a slot a profile invented, with no map element behind it)
+        never carries one, because a mark is something a builder puts on a
+        speaker they placed.
+        """
+        spec = self._specs.get(slot)
+        value = getattr(spec, "crossover", None) if spec is not None else None
+        if not value:
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
     @property
     def max_delay_s(self):

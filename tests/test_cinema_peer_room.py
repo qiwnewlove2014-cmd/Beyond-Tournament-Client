@@ -377,6 +377,29 @@ class RoutedSongTests(unittest.TestCase):
         peer.route(game, 7)
         self.assertEqual(len(feed.bank.sources), 3)
 
+    def test_the_room_follows_a_mark_dialled_mid_song(self):
+        """A bass cabinet set on the map reaches a routed peer's room too.
+
+        The feed re-acquires its room at most once a second and skips that when
+        the resolved plan still *is* the room it is playing (``matches``), so a
+        mark has to be part of what makes a plan the same room -- left out of
+        that signature, the peer kept playing the room the map no longer
+        described until the track changed.
+        """
+        game, feed = self.routed()
+        push(feed, count=4)
+        self.assertEqual(feed.bank._slot_crossover["front_l"], 0.0)
+        source = feed.bank.slot_sources["front_l"]
+        next(spec for spec in game.gameplay.map.cinema_speaker_list
+             if spec.channel == "front_l").crossover = 120
+        feed.last_push = time.monotonic()
+        peer.rooms_for(game)._reshaped_at = 0.0
+        peer.route(game, 7)
+        self.assertEqual(feed.bank._slot_crossover["front_l"], 120.0,
+                         "the mark never reached the peer's room")
+        self.assertIs(feed.bank.slot_sources["front_l"], source,
+                      "the room was rebuilt for a mark")
+
     def test_the_room_answers_to_the_music_slider(self):
         game, feed = self.routed(music_volume=50)
         self.assertEqual(feed.bank.category, "music")

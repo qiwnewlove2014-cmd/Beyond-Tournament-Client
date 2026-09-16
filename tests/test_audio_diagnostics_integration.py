@@ -83,6 +83,7 @@ class AudioDiagnosticIntegrationTests(unittest.TestCase):
         audio._drain_audio_inbox = lambda: None
         audio._jukebox_receivers = deque()
         audio.instrument_samples = SimpleNamespace(pump=lambda **kw: self.advance(.002))
+        audio.crossed_samples = SimpleNamespace(pump=lambda **kw: None)
         audio.piano = audio.drums = SimpleNamespace(update=lambda: None)
         audio.unbound_sources = []
         audio.soundgroups = []
