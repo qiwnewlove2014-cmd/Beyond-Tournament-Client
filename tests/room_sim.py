@@ -300,10 +300,16 @@ class VirtualClock:
         self.now += float(seconds)
 
 
-def _specs(slots, delays, radius):
-    """``CinemaSpeakerSpec`` for each slot, at its ideal bearing."""
+def _specs(slots, delays, radius, marks=None):
+    """``CinemaSpeakerSpec`` for each slot, at its ideal bearing.
+
+    ``marks`` is the map's crossover per slot, carried exactly as a map element
+    would carry it: this is how a test describes a room whose speakers are not
+    all full range, and how it changes one mid-song.
+    """
     from math import cos, radians, sin
 
+    marks = dict(marks or {})
     out = []
     for slot in slots:
         angle = radians(IDEAL_BEARING[slot])
@@ -312,6 +318,7 @@ def _specs(slots, delays, radius):
             (ANCHOR[0] + sin(angle) * radius, ANCHOR[1] + cos(angle) * radius,
              ANCHOR[2]),
             delay_ms=delays.get(slot, 0.0),
+            crossover=marks.get(slot),
         ))
     return out
 
@@ -326,9 +333,10 @@ class RoomRig:
     frames -- is the test's to inject.
     """
 
-    def __init__(self, delays=None, *, slots=None, profile="front_only",
-                 samples=FRAME_20MS, radius=8.0, buffers_per_slot=None,
-                 clock=None, update_output=False, **source_options):
+    def __init__(self, delays=None, *, slots=None, marks=None,
+                 profile="front_only", samples=FRAME_20MS, radius=8.0,
+                 buffers_per_slot=None, clock=None, update_output=False,
+                 **source_options):
         delays = dict(delays or {})
         self.samples = int(samples)
         self.clock = clock or VirtualClock()
@@ -349,9 +357,14 @@ class RoomRig:
             except Exception:
                 default_slots = ("front_l", "front_r")
         self.requested = list(slots or default_slots)
+        # What the map says about this room, kept so the room can be re-resolved
+        # the way a builder's edit re-resolves it (see ``set_crossover``).
+        self.delays = delays
+        self.radius = radius
+        self.marks = dict(marks or {})
         self.renderer = CinemaRenderer(
             ANCHOR, profile, None,
-            specs=_specs(self.requested, delays, radius),
+            specs=_specs(self.requested, delays, radius, self.marks),
             detect_channels=False,
         )
         self.bank = CinemaSpeakerBank(
@@ -540,6 +553,30 @@ class RoomRig:
         """
         self.shed_frames += int(count)
         self.offset += int(count) * self.samples
+        return self
+
+    # ---------------------------------------------------------- the map
+    def set_crossover(self, slot, mark):
+        """One speaker's crossover is changed on the map under a playing room.
+
+        Exactly the shape the game reaches this by: the mark is part of a
+        room's signature, so the room is re-resolved for the same speakers and
+        the bank is handed the new renderer, which re-cuts that speaker where
+        it stands (see ``CinemaSpeakerBank.reconfigure``). ``mark`` is the map's
+        own number, signed: positive is a bass cabinet, negative a tweeter,
+        ``None`` or 0 is the full-range speaker every map had before.
+        """
+        self.marks[str(slot)] = mark
+        return self.reconfigure()
+
+    def reconfigure(self):
+        """Re-resolve the room from the map and hand it to the playing bank."""
+        self.renderer = CinemaRenderer(
+            ANCHOR, self.renderer.profile.name, None,
+            specs=_specs(self.requested, self.delays, self.radius, self.marks),
+            detect_channels=False,
+        )
+        self.bank.reconfigure(self.renderer)
         return self
 
     def realign(self, **kwargs):

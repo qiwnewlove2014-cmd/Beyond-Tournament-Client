@@ -845,23 +845,70 @@ class TheRoomFollowsTheMarkTests(unittest.TestCase):
     def test_a_mark_dialled_mid_song_is_played_without_a_rebuild(self):
         room = Room().settle()
         left = room.sources["front_l"]
-        plays = left.played
+        cabinet = room.sources["front_r"]
+        plays = {slot: source.played for slot, source in room.sources.items()}
+        depth = {slot: source.buffers_queued for slot, source in room.sources.items()}
         self.assertTrue(room.remap({"front_r": 120}), "the room was not re-cut")
-        # The speaker that did not change is the same OpenAL source, still
-        # playing, never stopped: the room was re-cut, not rebuilt, and the
-        # song was never interrupted for the rest of the room.
+        # *Neither* speaker is stopped, emptied or replaced: the room was
+        # re-cut, not rebuilt, and no speaker was interrupted for it.
         self.assertIs(room.sources["front_l"], left)
+        self.assertIs(room.sources["front_r"], cabinet)
         self.assertEqual(room.sources["front_l"].state,
                          cyal.SourceState.PLAYING)
-        self.assertEqual(left.played, plays, "the room was restarted")
+        self.assertEqual(room.sources["front_r"].state,
+                         cyal.SourceState.PLAYING)
+        self.assertEqual(
+            {slot: source.played for slot, source in room.sources.items()},
+            plays, "a speaker was stopped and started for a re-cut")
+        self.assertEqual(
+            {slot: source.buffers_queued for slot, source in room.sources.items()},
+            depth, "a speaker's queue was thrown away for a re-cut")
         self.assertTrue(room.bank.playing())
-        # The one that changed plays the bass from the frames it holds.
-        self.assertTrue(room.sources["front_r"].buffers,
-                        "the cabinet was left with nothing to play")
-        for buffer in room.sources["front_r"].buffers:
+        # The frames it already holds are the song at the room's own instant --
+        # a crossover is not a seek -- and they play out; from its next frame
+        # on it is handed the cabinet's stream.
+        room.run(6)
+        for buffer in room.sources["front_r"].buffers[-2:]:
             self.assertLess(magnitude(buffer.data, TOP),
                             0.05 * magnitude(buffer.data, BASS),
-                            "the cabinet came back with its mids")
+                            "the cabinet was still being handed its mids")
+        self.assertEqual(room.sources["front_r"].buffers_queued,
+                         room.sources["front_l"].buffers_queued)
+
+    def test_pressing_the_line_four_times_never_touches_a_speaker(self):
+        """The reported one: adjust it three or four times and it stumbles.
+
+        Every press used to empty that speaker and start it again -- a stop in
+        the middle of a buffer, four times over. A re-cut is a change of
+        programme, so nothing about the speaker is touched at all: the frames
+        it holds play out and the new band takes over from the next frame.
+        """
+        room = Room().settle()
+        plays = {slot: source.played for slot, source in room.sources.items()}
+        # Settling runs the room at a single frame deep, which is the case its
+        # own low-queue hold exists for; what is measured here is what the
+        # presses add to that.
+        holds = room.bank.refill_holds
+        for mark in (120, -3000, 120, -3000, 0, 120):
+            room.remap({"front_r": mark})
+            room.run(3)
+        self.assertEqual(
+            {slot: source.played for slot, source in room.sources.items()},
+            plays, "a press stopped and started the speaker")
+        self.assertTrue(room.bank.playing(), "the room went silent")
+        self.assertEqual(room.bank.refill_holds, holds,
+                         "the room was held for a re-cut")
+        depths = {slot: source.buffers_queued for slot, source in room.sources.items()}
+        self.assertEqual(len(set(depths.values())), 1,
+                         "the room came apart at the re-cut: %s" % (depths,))
+        self.assertGreaterEqual(min(depths.values()), 1, "a speaker ran dry")
+        self.assertEqual(room.bank._slot_crossover["front_r"], 120.0)
+        # And the last band really is the one it is being handed.
+        room.run(6)
+        for buffer in room.sources["front_r"].buffers[-2:]:
+            self.assertLess(magnitude(buffer.data, TOP),
+                            0.05 * magnitude(buffer.data, BASS),
+                            "the cabinet was still being handed its mids")
 
     def test_the_new_stream_is_on_the_room_s_own_instant(self):
         room = Room().settle()

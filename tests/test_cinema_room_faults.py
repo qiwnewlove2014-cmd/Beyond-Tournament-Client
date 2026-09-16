@@ -25,6 +25,9 @@ when I set a delay on
 each speaker"
 "the song stumbles over    ``.refuse_unqueue`` (a speaker the backend will not
 one bar"                   give back)
+"adjusting the crossover    ``.set_crossover`` (one speaker's mark changed
+three or four times and    while the song plays)
+the speaker stumbles"
 =========================  ===================================================
 """
 
@@ -501,6 +504,56 @@ class TheBufferPoolCoversWhatASpeakerMayHold(unittest.TestCase):
                            "the pool must cover the relay's queue cap and a "
                            "pump's worth of un-reclaimed buffers")
         self.assertGreater(rig.bank.buffers_per_slot, rig.bank.wanted_for_start())
+
+
+class AReCutNeverTouchesASpeaker(unittest.TestCase):
+    """A crossover changed mid-song costs the room nothing.
+
+    Reported as "adjusting it three or four times and the speakers stutter for
+    a moment". A mark is a change of *programme*, not of position: the frames a
+    speaker already holds are the same song at the same instant, so the one
+    thing a re-cut must never do is stop that speaker, empty it or fill it
+    again -- which is a stop in the middle of a buffer, once per press.
+    """
+
+    MARKS = (120, -3000, 0, -3000, 120)
+
+    def changes(self, rig, ticks):
+        """Change one speaker's mark through every shape, and count the work.
+
+        ``queued_total`` is what the room handed over: one frame per speaker
+        per tick is the room playing, and anything above that is a speaker
+        being emptied and re-filled under itself.
+        """
+        before = {slot: rig.sources[slot].queued_total for slot in rig.slots}
+        marks = []
+        for mark in self.MARKS:
+            rig.set_crossover("front_r", mark)
+            marks.append(rig.bank._slot_crossover["front_r"])
+            rig.run(ticks)
+        after = {slot: rig.sources[slot].queued_total for slot in rig.slots}
+        return before, after, marks
+
+    def test_five_changes_queue_one_frame_each_time(self):
+        rig = RoomRig().run(60)
+        before, after, marks = self.changes(rig, 20)
+        self.assertEqual(marks, [float(mark) for mark in self.MARKS])
+        for slot in rig.slots:
+            self.assertEqual(after[slot] - before[slot], len(self.MARKS) * 20,
+                             "%s was emptied and re-filled for a re-cut" % slot)
+        self.assertEqual(rig.bank.refill_holds, 0, "the room was held")
+        self.assertEqual(rig.silent_slots(), [])
+        self.assertEqual({slot: rig.sources[slot].underruns for slot in rig.slots},
+                         {slot: 0 for slot in rig.slots})
+
+    def test_the_relay_s_frame_size_and_a_trim_are_no_different(self):
+        rig = RoomRig({"front_r": 60.0}, samples=FRAME_40MS).run(60)
+        before, after, _marks = self.changes(rig, 12)
+        for slot in rig.slots:
+            self.assertEqual(after[slot] - before[slot], len(self.MARKS) * 12,
+                             "%s was emptied and re-filled for a re-cut" % slot)
+        self.assertEqual(rig.bank.refill_holds, 0, "the room was held")
+        self.assertEqual(rig.silent_slots(), [])
 
 
 if __name__ == "__main__":

@@ -1328,44 +1328,33 @@ class CinemaSpeakerBank:
 
     @_serialized
     def _follow_crossovers(self):
-        """Switch the speakers whose crossover mark changed onto their new stream.
+        """Follow the map's mark for each speaker, and say how many changed.
 
-        Played, not merely re-remembered: a speaker whose crossover changed is
-        holding frames of the *old* programme, and appending the new one behind
-        them would leave a step in that speaker's own stream (the room's instant,
-        then a different timbre). So it is emptied and put back on the room's
-        own instant out of the new stream -- the same treatment ``realign``
-        gives a speaker that ran dry -- one speaker at a time, so the speakers
-        that did not change (or the ones done before it) are still playing and
-        the room keeps its clock. Nothing else is stopped and the song is not
-        restarted: what changes is one speaker's programme at the live edge.
+        A mark that changed is a *programme* change, not a restart. The frames
+        that speaker already holds are the same song at the same instant with
+        the other band kept -- a crossover is not a seek -- and the room's next
+        frame is handed to it out of its new stream (``_programme`` reads the
+        mark per slot, and the stream was warmed above so its filter is already
+        settled when that frame arrives). So the speaker is never stopped,
+        never emptied and never re-aligned: it plays the last of the old
+        programme out, a queue's worth (60-120 ms), and carries straight on.
 
-        A speaker still waiting out its own delay trim is left alone: it is fed
-        every frame by construction, so it takes the new stream with the next
-        one, and stopping it would throw away the audio its trim is holding.
+        Emptying it instead was heard: a builder pressing a crossover line
+        three or four times in a row threw away that speaker's queue and
+        started it again on every press, and a stop mid-buffer is a step in the
+        audio no listener-side scheduling can undo. The one place a speaker is
+        emptied is ``realign``, for one that stalled -- there the frames that
+        follow are a window *from the past*, so a splice would leave that
+        speaker playing at an instant of its own. Here they are the live edge,
+        which is exactly where its queue already ends.
 
-        Returns how many speakers were switched.
+        Returns how many speakers changed mark.
         """
         changed = self._sync_crossovers()
-        if not changed:
-            return 0
-        playing = bool(self.slot_sources) and self.playing()
-        switched = 0
-        for slot in changed:
-            if self.slot_sources.get(slot) is None or self._held(slot):
-                continue
-            if not self._empty_speaker(slot):
-                # A speaker the backend will not let go of keeps the frames it
-                # holds and takes the new stream from the next one: a seam in
-                # that speaker, rather than the room losing its instant.
-                continue
-            switched += 1
-            if playing:
-                self.start_playback()
-        if switched:
+        if changed:
             log_line(f"[Cinema] room {self.renderer.profile.name}: "
-                     f"{switched} speaker(s) re-cut to their crossover")
-        return switched
+                     f"{len(changed)} speaker(s) re-cut to their crossover")
+        return len(changed)
 
     @_serialized
     def reconfigure(self, renderer):
@@ -1422,14 +1411,15 @@ class CinemaSpeakerBank:
                 self._pools[slot] = self._make_speaker(audio, slot)
             except Exception:
                 self.failure_reason = "cinema speaker could not join the room"
-        # A speaker whose *crossover mark* changed was never part of this
-        # method's arithmetic: it is the same speaker, fed a different
-        # programme (see _follow_crossovers, which puts it back on the room's
-        # own instant).
-        switched = self._follow_crossovers()
-        if added or switched:
-            # Every speaker holds the same frames again, so the new ones start
-            # on the beat the room is already playing.
+        # A speaker whose crossover mark changed is the same speaker fed a
+        # different programme: it is not stopped or re-filled here, it takes
+        # the new stream with the next frame it is handed (see
+        # _follow_crossovers).
+        self._follow_crossovers()
+        if added:
+            # A speaker that just appeared holds nothing, so it is filled with
+            # the frames the room still holds and starts on the beat that is
+            # already playing.
             self.realign(play=False)
         self.touch_environment()
         self.update_output()
