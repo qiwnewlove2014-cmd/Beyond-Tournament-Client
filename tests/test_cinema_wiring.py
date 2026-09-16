@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs import jukebox
 from libs.audio.cinema import (ROOM_MAX_DISTANCE, ROOM_RADIUS,
                                ROOM_REFERENCE_DISTANCE, CinemaRenderer,
-                               CinemaSpeakerBank, host_for, set_enabled)
+                               CinemaSpeakerBank, host_for, room_plan, set_enabled)
 from libs.world_map import CinemaSpeakerZone, Map
 
 
@@ -617,10 +617,49 @@ class CinemaBankTests(unittest.TestCase):
         game, renderer, bank = self.make()
         bank.queue_frame(b"\x01\x00" * 4, b"\x02\x00" * 4)
         for source in bank.sources:
+            source.state = cyal.SourceState.PLAYING
             source.buffers_processed = 1
         self.assertIsNone(bank.last_output_at)
         self.assertTrue(bank.reclaim())
         self.assertIsNotNone(bank.last_output_at)
+
+    def test_a_speaker_that_is_not_playing_is_left_alone(self):
+        """A stopped source's "finished" count is not a disclosure.
+
+        OpenAL reports a source that is not playing as having processed
+        everything it holds, so reclaiming one hands back audio nobody heard --
+        the pre-buffer a room is still filling, and the whole-frame hold a
+        trimmed speaker is waiting out. A pump that reclaimed there gave the
+        hold straight back, the room's depth never reached ``wanted_for_start``
+        (heard as "cinema mode went quiet"), or a speaker started on the
+        newest frame it held and the delay an installer dialled in came out as
+        the wrong number (see ``tests/room_sim.py``).
+        """
+        game, renderer, bank = self.make()
+        bank.queue_frame(b"\x01\x00" * 4, b"\x02\x00" * 4)
+        for source in bank.sources:
+            source.buffers_processed = 1          # the lying count
+        self.assertFalse(bank.reclaim())
+        self.assertIsNone(bank.last_output_at)
+        for source in bank.sources:
+            self.assertEqual(source.buffers_queued, 1,
+                             "the room lost a frame it never played")
+        # A paused speaker is OpenAL's own hold on it, and its count is still
+        # truthful -- that one is reclaimed.
+        for source in bank.sources:
+            source.state = cyal.SourceState.PAUSED
+        self.assertTrue(bank.reclaim())
+
+    def test_teardown_does_take_everything_back(self):
+        """``_reset_output`` is the one place a stopped speaker is drained."""
+        game, renderer, bank = self.make()
+        bank.queue_frame(b"\x01\x00" * 4, b"\x02\x00" * 4)
+        for source in bank.sources:
+            source.buffers_processed = 1
+        bank._reset_output()
+        for source in bank.sources:
+            self.assertEqual(source.buffers_queued, 0)
+            self.assertEqual(source.buffers_processed, 0)
 
     def test_start_playback_waits_for_the_whole_room_to_buffer(self):
         game, renderer, bank = self.make()
@@ -730,6 +769,39 @@ class CinemaModeTests(unittest.TestCase):
         player.refresh_cinema_rooms(now=1e6)
         self.assertIsNotNone(player.players["j1"].get("cinema"))
 
+    def test_the_read_out_and_the_playing_room_agree_about_who_is_silent(self):
+        """One descriptor for both, or a menu would describe another room.
+
+        ``surround`` on a cabinet with a placed rear pair: the *playing* room
+        feeds no rear slot at all, and the read-out a menu shows names those
+        very speakers. Built through the same factory, so they cannot drift.
+        """
+        entries = [('front_l', -30), ('front_r', 30),
+                   ('rear_l', -150), ('rear_r', 150)]
+        game, player, streamer = self.build("surround", entries=entries)
+        bank = streamer.call_args.kwargs.get("cinema")
+        self.assertIsInstance(bank, CinemaSpeakerBank)
+        self.assertNotIn("rear_l", bank.renderer.slots)
+        self.assertNotIn("rear_r", bank.renderer.slots)
+        _plan, silent = room_plan(game, (10.0, 20.0, 0.0),
+                                  requested="surround", room_id="j1")
+        # spk0..spk3 in the order they were placed, and the read-out names
+        # exactly the placed slots the playing room does not feed.
+        placed = ["front_l", "front_r", "rear_l", "rear_r"]
+        fed = set(bank.renderer.slots)
+        self.assertEqual([slot for _name, slot in silent],
+                         [slot for slot in placed if slot not in fed])
+
+    def test_auto_leaves_no_speaker_out(self):
+        entries = [('front_l', -30), ('front_r', 30),
+                   ('rear_l', -150), ('rear_r', 150)]
+        game, player, streamer = self.build("auto", entries=entries)
+        bank = streamer.call_args.kwargs.get("cinema")
+        self.assertEqual(bank.renderer.profile.name, "theatre")
+        _plan, silent = room_plan(game, (10.0, 20.0, 0.0),
+                                  requested="auto", room_id="j1")
+        self.assertEqual(silent, [])
+
 
 class CabinetCinemaMenuTests(unittest.TestCase):
     """The cabinet's own menu: what it plays through, and staff changing it."""
@@ -791,6 +863,46 @@ class CabinetCinemaMenuTests(unittest.TestCase):
         game = self.room_game(speakers=())
         detail = jukebox._cinema_detail(game, self.state("theatre"), "j1")
         self.assertIn("ring of speakers", detail)
+
+    def test_the_read_out_names_the_speakers_a_forced_shape_will_not_use(self):
+        """A requested shape is a shape: it can leave a placed speaker silent.
+
+        ``surround`` has no rear slots, so a rear pair someone placed and tuned
+        around the cabinet is never handed a buffer -- silent, with nothing on
+        any screen that said so, which is exactly what reads as a broken room.
+        The cabinet's own answer now names them (and still acquires nothing).
+        """
+        game = self.room_game(speakers=(('front_l', -30), ('front_r', 30),
+                                        ('rear_l', -150), ('rear_r', 150)))
+        detail = jukebox._cinema_detail(game, self.state("surround"), "j1")
+        self.assertIn("surround", detail)
+        self.assertIn("does not use", detail)
+        self.assertIn("spk2", detail)
+        self.assertIn("spk3", detail)
+        self.assertIn("2 of the speakers placed here", detail)
+        self.assertEqual(len(game.audio_mngr.context.created), 0)
+
+    def test_a_shape_that_does_use_them_all_says_nothing(self):
+        """The same four speakers, read as the map itself reads them."""
+        game = self.room_game(speakers=(('front_l', -30), ('front_r', 30),
+                                        ('rear_l', -150), ('rear_r', 150)))
+        detail = jukebox._cinema_detail(game, self.state("auto"), "j1")
+        self.assertIn("room speakers", detail)
+        self.assertNotIn("does not use", detail)
+
+    def test_the_mode_picker_says_what_each_shape_would_leave_out(self):
+        """The mistake is choosing a mode, so the warning sits on the choice."""
+        game = self.room_game(speakers=(('front_l', -30), ('front_r', 30),
+                                        ('rear_l', -150), ('rear_r', 150)))
+        _current, choices = jukebox._cinema_mode_choices(
+            game, self.state("surround"), "j1")
+        labels = {value: label for value, label in choices}
+        self.assertIn("spk2", labels["surround"])
+        self.assertIn("spk3", labels["surround"])
+        self.assertNotIn("does not use", labels["auto"])
+        self.assertNotIn("does not use", labels["theatre"])
+        # Off steps outside the room entirely, so it warns about nothing.
+        self.assertNotIn("does not use", labels["off"])
 
     def test_picking_a_mode_at_the_cabinet_asks_the_server(self):
         game = FakeGame()

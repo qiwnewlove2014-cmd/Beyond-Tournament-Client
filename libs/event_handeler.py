@@ -2141,10 +2141,15 @@ class EventHandeler:
         test_id = data.get("id")
         if not cabinet or not isinstance(test_id, int) or isinstance(test_id, bool):
             return
+        firer = str(data.get("name") or "").strip()
+        own = str(getattr(getattr(self.gameplay, "player", None), "name",
+                          "") or "").strip()
+        mine = bool(firer) and firer == own
 
         def _run():
             report = cinema_sound_test.play(self.game, self.gameplay, cabinet,
-                                            direction, test_id=test_id)
+                                            direction, test_id=test_id,
+                                            mine=mine)
             cinema_sound_test.send_report(self.game, test_id, report)
 
         with contextlib.suppress(Exception):

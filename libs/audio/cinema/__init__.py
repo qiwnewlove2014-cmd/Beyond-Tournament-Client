@@ -71,8 +71,8 @@ from .peer import (PeerRoomFeed, PeerRoomHost, describe as peer_describe,
 from .plugin import (CINEMA_AUTO, CINEMA_OFF, CinemaSpeakerHost, acquire_bank,
                      acquire_renderer, cabinet_anchor, cinema_room, host_for,
                      map_cabinet_anchors, map_speakers, preview_room, release_all,
-                     release_renderer, room_diagnosis, rooms_enabled, set_enabled,
-                     set_rooms_enabled)
+                     release_renderer, room_diagnosis, room_plan, rooms_enabled,
+                     set_enabled, set_rooms_enabled)
 from .profiles import (DEFAULT_PROFILE, PROFILES, CinemaProfile,
                        get_profile, profile_names)
 from .speech import (SpeechRooms, describe as speech_describe, drop as speech_drop,
@@ -143,6 +143,7 @@ __all__ = [
     "map_speakers",
     "mid_side",
     "preview_room",
+    "room_plan",
     "resolve_room",
     "rooms_enabled",
     "set_rooms_enabled",

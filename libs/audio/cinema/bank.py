@@ -35,11 +35,28 @@ from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
 from .listener import (distance_gain, occlusion_filter, restore_filter,
                        speaker_aim_gain)
 
-# One pool and one queue allowance per speaker. The radio between them keeps
+# One pool and one queue allowance per speaker. The ratio between them keeps
 # the same shape as the plain jukebox (32 buffers, 10 queued): enough head-
 # room for the startup pre-buffer plus network jitter, and never enough to
 # let a fast decoder run ahead of the room.
-BUFFERS_PER_SLOT = 12
+#
+# The pool has to cover everything a speaker can legitimately be holding at
+# once, or ``queue_frame`` refuses a frame -- and a refused frame is audio
+# nobody ever hears (the "it jumps forward for a second" report, which the
+# relay counts as a shed frame). What one speaker can hold:
+#
+#   10  the deepest queue the relay keeps before it sheds (its own cap)
+#    4  the frames a pump hands over before it reclaims any of them
+#    2  slack: the frame being rendered, and a ``realign`` fill
+#
+# plus, for a trimmed speaker, the whole-frame **hold** it waits out, which
+# those same buffers carry (see ``hold_frames``: 100 ms is five 20 ms frames).
+# 12 covered none of the above: a trimmed speaker's hold and a pump's worth of
+# un-reclaimed buffers together asked for more buffers than a pool had, so the
+# deepest trims dropped frames -- with the pool emptied, the room refilled and
+# the trim landed correctly, which is why a delay showed up "minutes into the
+# song" and looked like it had a mind of its own.
+BUFFERS_PER_SLOT = 16
 PREBUFFER_FRAMES = 4
 RESUME_FRAMES = 3
 MAX_QUEUED_FRAMES = 6
@@ -358,12 +375,42 @@ class CinemaSpeakerBank:
             return False
 
     @_serialized
-    def reclaim(self):
-        """Return finished buffers to their speaker's pool; True if any moved."""
+    def reclaim(self, *, drain_stopped=False):
+        """Return finished buffers to their speaker's pool; True if any moved.
+
+        Only a speaker that is *playing* -- or paused, which is OpenAL's own
+        hold on it and still a truthful count -- is read for finished buffers.
+        A **stopped** source reports *everything it holds* as processed
+        (``AL_BUFFERS_PROCESSED`` counts a buffer finished the moment its
+        source is not playing it), so reclaiming one hands back audio it has
+        never played. In a room that is not two things at once, those frames
+        are exactly the audio the room is waiting on:
+
+        * the pre-buffer a room is still filling before it can start at all,
+        * and the whole frames of **hold** a trimmed speaker is waiting out --
+          its delay trim IS those frames (see ``hold_frames``).
+
+        A transport that reclaims on every pump (``jukebox_relay``,
+        ``AudioStreamer``) therefore gives the hold straight back before the
+        speaker can spend it: the room's depth never reaches
+        ``wanted_for_start`` (heard as "cinema mode went quiet"), or the
+        speaker starts on the newest frame it holds instead of the oldest and
+        the delay an installer dialled in is heard as the *wrong number* -- or
+        as none at all ("the delays only work later in the song").
+        ``peer.py`` and the voice leg already refuse to reclaim a room that is
+        not playing for this very reason; this is the same rule, in the one
+        place that owns the buffers.
+
+        ``drain_stopped`` is the **teardown** path (``_reset_output``): the
+        room is being taken apart and every buffer it still holds is wanted
+        back, played or not.
+        """
         reclaimed = False
         for slot, source in list(self.slot_sources.items()):
             pool = self._pools.get(slot)
             if pool is None:
+                continue
+            if not drain_stopped and not self._readable(slot):
                 continue
             try:
                 while source.buffers_processed > 0:
@@ -381,6 +428,24 @@ class CinemaSpeakerBank:
         if reclaimed:
             self.last_output_at = self._clock()
         return reclaimed
+
+    def _readable(self, slot):
+        """True while this speaker's finished-buffer count can be believed.
+
+        Playing or paused, and only those: OpenAL reports a stopped source as
+        having processed everything it holds, so the count is not a disclosure
+        of what was heard until the source is actually running. A state that
+        cannot be read is treated as *not* readable -- leaving buffers with the
+        speaker is always safe, handing back audio nobody played is not.
+        """
+        source = self.slot_sources.get(slot)
+        if source is None:
+            return False
+        try:
+            return source.state in (cyal.SourceState.PLAYING,
+                                    cyal.SourceState.PAUSED)
+        except Exception:
+            return False
 
     # ------------------------------------------------- frame size and floor
 
@@ -463,7 +528,20 @@ class CinemaSpeakerBank:
             # Nothing is playing: the transport's own start path owns this room
             # and holds it until ``wanted_for_start`` frames are queued.
             return False
-        depth = min(self._queued_of(slot) for slot in self.slot_sources)
+        # Only the speakers that are *playing* are measured. A speaker that
+        # stopped mid-song (an underrun, a hiccup) holds an empty queue by
+        # construction, and reading that as "the room is running low" held the
+        # whole room for a refill -- and while a room is held, ``_feed_slots``
+        # feeds *every* speaker (nothing is playing, so none is being left
+        # out), which rebuilt the stopped one out of **live** frames. It then
+        # started on content ahead of the room's own instant and stayed there:
+        # heard as the cabinets coming apart after a stumble, and the trim an
+        # installer dialled coming back as a different number (the reported
+        # "it comes apart and then tries to pull itself back together").
+        # A stopped speaker is ``realign``'s to put back on the room's window.
+        playing = self._playing_slots()
+        measured = playing or list(self.slot_sources)
+        depth = min(self._queued_of(slot) for slot in measured)
         if depth > LOW_QUEUE_FRAMES:
             return False
         return self._begin_refill_hold(depth)
@@ -1144,7 +1222,10 @@ class CinemaSpeakerBank:
             with contextlib.suppress(Exception):
                 source.stop()
         try:
-            self.reclaim()
+            # Teardown: every buffer the room still holds is wanted back, and
+            # a stopped speaker is the one thing a routine ``reclaim`` refuses
+            # to read (see reclaim()).
+            self.reclaim(drain_stopped=True)
         except Exception:
             pass
         self._plays_started = False

@@ -39,7 +39,7 @@ from .audio_diagnostics import probe as audio_probe
 from .audio.cinema import (CINEMA_AUTO, CINEMA_OFF, ROOM_MAX_DISTANCE,
                            ROOM_REFERENCE_DISTANCE, acquire_bank, cabinet_anchor,
                            cinema_room, preview_room, profile_names,
-                           release_renderer, room_diagnosis)
+                           release_renderer, room_diagnosis, room_plan)
 
 # The profile ids a cabinet's mode may name, and the shape every jukebox
 # caller can rely on (see plugin.CINEMA_AUTO / CINEMA_OFF).
@@ -1921,19 +1921,68 @@ def _cinema_detail(game, gp, jukebox_id, mode=None):
     if anchor is None:
         return ("This cabinet has no cinema room: it is not on the map (or its "
                 "position is not known yet).")
-    room = preview_room(game, anchor, room_id=jukebox_id)
-    if room is not None:
+    plan, silent = room_plan(game, anchor, requested=mode, room_id=jukebox_id)
+    if plan is not None and plan.placement is not None:
         if mode == CINEMA_AUTO:
             return (f"Playing through the room speakers around this cabinet "
-                    f"({room.summary()}).")
-        return (f"This cabinet plays as {mode}: {room.summary()}. A shape "
-                f"nobody placed around it is filled from the ring behind it.")
+                    f"({plan.summary()}).")
+        return (f"This cabinet plays as {mode}: {plan.summary()}. A shape "
+                f"nobody placed around it is filled from the ring behind it."
+                + _silent_speaker_note(silent))
     if mode != CINEMA_AUTO:
+        # The shape outlives the map: it is played from the ring behind the
+        # cabinet. Every speaker standing here is outside it (named when there
+        # are any), and the diagnosis says why none of them made a room.
         return (f"This cabinet plays as {mode} from a ring of speakers behind "
                 f"it, because the map has no room here: "
-                f"{room_diagnosis(game, anchor, room_id=jukebox_id)}.")
+                f"{room_diagnosis(game, anchor, room_id=jukebox_id)}."
+                + _silent_speaker_note(silent))
     return (f"No cinema room here, so this cabinet plays its own stereo: "
             f"{room_diagnosis(game, anchor, room_id=jukebox_id)}.")
+
+
+def _silent_speaker_note(silent):
+    """Name the speakers a shape does not use, or say nothing when it uses all.
+
+    A requested shape names a fixed set of slots, so a speaker somebody placed
+    on a slot that shape does not have is silent -- and "silent with nothing on
+    any screen that says so" is indistinguishable from a broken room. One
+    sentence, in the shape's own words, is the whole fix (see
+    ``cinema_plugin.room_plan``).
+    """
+    if not silent:
+        return ""
+    names = ", ".join(str(name or slot) for name, slot in silent)
+    return (f" Speakers this shape does not use are silent: {names}"
+            f" ({len(silent)} of the speakers placed here); Auto plays"
+            f" whatever stands around the cabinet.")
+
+
+def _cinema_mode_choices(game, gp, jukebox_id):
+    """The mode menu's lines, each already saying what it would leave out.
+
+    The warning belongs where the mistake is made: a shape is chosen once and
+    heard for every song after it, so a mode that would leave one of the
+    speakers placed here silent says so next to its own name rather than in a
+    log nobody reads.
+    """
+    current = _cabinet_cinema_mode(gp, jukebox_id)
+    anchor = cabinet_anchor(game, jukebox_id) if game is not None else None
+
+    def _note(name):
+        if anchor is None:
+            return ""
+        _plan, silent = room_plan(game, anchor, requested=name, room_id=jukebox_id)
+        return _silent_speaker_note(silent)
+
+    choices = [
+        (CINEMA_AUTO, "Auto - use the speakers placed around this cabinet"
+         + _note(CINEMA_AUTO)),
+        (CINEMA_OFF, "Off - always this cabinet's own stereo"),
+    ]
+    choices.extend((name, f"Force the {name} room shape{_note(name)}")
+                   for name in profile_names())
+    return current, choices
 
 
 def _open_cinema_mode_menu(game, gp, jukebox_id):
@@ -1945,13 +1994,7 @@ def _open_cinema_mode_menu(game, gp, jukebox_id):
     """
     from . import menu as menu_mod, menus
 
-    current = _cabinet_cinema_mode(gp, jukebox_id)
-    choices = [
-        (CINEMA_AUTO, "Auto - use the speakers placed around this cabinet"),
-        (CINEMA_OFF, "Off - always this cabinet's own stereo"),
-    ]
-    choices.extend((name, f"Force the {name} room shape")
-                   for name in profile_names())
+    current, choices = _cinema_mode_choices(game, gp, jukebox_id)
 
     items = []
     for value, description in choices:

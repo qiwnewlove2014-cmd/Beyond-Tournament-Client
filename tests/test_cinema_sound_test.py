@@ -159,7 +159,11 @@ def make_game(speakers=(("front_l", 6.5, 26.5), ("front_r", 13.5, 26.5)),
         occlusion_tier=lambda *args: 0)
     game.gameplay = FakeGameplay(map=map_obj, music_bot=FakeBot(),
                                  jukebox_player=player, game=game,
-                                 megaphone=None, can_use_cinema_pan=True)
+                                 megaphone=None, can_use_cinema_pan=True,
+                                 # This connection's own name, as login sets it:
+                                 # what a relayed test is compared against to
+                                 # know whether its shot was ours.
+                                 player=SimpleNamespace(name="Somchai"))
     game.called_after = []
     game.call_after = lambda ms, fn: game.called_after.append((ms, fn))
     game.network = FakeNetwork()
@@ -259,6 +263,62 @@ class WhatThisMachineDidTests(unittest.TestCase):
         self.assertFalse(report["heard"])
         self.assertIn("Instruments", report["reason"])
 
+    def test_a_shot_this_client_fired_is_heard_over_its_own_switch(self):
+        """The one exception: the tester hears the room they are testing.
+
+        A tester whose normal listening choice is "played where they stand"
+        could otherwise never hear the cabinet they walked up to -- the one
+        pair of ears standing in front of that room would be the reason the
+        summary read "heard 0/n". The exception is this client, this note, and
+        this switch line only.
+        """
+        game = make_game(live=False)
+        with mock.patch.object(cinema_sound_test, "log_line") as logged:
+            report = cinema_sound_test.play(game, game.gameplay, "j1", "auto",
+                                            mine=True)
+        self.assertTrue(report["heard"])
+        self.assertEqual(report["speakers"], 2)
+        self.assertEqual(report["reason"], "")
+        self.assertEqual(len(game.audio_mngr.played), 2)
+        # ...and the line it leaves says the switch was out of the way, so a
+        # later reader can tell this from a note heard through a room.
+        self.assertIn("Instruments switch is off", logged.call_args[0][0])
+
+    def test_every_other_machine_still_answers_its_own_switch(self):
+        game = make_game(live=False)
+        report = cinema_sound_test.play(game, game.gameplay, "j1", "auto",
+                                        mine=False)
+        self.assertFalse(report["heard"])
+        self.assertIn("Instruments", report["reason"])
+        self.assertEqual(game.audio_mngr.played, [])
+
+    def test_the_exception_is_the_switch_and_nothing_else(self):
+        """A shot you fired is not a machine that can hear, or a room that works.
+
+        The muted machine, the cabinet this map does not have, the room that
+        does not resolve and the ears out of its reach are answers about the
+        room -- inventing audibility for them would be the false green the
+        whole feature exists to remove.
+        """
+        muted = make_game(live=False)
+        muted.audio_mngr.muted = True
+        self.assertIn("muted", cinema_sound_test.play(
+            muted, muted.gameplay, "j1", "auto", mine=True)["reason"])
+        missing = make_game(live=False)
+        self.assertIn("j9", cinema_sound_test.play(
+            missing, missing.gameplay, "j9", "auto", mine=True)["reason"])
+        unresolved = make_game(speakers=(("front_l", 6.5, 26.5),), live=False)
+        self.assertTrue(cinema_sound_test.play(
+            unresolved, unresolved.gameplay, "j1", "auto", mine=True)["reason"])
+        far = make_game(cabinets=(("j1", OTHER_ANCHOR),),
+                        speakers=(("front_l", 196.5, 306.5),
+                                  ("front_r", 203.5, 306.5)),
+                        position=(10.0, 25.0, 0.0), live=False)
+        self.assertIn("out of reach", cinema_sound_test.play(
+            far, far.gameplay, "j1", "auto", mine=True)["reason"])
+        for game in (muted, missing, unresolved, far):
+            self.assertEqual(game.audio_mngr.played, [])
+
     def test_a_cabinet_this_map_does_not_have_says_so(self):
         game = make_game()
         report = cinema_sound_test.play(game, game.gameplay, "j9", "auto")
@@ -355,6 +415,50 @@ class TheShotItselfTests(unittest.TestCase):
         self.assertEqual(payload["id"], 3)
         self.assertTrue(payload["heard"])
         self.assertEqual(len(game.audio_mngr.played), 2)
+
+    def test_the_client_that_fired_it_hears_its_own_shot_over_its_switch(self):
+        """The one exception, decided from the relay's own name field.
+
+        The Server relays who fired the shot; this connection compares it with
+        the name login gave it. That name is the whole scope -- one client, one
+        note -- so a tester who keeps ``Instruments:`` off can still hear the
+        room they walked up to, while nobody else's switch is touched.
+        """
+        from libs import event_handeler
+        game = make_game(live=False)
+        handler = event_handeler.EventHandeler.__new__(event_handeler.EventHandeler)
+        handler.game = game
+        handler.gameplay = game.gameplay
+        handler.cinema_test({"id": 4, "cabinet": "j1", "direction": "auto",
+                             "name": "Somchai"})
+        _channel, event, payload = game.network.sent[-1]
+        self.assertEqual(event, "cinema_test_report")
+        self.assertTrue(payload["heard"])
+        self.assertEqual(payload["speakers"], 2)
+        self.assertEqual(len(game.audio_mngr.played), 2)
+
+    def test_another_testers_shot_answers_this_machines_switch(self):
+        """Somebody else's shot is not mine, and a nameless relay is nobody's.
+
+        A client that cannot read its own name -- an older Server that sends no
+        name, a login that has not landed -- has no exception at all, which is
+        the behaviour every client had before it existed.
+        """
+        from libs import event_handeler
+        game = make_game(live=False)
+        handler = event_handeler.EventHandeler.__new__(event_handeler.EventHandeler)
+        handler.game = game
+        handler.gameplay = game.gameplay
+        handler.cinema_test({"id": 5, "cabinet": "j1", "direction": "auto",
+                             "name": "SomeoneElse"})
+        _channel, event, payload = game.network.sent[-1]
+        self.assertEqual(event, "cinema_test_report")
+        self.assertFalse(payload["heard"])
+        self.assertIn("Instruments", payload["reason"])
+        self.assertEqual(game.audio_mngr.played, [])
+        game.network.sent.clear()
+        handler.cinema_test({"id": 6, "cabinet": "j1", "direction": "auto"})
+        self.assertFalse(game.network.sent[-1][2]["heard"])
 
     def test_a_packet_without_a_usable_id_changes_nothing(self):
         from libs import event_handeler

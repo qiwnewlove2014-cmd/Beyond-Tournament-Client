@@ -2035,6 +2035,42 @@ class RoomCheckToolTests(unittest.TestCase):
         self.assertEqual(self.tool.wall_tiles(thick, room, (10.0, 20.0, 0.0)), 3)
         self.assertEqual(self.tool.wall_tiles(thick, room, (10.0, 12.0, 0.0)), 0)
 
+    def test_the_tool_says_which_speakers_a_cabinets_mode_will_not_use(self):
+        """The question this tool is run for: why is that speaker silent?
+
+        A cabinet set to ``surround`` has no rear slot, so a placed rear pair
+        is never fed however it is tuned. The check reads the mode off the map
+        and names those speakers, from the same read-out the in-game cabinet
+        menu gives -- so a builder sees it without starting the game.
+        """
+        anchor = (10.0, 5.0, 0.0)
+        jukeboxes = [("j1", anchor)]
+
+        def speaker(name, channel, x, y):
+            return {"id": name, "channel": channel, "minx": x, "maxx": x + 1,
+                    "miny": y, "maxy": y + 1, "minz": 0, "maxz": 1}
+
+        speakers = [speaker("f_l", "front_l", 3, 17),
+                    speaker("f_r", "front_r", 16, 17),
+                    speaker("r_l", "rear_l", 3, -4),
+                    speaker("r_r", "rear_r", 16, -4)]
+        silent, plan = self.tool.placed_but_silent(jukeboxes, speakers, "j1",
+                                                   anchor, "surround")
+        self.assertEqual(plan.profile, "surround")
+        self.assertEqual([slot for _name, slot in silent], ["rear_l", "rear_r"])
+        line = self.tool.silent_line(silent)
+        self.assertIn("r_l [rear_l]", line)
+        self.assertIn("never", line)
+        # Auto is the map's own reading of the same four speakers: it uses all
+        # of them, so there is nothing to warn about.
+        silent, plan = self.tool.placed_but_silent(jukeboxes, speakers, "j1",
+                                                   anchor, "auto")
+        self.assertEqual(silent, [])
+        self.assertEqual(plan.profile, "theatre")
+        # Off steps outside the room entirely: no shape, nothing to name.
+        self.assertEqual(self.tool.placed_but_silent(jukeboxes, speakers, "j1",
+                                                     anchor, "off"), ((), None))
+
     def test_a_wall_is_a_platform_whose_type_starts_with_wall(self):
         """Real maps build walls from ``<platform type="wall...">``, not <wall>."""
         with tempfile.TemporaryDirectory() as folder:

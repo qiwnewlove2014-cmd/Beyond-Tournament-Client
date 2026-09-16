@@ -16,11 +16,18 @@ each one reports back what it did. The Server collects the answers and hands the
 person who fired it one line (see ``server/libs/cinema_sound_test.ts``); this
 module is the client's half: play it here, say why not, and send the answer.
 
-Two rules it keeps. It never touches the frame queue of a room that is playing a
-song (a test is a note *at* the speakers, so a song in progress is not disturbed
--- what it cannot check is the queue's own depth), and it never asks the Server
-to decide anything the listening machine decides: the switches are read here,
-where they are.
+Three rules it keeps. It never touches the frame queue of a room that is playing
+a song (a test is a note *at* the speakers, so a song in progress is not
+disturbed -- what it cannot check is the queue's own depth), it never asks the
+Server to decide anything the listening machine decides (the switches are read
+here, where they are), and it holds exactly **one** exception to the listening
+switches: the client that fired a shot hears that one note whatever its own
+``Instruments:`` line says. That line is a listening choice about *bands*, and a
+tester checking a room they are standing in front of is not asking to hear a
+band over it -- they are asking whether this cabinet can be heard at all, and
+without the exception the answer is always no on the one machine that is
+standing in the room. Every other machine answers its own switch, and nothing
+else about the note is exempt (see ``play``).
 """
 
 from ... import consts
@@ -79,7 +86,7 @@ def fire(game, gameplay, cabinet, direction):
     return True
 
 
-def play(game, gameplay, cabinet, direction, *, test_id=0):
+def play(game, gameplay, cabinet, direction, *, test_id=0, mine=False):
     """Play the test note here and return the report this client will send.
 
     The report is ``{"heard", "speakers", "reason"}``: the number of speakers the
@@ -88,6 +95,19 @@ def play(game, gameplay, cabinet, direction, *, test_id=0):
     switch, a cabinet this map does not have, a room that does not resolve, ears
     out of the room's reach -- and each one is a different thing to go and fix,
     which is why they are told apart instead of collapsed into "nothing".
+
+    ``mine`` is true on the one client that **fired** this shot (the Server
+    relays the firing player's name with it, and the handler compares it with
+    this connection's own). That client gets the one exception in the whole
+    cinema layer: its own ``Instruments:`` switch is not consulted for the note
+    it fired itself. A tester whose normal listening choice is "played where
+    they stand" could otherwise never hear the room they are checking -- the
+    summary would say "heard 0/n" while the one pair of ears standing in front
+    of that cabinet was the reason. Nothing else is exempt, deliberately: a
+    muted machine, a cabinet this map does not have, a room that does not
+    resolve and ears out of the room's reach are all answers about the room (and
+    about this machine's audio), and inventing audibility for them would be the
+    false green this feature exists to remove.
     """
     report = {"heard": False, "speakers": 0, "reason": ""}
     if game is None or gameplay is None:
@@ -96,8 +116,12 @@ def play(game, gameplay, cabinet, direction, *, test_id=0):
     # The listener's own switch, asked first and asked live: with the band off
     # the rooms (Music Bot menu -> Instruments), a test is not heard from a
     # cabinet here -- and that is an answer about this listener, not about the
-    # cabinet, so it is named as such.
-    if not cinema_live.live_instruments_enabled():
+    # cabinet, so it is named as such. **Except for the shot this client fired
+    # itself** (``mine``): that is one client, one note, and the switch line only
+    # -- a room's reach and this machine's own audio are asked exactly as they
+    # were below, so the tester cannot be told a room works when it does not.
+    switch_off = not cinema_live.live_instruments_enabled()
+    if switch_off and not mine:
         report["reason"] = _bounded("Instruments switch is off here")
         return report
     # ...and this machine's own audio, which is the one silence no switch in the
@@ -139,9 +163,14 @@ def play(game, gameplay, cabinet, direction, *, test_id=0):
     report["speakers"] = int(spoken)
     # One line per shot on this client, on the routine sink: the summary says
     # how many heard it, and this says what *this* machine did about it -- the
-    # half a tester standing in front of the room cannot otherwise read.
+    # half a tester standing in front of the room cannot otherwise read. When
+    # the switch above was out of the way, the line says so: a later reader
+    # (this tester, another one, a bug report) has to be able to tell a note
+    # heard through a room from one heard because its own player fired it.
+    exempt = (" (own Instruments switch is off; the note this client fired is "
+              "heard anyway)") if (spoken and switch_off and mine) else ""
     log_line(f"[Cinema] sound test -> jukebox {cabinet} ({direction}): "
-             + (f"played at {spoken} speaker(s)" if spoken
+             + (f"played at {spoken} speaker(s){exempt}" if spoken
                 else f"not heard here ({report['reason']})"))
     return report
 

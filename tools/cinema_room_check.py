@@ -27,12 +27,13 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 from math import cos, radians, sin, sqrt, trunc
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from libs.audio.cinema import (ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE,
                                CinemaLayout, ListenerPose, exclusive_speakers,
-                               facing_report, resolve_room)
+                               facing_report, resolve_room, room_plan)
 from libs.audio.cinema.router import CinemaRenderer
 
 # Angles and radius for the room --make-room generates: a front wall, the two
@@ -69,10 +70,12 @@ def element_spec(element):
         if len(values) == 6:
             spec.update(dict(zip(("minx", "maxx", "miny", "maxy", "minz", "maxz"),
                                  values)))
-    for key in ("x", "y", "z", "channel", "room", "level", "delay", "aim_yaw",
-                "inner_cone_angle", "outer_cone_angle", "outer_cone_gain"):
+    for key in ("x", "y", "z", "channel", "cinema_mode", "room", "level",
+                "delay", "aim_yaw", "inner_cone_angle", "outer_cone_angle",
+                "outer_cone_gain"):
         if key in attributes:
-            spec[key] = _number(attributes[key]) if key != "channel" else attributes[key]
+            spec[key] = (attributes[key] if key in ("channel", "cinema_mode")
+                         else _number(attributes[key]))
     return spec
 
 
@@ -288,8 +291,65 @@ def demo():
             print("\n".join(facing_lines(room, (0.0, 0.0, 0.0), (0.0, 90.0, 180.0))))
 
 
+def read_modes(path):
+    """``{jukebox_id: cinema_mode}`` from a .map file, ``auto`` when unset.
+
+    The mode is the map's own decision about a cabinet (see
+    ``server/libs/world_map/elements/jukebox.ts``), and it is what decides
+    whether the speakers someone placed are used at all: a forced shape names
+    a fixed set of slots, so a speaker on a slot that shape does not have is
+    never fed. Reading it here is what lets this tool answer "why is that
+    speaker silent" for the cabinet as the map left it.
+    """
+    root = ET.parse(path).getroot()
+    modes = {}
+    for element in root.find("body") or ():
+        if element.tag == "jukebox":
+            modes[str(element.get("id", "?"))] = str(
+                element.get("cinema_mode") or "auto").strip().lower()
+    return modes
+
+
+def placed_but_silent(jukeboxes, speakers, jid, anchor, mode):
+    """``[(name, slot), ...]`` -- speakers the cabinet's own mode does not use.
+
+    The same read-out the cabinet's in-game menu gives
+    (``libs/audio/cinema/plugin.py::room_plan``), run against the map file, so
+    a builder can see it without starting the game -- and from the same
+    function, so the two can never disagree.
+    """
+    if mode in ("", "off"):
+        return (), None
+    map_ = SimpleNamespace(
+        jukebox_list=[SimpleNamespace(id=other_id, center=other)
+                      for other_id, other in jukeboxes],
+        get_cinema_speakers=lambda: list(speakers),
+    )
+    game = SimpleNamespace(gameplay=SimpleNamespace(map=map_))
+    plan, silent = room_plan(game, anchor, requested=mode, room_id=jid)
+    return silent, plan
+
+
+def silent_line(silent, *, ring=False):
+    """One line naming the speakers a cabinet's mode never feeds.
+
+    A requested shape names a fixed set of slots, so a speaker placed on a
+    slot it does not have (a rear pair under ``surround``, say) is silent for
+    every song -- with nothing on any screen that says so, which is what reads
+    as a broken room rather than a shape that does not use it.
+    """
+    names = ", ".join(f"{name} [{slot}]" for name, slot in silent)
+    if ring:
+        return (f"{names} -- the {len(silent)} speaker(s) placed here, and this "
+                "shape builds its own ring instead of them.")
+    return (f"{names} -- this shape has no slot for them, so they are never "
+            "fed.\n            Use 'auto' (the speakers around the cabinet) or "
+            "a shape that names them.")
+
+
 def report_map(path):
     jukeboxes, speakers = read_map(path)
+    modes = read_modes(path)
     if not jukeboxes:
         # The common trap: speakers placed, nothing to anchor them to. A room
         # is resolved around a cabinet, so this is the answer, not "no room".
@@ -305,6 +365,11 @@ def report_map(path):
     print(f"{path}: {len(jukeboxes)} jukebox(es), {len(speakers)} cinema speaker(s)")
     for jid, anchor in jukeboxes:
         print(f"\njukebox {jid} at {tuple(round(v, 1) for v in anchor)}")
+        # The decision first, the room after it: what the cabinet plays through
+        # is the mode's to say, and a forced shape is not the same room as the
+        # map's own reading of the speakers around it.
+        mode = modes.get(jid, "auto")
+        print(f"  mode    : {mode}")
         # A speaker belongs to the cabinet it stands closest to: two rooms on
         # one map must never play two songs through the same speaker.
         rivals = [other for other_id, other in jukeboxes if other_id != jid]
@@ -321,8 +386,20 @@ def report_map(path):
                   "two-source jukebox")
             for reason in reasons:
                 print(f"     {reason}")
+            if mode not in ("", "auto", "off"):
+                # ...unless the mode was asked for by name: that shape outlives
+                # the map and is played from the ring behind the cabinet, so
+                # every speaker placed here is outside it.
+                silent, _plan = placed_but_silent(jukeboxes, speakers, jid,
+                                                  anchor, mode)
+                if silent:
+                    print("  SILENT  : " + silent_line(silent, ring=True))
             continue
         print(describe(room, anchor, heading=0.0))
+        if mode not in ("", "auto", "off"):
+            silent, _plan = placed_but_silent(jukeboxes, speakers, jid, anchor, mode)
+            if silent:
+                print("  SILENT  : " + silent_line(silent))
         walls = read_walls(path)
         if walls:
             print(audible_lines(room, anchor, walls))

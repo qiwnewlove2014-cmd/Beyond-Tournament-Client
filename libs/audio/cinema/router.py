@@ -207,3 +207,27 @@ class CinemaRenderer:
         """Forget the running channel evidence; nothing native to release."""
         self.channel.reset()
         self.active_kind = STEREO
+
+
+def renderer_for(anchor, profile, *, specs=None, fill=True, layout=None,
+                 max_speakers=None, detect_channels=True, declared_layout=AUTO):
+    """The renderer a room asks for, ring and all -- one rule, two callers.
+
+    ``fill`` is the only difference between a room read off the map and one a
+    builder asked for by name: a requested shape may pad itself out with the
+    geometric ring for the slots the map does not have, while a room read off
+    the map is exactly the speakers someone placed. Playback
+    (``plugin.CinemaSpeakerHost.acquire_bank``) and the read-outs (a cabinet's
+    own menu, which has to answer *before* anything is acquired) both build
+    their room here, so a menu can never describe a room that would play
+    differently -- which is the whole point of being able to ask.
+    """
+    if layout is None and not fill and specs:
+        layout = CinemaLayout(anchor, specs, use_ring=False)
+        specs = None
+    if layout is not None:
+        specs = None
+    return CinemaRenderer(anchor, profile, layout, specs=specs,
+                          max_speakers=max_speakers,
+                          detect_channels=detect_channels,
+                          declared_layout=declared_layout)

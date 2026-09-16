@@ -24,11 +24,11 @@ runs its original two-source code path untouched.
 from .bank import DEFAULT_CATEGORY, CinemaSpeakerBank
 from .channel import AUTO
 from .listener import ListenerPose, facing_report
-from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
+from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE, coerce_spec
 from .placement import (AUTO_PROFILE, ROOM_RADIUS, RoomPlan, exclusive_speakers,
                         resolve_room, room_profile)
 from .profiles import DEFAULT_PROFILE, get_profile
-from .router import CinemaRenderer
+from .router import CinemaRenderer, renderer_for
 
 # Player preference. The per-cabinet decision is made by the map (the
 # jukebox element's cinema mode), so this is only a local override for the
@@ -172,21 +172,18 @@ class CinemaSpeakerHost:
             requested = room_profile(placement, requested)
         profile_name = get_profile(requested or self.profile).name
         anchor = tuple(float(value) for value in anchor)
+        # The room is built by the one factory the read-outs use too, so a
+        # menu can never describe a room this would not play: ``fill`` is the
+        # difference between a room read off the map (only the speakers the
+        # map has) and a requested shape (padded from the ring).
         layout = options.pop("layout", None)
         specs = options.pop("specs", None)
-        if layout is None and options.pop("fill", None) is False and specs:
-            # A room read off the map is only the speakers the map has: fill
-            # nothing in from the geometric ring.
-            from .layout import CinemaLayout
-            layout = CinemaLayout(anchor, specs, use_ring=False)
-            specs = None
-        if layout is not None:
-            specs = None
-        renderer = CinemaRenderer(
+        renderer = renderer_for(
             anchor,
             profile_name,
-            layout,
+            layout=layout,
             specs=specs,
+            fill=options.pop("fill", None) is not False,
             max_speakers=self.max_speakers,
             detect_channels=options.pop("detect_channels", True),
             declared_layout=options.pop("declared_layout", AUTO),
@@ -245,13 +242,7 @@ class CinemaSpeakerHost:
             profile=requested or AUTO_PROFILE,
         )
         if placement is not None:
-            # Only an explicitly asked-for profile may pad itself out with
-            # speakers the map does not have (see RoomPlan.fill); a room read
-            # off the map is exactly the speakers someone placed.
-            return RoomPlan(room_profile(placement, requested), placement.specs,
-                            placement,
-                            fill=str(requested or "").strip().lower() not in
-                                 ("", AUTO_PROFILE))
+            return _plan_from(placement, requested)
         if requested and str(requested).strip().lower() not in ("", AUTO_PROFILE):
             # A cabinet the server marked but a map with no speakers in it: a
             # geometric ring behind the cabinet is still a real room, and it
@@ -510,6 +501,20 @@ def map_cabinet_anchors(game, exclude=None):
             if exclude is None or cabinet_id != str(exclude)]
 
 
+def _plan_from(placement, requested):
+    """A resolved placement as the :class:`RoomPlan` a caller asked for.
+
+    The ``fill`` rule lives here because the playing path and the menus both
+    need it: only an explicitly asked-for profile may pad itself out with
+    speakers the map does not have (see ``RoomPlan.fill``), while a room read
+    off the map is exactly the speakers someone placed.
+    """
+    requested = "" if requested is None else str(requested).strip().lower()
+    return RoomPlan(room_profile(placement, requested), placement.specs,
+                    placement,
+                    fill=requested not in ("", AUTO_PROFILE))
+
+
 def preview_room(game, anchor, *, room_id=None, radius=None):
     """Resolve the room the map describes, without turning the feature on.
 
@@ -518,19 +523,58 @@ def preview_room(game, anchor, *, room_id=None, radius=None):
     how the jukeboxes themselves play. :func:`cinema_room` is the playing
     path and still requires the feature to be enabled.
     """
-    speakers = map_speakers(game)
-    if not speakers:
-        return None
+    plan, _silent = room_plan(game, anchor, room_id=room_id, radius=radius)
+    return plan
+
+
+def room_plan(game, anchor, *, requested=None, room_id=None, radius=None):
+    """The room a cabinet's mode would play, and the speakers it leaves out.
+
+    Returns ``(plan, silent)``: ``plan`` is the room ``requested`` resolves to
+    here (None when it has none), and ``silent`` is ``[(name, slot), ...]`` --
+    the speakers standing around the cabinet that this shape does not feed.
+
+    A requested shape names a fixed set of slots, so a speaker somebody placed
+    on a slot that shape does not have (a rear pair under ``surround``, say)
+    is never handed a buffer: silent, with nothing on any screen that says so,
+    which is indistinguishable from a broken room. This is the answer a menu
+    gives, and it is derived from the very renderer playback would build
+    (:func:`router.renderer_for`), so a read-out can never name a speaker the
+    room would not feed -- or stay quiet about one it will not. Previewing
+    acquires nothing and changes nothing.
+    """
+    requested = "" if requested is None else str(requested).strip().lower()
+    if requested == CINEMA_OFF:
+        # The map said this cabinet plays its own stereo, so there is no shape
+        # to read out and no speaker it leaves out: it is silent about
+        # everything on purpose (see ``plan_for``).
+        return None, []
+    anchor = tuple(float(value) for value in anchor)
     radius = float(ROOM_RADIUS if radius is None else radius)
-    placement = resolve_room(
-        exclusive_speakers(speakers, anchor,
-                           rivals=map_cabinet_anchors(game, exclude=room_id),
-                           radius=radius),
-        anchor, radius=radius, room=room_id, profile=AUTO_PROFILE,
-    )
-    if placement is None:
-        return None
-    return RoomPlan(placement.profile_name, placement.specs, placement)
+    candidates = exclusive_speakers(map_speakers(game), anchor,
+                                    rivals=map_cabinet_anchors(game, exclude=room_id),
+                                    radius=radius)
+    placement = resolve_room(candidates, anchor, radius=radius, room=room_id,
+                             profile=requested or AUTO_PROFILE)
+    if placement is not None:
+        plan = _plan_from(placement, requested)
+        room = renderer_for(anchor, plan.profile, specs=plan.specs, fill=plan.fill)
+        placed = [(placed.spec.name, slot)
+                  for slot, placed in placement.speakers.items()]
+    elif requested not in ("", AUTO_PROFILE):
+        # A shape that was asked for outlives the map: the ring behind the
+        # cabinet is the room, so every speaker standing here is outside it.
+        profile_name = get_profile(requested).name
+        plan = RoomPlan(profile_name, None, None, fill=True)
+        room = renderer_for(anchor, profile_name, specs=None, fill=True)
+        placed = [(spec.name, spec.slot) for spec in
+                  (coerce_spec(raw) for raw in candidates) if spec is not None]
+    else:
+        return None, []
+    fed = set(room.slots)
+    silent = sorted(((name, slot) for name, slot in placed if slot not in fed),
+                    key=lambda item: (item[1], str(item[0])))
+    return plan, silent
 
 
 def room_diagnosis(game, anchor, *, room_id=None, radius=None):
