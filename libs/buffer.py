@@ -227,7 +227,10 @@ def add_item(game, name, text, speak=True, sound=""):
                 speech.speak(item.format_text(), i.interrupt, id=f"buffer_{i.name}")
             return
     add_buffer(name)
-    add_item(game, name, text, speak)
+    # The line that opens a buffer still carries its own notification sound:
+    # dropping it here left the first sound of every buffer silent (the round
+    # start sound of a client whose "match" buffer did not exist yet).
+    add_item(game, name, text, speak, sound)
 
 
 def cycle_item(dir):
