@@ -1001,10 +1001,27 @@ class Gameplay(state.State):
             return buffer.cycle_item(3)
         buffer.cycle_item(1)
 
+    def in_competition_match(self):
+        """True while this player is in a started competition match.
+
+        The server only sends `enter_match` / `exit_match` from a real match's
+        start() / remove_player: the persistent world maps, the Pong cabinet
+        (arcade or ranked) and a Blackjack table never do. The flag is therefore
+        exactly "a competition is running for this player", not merely "a game
+        object exists", which is what lets a shield reminder tell the two apart.
+        """
+        return bool(getattr(self, "game_started", False))
+
     def start_raise_shield(self, mod=0):
         if not self.spectator_mode and not getattr(self.player, 'dead', False):
             if not self.shield_mngr.equipped_shield:
-                speak("No shield equipped.")
+                # "No shield equipped." answers a player who meant to raise a
+                # shield, so it only belongs where a shield could be raised at
+                # all -- inside a competition. In a world/build map or in a
+                # minigame the key is stray, and a line spoken for it talks over
+                # the map's own sounds for nothing.
+                if self.in_competition_match():
+                    speak("No shield equipped.")
                 return
             self.shield_mngr.raise_shield()
             self.game.network.send(consts.CHANNEL_MISC, "raise_shield", {"angle": self.player.hfacing})
