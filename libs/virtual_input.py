@@ -22,6 +22,10 @@ class Virtual_input:
         msg_length (int): Sets the maximum character limit one wishes to have in the string before returning
         repeat_first_ms (int): Determines the first instance after which the user's keys will be automatically held. Best left at 500 so the user would have to trigger this event intentionally
         repeat_second_ms (int): Time waited after the first event fires. I.e, assuming the first_ms = 500, the keys will first be repeated at 500, then 550, 600, etc.
+        multiline (bool): Whether this field holds a body of text rather than a
+            value, and so keeps a pasted line break instead of joining it into
+            a space (see paste_text). Default true: a paste is never destroyed
+            unless whoever asked for the field said it is one line.
         """
         self.game = game
         self.key_clock = game.new_clock()
@@ -44,6 +48,7 @@ class Virtual_input:
         self.can_escape = kwargbs.get("escape", True)
         self.whitelisted_characters = list(string.printable)
         self.maximum_message_length = kwargbs.get("msg_length", -1)
+        self.multiline = kwargbs.get("multiline", True)
         self._key_times = {}
         self.initial_key_repeating_time = kwargbs.get("repeat_first_ms", 500)
         self.repeating_increment = kwargbs.get("repeat_second_ms", 50)
@@ -225,6 +230,95 @@ class Virtual_input:
         self.line_list = re.split("\r?\n", self.current_string)
         self._clamp_line_num()
 
+    def _after_text_change(self):
+        """The state every edit leaves behind: the typing notice and its tick."""
+        if self.typing == False and self.current_string and self.current_string[0] != "/":
+            if self.game.network:
+                self.game.network.send(
+                    consts.CHANNEL_MISC, "set_typing", {"typing": True}
+                )
+            self.typing = True
+            self.typing_clock.restart()
+        self._send_typing_tick()
+
+    def paste_text(self, text, multiline=None):
+        """Insert a clipboard text as one edit, with its line breaks decided by
+        the field.
+
+        A paste is not a keystroke: a message written in another window
+        arrives with the line breaks it has, and a field that was not declared
+        one line keeps them -- nothing a player pasted is thrown away by
+        default. A field that *was* declared one line (the Staff Form says so
+        with its own prompt) joins them into spaces, because the Server refuses
+        a line break there at the end of the whole form -- joining them here is
+        what keeps a pasted answer from being thrown away after the confirm
+        step.
+
+        What is spoken is a summary, never the paste: a long message read aloud
+        character by character is unusable. When the field's own cap is reached
+        it says so instead of silently dropping the end of the message.
+        """
+        keep_lines = self.multiline if multiline is None else multiline
+        source = str(text or "")
+
+        # Line endings first, then the characters a text field cannot hold.
+        pasted = source.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+        pasted = "".join(
+            character
+            for character in pasted
+            if character == "\n" or ord(character) >= 32
+        )
+        if not pasted:
+            speak("nothing to paste")
+            return
+
+        joined = not keep_lines
+        if joined:
+            # One line means one line: the breaks become spaces, and the runs
+            # they leave behind are collapsed, which is also what the command
+            # line this answer finally becomes would do to them.
+            pasted = re.sub(r" *\n *", " ", pasted)
+            pasted = re.sub(r" {2,}", " ", pasted)
+
+        truncated = False
+        if self.maximum_message_length != -1:
+            space_left = self.maximum_message_length - len(self.current_string)
+            if space_left <= 0:
+                try:
+                    self.game.direct_soundgroup.play("ui/error.ogg")
+                except Exception:
+                    pass
+                speak(f"this field is full at {self.maximum_message_length} characters")
+                return
+            if len(pasted) > space_left:
+                pasted = pasted[:space_left]
+                truncated = True
+
+        before = self.current_string[: max(0, self._cursor)]
+        after = self.current_string[max(0, self._cursor) :]
+        self.current_string = before + pasted + after
+        self._cursor = len(before) + len(pasted)
+        self.selection = self.get_character()
+        self.start_selection = self._cursor - 1
+        self.end_selection = self._cursor
+        # One paste is many edits, so the line tracking is taken from where the
+        # cursor landed rather than incremented per inserted character.
+        self.line_list = re.split("\r?\n", self.current_string)
+        self.line_num = self.current_string.count("\n", 0, self._cursor)
+        self._clamp_line_num()
+        self._after_text_change()
+
+        lines = pasted.count("\n") + 1
+        summary = [
+            f"pasted {lines} line{'' if lines == 1 else 's'}, "
+            f"{len(pasted)} character{'' if len(pasted) == 1 else 's'}"
+        ]
+        if joined and "\n" in source:
+            summary.append("line breaks joined into spaces")
+        if truncated:
+            summary.append(f"only the first {len(pasted)} characters fit")
+        speak("text pasted from clipboard: " + ", ".join(summary))
+
     def _clamp_line_num(self):
         """Keep line_num inside the current line_list bounds.
 
@@ -354,7 +448,7 @@ class Virtual_input:
         """
         self.whitelisted_characters = list(characters)
 
-    def run(self, message, validate=False, default="", handeler=None, password=False, min_val=None, max_val=None, msg_length=-1):
+    def run(self, message, validate=False, default="", handeler=None, password=False, min_val=None, max_val=None, msg_length=-1, multiline=True):
         speak(message, True, id="text_entry_title")
         self.clear()
         self.hidden = password  # Update hidden state
@@ -373,6 +467,9 @@ class Virtual_input:
                 self.max_val = max_val
             
         self.maximum_message_length = msg_length
+        # Set per field: the Staff Form sends it with the prompt, and the
+        # caller that owns the field knows whether it holds a body of text.
+        self.multiline = multiline
         if default != "":
             self.insert_character(str(default))
         self.typing_clock.restart()
@@ -692,8 +789,7 @@ class Virtual_input:
                     speak("coppied: " + self.selection)
                     pyperclip.copy(self.selection)
                 elif event.key == pygame.K_v and event.mod & pygame.KMOD_CTRL:
-                    speak("text pasted from clipboard")
-                    self.insert_character(pyperclip.paste())
+                    self.paste_text(pyperclip.paste())
                 elif event.key == pygame.K_F1:
                     speak("Word echo on") if self.toggle_word_repetition() else speak(
                         "word echo off"

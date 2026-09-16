@@ -35,9 +35,9 @@ def handeler():
     recorded = {}
 
     def run(prompt, handeler=None, default="", min_val=None, max_val=None,
-            msg_length=-1):
+            msg_length=-1, multiline=False):
         recorded.update(prompt=prompt, min_val=min_val, max_val=max_val,
-                        msg_length=msg_length)
+                        msg_length=msg_length, multiline=multiline)
         return lambda: True
 
     obj = object.__new__(event_handeler_module.EventHandeler)
