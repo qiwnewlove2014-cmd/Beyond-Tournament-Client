@@ -1,6 +1,7 @@
 """Build safety tests use temporary fixtures only; no build or game imports."""
 import contextlib
 import copy
+import errno
 import hashlib
 import importlib.util
 import io
@@ -345,6 +346,122 @@ class BuildSafetyTests(unittest.TestCase):
             safety.publish(self.project, self.entries)
         self.assertEqual(sentinel.read_bytes(), b"fixture")
 
+    def publish_fixture(self):
+        """A checked package ready to publish, over a previous build and compiler output."""
+        package = self.package_fixture()
+        self.write(self.project / safety.OUTPUT_NAME / "previous.txt", b"previous build")
+        self.write(self.project / safety.DIST_NAME / "beyond_tournament.exe", b"compiler output")
+        return package
+
+    def failing_rename(self, should_fail):
+        """A Path.rename that refuses only the calls should_fail() selects."""
+        original = Path.rename
+        def rename(self, target, *args, **kwargs):
+            if should_fail(self, Path(target)):
+                raise PermissionError(errno.EACCES, "file is in use by another process",
+                                      str(Path(self) / "sounds.dat"))
+            return original(self, target, *args, **kwargs)
+        return rename
+
+    def test_publish_keeps_the_previous_build_whole_when_the_swap_fails(self):
+        """A locked output never leaves a half-deleted package behind."""
+        package = self.publish_fixture()
+        output = self.project / safety.OUTPUT_NAME
+        previous = self.project / safety.PREVIOUS_NAME
+        def locked(path, target):
+            return path == package and target == output
+        with mock.patch.object(Path, "rename", self.failing_rename(locked)):
+            with self.assertRaises(safety.BuildSafetyError) as raised:
+                safety.publish(self.project, self.entries)
+        message = str(raised.exception)
+        self.assertIn("file is in use by another process", message)
+        self.assertIn("close whatever holds it", message)
+        self.assertIn(str(package), message)
+        self.assertIn(safety.retry_command(), message)
+        self.assertEqual((output / "previous.txt").read_bytes(), b"previous build")
+        self.assertFalse(previous.exists())
+        self.assertTrue((package / "sounds.dat").is_file())
+        self.assertTrue((self.project / safety.DIST_NAME / "beyond_tournament.exe").is_file())
+
+    def test_preflight_leftover_staging_message_names_the_retry_command(self):
+        """A kept package is recoverable without rebuilding; the message says how."""
+        self.project_fixture()
+        self.write(self.project / safety.STAGING_NAME / "leftover.txt")
+        with self.assertRaises(safety.BuildSafetyError) as raised:
+            safety.validate_project(self.project, self.entries)
+        message = str(raised.exception)
+        self.assertIn(safety.retry_command(), message)
+        self.assertIn("rebuild from scratch", message)
+
+    def test_publish_reports_a_full_drive_as_the_remedy(self):
+        package = self.publish_fixture()
+        output = self.project / safety.OUTPUT_NAME
+        def no_space(path, target):
+            if path == package and target == output:
+                raise OSError(errno.ENOSPC, "no space left on device", str(path))
+            return False
+        with mock.patch.object(Path, "rename", self.failing_rename(no_space)):
+            with self.assertRaises(safety.BuildSafetyError) as raised:
+                safety.publish(self.project, self.entries)
+        self.assertIn("free space on that drive", str(raised.exception))
+        self.assertEqual((output / "previous.txt").read_bytes(), b"previous build")
+
+    def test_publish_never_deletes_the_previous_build_before_the_new_one_lands(self):
+        """The old output is renamed aside, never removed ahead of the swap."""
+        self.publish_fixture()
+        removed, renamed = [], []
+        original_rmtree = safety.shutil.rmtree
+        original_rename = Path.rename
+        def rmtree(path, *args, **kwargs):
+            removed.append(Path(path))
+            return original_rmtree(path, *args, **kwargs)
+        def rename(self, target, *args, **kwargs):
+            renamed.append((Path(self), Path(target)))
+            return original_rename(self, target, *args, **kwargs)
+        with mock.patch.object(safety.shutil, "rmtree", rmtree), mock.patch.object(Path, "rename", rename):
+            safety.publish(self.project, self.entries)
+        output = self.project / safety.OUTPUT_NAME
+        self.assertNotIn(output, removed)
+        self.assertLess(renamed.index((output, self.project / safety.PREVIOUS_NAME)),
+                        renamed.index((self.project / safety.STAGING_NAME, output)))
+        self.assertIn(self.project / safety.PREVIOUS_NAME, removed)
+
+    def test_publish_warns_about_a_locked_leftover_without_failing_a_finished_build(self):
+        self.publish_fixture()
+        previous = self.project / safety.PREVIOUS_NAME
+        original_rmtree = safety.shutil.rmtree
+        def rmtree(path, *args, **kwargs):
+            if Path(path) == previous:
+                raise PermissionError(errno.EACCES, "the process cannot access the file",
+                                      str(previous / "openal.dll"))
+            return original_rmtree(path, *args, **kwargs)
+        stderr = io.StringIO()
+        with mock.patch.object(safety.shutil, "rmtree", rmtree), contextlib.redirect_stderr(stderr):
+            safety.publish(self.project, self.entries)
+        warning = stderr.getvalue()
+        self.assertIn("[BUILD WARNING]", warning)
+        self.assertIn(str(previous), warning)
+        self.assertIn("delete", warning)
+        self.assertTrue((self.project / safety.OUTPUT_NAME / "sounds.dat").is_file())
+        self.assertFalse((self.project / safety.OUTPUT_NAME / "previous.txt").exists())
+
+    def test_publish_refuses_a_leftover_it_cannot_delete_without_touching_anything(self):
+        package = self.publish_fixture()
+        leftover = self.project / safety.PREVIOUS_NAME
+        self.write(leftover / "sounds.dat")
+        def rmtree(path, *args, **kwargs):
+            raise PermissionError(errno.EACCES, "the process cannot access the file", str(path))
+        before = self.snapshot()
+        with mock.patch.object(safety.shutil, "rmtree", rmtree):
+            with self.assertRaises(safety.BuildSafetyError) as raised:
+                safety.publish(self.project, self.entries)
+        message = str(raised.exception)
+        self.assertIn(str(leftover), message)
+        self.assertIn("re-run build.bat", message)
+        self.assertIn("untouched", message)
+        self.assertEqual(before, self.snapshot())
+        self.assertTrue((package / "sounds.dat").is_file())
+
     def test_preflight_checks_runtime_without_importing_it(self):
         self.project_fixture()
         root = self.base / "Python/Lib/site-packages"
@@ -524,7 +641,10 @@ class BuildSafetyTests(unittest.TestCase):
         cmd = str(Path(os.environ["SystemRoot"]) / "System32/cmd.exe")
         env = os.environ.copy()
         env.pop("BT_BUILD_NO_PAUSE", None)
-        with subprocess.Popen([cmd, "/d", "/c", batch.name, "--invalid-test-option"], cwd=self.project,
+        # Invoked by full path on purpose: a shell that sets NoDefaultCurrentDirectoryInExePath
+        # (Git Bash / MSYS) makes cmd refuse a bare batch name, which would look like a build
+        # failure here. build.bat re-anchors to its own folder with pushd "%~dp0" either way.
+        with subprocess.Popen([cmd, "/d", "/c", str(batch), "--invalid-test-option"], cwd=self.project,
                               env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT) as process:
             try:
@@ -544,10 +664,11 @@ class BuildSafetyTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows batch test")
     def test_batch_automated_failure_does_not_wait_or_report_success(self):
-        self.write(self.project / "build.bat", (CLIENT / "build.bat").read_bytes())
+        batch = self.write(self.project / "build.bat", (CLIENT / "build.bat").read_bytes())
         cmd = str(Path(os.environ["SystemRoot"]) / "System32/cmd.exe")
         env = dict(os.environ, BT_BUILD_NO_PAUSE="1")
-        with subprocess.Popen([cmd, "/d", "/c", "build.bat", "--invalid-test-option"], cwd=self.project,
+        # Full path, for the same reason as the interactive batch test above.
+        with subprocess.Popen([cmd, "/d", "/c", str(batch), "--invalid-test-option"], cwd=self.project,
                               env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT) as process:
             try:

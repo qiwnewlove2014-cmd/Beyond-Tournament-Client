@@ -6,6 +6,7 @@ This is a packaging integrity guard, not an antivirus or a clean-host guarantee.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -20,6 +21,9 @@ PROJECT = Path(__file__).resolve().parents[1]
 MANIFEST = PROJECT / "tools" / "build_binary_manifest.json"
 STAGING_NAME = "Beyond Tournament.pending"
 OUTPUT_NAME = "Beyond Tournament"
+# The previous published build, parked here for the instant of a publish swap so a
+# failure can put it back whole instead of leaving a half-deleted output directory.
+PREVIOUS_NAME = "Beyond Tournament.previous"
 DIST_NAME = "beyond_tournament.dist"
 HELPERS = frozenset({"ffmpeg.exe", "oalinst.exe"})
 PLAYER_PATCH_NOTES = ("player_patch_notes.txt", "player_patch_notes_th.txt")
@@ -35,6 +39,44 @@ AUTOPLAY_MARKERS = tuple(value.encode("utf-16le") for value in ("AutoPlay Applic
 
 class BuildSafetyError(RuntimeError):
     pass
+
+
+def blocking_reason(error: OSError) -> str:
+    """The system's own words plus the path it blamed, never a bare errno."""
+    reason = getattr(error, "strerror", None) or str(error)
+    blocked = getattr(error, "filename", None)
+    return f"{reason} ({blocked})" if blocked else reason
+
+
+def failure_remedy(error: OSError) -> str:
+    """What the operator must do next: a full drive and a locked path differ."""
+    if getattr(error, "errno", None) == errno.ENOSPC or getattr(error, "winerror", None) == 112:
+        return "free space on that drive, then re-run build.bat"
+    return ("close whatever holds it (a running Client, an open Explorer window, a backup or "
+            "antivirus scan), then re-run build.bat")
+
+
+def retry_command() -> str:
+    """The command build.bat uses for this step, for an operator to copy as-is."""
+    return "python -I -X utf8 -S tools\\build_safety.py publish"
+
+
+def remove_generated(path: Path, *, keep: str = "") -> None:
+    """Delete a generated directory, naming the holder when Windows refuses.
+
+    Publish is the only caller that deletes a generated tree, and it always
+    reports which path is still in use and what to do about it instead of a
+    bare errno.
+    """
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        raise BuildSafetyError(
+            f"Could not delete the generated folder {path}: {blocking_reason(error)} - "
+            f"{failure_remedy(error)}." + (f" {keep}" if keep else "")
+        ) from error
 
 
 def checked_path(path: Path) -> Path:
@@ -278,13 +320,17 @@ def validate_project(project: Path, entries: dict) -> None:
         raise BuildSafetyError("Project HRTF profiles or runtime DLL files are missing")
     validate_player_documents(checked_path(project.parent / "server" / "docs"))
     # Check old generated trees before any build operation can replace them.
-    for name in (OUTPUT_NAME, DIST_NAME):
+    for name in (OUTPUT_NAME, PREVIOUS_NAME, DIST_NAME):
         old = checked_path(project / name)
         if old.exists():
             scan_tree(old)
     pending = checked_path(project / STAGING_NAME)
     if pending.exists():
-        raise BuildSafetyError(f"Previous staging directory exists; review it before retrying: {pending}")
+        raise BuildSafetyError(
+            f"Previous staging directory exists; review it before retrying: {pending}. "
+            f"Publish the package inside with '{retry_command()}' from the client folder, or delete "
+            f"the folder to rebuild from scratch."
+        )
 
 
 def verify_package(package: Path, entries: dict) -> None:
@@ -305,26 +351,73 @@ def verify_package(package: Path, entries: dict) -> None:
 
 
 def publish(project: Path, entries: dict) -> None:
-    """Keep the previous output until staging passes. Never operate outside project."""
+    """Promote a fully checked staging directory over the previous output.
+
+    The swap is rename-only and never deletes the previous build before the new
+    one is in place, so a failure part way through (a locked file, a full drive)
+    leaves the old build whole and the staged package intact instead of a
+    half-deleted output directory. Nothing here writes package data: the space
+    for a build is consumed by the copy and compile steps before this one.
+    """
     project = checked_path(project)
     staging = checked_path(project / STAGING_NAME)
     output = checked_path(project / OUTPUT_NAME)
+    previous = checked_path(project / PREVIOUS_NAME)
     dist = checked_path(project / DIST_NAME)
     verify_package(staging, entries)
-    for path in (staging, output, dist):
+    for path in (staging, output, previous, dist):
         if path.parent != project or path == project:
             raise BuildSafetyError(f"Refusing an unexpected generated path: {path}")
-    for old in (output, dist):
+    for old in (output, previous, dist):
         if old.exists():
             scan_tree(old)
     # These are the same generated directories replaced by the previous batch.
     # Never use the generated output as storage for personal files/settings.
     # Sources, $ candidates, and external paths are not removed.
-    if output.exists():
-        shutil.rmtree(output)
-    staging.rename(output)
-    if dist.exists():
-        shutil.rmtree(dist)
+    # A parked copy means an earlier publish could not delete it; the name has
+    # to be free for this swap, so it is cleared here rather than overwritten.
+    remove_generated(previous, keep=f"The published build at {output} is untouched; "
+                                    f"only this leftover copy blocks the swap.")
+    parked = output.exists()
+    if parked:
+        try:
+            output.rename(previous)
+        except OSError as error:
+            raise BuildSafetyError(
+                f"Could not move the previous build aside to {previous}: {blocking_reason(error)} - "
+                f"{failure_remedy(error)}. The published build at {output} was not changed and "
+                f"the staged package is still at {staging}."
+            ) from error
+    try:
+        staging.rename(output)
+    except OSError as error:
+        restored = "Nothing was published yet."
+        if parked:
+            try:
+                previous.rename(output)
+                restored = f"The previous build was put back at {output}."
+            except OSError as restore_error:
+                restored = (f"The previous build is complete under its parked name {previous}: "
+                            f"{blocking_reason(restore_error)}.")
+        raise BuildSafetyError(
+            f"Could not promote the staged package to {output}: {blocking_reason(error)} - "
+            f"{failure_remedy(error)}. {restored} The staged package is intact at {staging}: "
+            f"publish it without rebuilding with '{retry_command()}' from the client folder, or "
+            f"delete that folder and start build.bat over."
+        ) from error
+    # The new build is published: a locked leftover is now only stale output, so
+    # it is reported with its remedy instead of failing a build that succeeded.
+    for leftover in (previous, dist):
+        try:
+            remove_generated(
+                leftover,
+                keep=f"The new build is already published at {output}; delete {leftover} by hand "
+                     f"before the next build." if leftover == previous else
+                     f"The new build is already published at {output}; this compiler output is "
+                     f"stale and can be deleted by hand.",
+            )
+        except BuildSafetyError as warning:
+            print(f"[BUILD WARNING] {warning}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
