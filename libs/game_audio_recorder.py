@@ -21,6 +21,7 @@ import threading
 import time
 import wave
 
+from . import folder_dialog
 from . import options
 
 
@@ -1075,32 +1076,31 @@ class GameAudioRecorderManager:
         folder = ""
         choice_dispatched = False
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            try:
-                folder = filedialog.askdirectory(
-                    title="Select Beyond Tournament recording folder",
-                    initialdir=initial,
-                    mustexist=True,
-                )
-            finally:
-                root.destroy()
-            if folder:
-                choice_dispatched = True
-                self._dispatch(lambda folder=folder: self._accept_folder_choice(folder))
-            else:
-                self._announce("Recording folder was not changed.")
+            # The browser is the shell's, and building Tk for it is ~80 ms of
+            # interpreter time: in this process that is one hitch in the sound,
+            # so the dialog is built in a helper process (see folder_dialog).
+            folder, problem = folder_dialog.ask_folder(
+                "Select Beyond Tournament recording folder", initial)
         except Exception as error:
             print(f"[GameAudioRecorder] Folder dialog failed: {error}")
             self._announce("The recording folder dialog could not be opened.")
-        finally:
-            if not choice_dispatched:
-                with self._lock:
-                    self._configuring_folder = False
+            return self._finish_folder_choice()
+        if problem:
+            print(f"[GameAudioRecorder] Folder dialog failed: {problem}")
+            self._announce("The recording folder dialog could not be opened.")
+            return self._finish_folder_choice()
+        if folder:
+            choice_dispatched = True
+            self._dispatch(lambda folder=folder: self._accept_folder_choice(folder))
+        else:
+            self._announce("Recording folder was not changed.")
+        if not choice_dispatched:
+            self._finish_folder_choice()
+
+    def _finish_folder_choice(self):
+        """Re-open the folder picker for the next press, unless one is on its way."""
+        with self._lock:
+            self._configuring_folder = False
 
     def _accept_folder_choice(self, folder):
         try:
@@ -1187,28 +1187,21 @@ class GameAudioRecorderManager:
     def _select_output_path(self):
         path = ""
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-
             folder = Path.home() / "Music" / "Beyond Tournament Recordings"
             folder.mkdir(parents=True, exist_ok=True)
             default_name = time.strftime("Beyond Tournament Recording %Y-%m-%d %H-%M-%S.wav")
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            try:
-                path = filedialog.asksaveasfilename(
-                    title="Save Beyond Tournament game audio recording",
-                    initialdir=str(folder),
-                    initialfile=default_name,
-                    defaultextension=".wav",
-                    filetypes=[("WAV audio", "*.wav")],
-                    confirmoverwrite=True,
-                )
-            finally:
-                root.destroy()
+            # Same reason as the folder picker: the save prompt is built in a
+            # helper process so this one keeps playing (see folder_dialog).
+            path, problem = folder_dialog.ask_save_file(
+                "Save Beyond Tournament game audio recording",
+                str(folder), default_name)
         except Exception as error:
             print(f"[GameAudioRecorder] Save dialog failed: {error}")
+            self._finish_idle()
+            self._announce("The recording file dialog could not be opened.")
+            return
+        if problem:
+            print(f"[GameAudioRecorder] Save dialog failed: {problem}")
             self._finish_idle()
             self._announce("The recording file dialog could not be opened.")
             return

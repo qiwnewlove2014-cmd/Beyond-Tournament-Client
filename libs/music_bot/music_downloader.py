@@ -1,8 +1,14 @@
 """Private, background downloads for the personal Music Bot.
 
-The Server never receives URLs, paths, progress, or downloaded media.  Tk and
-yt-dlp both run off the gameplay/audio thread; only menus and notifications are
-queued back to the main game thread.
+The Server never receives URLs, paths, progress, or downloaded media.  The
+download itself, the yt-dlp import and the progress updates all run off the
+gameplay/audio thread, and only menus and notifications are queued back to the
+main game thread. Tk is not built here at all: the folder browser is the
+shell's and costs ~80 ms of interpreter time to start, which is an audible
+hitch in the game it was opened from, so it is shown in its own process (see
+``libs/folder_dialog.py``).  yt-dlp is preloaded when a download is asked for,
+because its import is ~700 ms and a worker thread doing it still delays the
+frame loop.
 """
 
 import os
@@ -11,6 +17,7 @@ import threading
 import time
 from urllib.parse import urlparse
 
+from .. import folder_dialog
 from .. import logger
 from .. import options
 from ..accessible_progress import AccessibleProgressBar
@@ -364,21 +371,16 @@ class MusicDownloadManager:
         initial_folder = self.configured_folder()
 
         def select_folder():
-            root = None
             try:
-                import tkinter as tk
-                from tkinter import filedialog
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
-                dialog_options = {
-                    "title": "Select Music Download Folder",
-                    "mustexist": True,
-                }
-                if initial_folder:
-                    dialog_options["initialdir"] = initial_folder
-                folder = filedialog.askdirectory(**dialog_options)
-                if folder:
+                # The shell's browser, built in a helper process: Tk's own
+                # start-up is ~80 ms of interpreter time here, which is one
+                # hitch in the game and one late note for whoever is playing.
+                folder, problem = folder_dialog.ask_folder(
+                    "Select Music Download Folder", initial_folder)
+                if problem:
+                    logger.log(f"[MusicDownload] Folder selector failed: {problem}")
+                    self.game.put(lambda: speak("Could not open the folder selector."))
+                elif folder:
                     folder = os.path.abspath(folder)
                     self.game.put(lambda folder=folder: selected_callback(folder))
                 else:
@@ -389,11 +391,6 @@ class MusicDownloadManager:
             finally:
                 with self._lock:
                     self._folder_dialog_open = False
-                if root is not None:
-                    try:
-                        root.destroy()
-                    except Exception:
-                        pass
 
         threading.Thread(
             target=select_folder,

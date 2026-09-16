@@ -8,6 +8,16 @@ if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--bt-youtube
     from libs.youtube_resolver import worker_main
     raise SystemExit(worker_main(sys.argv[2:]))
 
+# The folder/save dialog runs in its own process for the same reason the
+# resolver does: the caller keeps playing. Building Tk holds the interpreter
+# for ~80 ms, which is one audible hitch in the game it was opened from, so it
+# is built in a helper that owns nothing else. This branch must also stay above
+# _configure_compiled_output -- a compiled build would otherwise redirect the
+# child's stdout to the game's log file instead of the pipe we read it from.
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--bt-file-dialog":
+    from libs.folder_dialog import worker_main
+    raise SystemExit(worker_main(sys.argv[2:]))
+
 
 def _configure_compiled_output():
     """Redirect only the real game, never a resolver child, to its usual log."""
