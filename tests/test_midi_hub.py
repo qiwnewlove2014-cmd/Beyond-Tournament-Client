@@ -196,14 +196,36 @@ class MidiHubTests(unittest.TestCase):
         self.assertIsNone(hub.active_profile_id)
 
     def test_drum_profile_preserves_gm_and_chromatic_contracts(self):
+        first = DRUM_MIDI_PROFILE.CHROMATIC_FIRST_NOTE
+        last = DRUM_MIDI_PROFILE.CHROMATIC_LAST_NOTE
         self.assertEqual(
-            [DRUM_MIDI_PROFILE.note_to_pad(note) for note in range(60, 77)],
-            list(range(17)),
+            [DRUM_MIDI_PROFILE.note_to_pad(note) for note in range(first, last + 1)],
+            list(range(last - first + 1)),
         )
         self.assertEqual(DRUM_MIDI_PROFILE.note_to_pad(36), 0)
         self.assertEqual(DRUM_MIDI_PROFILE.note_to_pad(42), 3)
         self.assertEqual(DRUM_MIDI_PROFILE.note_to_pad(57), 11)
         self.assertIsNone(DRUM_MIDI_PROFILE.note_to_pad(True))
+
+    def test_the_last_pad_is_reachable_from_midi(self):
+        """The top pad must be playable without a keyboard.
+
+        Pad 17 (the dedicated Rim) shipped reachable from its own key only, so a
+        MIDI drummer could not trigger it at all. Both doors have to reach it: the
+        GM note a drum module sends for a rim strike, and the chromatic span.
+        """
+        self.assertEqual(DRUM_MIDI_PROFILE.note_to_pad(37), 17)
+        self.assertEqual(
+            DRUM_MIDI_PROFILE.note_to_pad(DRUM_MIDI_PROFILE.CHROMATIC_LAST_NOTE),
+            17,
+        )
+        self.assertGreaterEqual(
+            DRUM_MIDI_PROFILE.CHROMATIC_LAST_NOTE
+            - DRUM_MIDI_PROFILE.CHROMATIC_FIRST_NOTE
+            + 1,
+            18,
+            "the chromatic span no longer covers every pad the kits define",
+        )
 
     def test_default_drum_profile_dispatches_on_main_thread(self):
         class DrumOwner:

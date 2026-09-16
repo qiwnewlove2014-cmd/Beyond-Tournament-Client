@@ -213,11 +213,18 @@ class DrumMidiProfile(MidiProfile):
     profile_id = "drumset"
     device_label = "MIDI drum input"
     device_label_plural = "MIDI drum inputs"
-    CHROMATIC_FIRST_NOTE = 60
-    CHROMATIC_LAST_NOTE = 76
+    # The chromatic span covers EVERY pad the kits define, one note per pad, so a
+    # MIDI controller can reach the last pad (17, the dedicated Rim) as well. The
+    # count here has to follow `DrumAudio.KITS`: a span that stops at pad 16 leaves
+    # the top pad reachable from the keyboard alone, which is how pad 17 shipped.
+    CHROMATIC_FIRST_NOTE = 60   # C4 -> pad 0
+    CHROMATIC_LAST_NOTE = 77    # F5 -> pad 17
     GENERAL_MIDI_NOTE_TO_PAD = {
         35: 0, 36: 0,
-        37: 2,
+        # 37 is Side Stick -- a rim strike on a real kit -- so it plays the pad that
+        # voices the rim on its own (17). Pad 2 keeps its own note (the chromatic
+        # span below) and its own key, so nothing becomes unreachable.
+        37: 17,
         38: 1, 39: 1, 40: 1,
         41: 9, 43: 9,
         42: 3,
