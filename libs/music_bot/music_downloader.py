@@ -47,6 +47,8 @@ SOURCE_FORMATS = (
     "bestaudio/best",
 )
 
+_PRELOAD_STARTED = threading.Event()
+
 
 def is_supported_music_url(value):
     """Accept only normal HTTPS YouTube pages used by the current Music Bot."""
@@ -60,6 +62,32 @@ def is_supported_music_url(value):
         )
     except Exception:
         return False
+
+
+def _preload_download_backend():
+    """Start loading yt-dlp now, in the background, instead of at the download.
+
+    ``import yt_dlp`` measures ~700 ms and ~24 MB of Python heap, and it used
+    to happen as the download worker's first line -- off the gameplay thread,
+    but not off the interpreter: a worker thread importing starves the frame
+    loop too (measured: ~10 ms worst frame delay against a 20 ms frame loop,
+    and as much again for the first ``YoutubeDL`` object, against 0.7 ms
+    idle). Ten milliseconds is not a lot of wall clock, but it is exactly what
+    cannot be handed back to a note somebody is already holding, so the import
+    is started the moment a download is asked for -- two menu steps before one
+    can start -- and is never started twice.
+    """
+    if _PRELOAD_STARTED.is_set():
+        return
+    _PRELOAD_STARTED.set()
+
+    def load():
+        try:
+            import yt_dlp  # noqa: F401
+        except Exception as error:
+            logger.log(f"[MusicDownload] yt-dlp preload failed: {error}")
+
+    threading.Thread(target=load, name="music-download-preload", daemon=True).start()
 
 
 def filter_download_tracks(tracks):
@@ -254,6 +282,10 @@ class MusicDownloadManager:
         if self.is_active():
             speak("A Music Bot download is already active. Check its status or cancel it first.")
             return
+        # The player has asked for a download: pay for yt-dlp's import while
+        # they are still choosing a format and a quality, not when they press
+        # the button that starts it.
+        _preload_download_backend()
         with self._lock:
             folder_dialog_open = self._folder_dialog_open
         if folder_dialog_open:
