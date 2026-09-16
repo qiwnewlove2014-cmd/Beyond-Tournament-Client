@@ -81,6 +81,21 @@ class GameplayAudioDiagnosticTests(unittest.TestCase):
         self.assertFalse(any(label.startswith("gp.input") for label in self.labels))
         self.assertIn("cpu_ms=0.00", self.lines[0])
 
+    def test_the_head_is_reported_while_playing_but_never_while_spectating(self):
+        """A spectator is not the one whose head the room should turn with;
+        and their own body is parked, so a report from it would be a lie."""
+        from libs.gameplay import Gameplay
+        gp = self.gameplay()
+        with patch.object(Gameplay, "_report_facing") as report, \
+             patch("libs.gameplay.pygame.key.get_pressed"):
+            self.capture(gp.update, [])
+        report.assert_called_once_with()
+        gp.spectator_mode = True
+        with patch.object(Gameplay, "_report_facing") as spectating, \
+             patch("libs.gameplay.pygame.key.get_pressed"):
+            self.capture(gp.update, [])
+        spectating.assert_not_called()
+
     def test_gameplay_held_and_discrete_input_keep_order_and_binding(self):
         import pygame
         gp = self.gameplay(block=False)

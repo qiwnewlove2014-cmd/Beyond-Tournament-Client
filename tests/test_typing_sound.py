@@ -54,13 +54,26 @@ class FakeMap:
 
 
 class FakePlayer:
-    def __init__(self):
-        self.x, self.y, self.z = 1, 2, 3
+    def __init__(self, position=(1, 2, 3)):
+        self.x, self.y, self.z = position
 
 
-def make_handler(reverb_at=None):
+def make_handler(reverb_at=None, focus=None):
+    """A handler whose gameplay answers `listener_object` for real.
+
+    The tick is blended with the room the *listener* is in, and while
+    spectating that is the player being watched, not this client's parked
+    character -- so the lookup goes through the one reader for it.
+    """
+    from libs.gameplay import Gameplay
+
     map_obj = FakeMap(reverb_at=reverb_at)
-    gameplay = types.SimpleNamespace(map=map_obj, player=FakePlayer())
+    gameplay = types.SimpleNamespace(
+        map=map_obj,
+        player=FakePlayer(),
+        camera=types.SimpleNamespace(focus_object=focus),
+    )
+    gameplay.listener_object = lambda: Gameplay.listener_object(gameplay)
     game = types.SimpleNamespace(audio_mngr=FakeAudioMngr())
     return types.SimpleNamespace(game=game, gameplay=gameplay)
 
@@ -89,6 +102,11 @@ class TypingSoundTests(unittest.TestCase):
         event_handeler.EventHandeler.typing_sound(h, {"name": "Alice"})
         self.assertEqual(h.gameplay.map.looked_up, [(1, 2, 3)])
         self.assertEqual(h.game.audio_mngr.efx.sent, [])
+
+    def test_a_spectator_hears_the_tick_in_the_room_their_ears_are_in(self):
+        h = make_handler(reverb_at=None, focus=FakePlayer((40, 41, 0)))
+        event_handeler.EventHandeler.typing_sound(h, {"name": "Alice"})
+        self.assertEqual(h.gameplay.map.looked_up, [(40, 41, 0)])
 
     def test_silent_when_typing_sounds_disabled(self):
         h = make_handler()

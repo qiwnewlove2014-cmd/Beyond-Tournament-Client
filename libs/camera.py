@@ -204,12 +204,99 @@ class Camera:
             # Cyal/OpenAL failures must not make a network snapshot kill the game.
             log(f"[ENTITY.AUDIO] Spectator listener update skipped: {e}")
 
+    def _listener_map(self):
+        """The map the listener is standing on: the current one, when we have it.
+
+        move() used to read ``focus_object.map`` for the ears' reverb, zone,
+        ambience and music. While spectating the focus is somebody else's
+        entity, and right after a map change it can still be the destroyed one
+        from the map we just left -- reading the current map keeps the
+        listener's own state honest in both cases, and is the same object as
+        before whenever the focus is the local player.
+        """
+        map_ = getattr(getattr(self.game, "gameplay", None), "map", None)
+        if map_ is not None and hasattr(map_, "get_ambiences_at"):
+            return map_
+        return getattr(self.focus_object, "map", None)
+
+    def refresh_listener(self, x=None, y=None, z=None):
+        """Re-read the ears' state where they now are.
+
+        Called after a map change while spectating: the packet that carries a
+        map moves this client's *character*, but the camera follows somebody
+        else's body, so its on_move never fires here and the new map's
+        ambience bed, reverb and zone were never entered -- the room stayed the
+        old one's until the followed player happened to take a step. Only the
+        listener's half of move(): the water and footstep work belongs to the
+        object being followed, and it did not dive or walk.
+        """
+        if x is not None:
+            self.x = float(x)
+            self.y = float(y) if y is not None else self.y
+            self.z = float(z) if z is not None else self.z
+            self.game.audio_mngr.position = (self.x, self.y, self.z)
+            self.soundgroup.position = (self.x, self.y, self.z)
+            megaphone = getattr(getattr(self.game, 'gameplay', None), 'megaphone', None)
+            if megaphone and hasattr(megaphone, 'request_spatial_refresh'):
+                megaphone.request_spatial_refresh()
+        self.apply_listener_state(self.x, self.y, self.z)
+
+    def apply_listener_state(self, x, y, z, ambiences_to_pause=(), musics_to_pause=()):
+        """Enter/leave the listener's reverb, zone, ambience and music at (x,y,z).
+
+        ``ambiences_to_pause``/``musics_to_pause`` name what the listener has
+        just left (move() collects them at the previous position); leaving them
+        empty means "nothing is on the way out", which is what a refresh wants.
+        """
+        # change reverb if required.
+        reverb = self._listener_map().get_reverb_at(x, y, z)
+        if reverb != self.reverb and not self.focus_object.dead:
+            self.reverb = reverb
+            if reverb is None:
+                self.focus_object.soundgroup.apply_effect(None, 0)
+            else:
+                # A zone whose slot could not be borrowed (momentary effect-slot
+                # pool exhaustion) retries on a cooldown, so the current room
+                # recovers its reverb in place instead of staying dry until a
+                # client restart.
+                slot = reverb.reverb
+                if slot is None and hasattr(reverb, "ensure_slot"):
+                    slot = reverb.ensure_slot()
+                self.focus_object.soundgroup.apply_effect(slot, 0)
+
+        # enter/leave zones
+        zone = self._listener_map().get_zone_at(x, y, z)
+        if zone and zone != self.currentzone:
+            speak(f"{zone}")
+            self.currentzone = zone
+        # enter/leave ambiences
+        for i in self._listener_map().get_ambiences_at(x, y, z):
+            if i in ambiences_to_pause:
+                ambiences_to_pause.remove(i)
+                if not i.playing:
+                    i.enter()
+                continue
+            i.enter()
+        for i in ambiences_to_pause:
+            i.leave()
+        # enter/leave musics
+        for i in self._listener_map().get_musics_at(x, y, z):
+            if i in musics_to_pause:
+                musics_to_pause.remove(i)
+                if not i.playing:
+                    i.enter()
+                continue
+            i.enter()
+        for i in musics_to_pause:
+            i.leave()
+
     def move(self, x, y, z):
+        previous = (self.x, self.y, self.z)
         ambiences_to_pause = list(
-            self.focus_object.map.get_ambiences_at(self.x, self.y, self.z)
+            self._listener_map().get_ambiences_at(*previous)
         )
         musics_to_pause = list(
-            self.focus_object.map.get_musics_at(self.x, self.y, self.z)
+            self._listener_map().get_musics_at(*previous)
         )
         self.x = float(x) if x is not None else 0.0
         self.y = float(y) if y is not None else 0.0
@@ -313,47 +400,11 @@ class Camera:
                 self.focus_object.recorded_depth = cur_depth
 
 
-        # change reverb if required.
-        reverb = self.focus_object.map.get_reverb_at(self.x, self.y, self.z)
-        if reverb != self.reverb and not self.focus_object.dead:
-            self.reverb = reverb
-            if reverb is None:
-                self.focus_object.soundgroup.apply_effect(None, 0)
-            else:
-                # A zone whose slot could not be borrowed (momentary effect-slot
-                # pool exhaustion) retries on a cooldown, so the current room
-                # recovers its reverb in place instead of staying dry until a
-                # client restart.
-                slot = reverb.reverb
-                if slot is None and hasattr(reverb, "ensure_slot"):
-                    slot = reverb.ensure_slot()
-                self.focus_object.soundgroup.apply_effect(slot, 0)
-            
-        # enter/leave zones
-        zone = self.focus_object.map.get_zone_at(self.x, self.y, self.z)
-        if zone and zone != self.currentzone:
-            speak(f"{zone}")
-            self.currentzone = zone
-        # enter/leave ambiences
-        for i in self.focus_object.map.get_ambiences_at(self.x, self.y, self.z):
-            if i in ambiences_to_pause:
-                ambiences_to_pause.remove(i)
-                if not i.playing:
-                    i.enter()
-                continue
-            i.enter()
-        for i in ambiences_to_pause:
-            i.leave()
-        # enter/leave musics
-        for i in self.focus_object.map.get_musics_at(self.x, self.y, self.z):
-            if i in musics_to_pause:
-                musics_to_pause.remove(i)
-                if not i.playing:
-                    i.enter()
-                continue
-            i.enter()
-        for i in musics_to_pause:
-            i.leave()
+        self.apply_listener_state(
+            self.x, self.y, self.z,
+            ambiences_to_pause=ambiences_to_pause,
+            musics_to_pause=musics_to_pause,
+        )
         if self.sonar:
             self.scan_around()
 

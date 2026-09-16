@@ -583,6 +583,18 @@ class EventHandeler:
         y = float(raw_y) if raw_y is not None else 0.0
         z = float(raw_z) if raw_z is not None else 0.0
         audio_probe.call("map.player_move", self.gameplay.player.move, x, y, z, play_sound=False)
+        if getattr(self.gameplay, "spectator_mode", False):
+            # The ears, not the body: this packet moved this client's own
+            # character (`player.move` above), but the camera follows the
+            # player being watched, so its on_move never fired here -- and the
+            # new map's ambience bed, zone and reverb were never entered at
+            # all (the room stayed the old map's until the followed player
+            # happened to take a step). The coordinates on a map packet for a
+            # spectator are that followed player's.
+            audio_probe.call(
+                "map.listener_refresh",
+                self.gameplay.camera.refresh_listener, x, y, z,
+            )
         # Setup megaphone speakers after map data is loaded (with safety check)
         if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
             # A full parse may be a different map. Replace the old cached PA
@@ -989,8 +1001,14 @@ class EventHandeler:
         # Keep door open sounds crisp and natural (bypass occlusion for door open)
         allow_occlusion = "door/open" not in snd_path
         if allow_occlusion and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
-            lx, ly, lz = self.gameplay.player.x, self.gameplay.player.y, self.gameplay.player.z
-            facing = getattr(self.gameplay.player, 'facing', 0.0)
+            # The ears, not this client's character: a spectator's own body is
+            # parked where they joined the match, and judging a relayed sound
+            # from there muffled it behind walls that are nowhere near the
+            # listener (and, on the stereo-spatial path, dropped it outright
+            # past a distance the listener is not standing at).
+            listener = self.gameplay.listener_object()
+            lx, ly, lz = listener.x, listener.y, listener.z
+            facing = getattr(listener, 'facing', 0.0)
 
             if getattr(self.gameplay, 'map', None) and not getattr(self.game, 'pong_mode', False):
                 with contextlib.suppress(Exception):
@@ -1206,7 +1224,12 @@ class EventHandeler:
                     data.get("x"), data.get("y"), data.get("z"),
                     bool(data.get("play_sound", False)), data.get("mode", "walk")
                 )
-                entity.face(data.get("angle", 0), entity.vfacing, entity.bfacing, force=True)
+                # Only when the packet really carries a facing. A missing
+                # angle used to be read as 0, which stamped north on every
+                # watched player -- and a spectator's camera turns with the
+                # entity they follow, so a walk read as a sideways shuffle.
+                if "angle" in data:
+                    entity.face(data.get("angle", 0), entity.vfacing, entity.bfacing, force=True)
             except Exception as e:
                 log_exception(e, f"move name={name!r} data={data!r}")
         else:
@@ -1315,10 +1338,11 @@ class EventHandeler:
             # listener's own environment shapes what they hear, so walking out
             # of a room makes the ticks dry again.
             if snd and getattr(self, "gameplay", None) and self.gameplay.map:
+                listener = self.gameplay.listener_object()
                 reverb = self.gameplay.map.get_reverb_at(
-                    self.gameplay.player.x,
-                    self.gameplay.player.y,
-                    self.gameplay.player.z,
+                    listener.x,
+                    listener.y,
+                    listener.z,
                 )
                 if reverb and reverb.reverb and hasattr(snd, "source") and snd.source:
                     with contextlib.suppress(Exception):
@@ -1596,7 +1620,14 @@ class EventHandeler:
             default=data.get("default", ""),
             min_val=min_val,
             max_val=max_val,
-            msg_length=msg_length
+            msg_length=msg_length,
+            # A field that holds a body of text keeps a pasted line break; a
+            # one-line field joins them (see virtual_input.paste_text). The
+            # Server sends it with the prompt because the field's own rule is
+            # what has to answer (staff_menu.ts sets it from the form step),
+            # and a Server that does not send it gets today's behaviour: the
+            # paste keeps its lines.
+            multiline=bool(data_obj.get("multiline", True)),
         ))
 
     def tickets_menu(self, data):

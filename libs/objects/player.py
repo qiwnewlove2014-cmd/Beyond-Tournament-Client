@@ -44,6 +44,11 @@ class Player(Entity):
                 "z": self.z,
                 "play_sound": True,
                 "mode": mode,
+                # Which way we are facing, not just where we are going. The
+                # Server keeps it as the player's angle (the shield's block
+                # direction, and what a spectator's head turns with), and
+                # without it every move packet drove both back to zero.
+                "angle": self.hfacing,
             },
         )
 

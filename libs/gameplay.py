@@ -65,6 +65,13 @@ class Gameplay(state.State):
     _DRUM_MIDI_CHROMATIC_FIRST_NOTE = DRUM_MIDI_PROFILE.CHROMATIC_FIRST_NOTE
     _DRUM_MIDI_CHROMATIC_LAST_NOTE = DRUM_MIDI_PROFILE.CHROMATIC_LAST_NOTE
     _DRUM_MIDI_GM_NOTE_TO_PAD = DRUM_MIDI_PROFILE.GENERAL_MIDI_NOTE_TO_PAD
+    # How often a turn that sends no movement packet is reported, and how far
+    # the head must have moved before it is worth a packet at all. A player
+    # spinning on the spot is the case this exists for: fast enough that a
+    # spectator's room wheels with them, quiet enough that standing still
+    # costs nothing and a slow drift is never reported twice for one degree.
+    FACING_REPORT_INTERVAL_MS = 100
+    FACING_REPORT_STEP_DEG = 2.0
 
     def __init__(self, game):
         super().__init__(game)
@@ -132,7 +139,56 @@ class Gameplay(state.State):
         self.tracking_clock = None
         self.facing_sound_clock = self.game.new_clock()
         self.is_facing_target = False
+        # Where this player's head is pointing, as the Server last heard it
+        # (see _report_facing). None until the first report, so the first
+        # report is sent whatever it says.
+        self._facing_reported = None
+        self._facing_report_clock = self.game.new_clock()
         self.reload_keyconfig()
+
+    def listener_object(self):
+        """The object whose ears are hearing the world right now.
+
+        Everything that asks "how far is this sound, is it behind a wall,
+        where in the stereo field does it sit" must ask this, never
+        ``self.player``: while spectating the camera follows somebody else's
+        body, and this client's own character is parked at the spot the
+        spectator jumped in from. Measured from that parked body, the sounds
+        the Server does relay arrive muffled by walls that are nowhere near
+        the listener, and are dropped outright past a distance the listener
+        is not actually standing at.
+        """
+        focus = getattr(getattr(self, "camera", None), "focus_object", None)
+        return focus if focus is not None else self.player
+
+    def _report_facing(self, force=False):
+        """Tell the Server where our head is pointing.
+
+        A movement packet already carries the facing, but a player who turns
+        on the spot sends no movement at all -- so a spectator following them
+        got a head that never moved (a forward walk read as a sideways one),
+        and the Server's idea of the player's angle went stale, which is what
+        the shield's block arc is measured against. Throttled: a spin is
+        reported at most FACING_REPORT_INTERVAL_MS apart and only when the
+        head really moved.
+        """
+        network = getattr(self.game, "network", None)
+        if network is None:
+            return
+        # The arena owns the facing during a Pong match; reporting would
+        # fight the lock it keeps on every player.
+        if getattr(self.game, "pong_mode", False):
+            return
+        facing = float(getattr(self.player, "hfacing", 0.0) or 0.0)
+        if not force and self._facing_reported is not None:
+            if self._facing_report_clock.elapsed < self.FACING_REPORT_INTERVAL_MS:
+                return
+            moved = abs(((facing - self._facing_reported) + 180) % 360 - 180)
+            if moved < self.FACING_REPORT_STEP_DEG:
+                return
+        self._facing_reported = facing
+        self._facing_report_clock.restart()
+        network.send(consts.CHANNEL_MAP, "player_face", {"angle": facing})
 
     def reload_keyconfig(self):
         kc = self.game.keyconfig
@@ -787,6 +843,8 @@ class Gameplay(state.State):
             self.megaphone.update_megaphone_settings(volume, bass, mid, high)
 
     def update(self, events):
+        if not self.spectator_mode:
+            audio_probe.call("gp.facing", self._report_facing)
         audio_probe.call("gp.wind", self._update_horse_wind)
         audio_probe.call("gp.megaphone", self.megaphone.update_megaphone_audio, 0, None)
         audio_probe.call("gp.wall_tone", self.wall_tone.update)
