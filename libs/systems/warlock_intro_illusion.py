@@ -24,11 +24,15 @@ class WarlockIntroIllusion:
     The Server remains authoritative over intro start/cue/stop timing. This
     class only renders the approved sound at a listener-relative phantom
     position, so no fake coordinates or per-frame packets enter game state.
+    It also renders the arrival fanfare (intro_boom.ogg) as a flat 2D
+    "in the ears" stinger treated like the map's ambience — that one sound
+    is the only flat render; every other cue stays positional.
     """
 
     ACTION_STOP = 0
     ACTION_MAIN = 1
     ACTION_CUE = 2
+    ACTION_FLAT = 3
     STOP_FADE_SECONDS = 0.18
     INTRO_SPEECH_SECONDS = 49.8
     FINAL_HALF_CIRCLE_SECONDS = 7.8
@@ -37,6 +41,8 @@ class WarlockIntroIllusion:
         self.gameplay = gameplay
         self._time = time_source
         self._states = {}
+        self._flat_group = None
+        self._flat_sounds = []
 
     @staticmethod
     def _phase_for(name):
@@ -56,7 +62,9 @@ class WarlockIntroIllusion:
             action = int(data.get("illusion"))
         except (TypeError, ValueError):
             return False
-        if action not in (self.ACTION_STOP, self.ACTION_MAIN, self.ACTION_CUE):
+        if action not in (
+            self.ACTION_STOP, self.ACTION_MAIN, self.ACTION_CUE, self.ACTION_FLAT
+        ):
             return False
 
         name = str(data.get("name") or "")[:128]
@@ -72,6 +80,8 @@ class WarlockIntroIllusion:
         volume = max(0, min(300, int(data.get("volume", 100))))
         if action == self.ACTION_MAIN:
             self.start(name, path, volume)
+        elif action == self.ACTION_FLAT:
+            self.play_flat(name, path, volume)
         else:
             self.play_cue(name, path, volume)
         return True
@@ -100,6 +110,49 @@ class WarlockIntroIllusion:
         cue = self._play_spatial(path, state.position, volume)
         self._apply_reverb_to_sound(cue)
 
+    def play_flat(self, name, path, volume):
+        """Render the arrival fanfare as a flat 2D "in the ears" stinger.
+
+        The sound plays through a direct (non-positional) source in the
+        ambience volume category — exactly how map ambience plays — so every
+        listener hears the same reveal regardless of distance, while the
+        reverb send from the listener's current map zone keeps it inside the
+        map's acoustic ambience instead of a dry UI cue. Only intro_boom.ogg
+        is ever routed here by the server.
+        """
+        if self._flat_group is None:
+            self._flat_group = self.gameplay.game.audio_mngr.create_soundgroup(
+                direct=True, filterable=True
+            )
+        self._prune_flat_sounds()
+        sound = self._flat_group.play(
+            path, False, f"flat_{name}", cat="ambience", volume=volume
+        )
+        if sound is None:
+            return
+        slot = self._current_reverb_slot()
+        self._apply_reverb_to_sound(sound, slot)
+        sound.flat_reverb_slot = slot
+        self._flat_sounds.append(sound)
+
+    def _prune_flat_sounds(self):
+        # Finished one-shots are drained by SoundGroup.loop(); their wrapper
+        # loses its source afterwards, which is the prune signal here.
+        self._flat_sounds = [
+            sound for sound in self._flat_sounds
+            if sound is not None and getattr(sound, "source", None) is not None
+        ]
+
+    def _update_flat_sounds(self):
+        if not self._flat_sounds:
+            return
+        self._prune_flat_sounds()
+        slot = self._current_reverb_slot()
+        for sound in self._flat_sounds:
+            if getattr(sound, "flat_reverb_slot", None) is not slot:
+                self._apply_reverb_to_sound(sound, slot)
+                sound.flat_reverb_slot = slot
+
     def stop(self, name, immediate=False):
         state = self._states.get(name)
         if state is None:
@@ -115,6 +168,7 @@ class WarlockIntroIllusion:
 
     def update(self):
         now = self._time()
+        self._update_flat_sounds()
         for name, state in list(self._states.items()):
             sound = state.sound
             # Cue-only placeholder state remains useful until the speech main
@@ -285,3 +339,23 @@ class WarlockIntroIllusion:
         for state in list(self._states.values()):
             self._destroy_sound(state.sound)
         self._states.clear()
+        self._destroy_flat_group()
+
+    def _destroy_flat_group(self):
+        group = self._flat_group
+        self._flat_group = None
+        self._flat_sounds = []
+        if group is None:
+            return
+        # Detach the reverb EFX sends before destroying the sources —
+        # releasing sources with sends attached glitches the driver mix.
+        sounds = list(getattr(group, "labeled_sources", {}).values())
+        sounds += list(getattr(group, "unlabeled_sources", []))
+        for sound in sounds:
+            source = getattr(sound, "source", None)
+            if source is None:
+                continue
+            with contextlib.suppress(Exception):
+                self.gameplay.game.audio_mngr.efx.send(source, 0, None)
+        with contextlib.suppress(Exception):
+            group.destroy()

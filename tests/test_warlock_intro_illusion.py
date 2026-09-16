@@ -50,6 +50,7 @@ class FakeAudioManager:
         self.unbound_sources = []
         self.efx = FakeEfx()
         self.plays = []
+        self.groups = []
 
     def play_unbound_stereo_spatial(
             self, path, x, y, z, listener_x, listener_y, listener_z, **kwargs):
@@ -63,6 +64,45 @@ class FakeAudioManager:
             "sound": sound,
         })
         return sound
+
+    def create_soundgroup(self, direct=False, radius=0.5, filterable=False):
+        group = FakeSoundGroup(direct=direct, filterable=filterable)
+        self.groups.append(group)
+        return group
+
+
+class FakeSoundGroup:
+    def __init__(self, direct=False, filterable=False):
+        self.direct = direct
+        self.filterable = filterable
+        self.plays = []
+        self.destroyed = False
+        self.labeled_sources = {}
+        self.unlabeled_sources = []
+
+    def play(self, path, looping=False, id="", dist=False, cat="miscelaneous",
+             rel_x=0, rel_y=0, rel_z=0, volume=100, pitch=1.0):
+        sound = FakeSound((0.0, 0.0, 0.0))
+        if id:
+            self.labeled_sources[id] = sound
+        else:
+            self.unlabeled_sources.append(sound)
+        self.plays.append({
+            "path": path,
+            "looping": looping,
+            "id": id,
+            "cat": cat,
+            "volume": volume,
+            "sound": sound,
+        })
+        return sound
+
+    def destroy(self):
+        self.destroyed = True
+        for sound in list(self.labeled_sources.values()) + list(self.unlabeled_sources):
+            sound.destroy(force=True)
+        self.labeled_sources.clear()
+        self.unlabeled_sources.clear()
 
 
 class FakeMap:
@@ -175,6 +215,82 @@ class WarlockIntroIllusionTests(unittest.TestCase):
         self.assertIs(self.manager._states["warlock_test"].sound, main)
         self.assertIsNotNone(main.source)
 
+    def test_flat_fanfare_plays_2d_direct_in_ambience_category_with_map_reverb(self):
+        self.assertTrue(self.manager.handle_packet({
+            "name": "warlock_test",
+            "sound": "entities/warlock/intro_boom.ogg",
+            "volume": 150,
+            "illusion": 3,
+        }))
+        # The fanfare is the ONE sound rendered in the listener's ears: it
+        # must never go through the positional stereo-spatial path.
+        self.assertEqual(self.audio.plays, [])
+        self.assertEqual(len(self.audio.groups), 1)
+        group = self.audio.groups[0]
+        self.assertTrue(group.direct)
+        self.assertTrue(group.filterable)
+        self.assertEqual(len(group.plays), 1)
+        play = group.plays[0]
+        self.assertEqual(play["path"], "entities/warlock/intro_boom.ogg")
+        self.assertFalse(play["looping"])
+        self.assertEqual(play["cat"], "ambience")
+        self.assertEqual(play["volume"], 150)
+        self.assertTrue(self.audio.efx.sends)
+        self.assertIs(self.audio.efx.sends[-1][2], self.map.slot)
+
+    def test_flat_fanfare_follows_reverb_zone_changes_and_prunes_finished_sounds(self):
+        self.manager.handle_packet({
+            "name": "warlock_test",
+            "sound": "entities/warlock/intro_boom.ogg",
+            "volume": 150,
+            "illusion": 3,
+        })
+        sends_before = len(self.audio.efx.sends)
+
+        self.clock.now += 0.1
+        self.manager.update()
+        self.assertEqual(len(self.audio.efx.sends), sends_before)
+
+        replacement = object()
+        self.map.slot = replacement
+        self.clock.now += 0.1
+        self.manager.update()
+        self.assertEqual(self.audio.efx.sends[-1][2], replacement)
+
+        # A drained one-shot (source released by SoundGroup.loop) disappears
+        # from the tracking list on the next update.
+        self.audio.groups[0].plays[0]["sound"].source = None
+        self.clock.now += 0.1
+        self.manager.update()
+        self.assertEqual(self.manager._flat_sounds, [])
+
+    def test_flat_fanfare_is_released_on_destroy(self):
+        self.manager.handle_packet(self.start_packet)
+        self.manager.handle_packet({
+            "name": "warlock_test",
+            "sound": "entities/warlock/intro_boom.ogg",
+            "volume": 150,
+            "illusion": 3,
+        })
+        flat_source = self.audio.groups[0].plays[0]["sound"].source
+        self.manager.destroy()
+        # EFX sends detach (slot=None) before the source teardown, then the
+        # whole direct group is destroyed with the illusion.
+        self.assertEqual(self.audio.efx.sends[-1][0], flat_source)
+        self.assertIsNone(self.audio.efx.sends[-1][2])
+        self.assertTrue(self.audio.groups[0].destroyed)
+        self.assertIsNone(self.manager._flat_group)
+        self.assertEqual(self.manager._flat_sounds, [])
+        # Replaying after teardown lazily rebuilds the group instead of dying.
+        self.assertTrue(self.manager.handle_packet({
+            "name": "warlock_test",
+            "sound": "entities/warlock/intro_boom.ogg",
+            "volume": 150,
+            "illusion": 3,
+        }))
+        self.assertEqual(len(self.audio.groups), 2)
+        self.assertFalse(self.audio.groups[1].destroyed)
+
     def test_stop_fades_before_destroying_owned_source(self):
         self.manager.handle_packet(self.start_packet)
         sound = self.audio.plays[0]["sound"]
@@ -218,7 +334,14 @@ class WarlockIntroIllusionTests(unittest.TestCase):
             "sound": "entities/warlock/summon.ogg",
             "illusion": 9,
         }))
+        self.assertFalse(self.manager.handle_packet({
+            "name": "warlock_test",
+            "sound": "ui/fanfare.ogg",
+            "volume": 150,
+            "illusion": 3,
+        }))
         self.assertEqual(self.audio.plays, [])
+        self.assertEqual(self.audio.groups, [])
 
     def test_destroy_releases_all_owned_sources(self):
         self.manager.handle_packet(self.start_packet)
