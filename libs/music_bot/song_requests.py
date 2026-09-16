@@ -171,8 +171,9 @@ def request_line(title, requester, waiting=0, started=False):
 # A search returns five candidates (versions, uploads, live takes), and only
 # the person who asked knows which one they meant. So the host searches and
 # offers them: `PendingPicks` keeps the host's copy (the full result, with the
-# URLs a queue entry needs) and what travels is the choice itself, as an index
-# (`choice_line` numbers them). The asker's pick comes back as that index and
+# URLs a queue entry needs) and what travels is the choice itself, as its
+# position in the offered list (the menu answers with that position; the line
+# itself stays the song's own name). The asker's pick comes back as that index and
 # is resolved against the host's own list -- a title or a URL from a client is
 # never trusted, exactly like every other value that reaches a host's queue.
 
@@ -188,18 +189,24 @@ def _duration_s(value, default=0):
     return secs
 
 
-def choice_line(index, title, seconds=None):
-    """One candidate in a picker: `3. A Song (4:29)`.
+def choice_line(title, seconds=None):
+    """One candidate in a picker: `A Song (4:29)`.
 
     The host's own search-results menu and a requester's picker show the same
     results of the same search, so both render them here (`4:29`, or no
     duration at all when the search did not say).
+
+    Deliberately **not numbered**: a reader picks a line by scrolling to it, and
+    a leading "3." only makes the screen reader read a number that means nothing
+    outside this menu before it says the song. Which one was picked is the
+    position in the list the menu answers with, never a number parsed back out
+    of a label.
     """
     title = " ".join(str(title or "").split()) or "Unknown"
     secs = _duration_s(seconds)
     if secs:
-        return f"{index}. {title} ({secs // 60}:{secs % 60:02d})"
-    return f"{index}. {title}"
+        return f"{title} ({secs // 60}:{secs % 60:02d})"
+    return title
 
 
 def candidates(results, limit=CANDIDATE_LIMIT):

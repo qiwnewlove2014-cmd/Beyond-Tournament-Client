@@ -1354,12 +1354,12 @@ class MapMusicBot:
         for item in items or ():
             if not isinstance(item, dict):
                 continue
-            # Numbered by what is actually shown: an entry the list skipped
-            # must not leave a hole in the numbering somebody reads out loud
-            # (the same rule the queue's own lines follow).
+            # The position in the list is what the pick means, and it counts
+            # what is actually shown: an entry the list skipped must not shift
+            # which result a later position points at.
             index = len(entries)
             label = song_requests.choice_line(
-                index + 1, item.get("title"), item.get("duration"))
+                item.get("title"), item.get("duration"))
 
             def choose(idx=index, picked=label):
                 gp.pop_last_substate()
@@ -3095,9 +3095,9 @@ class MapMusicBot:
         items = []
         for i, r in enumerate(results):
             # The same line a requester's picker shows for the same result
-            # (`song_requests.choice_line`, "3. A Song (4:29)").
+            # (`song_requests.choice_line`, "A Song (4:29)").
             label = song_requests.choice_line(
-                i + 1, r.get('title'), r.get('duration'))
+                r.get('title'), r.get('duration'))
             # Use default_factory to capture loop variable
             def make_callback(idx):
                 return lambda: self._on_result_selected(idx, gp)

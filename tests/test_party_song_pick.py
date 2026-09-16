@@ -19,6 +19,7 @@ No game, OpenAL, network or yt-dlp is required.
 """
 
 import os
+import re
 import sys
 import unittest
 from types import SimpleNamespace
@@ -75,21 +76,28 @@ def open_menu(bot, *args, **kwargs):
 # ── the candidates the host keeps ───────────────────────────────────────
 
 class TestChoiceLine(unittest.TestCase):
-    def test_the_line_numbers_and_times_a_result(self):
-        self.assertEqual(song_requests.choice_line(1, "A Song", 269),
-                         "1. A Song (4:29)")
-        self.assertEqual(song_requests.choice_line(12, "A Song", 5),
-                         "12. A Song (0:05)")
+    def test_the_line_is_the_song_and_its_time(self):
+        self.assertEqual(song_requests.choice_line("A Song", 269),
+                         "A Song (4:29)")
+        self.assertEqual(song_requests.choice_line("A Song", 5),
+                         "A Song (0:05)")
         # No duration from the search is no duration in the line, never "0:00".
-        self.assertEqual(song_requests.choice_line(3, "A Song"), "3. A Song")
-        self.assertEqual(song_requests.choice_line(3, "A Song", 0), "3. A Song")
-        self.assertEqual(song_requests.choice_line(3, "A Song", "nope"),
-                         "3. A Song")
+        self.assertEqual(song_requests.choice_line("A Song"), "A Song")
+        self.assertEqual(song_requests.choice_line("A Song", 0), "A Song")
+        self.assertEqual(song_requests.choice_line("A Song", "nope"), "A Song")
+
+    def test_no_line_carries_a_position_number(self):
+        # A reader picks a line by scrolling to it; a leading "3." would only
+        # make a screen reader say a number that means nothing outside this
+        # menu before it says the song (the pick travels as the menu position).
+        for seconds in (None, 269, "nope"):
+            line = song_requests.choice_line("A Song", seconds)
+            self.assertFalse(re.match(r"^\d+\.\s", line), line)
 
     def test_a_title_is_one_line_and_never_empty(self):
-        self.assertEqual(song_requests.choice_line(1, " a\n\nb\tc "),
-                         "1. a b c")
-        self.assertEqual(song_requests.choice_line(1, "   "), "1. Unknown")
+        self.assertEqual(song_requests.choice_line(" a\n\nb\tc "),
+                         "a b c")
+        self.assertEqual(song_requests.choice_line("   "), "Unknown")
 
 
 class TestCandidates(unittest.TestCase):
@@ -286,7 +294,7 @@ class TestThePicker(unittest.TestCase):
         menu = open_menu(bot, "r3", self.ITEMS, "a song")
         self.assertEqual(menu.title, "Pick a song: a song")
         self.assertEqual([label for label, _ in menu.items],
-                         ["1. Studio (4:29)", "2. Live", "Nothing, thanks"])
+                         ["Studio (4:29)", "Live", "Nothing, thanks"])
         self.assertEqual(len(gp.substates), 1)
 
     def test_choosing_sends_the_index_of_the_line_that_was_chosen(self):
@@ -295,11 +303,11 @@ class TestThePicker(unittest.TestCase):
         open_menu(bot, "r3", self.ITEMS, "a song", on_pick=picked.append)
         with mock.patch("libs.music_bot.controller.speak") as said:
             for label, callback in FakeMenu.instances[-1].items:
-                if label == "2. Live":
+                if label == "Live":
                     callback()
         self.assertEqual(picked, [1])
         self.assertEqual(gp.substates, [])                 # the menu closed
-        said.assert_called_once_with("2. Live")            # read back
+        said.assert_called_once_with("Live")               # read back
 
     def test_the_last_line_withdraws_instead_of_picking(self):
         bot, gp = make_bot()
@@ -331,7 +339,7 @@ class TestThePicker(unittest.TestCase):
         bot, gp = make_bot()
         menu = open_menu(bot, "r3", [None, self.ITEMS[0]], "a song")
         self.assertEqual([label for label, _ in menu.items],
-                         ["1. Studio (4:29)", "Nothing, thanks"])
+                         ["Studio (4:29)", "Nothing, thanks"])
 
 
 # ── wiring ──────────────────────────────────────────────────────────────
@@ -417,10 +425,15 @@ class TestWiring(unittest.TestCase):
         # The host's own search menu and an asker's picker show the same
         # results, so both ask song_requests for the line.
         controller = self._source("libs", "music_bot", "controller.py")
-        self.assertIn("song_requests.choice_line",
-                      self._function(controller, "_show_results_menu"))
+        results = self._function(controller, "_show_results_menu")
+        self.assertIn("song_requests.choice_line", results)
+        # And neither menu invents a position number of its own: the reader
+        # hears the song, and the pick travels as the menu position.
+        self.assertNotIn("i + 1", results)
+        self.assertNotIn("index + 1", results)
         picker = self._function(controller, "open_song_pick_menu")
         self.assertIn("song_requests.choice_line", picker)
+        self.assertNotIn("index + 1", picker)
         self.assertIn("song_requests.NO_CHOICES", picker)
 
     def test_the_server_remembers_who_a_request_belongs_to(self):
