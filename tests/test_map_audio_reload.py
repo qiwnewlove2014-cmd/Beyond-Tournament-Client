@@ -11,6 +11,20 @@ class _QueuedGame:
         self.pending.append(callback)
 
 
+def bare_map():
+    """A Map built by attribute (no __init__, so no real map audio).
+
+    The two piano warm-up timer fields come along because destroy() is the
+    same code the game runs: it retires a warm-up still waiting to run.
+    """
+    from libs.world_map import Map
+
+    map_obj = Map.__new__(Map)
+    map_obj._piano_backfill_id = None
+    map_obj._piano_warmup_token = 0
+    return map_obj
+
+
 class TestMapAudioThreadOwnership(unittest.TestCase):
     def test_map_lifecycle_handlers_only_apply_from_game_queue(self):
         from libs.event_handeler import EventHandeler
@@ -340,7 +354,7 @@ class TestMapReloadResourceOwnership(unittest.TestCase):
             def detach_environment_effects(self):
                 order.append("entity_detach")
 
-        map_obj = Map.__new__(Map)
+        map_obj = bare_map()
         map_obj.entities = {"player": Entity()}
         map_obj.reverb_list = [AudioObject("reverb_release")]
         map_obj.ambience_list = [AudioObject("ambience_destroy")]

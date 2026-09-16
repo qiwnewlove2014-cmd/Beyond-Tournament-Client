@@ -241,17 +241,23 @@ class InstrumentSampleCache:
         while len(self._failures) > self._max_failures:
             self._failures.popitem(last=False)
 
-    def pump(self, max_uploads=4, budget_seconds=0.002):
+    def pump(self, max_uploads=4, budget_seconds=0.002, max_bytes=None):
         """Upload a bounded amount on the audio owner; return upload count.
 
         The budget is checked between uploads. One backend upload cannot be
         interrupted; its duration remains the backend's responsibility.
+        ``max_bytes`` bounds the PCM one frame hands the driver: the count and
+        the clock alone let four multi-hundred-kilobyte pieces land in the same
+        frame (the clock is only read between uploads), which is a frame the
+        whole client feels. The first piece of a frame is always allowed, so a
+        cap smaller than a single sample can never stop the pump.
         """
         self._check_owner()
         if self._closed or max_uploads <= 0 or budget_seconds <= 0:
             return 0
         deadline = self._clock() + budget_seconds
         count = 0
+        sent = 0
         while count < max_uploads and self._clock() < deadline:
             if self._uploading is None:
                 try:
@@ -284,6 +290,8 @@ class InstrumentSampleCache:
             prepared = current.prepared
             index = len(current.buffers)
             pcm, channels = prepared.pieces[index]
+            if max_bytes is not None and sent and sent + len(pcm) > max_bytes:
+                break
             try:
                 buffer = self._upload(pcm, channels, prepared.rate)
                 if buffer is None:
@@ -296,6 +304,7 @@ class InstrumentSampleCache:
             current.buffers.append(buffer)
             prepared.pieces[index] = (b"", channels)
             count += 1
+            sent += len(pcm)
             if len(current.buffers) == len(prepared.pieces):
                 buffers = current.buffers
                 representations = {

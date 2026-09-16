@@ -92,26 +92,50 @@ class PianoAudio:
         ("DELAY", 0.012),
     )
 
-    def preload(self):
-        """Warm the full shipped piano range when a map piano appears.
+    # The shipped piano samples: seven octaves of C..B plus the B0/C8 edges.
+    _NOTE_NAMES = ("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")
+    _SHIPPED_OCTAVES = tuple(range(1, 8))
+    _EDGE_NOTES = ("B0", "C8")
+    # The octaves a keyboard starts on (the default octave and its neighbours).
+    # They arrive with the map, because a player walks up and plays before
+    # anything else on the map is ready. The rest of the shipped range is asked
+    # for once the join has settled -- see Map.spawn_instrument -- because
+    # preparing all 86 notes (~92 MB of PCM, ~314 driver inserts, measured
+    # 1.3 s of one core) inside the map parse competed with the login snapshot,
+    # the map itself and its entity spawns on EVERY client that joined a map
+    # with a piano in it.
+    EAGER_OCTAVES = (3, 4, 5)
 
-        Listeners used to warm only octaves 3-5, so the first strike of any
-        note outside that range was silent until its sample finished
-        preparing. The complete set (B0..C8, 85 notes, ~98 MB prepared) fits
-        the shared instrument sample cache alongside a drum kit.
-        """
-        notes = ("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")
-        paths = [
+    @classmethod
+    def _octave_paths(cls, octaves):
+        return tuple(
             f"piano/Piano.mf.{note}{octave}.ogg"
-            for octave in range(1, 8)
-            for note in notes
-        ]
-        paths.append("piano/Piano.mf.B0.ogg")
-        paths.append("piano/Piano.mf.C8.ogg")
-        # The shipped set stops at Gb6, so Gb7 above resolves to one cached
-        # decode failure per generation - harmless, and it starts warming
-        # automatically if that sample ever ships.
-        self.am.instrument_samples.request(paths)
+            for octave in octaves
+            for note in cls._NOTE_NAMES
+        )
+
+    def preload(self):
+        """Warm the octaves a keyboard starts on when a map piano appears."""
+        self.am.instrument_samples.request(self._octave_paths(self.EAGER_OCTAVES))
+
+    def eager_note_count(self):
+        """How many notes arrive with the map; the rest follow once it settles."""
+        return len(self._octave_paths(self.EAGER_OCTAVES))
+
+    def warm_shipped_range(self):
+        """Warm the rest of the shipped range once the join has settled.
+
+        A note outside the eager octaves is not lost in the meantime: the
+        sample is requested the first time the note reaches the play path, and
+        a listener's cold note is HELD (bounded by DEFERRED_NOTE_TIMEOUT_S)
+        rather than dropped. The shipped set stops at Gb6, so Gb7 resolves to
+        one cached decode failure per generation - harmless, and it starts
+        warming automatically if that sample ever ships.
+        """
+        self.am.instrument_samples.request(
+            self._octave_paths(self._SHIPPED_OCTAVES)
+            + tuple(f"piano/Piano.mf.{note}.ogg" for note in self._EDGE_NOTES)
+        )
 
     def load_stereo_split_buffers(self, path: str):
         """Return split L/R buffers, or (None, None) while notes prepare.

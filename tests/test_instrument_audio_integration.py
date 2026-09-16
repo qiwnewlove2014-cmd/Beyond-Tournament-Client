@@ -3,6 +3,7 @@
 import ctypes
 import os
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -66,15 +67,43 @@ class InstrumentAudioIntegrationTests(unittest.TestCase):
             drums.preload(kit)
             self.assertEqual(requested[-1], tuple(path for _, path, _, _ in drums.pad_defs(kit) if path))
 
+    def test_the_eager_warm_up_is_the_keyboard_octaves_and_the_rest_follows(self):
+        requested = []
+        piano = PianoAudio(SimpleNamespace(instrument_samples=SimpleNamespace(
+            request=lambda paths: requested.append(tuple(paths)))))
+        piano.preload()
+        self.assertEqual(requested[0], PianoAudio._octave_paths(PianoAudio.EAGER_OCTAVES))
+        self.assertEqual(len(requested[0]), 36)
+        self.assertEqual(len(set(requested[0])), 36)
+        self.assertIn("piano/Piano.mf.C3.ogg", requested[0])
+        self.assertIn("piano/Piano.mf.B5.ogg", requested[0])
+        # The rare ends of B0..C8 are NOT prepared inside the map parse: a
+        # client that joins a map with a piano in it must not spend its join
+        # preparing 92 MB of PCM. They arrive with the backfill below, and a
+        # note struck before it is held rather than dropped (see
+        # test_remote_piano_note_waits_for_its_sample_instead_of_dropping).
+        for rare in ("B0", "C1", "B7", "C8"):
+            self.assertNotIn(f"piano/Piano.mf.{rare}.ogg", requested[0])
+        self.assertEqual(piano.eager_note_count(), 36)
+        piano.warm_shipped_range()
+        self.assertEqual(len(requested[1]), 86)
+        self.assertEqual(len(set(requested[1])), 86)
+        self.assertIn("piano/Piano.mf.B0.ogg", requested[1])
+        self.assertIn("piano/Piano.mf.C1.ogg", requested[1])
+        self.assertIn("piano/Piano.mf.B7.ogg", requested[1])
+        self.assertIn("piano/Piano.mf.C8.ogg", requested[1])
+
     def test_map_metadata_prewarms_listeners_without_entering_a_session(self):
         from libs.world_map import Map
         from libs.map import Map_parser
         requested = []
         audio = SimpleNamespace(instrument_samples=SimpleNamespace(request=lambda paths: requested.append(tuple(paths))))
         audio.piano, audio.drums = PianoAudio(audio), DrumAudio(audio)
-        world = Map.__new__(Map)
-        world.game = SimpleNamespace(audio_mngr=audio)
-        world.destroy = Mock()
+        scheduled = []
+        world = Map(SimpleNamespace(
+            audio_mngr=audio,
+            call_after=lambda ms, function: scheduled.append((ms, function)) or 7,
+        ))
         data = dict(minx=0, maxx=10, miny=0, maxy=10, minz=0, maxz=0, elements=[
             {"type": "instrument", "data": {"instrument": "piano"}},
             {"type": "instrument", "data": {"instrument": "drumset", "kit": "diw"}},
@@ -82,22 +111,89 @@ class InstrumentAudioIntegrationTests(unittest.TestCase):
         ])
         Map_parser(world.game, world).load(data)
         self.assertEqual(len(requested), 2)
-        self.assertIn("piano/Piano.mf.B0.ogg", requested[0])
-        self.assertIn("piano/Piano.mf.C1.ogg", requested[0])
-        self.assertIn("piano/Piano.mf.C3.ogg", requested[0])
-        self.assertIn("piano/Piano.mf.B5.ogg", requested[0])
-        self.assertIn("piano/Piano.mf.B7.ogg", requested[0])
-        self.assertIn("piano/Piano.mf.C8.ogg", requested[0])
-        # 7 full octaves (C1..B7) plus the B0/C8 edges; Gb7 does not ship but
-        # is requested anyway so it warms itself if the sample ever appears.
-        self.assertEqual(len(requested[0]), 86)
-        self.assertEqual(len(set(requested[0])), 86)
+        self.assertEqual(requested[0], PianoAudio._octave_paths(PianoAudio.EAGER_OCTAVES))
+        # One warm-up for the whole map, not one per piano, and it is what asks
+        # for the rest of the shipped range (the notes a keyboard plays are
+        # already in requested[0]).
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][0], Map.INSTRUMENT_BACKFILL_DELAY_MS)
+        scheduled[0][1]()
+        self.assertEqual(requested[2], PianoAudio(audio)._octave_paths(PianoAudio._SHIPPED_OCTAVES)
+                         + ("piano/Piano.mf.B0.ogg", "piano/Piano.mf.C8.ogg"))
+        self.assertEqual(len(requested[2]), 86)
         self.assertEqual(requested[1], tuple(path for _, path, _, _ in DrumAudio.pad_defs("diw") if path))
         self.assertEqual(audio.drums._active_kit, DrumAudio.DEFAULT_KIT)
         audio.drums._active_kit = "diw"
         world.spawn_instrument(instrument="Drumset")
         self.assertEqual(requested[-1], tuple(path for _, path, _, _ in DrumAudio.pad_defs("default") if path))
         self.assertEqual(audio.drums._active_kit, "diw")
+        # A map that is gone by the time its timer fires warms nothing: the
+        # notes belong to the map the player is on, not the one they left, and
+        # a 60 MB decode must not start in whatever they are doing next.
+        before = len(requested)
+        world.destroy()
+        scheduled[0][1]()
+        self.assertEqual(len(requested), before)
+
+    def test_one_frame_never_hands_the_driver_more_than_its_byte_budget(self):
+        pcm = b"\x00\x00" * 300_000          # 600 KB stereo -> 1.2 MB prepared
+        handed = []
+
+        def decode(path):
+            return SimpleNamespace(buffer=pcm, channels=2, frequency=44100)
+
+        def upload(data, channels, rate):
+            handed.append(len(data))
+            return object()
+
+        cache = InstrumentSampleCache(str, decode, upload)
+        try:
+            def pump_when_ready(**kwargs):
+                """Pump once the decoder has a file ready (never waits forever)."""
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if cache.pump(**kwargs):
+                        return True
+                    time.sleep(0.005)
+                return False
+
+            cache.request(["one"])
+            budget = 800_000
+            per_call = []
+            while cache.status(["one"]) != "ready":
+                handed.clear()
+                self.assertTrue(pump_when_ready(max_uploads=4, budget_seconds=1.0,
+                                                max_bytes=budget))
+                per_call.append(sum(handed))
+            # Every frame stays inside the budget (the first piece is always
+            # allowed, so a budget smaller than one piece still makes progress).
+            self.assertGreaterEqual(len(per_call), 2)
+            self.assertLessEqual(max(per_call), budget)
+            # A cap that cannot fit a single further piece must not stall the
+            # pump: the first piece of a frame is always handed over.
+            handed.clear()
+            cache.clear()
+            cache.request(["one"])
+            self.assertTrue(pump_when_ready(max_uploads=4, budget_seconds=1.0, max_bytes=1))
+            for _ in range(20):
+                if cache.status(["one"]) == "ready":
+                    break
+                cache.pump(max_uploads=4, budget_seconds=1.0, max_bytes=1)
+            self.assertEqual(cache.status(["one"]), "ready")
+        finally:
+            cache.close()
+        # Without the cap the same frame carries the whole 1.2 MB file.
+        handed.clear()
+        uncapped = InstrumentSampleCache(
+            str, decode, lambda data, channels, rate: handed.append(len(data)) or object())
+        try:
+            uncapped.request(["one"])
+            while uncapped.status(["one"]) != "ready":
+                uncapped.pump(max_uploads=4, budget_seconds=1.0)
+            # Stereo 600 KB plus its mono/left/right halves: 1.5 MB in one frame.
+            self.assertEqual(sum(handed), 600_000 + 3 * 300_000)
+        finally:
+            uncapped.close()
 
     def test_remote_piano_note_waits_for_its_sample_instead_of_dropping(self):
         audio = SimpleNamespace(instrument_samples=SimpleNamespace(status=Mock(return_value="loading")))
@@ -163,7 +259,10 @@ class InstrumentAudioIntegrationTests(unittest.TestCase):
         audio.unbound_sources = []
         audio.soundgroups = []
         audio.loop()
-        self.assertEqual(calls, ["inbox", ("pump", {"max_uploads": 4, "budget_seconds": 0.002}), "piano", "drums"])
+        self.assertEqual(calls, ["inbox", ("pump", {
+            "max_uploads": 4, "budget_seconds": 0.002,
+            "max_bytes": AudioManager.INSTRUMENT_UPLOAD_BYTES_PER_FRAME,
+        }), "piano", "drums"])
 
     def test_blocked_decoder_does_not_block_main_audio_loop(self):
         started, release = threading.Event(), threading.Event()

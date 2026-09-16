@@ -763,6 +763,13 @@ class AudioManager():
             except Exception as e:
                 print(f"[AUDIO INBOX] deferred call failed: {e}")
 
+    # PCM one frame may hand the driver while instrument samples prepare. The
+    # upload budget above is checked between inserts, so four large pieces could
+    # otherwise land in a single frame; this bounds the worst frame instead of
+    # the average one. It only ever trims the heaviest frames (a piano piece
+    # measured ~0.3 MB, so the usual frame is well under it).
+    INSTRUMENT_UPLOAD_BYTES_PER_FRAME = 1_500_000
+
     def register_jukebox_receiver(self, receiver):
         """Register on the main thread; weak ownership lets finished streams go."""
         self._jukebox_receivers.append(weakref.ref(receiver))
@@ -803,7 +810,8 @@ class AudioManager():
                 audio_probe.call("audio.inbox", self._drain_audio_inbox)
                 self._pump_jukebox_receivers()
                 audio_probe.call("audio.instrument_upload", self.instrument_samples.pump,
-                                 max_uploads=4, budget_seconds=0.002)
+                                 max_uploads=4, budget_seconds=0.002,
+                                 max_bytes=self.INSTRUMENT_UPLOAD_BYTES_PER_FRAME)
                 map_sounds = getattr(self, "map_sounds", None)
                 if map_sounds is not None:
                     audio_probe.call("audio.map_upload", map_sounds.pump,

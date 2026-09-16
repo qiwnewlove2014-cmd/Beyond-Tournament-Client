@@ -67,6 +67,11 @@ class Map:
         # 🎬 Cinema speakers: same idea as the jukebox list, one entry per
         # placed speaker. The room they form is resolved per cabinet.
         self.cinema_speaker_list = []
+        # Id of the pending "finish warming the piano range" timer (None when
+        # none is pending) and the token that retires it when this map is torn
+        # down or reloaded (see _schedule_piano_backfill).
+        self._piano_backfill_id = None
+        self._piano_warmup_token = 0
 
     def valid_straight_path(self, position1, position2):
         x1, y1, z1 = position1
@@ -216,6 +221,11 @@ class Map:
                 audio_probe.call("map.occlusion", i.soundgroup.aclude_check, self)
 
     def destroy(self, destroy_entities=True):
+        # A warm-up still waiting to run belongs to the map that scheduled it,
+        # not to whatever the player is on next: retire it here (the timer
+        # itself is unscheduled by nobody -- it checks this token when it runs).
+        self._piano_warmup_token += 1
+        self._piano_backfill_id = None
         cache = getattr(getattr(getattr(self, "game", None), "audio_mngr", None), "map_sounds", None)
         if cache is not None:
             cache.begin_map()  # Cancel stale work, retain bounded ready buffers.
@@ -838,6 +848,13 @@ class Map:
     def spawn_zombieSpawn(self, **kwargs):
         pass
 
+    # How long after a map is applied its piano range is finished warming.
+    # The notes a keyboard plays arrive with the map; the rest of the shipped
+    # range waits for the join to settle, because preparing all of it inside
+    # the map parse competed with the login snapshot, the map itself and its
+    # entity spawns on every client that joined a map with a piano in it.
+    INSTRUMENT_BACKFILL_DELAY_MS = 4000
+
     def spawn_instrument(self, instrument="piano", kit=None, **kwargs):
         # The server separately spawns the interactive entity. Map metadata
         # only warms known local samples for listeners, with no audio or I/O
@@ -845,9 +862,42 @@ class Map:
         instrument = str(instrument or "piano").lower()
         if instrument == "piano":
             self.game.audio_mngr.piano.preload()
+            self._schedule_piano_backfill()
         elif instrument == "drumset":
             drums = self.game.audio_mngr.drums
             drums.preload(kit or drums.DEFAULT_KIT)
+
+    def _schedule_piano_backfill(self):
+        """Warm the rest of the piano range once this map has settled.
+
+        Idempotent: a map with five pianos schedules one warm-up, and the
+        sample cache ignores a path it already holds. Self-retiring: the timer
+        only warms the range if the map that scheduled it is still the live
+        one (destroy() retires it), so leaving a map does not start a 60 MB
+        decode in whatever the player is doing next.
+        """
+        if self._piano_backfill_id is not None:
+            return
+        call_after = getattr(self.game, "call_after", None)
+        if not callable(call_after):
+            return  # A mock/legacy game owns no timers; the eager set still ran.
+        from .deferred_log import log_deferred
+        log_deferred(
+            f"[Instruments] piano: {self.game.audio_mngr.piano.eager_note_count()}"
+            f" note(s) warm with the map, the rest of the shipped range in"
+            f" {self.INSTRUMENT_BACKFILL_DELAY_MS} ms (off the join)"
+        )
+        token = self._piano_warmup_token
+        self._piano_backfill_id = call_after(
+            self.INSTRUMENT_BACKFILL_DELAY_MS,
+            lambda: self._piano_backfill(token),
+        )
+
+    def _piano_backfill(self, token):
+        self._piano_backfill_id = None
+        if token != self._piano_warmup_token:
+            return
+        self.game.audio_mngr.piano.warm_shipped_range()
 
     def spawn_entity(
         self,
