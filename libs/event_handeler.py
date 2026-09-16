@@ -10,6 +10,7 @@ import contextlib
 import webbrowser
 import cyal
 from . import audio_manager, buffer, gameplay, local_player_documents, menu, menus, options, consts
+from . import party_sync_audio
 from .speech import speak
 from .weapons import weapon
 from . import tickets
@@ -530,16 +531,22 @@ class EventHandeler:
         # Clear it here (on CHANNEL_MAP) so subsequent spawn_entity packets on
         # that same ordered channel rebuild only valid mappings for the new map.
         self.gameplay.voice_channels.clear()
-        # Party Sync sessions are map-scoped server-side (they end when the
-        # host or a guest leaves the map). A fresh map therefore always starts
-        # without a session: clear the mirror and stop any forced upload so a
-        # stale host flag cannot leak audio into the new map.
+        # Party Sync spans maps: the server keeps the session and addresses
+        # every leg to the player (voice_channel is assigned once per login),
+        # so a map load is not an end. The session mirror and the host's forced
+        # upload stay exactly as they were — a host who travels keeps playing
+        # to the room — and a member with no entity here keeps their sink.
+        # Only the server ends a session, and its party_sync_ended is what
+        # clears this, never the map.
+        #
+        # This call is about the SINKS and the members still standing here, not
+        # about the map that is arriving: the new entities do not exist yet (the
+        # table was cleared a line above, and the spawn packets come after), so
+        # putting them on the session's legs is `_apply_spawn_entity`'s job —
+        # every member's entity is put back on them there, sink or no sink.
         ps = getattr(self.gameplay, "party_sync", None)
-        if ps is not None:
-            ps.end_session()
-        bot = getattr(self.gameplay, "music_bot", None)
-        if bot is not None:
-            bot.party_sync_force_upload = False
+        if ps is not None and getattr(ps, "role", None) in ("host", "guest"):
+            self._sync_party_sync_direct_audio()
         self._party_sync_prompt_menu = None
         # Release preloaded instrument buffers and live voices from the previous
         # map so memory does not accumulate. Must run on the main thread because
@@ -754,6 +761,18 @@ class EventHandeler:
             self.gameplay.voice_channels[data["voice_channel"]] = entity
         if data.get("player", False) and not getattr(entity, "player", False):
             entity.player = True
+
+        # A session member's entity is the leg that plays them from here on.
+        # Runs after `player` (that setter is what creates the sources the legs
+        # are written to), and for EVERY member entity rather than only one that
+        # was handed a sink: a map load, a return from another map and a late
+        # session all produce a fresh entity that is not on the session's legs
+        # yet, and the roster will not say so again.
+        if (data.get("voice_channel", None) is not None
+                and getattr(entity, "player", False)):
+            party_sync_audio.hand_back_to_entity(
+                self.gameplay, entity, data["voice_channel"], self.game
+            )
             
         if data["name"] == "ball":
             snd = entity.soundgroup.play("Pong/rolling.ogg", looping=True, id="ball_roll", cat="miscelaneous", volume=45)
@@ -826,6 +845,16 @@ class EventHandeler:
             )
         if hasattr(self.gameplay, 'voice_channels') and isinstance(self.gameplay.voice_channels, dict):
             keys_to_remove = [k for k, v in self.gameplay.voice_channels.items() if getattr(v, 'name', None) == target_name]
+            # A session member who walks to another map keeps the session, so
+            # what their entity still holds (the song's queue and clock, the
+            # voice's queue) crosses into the sink that plays them from here.
+            # This must happen BEFORE the removal below destroys the entity's
+            # sources.
+            for k in keys_to_remove:
+                party_sync_audio.take_over_from_entity(
+                    self.gameplay, self.gameplay.voice_channels.get(k), k,
+                    self.game,
+                )
             for k in keys_to_remove:
                 del self.gameplay.voice_channels[k]
         if hasattr(self.gameplay, 'map') and self.gameplay.map:
@@ -2005,21 +2034,104 @@ class EventHandeler:
             if compression is not None and (player_sources or in_room):
                 compression.recieve(opus_data, player_sources or [], None,
                                     channelID, self.gameplay, sender_id)
-        elif channelID in self.gameplay.voice_channels.keys():
-            vc_source = self.gameplay.voice_channels[channelID].vc_source
-            radio_source = self.gameplay.voice_channels[channelID].radio_source
-            self.gameplay.voice_channels[channelID].vc_compression.recieve(data, vc_source, radio_source, channelID, self.gameplay)
+        else:
+            # Team talk reaches every session member wherever they are, so this
+            # leg must exist without an entity on this map: the sender's entity
+            # when they are standing here, else their Party Sync sink.
+            receiver = self._party_audio_receiver(channelID)
+            if receiver is None:
+                return
+            compression = getattr(receiver, "vc_compression", None)
+            if compression is None:
+                return
+            compression.recieve(
+                data,
+                getattr(receiver, "vc_source", None),
+                getattr(receiver, "radio_source", None),
+                channelID,
+                self.gameplay,
+            )
+
+    # How often the party leg may be re-reported for one channel (seconds).
+    # The leg is reported on a CHANGE of output (or of the flags that shape
+    # it), and a line per frame would be worse than the silence it explains.
+    PARTY_LEG_REPORT_INTERVAL = 5.0
+
+    def _party_leg_report(self, entity, channel_id, via_sink):
+        """Say ONCE per change which output is carrying a session's audio.
+
+        "The listener hears nothing" has three unrelated causes -- the frames
+        never arrived, they arrived and are playing at the member's *body* (a
+        3D source, inaudible past 50 tiles), or a cabinet's room took them --
+        and none of them leaves a trace anywhere. One routine line per change
+        of output makes that answerable from the listener's own log instead of
+        from a report that sounds the same in all three cases.
+        """
+        from .logger import log as _log
+        ps = getattr(self.gameplay, "party_sync", None)
+        if getattr(ps, "role", None) not in ("host", "guest"):
+            return
+        if via_sink:
+            leg = "their party sink (that member is on another map)"
+        elif getattr(entity, "_party_sync_direct", False):
+            leg = "their entity's direct-to-ear feed"
+        elif (getattr(ps, "role", None) == "guest"
+                and channel_id == getattr(ps, "host_voice_channel", None)):
+            leg = ("their entity AS A 3D SOURCE at their body - the session "
+                   "legs were never applied to it (the song fades with "
+                   "distance and is silent past 50 tiles)")
+        else:
+            return
+        try:
+            channel = int(channel_id)
+        except (TypeError, ValueError):
+            return
+        seen = getattr(self, "_party_leg_seen", None)
+        if seen is None:
+            seen = self._party_leg_seen = {}
+        previous, at = seen.get(channel, (None, 0.0))
+        now = time.monotonic()
+        if previous == leg and now - at < self.PARTY_LEG_REPORT_INTERVAL:
+            return
+        seen[channel] = (leg, now)
+        _log(f"[PartySync] channel {channel}: the session's music is playing "
+             f"out of {leg}")
+
+    def _party_audio_receiver(self, channel_id):
+        """Who plays one member's audio on this client.
+
+        This map's entity for that voice channel when the member is standing
+        here, otherwise the Party Sync sink kept for them while they are on
+        another map (libs/party_sync_audio.py). An entity always wins: it is
+        the real body, with a position, a reverb zone and the map's own
+        shaping, and the sink exists only for the case no entity can serve.
+
+        Read-only by design: the packet paths run on the receive thread and
+        must never create an OpenAL source, so a missing sink means "not ours"
+        rather than "make one".
+        """
+        entity = (getattr(self.gameplay, "voice_channels", None) or {}).get(channel_id)
+        if entity is not None:
+            return entity
+        sinks = party_sync_audio.sinks_for(self.gameplay, self.game)
+        return sinks.sink_for(channel_id) if sinks is not None else None
 
     def process_music_data(self, data):
         # Data format: [1 byte Entity VoiceChannel ID] + [Opus Packet]
         if len(data) < 2: return
         entity_channel_id = data[0]
         opus_data = data[1:]
-        
-        if entity_channel_id in self.gameplay.voice_channels:
-            entity = self.gameplay.voice_channels[entity_channel_id]
+
+        # The member's entity when they are standing here, else the Party Sync
+        # sink kept for them while they are on another map.
+        entity = self._party_audio_receiver(entity_channel_id)
+        if entity is not None:
             music_src = getattr(entity, 'music_source', None)
             if music_src is not None:
+                self._party_leg_report(
+                    entity, entity_channel_id,
+                    isinstance(entity, party_sync_audio.PartyMemberSink),
+                )
                 import time
 
                 if not hasattr(entity, 'music_compression') or not entity.music_compression:
@@ -2052,12 +2164,19 @@ class EventHandeler:
         if not (1 <= len(opus_data) <= 1275):
             return
 
-        entity = getattr(self.gameplay, "voice_channels", {}).get(entity_channel_id)
+        # The member's entity when they are here, else their Party Sync sink:
+        # a session's music timeline has to reach a listener on another map too
+        # (the same leg carries the frames and the jam-note anchor).
+        entity = self._party_audio_receiver(entity_channel_id)
         if entity is None:
             return
         music_src = getattr(entity, "music_source", None)
         if music_src is None:
             return
+        self._party_leg_report(
+            entity, entity_channel_id,
+            isinstance(entity, party_sync_audio.PartyMemberSink),
+        )
         if not getattr(entity, "music_compression", None):
             from .voice_chat import MusicCompression
             entity.music_compression = MusicCompression(self.game)
@@ -2133,6 +2252,13 @@ class EventHandeler:
         Server files the answer under the name it knows this connection by. The
         note, the switches and the report are all read and made on the main
         thread -- spawning OpenAL sources off it is what the inbox is for.
+
+        The relay carries the name of whoever *fired* it, and that name is the
+        whole scope of the one exception the sound test holds: on that client --
+        and only there -- the shot it fired itself is played even with its own
+        ``Instruments:`` switch off (see ``sound_test.play``). Every other client
+        compares nothing and answers its own switches exactly as before, and a
+        client that cannot read its own name simply has no exception.
         """
         if not isinstance(data, dict):
             return
@@ -2250,6 +2376,24 @@ class EventHandeler:
         bot = getattr(self.gameplay, "music_bot", None)
         force = bool(bot) and ps.role == "host"
         if bot is not None:
+            # One routine line per change: whether this machine is uploading for
+            # its listeners is the other half of "the listener hears nothing",
+            # and it is otherwise invisible on the host's own machine (they
+            # hear their music either way, straight from the local stream).
+            from .logger import log as _log
+            if force != bool(getattr(bot, "party_sync_force_upload", False)):
+                if force:
+                    _log(
+                        "[PartySync] hosting session "
+                        f"{getattr(ps, 'session_id', '')}: the music bot stream "
+                        "is being uploaded for the listeners (the Broadcast "
+                        "switch is not what gates it here)"
+                    )
+                else:
+                    _log(
+                        "[PartySync] no session: the music bot goes back to the "
+                        "Broadcast switch for who hears it"
+                    )
             bot.party_sync_force_upload = force
 
     def _sync_party_sync_direct_audio(self):
@@ -2304,6 +2448,13 @@ class EventHandeler:
                         set_voice_direct_mode(e)
                 elif getattr(e, "_party_sync_voice_direct", False):
                     clear_voice_direct_mode(e)
+            # 3) The session's own sinks: one per member who is NOT on this map
+            #    (libs/party_sync_audio.py). Reconciled here as well as on every
+            #    frame, so a session that spans maps has a leg on every client
+            #    from the moment the roster changes.
+            sinks = party_sync_audio.sinks_for(gp, self.game)
+            if sinks is not None:
+                sinks.sync(gp, ps)
 
         self.game.put(apply)
 
@@ -2381,6 +2532,127 @@ class EventHandeler:
             return
         self._sync_party_sync_upload()
         self._sync_party_sync_direct_audio()
+        # A session's song-request switch is the host's own (`Song Requests:`,
+        # set from the Party Sync menus), and the server carries it in the
+        # state so every listener knows. Push ours once per session: a state
+        # push arrives on every roster change, and re-announcing it each time
+        # would be noise.
+        if ps.role == "host" and getattr(self, "_party_song_flag_session", None) != ps.session_id:
+            self._party_song_flag_session = ps.session_id
+            bot = getattr(self.gameplay, "music_bot", None)
+            announce = getattr(bot, "announce_song_requests", None)
+            if callable(announce):
+                announce()
+        # A state push means the roster changed -- somebody just joined and
+        # cannot see this machine's queue, and the state they were handed only
+        # carries what the host last shared. So the host re-sends the queue now
+        # rather than waiting for the next change or the repeat interval.
+        if ps.role == "host":
+            bot = getattr(self.gameplay, "music_bot", None)
+            announce_queue = getattr(bot, "announce_party_queue", None)
+            if callable(announce_queue):
+                announce_queue(force=True)
+
+    def party_sync_queue(self, data):
+        """Relayed to every listener: the host's play queue, as it stands.
+
+        Read-only and silent: it feeds the listener's own party menu (the same
+        snapshot also rides the state push, so a joiner starts with it). It
+        never touches this machine's audio or its own queue -- the queue being
+        displayed belongs to the host.
+        """
+        from .party_sync import parse_queue
+        ps = self._party_sync()
+        if not getattr(ps, "role", None):
+            return
+        state = parse_queue(data)
+        ps.now_playing = state["now_playing"]
+        ps.queue = state["items"]
+
+    def party_sync_song_request(self, data):
+        """Relayed to the HOST: a listener asked for a song (/p <name>).
+
+        The server has already checked that the sender is in this session and
+        that the request is not spam; what is left is this machine's own queue,
+        so the question is handed to the music bot (main thread: it may start a
+        stream) and answered from there. A request is only ever appended --
+        what is playing now is never touched.
+        """
+        from .party_sync import parse_song_request
+        request = parse_song_request(data)
+        if request is None:
+            return
+        bot = getattr(self.gameplay, "music_bot", None)
+        if bot is None or not callable(getattr(bot, "queue_song_request", None)):
+            return
+        self.game.put(
+            lambda request=request: bot.queue_song_request(
+                request["from"], request["query"], request["request_id"]
+            )
+        )
+
+    def party_sync_song_choices(self, data):
+        """Relayed to the ASKER: the host found these songs for their /p.
+
+        The picker opens HERE, on the machine of the person who typed the song
+        -- they are the one who knows which version they meant. It needs no
+        playback and no running bot (a listener may have their own music bot
+        switched off), and the choice travels back as an INDEX: the names in
+        this menu are the host's, and the host resolves the pick against the
+        results it searched for.
+        """
+        from .party_sync import parse_song_choices
+        choices = parse_song_choices(data)
+        if choices is None:
+            return
+        bot = getattr(self.gameplay, "music_bot", None)
+        open_menu = getattr(bot, "open_song_pick_menu", None)
+        if not callable(open_menu):
+            return
+        self.game.put(lambda: open_menu(
+            choices["request_id"], choices["items"], choices["query"],
+            on_pick=lambda index, request_id=choices["request_id"]: \
+                self._party_sync_send("party_sync_song_pick", {
+                    "request_id": request_id, "index": index,
+                }),
+        ))
+
+    def party_sync_song_pick(self, data):
+        """Relayed to the HOST: the asker chose one of the results.
+
+        The server has already checked that the sender is the member the
+        request belonged to; what the index means is this machine's own
+        business, so the pick is resolved here against the results this host
+        searched for (see MapMusicBot.serve_song_pick).
+        """
+        from .party_sync import parse_song_pick
+        pick = parse_song_pick(data)
+        if pick is None:
+            return
+        bot = getattr(self.gameplay, "music_bot", None)
+        if bot is None or not callable(getattr(bot, "serve_song_pick", None)):
+            return
+        self.game.put(lambda: bot.serve_song_pick(
+            pick["from"], pick["request_id"], pick["index"]
+        ))
+
+    def _clear_party_song_requests(self):
+        """A session ended: forget who asked for what.
+
+        The cooldown and the "you already asked for that" memory are per
+        session: a new party must not inherit either from the last one. Picks
+        still waiting for a choice go with them -- a request id from an ended
+        session can never be answered again.
+        """
+        bot = getattr(self.gameplay, "music_bot", None)
+        for store in (getattr(bot, "song_requests", None),
+                      getattr(bot, "song_picks", None)):
+            if store is None:
+                continue
+            try:
+                store.forget()
+            except Exception:
+                pass
 
     def party_sync_joined(self, data):
         from .party_sync import parse_session_event
@@ -2414,6 +2686,7 @@ class EventHandeler:
         self._close_party_sync_prompt()
         self._sync_party_sync_upload()
         self._sync_party_sync_direct_audio()
+        self._clear_party_song_requests()
 
     def party_sync_ended(self, data):
         ps = self._party_sync()
@@ -2422,6 +2695,7 @@ class EventHandeler:
         self._close_party_sync_prompt()
         self._sync_party_sync_upload()
         self._sync_party_sync_direct_audio()
+        self._clear_party_song_requests()
         if was_guest:
             speak("The Party Sync session ended.")
 
@@ -2433,19 +2707,25 @@ class EventHandeler:
         return
 
     def party_sync_player_list(self, data):
-        from .party_sync import parse_player_list
-        players = parse_player_list(data)
+        from .party_sync import parse_player_list_entries
+        players = parse_player_list_entries(data)
         self._party_sync().invite_players = players
         self.game.put(lambda players=players: self._open_party_sync_invite_list(players))
 
     def _open_party_sync_invite_list(self, players):
-        """Main-thread host picker of inviteable players on the map."""
+        """Main-thread host picker of inviteable players (any map).
+
+        A session is not map-scoped, so the list is every player online, the
+        ones standing here first. Each line says which is which — the host is
+        inviting a *person*, and "they are over there" is the only thing that
+        makes a name from another map readable.
+        """
         gp = self.gameplay
         ps = self._party_sync()
         if ps.role != "host":
             return
         if not players:
-            speak("Nobody on this map can be invited right now.")
+            speak("Nobody online can be invited right now.")
             return
         m = menu.Menu(self.game, "Invite a player to listen", parrent=gp)
         items = []
@@ -2471,14 +2751,19 @@ class EventHandeler:
             if bot is not None and hasattr(bot, "_open_party_sync_menu"):
                 bot._open_party_sync_menu()
 
-        for name in players:
+        for entry in players:
+            name = entry.get("name") if isinstance(entry, dict) else entry
+            if not name:
+                continue
+            near = entry.get("near", True) if isinstance(entry, dict) else True
             def make_invite(target=name):
                 def cb():
                     ps.invite_players = []
                     close_top()
                     self._party_sync_send("party_sync_invite", {"name": target})
                 return cb
-            items.append((f"Invite {name}", make_invite()))
+            where = "(here)" if near else "(another map)"
+            items.append((f"Invite {name} {where}", make_invite()))
         items.append(("Back", back_to_party))
         m.add_items(items)
         menus.set_default_sounds(m)

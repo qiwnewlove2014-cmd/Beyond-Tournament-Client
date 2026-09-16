@@ -1207,6 +1207,89 @@ class VoiceChatRecord(threading.Thread):
         self.running = False
 
 
+# ── Handing one output over to another (Party Sync seams) ───────────────
+#
+# A session member has two possible outputs on this client: their own entity
+# while they stand on this map, and their party sink while they are on another
+# (libs/party_sync_audio.py). The seam between them is silent when what the
+# old output still holds travels across it, and plainly audible when it does
+# not: the new leg starts from an empty source, so it owes its whole
+# pre-buffer again (12 frames of music = 240 ms of nothing) while the frames
+# the old leg had queued are thrown away. These two helpers move the queue.
+
+def drain_source_queue(source, guard=512):
+    """MAIN THREAD ONLY: take every frame `source` still holds, in order.
+
+    A PLAYING source reports only the buffers it has finished, so it is
+    stopped first: OpenAL then counts everything still queued as processed and
+    hands it all back. A source that never played needs no stop at all, for the
+    same disclosure (a stopped source's whole queue already counts as
+    processed -- the reason `_play_music_frame` refuses to unqueue a pre-buffer
+    before it starts).
+
+    The buffer that was mid-playback comes back with the rest and is played
+    again from its start by whoever takes it (<= one frame, 20-40 ms). Dropping
+    the queue instead is heard as a whole pre-buffer of silence.
+
+    Returns ``(buffers, was_playing)``.
+    """
+    buffers = []
+    if source is None:
+        return buffers, False
+    try:
+        was_playing = source.state == cyal.SourceState.PLAYING
+    except Exception:
+        was_playing = False
+    if was_playing:
+        try:
+            source.stop()
+        except Exception:
+            pass
+    try:
+        while len(buffers) < guard and getattr(source, 'buffers_processed', 0) > 0:
+            result = source.unqueue_buffers()
+            if result is None:
+                break
+            if isinstance(result, (list, tuple)):
+                buffers.extend(result)
+            else:
+                buffers.append(result)
+    except Exception:
+        pass
+    return buffers, was_playing
+
+
+def carry_output(old_source, new_source, guard=512):
+    """MAIN THREAD ONLY: move `old_source`'s queued frames onto `new_source`.
+
+    Whatever the NEW output already holds is dropped first: it is the idle
+    silence a fresh entity source carries, or the tail of an older song, and a
+    source refuses to queue a buffer whose format differs from buffers still
+    queued on it (AL_INVALID_OPERATION). Dropping that also keeps the seam in
+    ONE order -- the carried frames are what the listener was about to hear.
+
+    Returns ``(moved, was_playing)``; `new_source` is started here when the old
+    one was playing, so playback continues without waiting for a new packet.
+    """
+    if old_source is None or new_source is None or old_source is new_source:
+        return 0, False
+    drain_source_queue(new_source, guard)
+    buffers, was_playing = drain_source_queue(old_source, guard)
+    moved = 0
+    for buf in buffers:
+        try:
+            new_source.queue_buffers(buf)
+        except Exception:
+            break
+        moved += 1
+    if moved and was_playing:
+        try:
+            new_source.play()
+        except Exception:
+            pass
+    return moved, was_playing
+
+
 class MusicCompression(threading.Thread):
     PRE_BUFFER_FRAMES = 12  # 240ms before first play (increased from 8 to
                             # prevent underruns on real networks)
@@ -1349,6 +1432,81 @@ class MusicCompression(threading.Thread):
             self.decoder = decoder
         except Exception:
             return
+
+    # What a handover copies: these describe the SONG, not the output it comes
+    # out of (see carry_over).
+    CARRY_FIELDS = (
+        "_has_started",
+        "_last_recv_time",
+        "_timeline_epoch",
+        "_timeline_last_received_seq",
+        "_timeline_first_queued_seq",
+        "_timeline_anchor_seq",
+        "_timeline_anchor_time",
+    )
+
+    def carry_over(self, other, old_source, new_source):
+        """MAIN THREAD ONLY: continue `other`'s song on this leg's output.
+
+        Used at a Party Sync seam: one member's entity and their party sink are
+        two outputs for the same song, and whichever of them appears has to
+        pick the song up where the other left it -- the queue itself
+        (`carry_output`) and the clock the remote jam notes are scheduled
+        against, which would otherwise be re-pinned a pre-buffer late.
+
+        The OUTPUT FORMAT has to travel too, and synchronously. The packet path
+        calls `set_output_stereo` on whichever leg is current, and for a leg
+        that has not been put on that format yet that arms the flush which
+        empties a source -- the very queue this call just moved. So the decoder
+        is swapped here instead and the flush flag is left clear; the next
+        frame then sees a format it already has and a session it is already
+        inside.
+
+        A leg whose two formats cannot be agreed keeps nothing and starts like
+        a fresh one: mixing a mono buffer and a stereo one on one source is an
+        error OpenAL refuses, and guessing which one the queue is would trade a
+        gap for silence. Returns the number of frames carried (0 when this
+        could not help).
+        """
+        if other is None or other is self:
+            return 0
+        old_stereo = bool(getattr(other, "_stereo", False))
+        moved, _playing = carry_output(old_source, new_source)
+        for name in self.CARRY_FIELDS:
+            if hasattr(other, name):
+                setattr(self, name, getattr(other, name))
+        self._timeline_pending = list(
+            getattr(other, "_timeline_pending", None) or []
+        )
+        generation = getattr(other, "_format_generation", None)
+        if generation is not None:
+            self._format_generation = generation
+        if bool(getattr(self, "_stereo", False)) != old_stereo:
+            self._set_format_now(old_stereo)
+        self._pending_format_flush = False
+        return moved
+
+    def _set_format_now(self, stereo):
+        """MAIN THREAD ONLY: put this leg on `stereo` without arming a flush.
+
+        `set_output_stereo` cannot be used at a handover: the decoder swap it
+        schedules on the worker also arms `_pending_format_flush`, which empties
+        the source on the next frame -- exactly the queue the handover just
+        carried. The decoder is rebuilt here (the worker only reads it after
+        this returns) and the generation is bumped, so a frame this leg decoded
+        with its old format is dropped instead of queued beside the carried
+        buffers.
+        """
+        self._stereo = bool(stereo)
+        self._format_generation += 1
+        try:
+            from pyogg import OpusDecoder
+            decoder = OpusDecoder()
+            decoder.set_channels(2 if stereo else 1)
+            decoder.set_sampling_frequency(48000)
+            self.decoder = decoder
+        except Exception:
+            pass
 
     def _flush_source(self, src):
         """MAIN THREAD ONLY: empty a source that may hold old-format buffers.

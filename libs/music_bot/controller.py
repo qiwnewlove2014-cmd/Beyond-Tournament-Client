@@ -31,6 +31,7 @@ from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
 from ..string_utils import friendly_key_name
+from . import song_requests
 from .media import (FFMPEG_PATH, DEFAULT_MAP_MUSIC, FALLBACK_PLAYLIST,
                     clamp_seek_position, format_track_position, YouTubeSearcher)
 from .streaming import AudioStreamer, LiveRelayStreamer
@@ -149,6 +150,20 @@ class MapMusicBot:
 
         # Music Bot settings (persisted in client options)
         self.queue_mode = options.get("music_bot_queue_mode", False)
+        # Song requests (/p) in a Party Sync session: OFF until the host turns
+        # them on, and the switch only exists while this client is the host
+        # (see song_requests_switch_item). `song_requests` is the host's own
+        # bookkeeping of who asked for what, kept out of the queue itself.
+        self.song_requests_open = options.get("music_bot_song_requests", False)
+        self.song_requests = song_requests.SongRequestBoard()
+        # Searches waiting for their asker to pick a version (the host's own
+        # /p keyed under LOCAL_REQUEST_ID, a listener's under the server's
+        # request id). See song_requests.PendingPicks.
+        self.song_picks = song_requests.PendingPicks()
+        # A host's own /p is keyed locally and needs its own id per search (see
+        # _offer_song_choices): reusing one key would let a menu left open from
+        # an earlier request resolve its index against a newer list.
+        self._local_pick_seq = 0
         self.water_muffle_enabled = options.get("music_bot_water_muffle", True)
         self.reverb_enabled = options.get("music_bot_reverb", True)
 
@@ -393,6 +408,12 @@ class MapMusicBot:
     # the room up within this long; the cost is one small reliable packet
     # every few seconds, and nothing at all when the bot is not routed.
     CINEMA_ANNOUNCE_INTERVAL = 3.0
+
+    # How often a Party Sync host re-sends its play queue to the session while
+    # there is anything in it. A listener cannot see this machine's queue, so
+    # the host says it: sent the moment it changes, and repeated this often so
+    # a lost packet or somebody who joined late catches up.
+    PARTY_QUEUE_INTERVAL = 5.0
 
     @staticmethod
     def _cinema_key(cabinet_id):
@@ -1042,8 +1063,7 @@ class MapMusicBot:
             m.speak_current_item()
 
         def get_queue_count_label():
-            n = len(self.next_up_queue)
-            return f"Play Queue ({n} waiting)" if n else "Play Queue (empty)"
+            return song_requests.queue_label(len(self.next_up_queue))
 
         m = menu_mod.Menu(self.game, "Music Bot Mode", parrent=gp)
         items = [
@@ -1153,6 +1173,336 @@ class MapMusicBot:
             consts.CHANNEL_MISC, event, data if data is not None else {}
         )
 
+    # ── Song requests (/p) ──────────────────────────────────────────────
+    # The queue this fills is THIS machine's, so the host owns the switch and
+    # the answer; a guest only asks (see libs/music_bot/song_requests.py for
+    # the rules, and Gameplay.party_sync_chat2 for the /p input).
+
+    def song_requests_switch_item(self, on_toggle=None):
+        """The host's /p switch as a menu item, or None for a listener.
+
+        It lives in the Party Sync menus (`_open_party_sync_menu` and
+        `Gameplay._open_party_sync_quick_menu`) and NOT in the Music Bot menu:
+        a line about what a session's listeners may ask for, parked among the
+        bot's own settings, read like a bot setting. One builder feeds both
+        session menus, so the two can never word the switch differently.
+        """
+        _gp, ps = self._party_sync_pair()
+        if ps is None or getattr(ps, "role", None) != "host":
+            return None
+
+        def label():
+            status = "ON" if self.song_requests_open else "OFF"
+            return f"Song Requests: {status} (listeners type /m)"
+
+        def action():
+            self.toggle_song_requests()
+            if on_toggle is not None:
+                on_toggle()
+
+        return (label, action)
+
+    def toggle_song_requests(self):
+        """Host: flip the switch, remember it, tell the session."""
+        self.song_requests_open = not self.song_requests_open
+        options.set("music_bot_song_requests", self.song_requests_open)
+        self.announce_song_requests()
+        if self.song_requests_open:
+            speak("Song requests open. Listeners can type /m and a song name "
+                  "in the Party Sync chat.")
+        else:
+            speak("Song requests closed.")
+        return self.song_requests_open
+
+    def announce_song_requests(self):
+        """Tell the server whether this host takes requests (host only).
+
+        It travels with the session state rather than being advertised on the
+        wire once, so a guest who joins later still knows, and the server can
+        refuse a request from a client whose flag is stale.
+        """
+        gp, ps = self._party_sync_pair()
+        if ps is None or getattr(ps, "role", None) != "host":
+            return
+        self._party_sync_send("party_sync_song_requests",
+                              {"open": bool(self.song_requests_open)})
+
+    def song_requests_label(self):
+        """Read-only answer for a listener (a host has the switch instead)."""
+        gp, ps = self._party_sync_pair()
+        open_ = bool(getattr(ps, "song_requests", False)) if ps else False
+        if open_:
+            return "Song requests: open - type /m and a song name"
+        return "Song requests: closed"
+
+    def queue_song_request(self, requester, query, request_id=None):
+        """MAIN THREAD: serve one listener's request, or say why not.
+
+        Everything the host can refuse is decided before the search (it costs
+        about a second of yt-dlp, and a refused request must not cost that).
+        `request_id` is None for the host's own /p: there is nobody to answer,
+        so the outcome is spoken here instead of being relayed.
+
+        The search offers CANDIDATE_LIMIT results and THE ASKER PICKS ONE --
+        a search returns five ways to play one song and only the person who
+        asked knows which they meant. Nobody is asked to pick for somebody
+        else: a listener's request opens a picker on their own machine, and a
+        host's own /p opens the same picker here.
+        """
+        from ..party_sync import clean_song_query
+        requester = str(requester or "").strip()
+        query = clean_song_query(query)
+        reason = self.song_requests.refusal(
+            requester, query, self.next_up_queue,
+            open_=self.song_requests_open, bot_running=self.enabled,
+        )
+        if reason is not None:
+            self._answer_song_request(requester, request_id, ok=False,
+                                      reason=reason)
+            return False
+        speak(f"Looking for {query} for {requester}...")
+
+        def do_search():
+            results = YouTubeSearcher.search(query,
+                                             count=song_requests.CANDIDATE_LIMIT)
+            self.game.put(
+                lambda: self._offer_song_choices(
+                    requester, query, request_id, results
+                )
+            )
+
+        threading.Thread(target=do_search, daemon=True).start()
+        return True
+
+    def _offer_song_choices(self, requester, query, request_id, results):
+        """MAIN THREAD: the search came back - offer it, or say there is none.
+
+        The host keeps the results (`song_picks`) and only the list of names
+        travels; the answer comes back as an index, so no client can name a
+        song into this queue. A host's own /p has no round trip (nothing to
+        send) and no asker to answer -- its picker opens locally.
+        """
+        if request_id is None:
+            self._local_pick_seq += 1
+            key = f"{song_requests.LOCAL_REQUEST_ID}:{self._local_pick_seq}"
+        else:
+            key = request_id
+        found = self.song_picks.add(key, requester, query, results)
+        if not found:
+            self._answer_song_request(requester, request_id, ok=False,
+                                      reason=f'No song found for "{query}".')
+            return
+        if request_id is None:
+            self.open_song_pick_menu(
+                key, song_requests.offered(found), query,
+                on_pick=lambda index: self.serve_song_pick(requester, key, index),
+            )
+            return
+        self._party_sync_send("party_sync_song_choices", {
+            "to": requester,
+            "request_id": request_id,
+            "query": query,
+            "items": song_requests.offered(found),
+        })
+
+    def serve_song_pick(self, requester, request_id, index):
+        """MAIN THREAD: one pick (or a withdrawal) for a request offered here.
+
+        The choice is resolved against the host's own list of results, and a
+        pick may only ever answer the request of the person who made it -- the
+        one thing a listener sends at another machine's queue.
+        """
+        local = str(request_id).startswith(song_requests.LOCAL_REQUEST_ID)
+        query = self.song_picks.query(request_id)
+        found, note = self.song_picks.pick(request_id, requester, index)
+        if note is song_requests.WITHDRAWN:
+            return False
+        if found is None:
+            self._answer_song_request(requester, None if local else request_id,
+                                      ok=False, reason=note)
+            return False
+        title = found.get("title") or query or "the song"
+        waiting = self._enqueue_track(
+            title,
+            found.get("webpage_url") or found.get("direct_url") or "",
+            "youtube",
+            http_headers=found.get("http_headers") or {},
+            webpage_url=found.get("webpage_url") or "",
+            direct_url=found.get("direct_url") or "",
+            requested_by=requester,
+        )
+        self.song_requests.note_served(requester, query or title)
+        self._answer_song_request(requester, None if local else request_id,
+                                  ok=True, title=title, waiting=waiting)
+        return True
+
+    def open_song_pick_menu(self, request_id, items, query="", on_pick=None):
+        """The picker: which of the results this request may be queued from.
+
+        Used by both ends of a request -- a listener whose own music bot may
+        be switched off entirely (this needs no playback, no sources and no
+        bot state, only a menu), and a host who asked their own bot. One menu
+        and one wording (`song_requests.choice_line`) because it is the same
+        search either way. `on_pick(index)` is what the choice means on this
+        machine: send it back to the host, or queue it here.
+        """
+        from .. import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if gp is None:
+            return
+        entries = []
+        for item in items or ():
+            if not isinstance(item, dict):
+                continue
+            # Numbered by what is actually shown: an entry the list skipped
+            # must not leave a hole in the numbering somebody reads out loud
+            # (the same rule the queue's own lines follow).
+            index = len(entries)
+            label = song_requests.choice_line(
+                index + 1, item.get("title"), item.get("duration"))
+
+            def choose(idx=index, picked=label):
+                gp.pop_last_substate()
+                speak(picked)
+                if callable(on_pick):
+                    on_pick(idx)
+
+            entries.append((label, choose))
+        if not entries:
+            speak(song_requests.NO_CHOICES)
+            return
+
+        def withdraw():
+            gp.pop_last_substate()
+            if callable(on_pick):
+                on_pick(-1)
+
+        entries.append(("Nothing, thanks", withdraw))
+        title = "Pick a song"
+        if query:
+            title = f"Pick a song: {query}"
+        m = menu_mod.Menu(self.game, title, parrent=gp)
+        m.add_items(entries)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _answer_song_request(self, requester, request_id, ok, title="",
+                             reason="", waiting=0):
+        """MAIN THREAD: hand one result back to the session (or just speak it).
+
+        The server decides who hears it: the requester always, and the whole
+        room when it was really queued. Only the host's client knows the
+        resolved title, which is why the line is composed here.
+        """
+        if request_id is None:
+            if ok:
+                speak(song_requests.request_line(
+                    title, requester, waiting=waiting, started=waiting == 0
+                ))
+            elif reason:
+                speak(reason)
+            return
+        payload = {
+            "to": requester,
+            "request_id": request_id,
+            "ok": bool(ok),
+        }
+        if ok:
+            payload["title"] = str(title)
+            payload["waiting"] = int(waiting)
+        else:
+            payload["reason"] = str(reason)[:160]
+        self._party_sync_send("party_sync_song_result", payload)
+
+    # ── the play queue the session can read ─────────────────────────────
+    # A listener hears this machine's music but cannot see what is coming:
+    # next_up_queue is client-side and the server has no music-bot queue at
+    # all. So the HOST relays a bounded snapshot of it (song_requests
+    # .queue_share) and every listener renders what arrives. It is a report in
+    # one direction only -- nothing a listener reads can change the queue.
+
+    def _now_playing_title(self):
+        """The title of the song this bot has on right now ("" when idle).
+
+        One reader for "what is playing": the session relay and the Play
+        Queue menu both lead with the same now-playing line
+        (`song_requests.now_playing_line`), and a host whose menu named a
+        different song than the room was told about would be describing a
+        queue nobody is playing.
+        """
+        if not (getattr(self, "playing", False)
+                or getattr(self, "paused", False)):
+            return ""
+        return " ".join(
+            str(getattr(self, "current_title", "") or "").split())
+
+    def announce_party_queue(self, force=False):
+        """Host: tell the session what is playing and what is waiting.
+
+        Called every frame like the cinema routing's own announce: it sends
+        the moment the queue changes (that is what makes a request show up for
+        the room as soon as it is queued) and repeats at
+        :data:`PARTY_QUEUE_INTERVAL` while there is anything to say, which
+        covers a lost packet and a listener who joined after the last change.
+        Quiet unless this client is the host of a session.
+        """
+        # Read the session without creating one: this runs every frame, and a
+        # client that has never used Party Sync must not grow a session state
+        # just because a music bot finished loading.
+        gp = self._find_gameplay()
+        if gp is None:
+            return False
+        ps = getattr(gp, "party_sync", None)
+        if ps is None or getattr(ps, "role", None) != "host":
+            return False
+        now_playing = self._now_playing_title()
+        items = song_requests.queue_share(self.next_up_queue)
+        signature = (now_playing,
+                     tuple((item["title"], item["by"]) for item in items))
+        sent = getattr(self, "_party_queue_sent", None)
+        now = time.monotonic()
+        if not force and signature == sent:
+            # Nothing changed and nothing is waiting: a session with an empty
+            # queue and a stopped bot has no news, so stay quiet.
+            if not now_playing and not items:
+                return False
+            if now - getattr(self, "_party_queue_sent_at", 0.0) \
+                    < self.PARTY_QUEUE_INTERVAL:
+                return False
+        self._party_sync_send("party_sync_queue",
+                              {"now_playing": now_playing, "items": items})
+        self._party_queue_sent = signature
+        self._party_queue_sent_at = now
+        return True
+
+    def party_queue_label(self):
+        """What this session's host has waiting (read-only, for a listener)."""
+        _gp, ps = self._party_sync_pair()
+        waiting = len(getattr(ps, "queue", None) or ()) if ps is not None else 0
+        return song_requests.queue_label(waiting)
+
+    def open_party_queue_view(self):
+        """Read-only view of the host's queue, for a session listener.
+
+        The queue is somebody else's: every line here is a report, and there
+        is nothing to press but Close. It opens on top of whatever party menu
+        asked for it, so closing it comes back there.
+        """
+        from .. import menu as menu_mod, menus
+        gp, ps = self._party_sync_pair()
+        if gp is None:
+            return
+        m = menu_mod.Menu(self.game, self.party_queue_label(), parrent=gp)
+        lines = song_requests.queue_lines(
+            getattr(ps, "queue", None) or (),
+            getattr(ps, "now_playing", ""),
+        )
+        items = [(line, lambda: None) for line in lines]
+        items.append(("Close", lambda: gp.pop_last_substate()))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
     def _clear_party_sync_direct(self):
         """Restore any entity left in Party Sync direct-to-ear audio mode
         (host-music feed AND party team-talk voice)."""
@@ -1187,7 +1537,7 @@ class MapMusicBot:
                 self._party_sync_send("party_sync_start")
             items.append(("Start Party Sync session", do_start))
             items.append((
-                "Invite friends on this map to hear your music privately",
+                "Invite friends anywhere to hear your music privately",
                 lambda: None,
             ))
         elif ps.role == "host":
@@ -1204,13 +1554,22 @@ class MapMusicBot:
                 items.append(("Kick a listener", do_kick))
             def do_invite():
                 close_top()
-                # Back in the invite picker returns to this Party controls
-                # menu (the Ctrl+F8 quick menu sets its own target).
+                # A session is not map-scoped, so the picker lists every player
+                # online (own map first, each line saying which is which).
+                # Back in the invite picker returns to this Party controls menu
+                # (the Ctrl+F8 quick menu sets its own target).
                 gp._party_sync_invite_back = (
                     lambda: self._open_party_sync_menu()
                 )
                 self._party_sync_send("party_sync_list")
-            items.append(("Invite players from this map", do_invite))
+            items.append(("Invite players (any map)", do_invite))
+            # The /p switch sits with the host's listeners, their invite and
+            # their End action (one builder: song_requests_switch_item), not
+            # in the Music Bot menu -- the queue it fills is this session's,
+            # and this is the menu a host opens to run the session.
+            item = self.song_requests_switch_item(m.speak_current_item)
+            if item is not None:
+                items.append(item)
             def do_end():
                 close_top()
                 self._party_sync_send("party_sync_end")
@@ -1225,6 +1584,14 @@ class MapMusicBot:
                 ps.end_session()
                 self._clear_party_sync_direct()
             items.append((f"Listening to {ps.host_name}", lambda: None))
+            # Read-only: whether this party takes song requests (/p) is the
+            # host's decision, and it arrives with the session state. A listener
+            # reads it here instead of finding out by asking.
+            items.append((self.song_requests_label, lambda: None))
+            # ...and what the host has waiting, which is the other half of
+            # asking for a song: the queue is the host's machine's, relayed to
+            # the room (song_requests.queue_share -> parse_queue -> here).
+            items.append((self.party_queue_label, self.open_party_queue_view))
             items.append(("Leave Party Sync session", do_leave))
 
         items.append(("Back", back_to_bot_menu))
@@ -1809,13 +2176,17 @@ class MapMusicBot:
         return True
 
     def _enqueue_track(self, title, target, source="youtube", http_headers=None,
-                       webpage_url="", direct_url=""):
+                       webpage_url="", direct_url="", requested_by=""):
         """Queue a track to play next (Queue Mode / Add to Queue).
 
         When nothing is playing the earliest possible "next" is right now, so
         the track starts immediately; otherwise it is appended and auto-plays
         when the current track ends.        Returns how many tracks are waiting (0
         when it started right away).
+
+        `requested_by` marks a Party Sync listener's song request (/p): it
+        travels with the queue entry so the queue menu can say whose song it is
+        and the request quota can count only the listeners' own slots.
         """
         if not target:
             speak("Cannot queue this track.")
@@ -1827,6 +2198,7 @@ class MapMusicBot:
             "http_headers": dict(http_headers or {}),
             "webpage_url": webpage_url,
             "direct_url": direct_url,
+            "requested_by": str(requested_by or ""),
         })
         if not self.playing and not self.is_loading_stream:
             self._play_queued_next()
@@ -2178,7 +2550,14 @@ class MapMusicBot:
         Every queued song is its own menu item so the player scrolls through
         them one at a time with the arrow keys / wheel — the menu speaks each
         item as it is highlighted, instead of reading the whole list at once.
-        Enter on a song re-reads its title.
+        Enter on a song re-reads its line.
+
+        Every line here is composed by `song_requests` (the count is the menu
+        title through `queue_label`, the body is `queue_lines`): the count, the
+        now-playing line, the numbered tracks and the empty sentence are the
+        same strings a Party Sync listener reads in their own view of this
+        queue, so the host and the room can never describe one queue two ways.
+        Only the ends differ — Clear Queue and Back here, Close there.
         """
         from .. import menu as menu_mod, menus
         gp = self._find_gameplay()
@@ -2197,19 +2576,17 @@ class MapMusicBot:
                 gp.pop_last_substate()
             self._open_queue_menu()
 
-        def queue_count():
-            n = len(self.next_up_queue)
-            return f"Play Queue ({n} waiting)" if n else "Play Queue (empty)"
+        m = menu_mod.Menu(
+            self.game, song_requests.queue_label(len(self.next_up_queue)),
+            parrent=gp)
+        items = []
+        for line in song_requests.queue_lines(
+                song_requests.queue_share(self.next_up_queue),
+                self._now_playing_title()):
+            def read_line(song_line=line):
+                speak(song_line)
 
-        m = menu_mod.Menu(self.game, "Play Queue", parrent=gp)
-        items = [(queue_count, lambda: None)]
-        for i, t in enumerate(self.next_up_queue, 1):
-            title = t.get("title", "Unknown")
-
-            def read_song(idx=i, song_title=title):
-                speak(f"{idx}. {song_title}")
-
-            items.append((f"{i}. {title}", read_song))
+            items.append((line, read_line))
         items.append(("Clear Queue", clear_queue))
         items.append(("Back", go_back))
         m.add_items(items)
@@ -2717,13 +3094,14 @@ class MapMusicBot:
         m = menu_mod.Menu(self.game, "Search Results", parrent=gp)
         items = []
         for i, r in enumerate(results):
-            dur = int(r.get('duration', 0))
-            dur_str = f"{dur // 60}:{dur % 60:02d}" if dur else "?"
-            title = r.get('title', 'Unknown')
+            # The same line a requester's picker shows for the same result
+            # (`song_requests.choice_line`, "3. A Song (4:29)").
+            label = song_requests.choice_line(
+                i + 1, r.get('title'), r.get('duration'))
             # Use default_factory to capture loop variable
             def make_callback(idx):
                 return lambda: self._on_result_selected(idx, gp)
-            items.append((f"{title} ({dur_str})", make_callback(i)))
+            items.append((label, make_callback(i)))
 
         items.append(("Cancel", lambda: gp.pop_last_substate()))
         m.add_items(items)
@@ -3321,6 +3699,12 @@ class MapMusicBot:
             # Keep the routing on the map fresh (a joiner, a return from
             # another map, a lost packet), at most every few seconds.
             self.announce_cinema_target()
+
+        # A Party Sync host keeps the room's view of this queue fresh: sent on
+        # every change (so a request appears for everybody as soon as it is
+        # queued) and repeated every PARTY_QUEUE_INTERVAL. Quiet for any client
+        # that is not hosting, which is the cheap majority of the time.
+        self.announce_party_queue()
 
         if not self.playing or self.paused:
             return

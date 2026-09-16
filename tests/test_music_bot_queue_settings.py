@@ -10,8 +10,9 @@ Covers:
 - _play_queued_next preserves the favorites/playlist queue.
 - stop(clear_queue=True) clears the play-next queue; stop(clear_queue=False)
   preserves it.
-- _on_result_selected: Queue Mode Enter queues directly (no options menu);
-  otherwise the options menu offers "Play Next (Add to Queue)".
+- _open_queue_menu: one item per queued song, and every line (count, now
+  playing, tracks, empty sentence) composed by libs.music_bot.song_requests so
+  the host reads the same strings a Party Sync listener does.
 - Settings: _reapply_bot_water_filter attach/detach, _sync_map_reverb gated by
   reverb_enabled, settings menu builds with all three toggles, options.set is
   called on toggle.
@@ -374,8 +375,11 @@ class TestQueueMenu(unittest.TestCase):
         ]
         self._open(bot)
         labels = [norm(label) for label, _ in last_menu().items]
+        # The count is the menu title; the body is the same list a Party Sync
+        # listener reads (song_requests.queue_lines).
+        self.assertEqual(last_menu().title, "Play Queue (2 waiting)")
         self.assertEqual(labels, [
-            "Play Queue (2 waiting)",
+            "Playing now: Test Track",
             "1. Song A",
             "2. Song B",
             "Clear Queue",
@@ -383,11 +387,13 @@ class TestQueueMenu(unittest.TestCase):
         ])
 
     def test_empty_queue_has_no_song_items(self):
-        bot = make_bot()
+        bot = make_bot(playing=False, current_title="")
         self._open(bot)
         labels = [norm(label) for label, _ in last_menu().items]
+        self.assertEqual(last_menu().title, "Play Queue (empty)")
         self.assertEqual(labels, [
-            "Play Queue (empty)", "Clear Queue", "Back",
+            "The queue is empty.",
+            "Clear Queue", "Back",
         ])
 
     def test_song_item_enter_restates_title(self):
@@ -419,8 +425,12 @@ class TestQueueMenu(unittest.TestCase):
         # The menu was rebuilt without the removed song item.
         self.assertEqual(len(FakeMenu.instances), 2)
         labels = [norm(label) for label, _ in last_menu().items]
+        self.assertEqual(last_menu().title, "Play Queue (empty)")
+        # The song on air keeps its own line: with nothing waiting the empty
+        # sentence would be news only to a bot that is not playing anything.
         self.assertEqual(labels, [
-            "Play Queue (empty)", "Clear Queue", "Back",
+            "Playing now: Test Track",
+            "Clear Queue", "Back",
         ])
 
 

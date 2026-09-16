@@ -38,6 +38,7 @@ from . import (
 )
 from .speech import speak
 from .audio_diagnostics import probe as audio_probe
+from . import party_sync_audio
 from .tracking_description import describe_tracking_direction
 from .objects import player
 from .weapons import weapon, weaponmanager
@@ -836,6 +837,16 @@ class Gameplay(state.State):
         # === Music Bot loop (auto-advance tracks) ===
         if hasattr(self, 'music_bot') and self.music_bot:
             audio_probe.call("gp.music_bot", self.music_bot.loop)
+
+        # === Party Sync sinks (members who are not on this map) ===
+        # A session member standing on another map has no entity here to play
+        # their music/voice through, so the session keeps its own source pair
+        # per member (libs/party_sync_audio.py). Per frame this reconciles the
+        # table with this map's entities — a member who walks away hands over
+        # to their sink and one who walks in hands over to their entity — and
+        # re-reads the listener's own "music" slider.
+        audio_probe.call("gp.party_sync",
+                         party_sync_audio.sinks_for(self).tick, self)
 
         # Detect a stopped/stalled jukebox receiver and ask the server for the
         # authoritative playback state plus relay warm-up frames.  This is
@@ -2011,8 +2022,21 @@ class Gameplay(state.State):
             own_name = str(getattr(self.player, "name", "") or "")
         except Exception:
             pass
+        # A cross-map session is otherwise invisible in the world: the roster
+        # names somebody the map does not show. Saying which members are on
+        # another map is the whole difference between "where are they?" and a
+        # session that makes sense; it is read-only (this map's channel table
+        # and the server's own state, nothing else).
+        from .party_sync_audio import member_is_local, state_members
+        channels_of = {}
+        for channel, meta in state_members(ps).items():
+            if meta.get("name"):
+                channels_of.setdefault(meta["name"], channel)
         for name, _role in roster:
             mark = " (you)" if own_name and name == own_name else ""
+            channel = channels_of.get(name)
+            if channel is not None and not member_is_local(self, channel):
+                mark += " (another map)"
             items.append((f"{name}{mark}", lambda: None))
         if not roster and is_host:
             items.append(("Nobody is listening yet", lambda: None))
@@ -2057,6 +2081,14 @@ class Gameplay(state.State):
 
         if is_host:
             items.append(("Invite players from this map", do_invite))
+            # Ctrl+F8 is the host's other door onto the same session, so it
+            # offers the same /p switch -- from the one builder, never a
+            # second wording (MapMusicBot.song_requests_switch_item).
+            bot = getattr(gp, "music_bot", None)
+            item = (bot.song_requests_switch_item(m.speak_current_item)
+                    if bot is not None else None)
+            if item is not None:
+                items.append(item)
             items.append((
                 "End Party Sync session",
                 lambda: confirm_then_leave(
@@ -2067,6 +2099,16 @@ class Gameplay(state.State):
                 ),
             ))
         else:
+            # Read-only: the play queue belongs to the host's machine, and the
+            # host relays it (MapMusicBot.announce_party_queue). A listener
+            # reads what is playing and what is waiting here; Ctrl+F8 is the
+            # session's own door, so the line is offered in both party menus.
+            bot = getattr(gp, "music_bot", None)
+            if bot is not None:
+                items.append((
+                    bot.party_queue_label,
+                    bot.open_party_queue_view,
+                ))
             items.append((
                 "Leave Party Sync session",
                 lambda: confirm_then_leave(
@@ -2104,10 +2146,56 @@ class Gameplay(state.State):
             return speak("Message too long (max 1000 characters).")
         if not message.lstrip().rstrip():
             return self.cancel()
+        # `/m <song>` (and `/p`, its first spelling) asks the host's music bot
+        # for a song. This is read HERE,
+        # in the Party Sync room, and nowhere else: party chat is plain text and
+        # never fires a server command, so a slash typed here means a request
+        # (and travels as its own event, never as a chat line).
+        from .party_sync import near_song_command, parse_chat_request
+        query = parse_chat_request(message)
+        if query is not None:
+            return self._request_party_song(query)
+        # A slash line that is not a request would be SAID IN THE ROOM as chat
+        # (party chat is plain text), so a near miss of the request command is
+        # answered here instead of being announced -- and the input stays open
+        # so the typo can be fixed rather than retyped. Anything that is not a
+        # near miss is somebody's ordinary message and goes as one.
+        hint = near_song_command(message)
+        if hint:
+            return speak(hint)
         if len(message) <= 1:
             return self.cancel("Message is too short.")
         self.game.network.send(
             consts.CHANNEL_MISC, "party_sync_chat", {"message": message}
+        )
+        self.pop_last_substate()
+
+    def _request_party_song(self, query):
+        """/m <song> in the Party Sync room (see libs/music_bot/song_requests.py).
+
+        The queue belongs to the host, so a guest asks and is answered by the
+        server (which is what keeps a stranger from filling somebody's queue);
+        a host asking their own bot is the same request with no round trip.
+        The input stays open when the request cannot be sent, so the player can
+        retype it rather than losing what they typed.
+        """
+        ps = getattr(self, "party_sync", None)
+        if not ps or not getattr(ps, "role", None):
+            return speak("You are not in a Party Sync session.")
+        if not query:
+            return speak("To ask for a song, type /m and the song name.")
+        bot = getattr(self, "music_bot", None)
+        if ps.role == "host":
+            if bot is None:
+                return speak("The music bot is not available.")
+            bot.queue_song_request(options.get("username", ""), query)
+            self.pop_last_substate()
+            return
+        if not getattr(ps, "song_requests", False):
+            return speak("This party is not taking song requests.")
+        speak(f"Asking {ps.host_name} for {query}...")
+        self.game.network.send(
+            consts.CHANNEL_MISC, "party_sync_song_request", {"query": query}
         )
         self.pop_last_substate()
 

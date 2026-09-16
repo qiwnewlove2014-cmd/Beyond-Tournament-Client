@@ -209,6 +209,15 @@ class Entity(Object):
                         gain = 0.0
                     else:
                         gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
+                    # Party Sync team talk: a session voice is delivered to the
+                    # session, not placed in the world (its source is already
+                    # direct/relative), so distance must not fade it. Without
+                    # this the flags said "direct" while the gain still walked
+                    # away with the body — a member across the street was
+                    # inaudible while one on another map was fine.
+                    if (getattr(self, "_party_sync_direct", False)
+                            or getattr(self, "_party_sync_voice_direct", False)):
+                        gain = 1.0
                     self.vc_source.gain = gain
 
                     if getattr(self, "_party_sync_direct", False):
@@ -401,6 +410,11 @@ class Entity(Object):
                             music_gain = 0.0
                         else:
                             music_gain = 1.0 - ((dist - min_dist) / (music_max - min_dist))
+                    # Same rule as move(): a session voice is flat at any
+                    # distance, for the same reason the party music leg is.
+                    if (getattr(self, "_party_sync_direct", False)
+                            or getattr(self, "_party_sync_voice_direct", False)):
+                        gain = 1.0
                     self.vc_source.gain = gain
                     self.music_source.gain = music_gain if not getattr(self, "muted_by_spectator", False) else 0.0
 

@@ -139,6 +139,9 @@ class TestMusicDuckWhenOthersSpeak(unittest.TestCase):
             playing=False,
             paused=False,
             _ensure_live_relay_streamer=mock.Mock(),
+            # loop() also relays the Party Sync queue to a session; this stub
+            # is not hosting one, so the call is a no-op.
+            announce_party_queue=mock.Mock(),
             _find_gameplay=lambda: gp,
         )
 
