@@ -4,7 +4,7 @@ import os
 from cryptography.fernet import Fernet
 import appdirs
 
-from . import consts, server_config
+from . import consts, login_attempts, server_config
 from .audio.output_system import DEFAULT_SYSTEM, REFUSAL_OPTION_KEY, SYSTEMS
 
 config_dirs = appdirs.AppDirs("Beyond Tournament")
@@ -86,6 +86,25 @@ def set(key, value, autosave=True):
     prefs[key] = value
     if autosave:
         save()
+
+
+def get_login_port():
+    """The port a login last got an answer on, when it is a port at all.
+
+    Only ever an ordering hint (``libs/login_attempts.py``): the login policy
+    ignores a value that is not one of the endpoint's own candidates, so a
+    stale or hand-edited setting cannot send a player anywhere.
+    """
+    return login_attempts.remembered_port(get(login_attempts.PREFERRED_OPTION_KEY))
+
+
+def set_login_port(port):
+    """Remember the port that answered, so the next login starts there."""
+    port = login_attempts.remembered_port(port)
+    if port is None:
+        return None
+    set(login_attempts.PREFERRED_OPTION_KEY, port)
+    return port
 
 
 def get_turning_sensitivity():

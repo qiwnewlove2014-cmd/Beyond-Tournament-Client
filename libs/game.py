@@ -35,6 +35,7 @@ from . import (
     anti_cheat,
     keyboard_layout,
     watchdog,
+    login_attempts,
 )
 from .speech import speak
 from .logger import log, log_exception
@@ -210,13 +211,78 @@ class Game:
         """returns a tuple to toggle {key} with the title as {text}. the tuple is accepted by Menu as a menu item only."""
         return (lambda: self.toggle_state(text, key, default=default), lambda: self.toggle(key, default=default))
 
-    def _new_network_client(self):
-        host, port = server_config.get_server_endpoint()
+    def _new_network_client(self, port=None):
+        """A fresh transport for one login attempt.
+
+        ``port`` overrides the endpoint's own port so a retry can be a new
+        socket on the same address (libs/login_attempts.py): a new local port
+        means a new NAT mapping, which is what a stale one needs. The
+        configured endpoint is what a login starts with.
+        """
+        host, configured = server_config.get_server_endpoint()
         return networking.Client(
             self,
             host,
-            port,
+            configured if port is None else port,
             event_handeler.EventHandeler,
+        )
+
+    def _open_first_login_attempt(self):
+        """Open the transport a login starts on, and remember the retry list.
+
+        The list is the endpoint and the port above it
+        (``libs/login_attempts.py``), with the port that last answered moved
+        to the front: a player whose way in is the fallback should not pay a
+        silence window on every login to rediscover it. Both the login button
+        and a reconnect come through here, so a retry after a mid-session drop
+        knows where it may go exactly as a fresh login does. Raises whatever
+        stops the last candidate, which is what both callers already report.
+        """
+        _, port = server_config.get_server_endpoint()
+        self._login_ports = login_attempts.candidate_ports(
+            port, preferred=options.get_login_port()
+        )
+        self._login_port = None
+        if not self._login_ports:
+            raise OSError("There is no login candidate to open.")
+        if not self._open_candidate(0):
+            raise self._last_open_error
+
+    def _open_candidate(self, index):
+        """Open the first candidate at or after ``index``, and say which.
+
+        A port this machine will not open a socket for is walked past rather
+        than reported: two candidates exist because one may open where another
+        cannot, and the configured port is exactly where a filter shows up
+        first. The retry notice is spoken only for a *later* candidate, so a
+        login that opens where it always did stays as quiet as it always was.
+
+        False means none of them would open; the error that stopped the last
+        one is kept for the caller to report.
+        """
+        ports = tuple(getattr(self, "_login_ports", ()))
+        last_error = None
+        while index < len(ports):
+            try:
+                self.network = self._new_network_client(ports[index])
+            except (OSError, server_config.ServerConfigError) as error:
+                self.network = None
+                last_error = error
+                index += 1
+                continue
+            self._login_try = index
+            self._login_port = ports[index]
+            if index > 0:
+                speak(login_attempts.retry_notice(index + 1, len(ports)), False)
+            return True
+        self._login_try = index
+        self._last_open_error = last_error
+        return False
+
+    def _silence_report(self, ports):
+        """The last word when every candidate was tried and stayed silent."""
+        return login_attempts.silence_message(
+            max(getattr(self, "_login_try", 0), 1), ports
         )
 
     def _connection_failure_message(self, error):
@@ -248,7 +314,7 @@ class Game:
         # before a new one takes its place, or the two talk to one account.
         self._close_network()
         try:
-            self.network = self._new_network_client()
+            self._open_first_login_attempt()
         except (OSError, server_config.ServerConfigError) as e:
             self.pop()
             menus.main_menu(self)
@@ -256,6 +322,53 @@ class Game:
             return
         speak("Connecting to the server. Please wait...")
         self.replace(self.login2)
+
+    def _retry_login(self):
+        """Walk to the next port, or report that none of them answered.
+
+        Only ever reached from ``login2``, where the wait is for the
+        *handshake*: nothing the server said has been answered, so this is a
+        connection that never opened rather than a login that went quiet. A
+        login the server accepted and then left silent belongs to
+        ``Client.loop``'s watchdog, which owns that window and never retries it
+        -- one rule, one owner, and a struggling server is not hammered.
+
+        Walking is ``_open_candidate``: a port this machine will not even open a
+        socket for is a reason to try the next candidate, not to report, and
+        only a list that is spent is worth reporting. What is reported then is
+        the most specific thing known -- the error that stopped the last
+        candidate if there was one, otherwise the silence that covered them
+        all.
+        """
+        self._close_network()
+        ports = tuple(getattr(self, "_login_ports", ()))
+        if not self._open_candidate(getattr(self, "_login_try", 0) + 1):
+            last_error = getattr(self, "_last_open_error", None)
+            if last_error is not None:
+                return self.connection_error(
+                    self._connection_failure_message(last_error)
+                )
+            return self.connection_error(self._silence_report(ports))
+        return self.replace(self.login2)
+
+    def _remember_login_port(self):
+        """Keep the port that answered, so the next login starts there.
+
+        Only ever reached once the handshake came back, which is the proof that
+        this machine can reach the server on that port. A filter that drops one
+        port and lets the other through does not change between logins, so
+        paying a silence window to rediscover it every time would be the
+        fallback's own cost; the value is an ordering hint and nothing else
+        (``candidate_ports`` ignores anything that is not a candidate here).
+
+        The account-creation flow opens its own socket outside this list, so it
+        deliberately has no say here: the port a login answered on is the only
+        one this remembers.
+        """
+        port = getattr(self, "_login_port", None)
+        if port is None or port == options.get_login_port():
+            return
+        options.set_login_port(port)
 
     def login2(self):
         """Wait for the transport, then ask the server to log this account in.
@@ -268,6 +381,8 @@ class Game:
         e = self.network.net.service(0)
         if e.type == enet.EVENT_TYPE_CONNECT:
             self.network.note_handshake()
+            # The port answered, so this machine starts with it next time.
+            self._remember_login_port()
             speak("Logging in. Please wait...")
             self.network.send(
                 consts.CHANNEL_MISC,
@@ -281,7 +396,9 @@ class Game:
             )
             return self.replace(self.network.loop)
         if self.network.login_timed_out():
-            self.connection_error()
+            # The handshake never came back. That is a connection that did not
+            # open, and it is worth one more socket before it is reported.
+            self._retry_login()
 
     def set_account(self):
         self.append(self.input.run("Enter your username.", handeler=self.set_account2))
@@ -766,7 +883,14 @@ class Game:
         if network is not None:
             network.close_socket(polite=polite)
 
-    def connection_error(self):
+    def connection_error(self, message="Connection error [timeout]"):
+        """Drop the attempt and say why, in the most specific words we have.
+
+        The caller may pass the line the player should hear (a silent handshake
+        that survived its retries is not the same failure as a login the server
+        abandoned mid-way), but the default stays for the generic case and for
+        the queued fallback ``Client.loop`` uses when it owns the timeout.
+        """
         # Drop the connection rather than leaving it open and unserviced: a
         # half-finished login used to keep a session on the server that the
         # player could not get back into ("user already logged in") for as long
@@ -776,7 +900,7 @@ class Game:
             self.replace(self.reconnect_state)
         else:
             menus.main_menu(self)
-            speak("Connection error [timeout]", False)
+            speak(message, False)
 
     def reconnect_state(self):
         if not hasattr(self, "reconnect_clock"):
@@ -791,7 +915,7 @@ class Game:
             # its replacement takes over.
             self._close_network()
             try:
-                self.network = self._new_network_client()
+                self._open_first_login_attempt()
                 self.replace(self.login2)
             except (OSError, server_config.ServerConfigError):
                 pass

@@ -374,15 +374,32 @@ class LoginFlowTests(unittest.TestCase):
         self.assertIn("jam_notes_v1", data["capabilities"])
         self.assertEqual(game.replaced, [network.loop])
 
-    def test_login2_gives_up_only_on_silence(self):
+    def test_login2_waits_while_the_handshake_could_still_arrive(self):
+        game = self.make_game()
+        network = FakeLoginClient(enet.EVENT_TYPE_NONE, timed_out=False)
+        game.network = network
+        calls = []
+        game.connection_error = lambda message="": calls.append(message)
+        with self.credentials(), mock.patch.object(game_module, "speak"):
+            game_module.Game.login2(game)
+        self.assertEqual(calls, [])
+        self.assertEqual(network.sent, [], "nothing is sent before the transport opens")
+
+    def test_login2_reports_a_silent_handshake_once_the_attempts_run_out(self):
+        """A handshake that never came back is a connection, not an account,
+        and the last attempt says so (a retry is one attempt of several)."""
         game = self.make_game()
         network = FakeLoginClient(enet.EVENT_TYPE_NONE, timed_out=True)
         game.network = network
+        game._login_ports = (consts.DEFAULT_PORT,)
+        game._login_try = 0
+        game._close_network = lambda: None
         calls = []
-        game.connection_error = lambda: calls.append("error")
+        game.connection_error = lambda message="": calls.append(message)
         with self.credentials(), mock.patch.object(game_module, "speak"):
             game_module.Game.login2(game)
-        self.assertEqual(calls, ["error"])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("No answer from the server", calls[0])
         self.assertEqual(network.sent, [], "nothing is sent on a silent transport")
 
     def test_creating_marks_the_handshake_too(self):
