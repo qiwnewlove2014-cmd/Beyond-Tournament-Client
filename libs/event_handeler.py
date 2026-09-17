@@ -508,6 +508,37 @@ class EventHandeler:
         if music_bot and hasattr(music_bot, '_sync_map_reverb'):
             music_bot._sync_map_reverb()
 
+    def map_renamed(self, data):
+        """The map this client is standing in was renamed on the Server.
+
+        A map's name is its file name and the map itself did not change: the
+        bytes this client already parsed are the map it is still standing in,
+        and no speaker moved. So this is deliberately *not* a map load --
+        ``parse_map`` is what stops jukebox playback, resets the instruments
+        and drops the moving intro, because a ``parse_map`` naming a different
+        map means the map really changed. That comparison is exactly why the
+        name has to arrive on its own: the client holds the name it believes it
+        is in, and the next map packet (a builder edit, a Reload Map Data) would
+        otherwise read as a map change and tear the room's audio down for a
+        rename nobody heard. Queued onto the main thread like the rest of the
+        map channel, where that decision is made.
+        """
+        if not isinstance(data, dict):
+            return
+        name = data.get("name")
+        if not isinstance(name, str) or not name:
+            return
+        previous = data.get("previous")
+        self.game.put(lambda: self._apply_map_rename(name, previous))
+
+    def _apply_map_rename(self, name, previous=None):
+        """Follow the name, and nothing else: no map load, no audio teardown."""
+        self.gameplay.map_name = name
+        was = f' (was "{previous}")' if isinstance(previous, str) and previous else ""
+        buffer.add_item(
+            self.game, "main", f'This map is now called "{name}"{was}.', speak=False
+        )
+
     def parse_map(self, data):
         self._queue_map_audio_event(self._apply_parse_map, data)
 
