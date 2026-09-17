@@ -16,6 +16,7 @@ from . import (
     string_utils,
     updater,
 )
+from .audio import output_system
 from .key_config_screen import Key_config_screen
 from .os_tools import get_os
 import pygame
@@ -461,6 +462,11 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
             lambda: hrtf_model_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent)
         ),
         (
+            lambda: "Set which sound system you would like to use. Currently: "
+            + sound_system_line(game),
+            lambda: sound_system_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, in_game=in_game), replace_call=replace_call, parent=parent)
+        ),
+        (
             lambda: "Configure location announcement. Current setting: "
             + location_template_name(
                 options.get("location_template", DEFAULT_LOCATION_TEMPLATE)
@@ -553,8 +559,83 @@ def hrtf_model_menu(game, func_call, replace_call=None, parent=None):
 def set_hrtf_model(model, game, func_call):
     game.audio_mngr.hrtf.use(model)
     options.set("hrtf_model", model)
+    # Choosing an HRTF model is choosing HRTF: a saved speaker system would
+    # otherwise win at the next startup and leave the model looking ignored.
+    options.set_sound_system(output_system.DEFAULT_SYSTEM)
     func_call()
     speech.speak(f"using HRTF model {model}")
+
+
+def sound_system_line(game):
+    """What the card renders with, for the Options line.
+
+    The card's own answer is the truth -- it can refuse what the saved option
+    asks for -- so the line reads the live state.  A host with no audio manager,
+    or a device that has just gone away, falls back to the saved choice rather
+    than failing to draw the menu at all.
+    """
+    system = getattr(getattr(game, "audio_mngr", None), "output_system", None)
+    if system is not None:
+        with contextlib.suppress(Exception):
+            return system.describe()
+    return options.get_sound_system_label()
+
+
+def sound_system_menu(game, func_call, replace_call=None, parent=None):
+    """Pick a rendering: the saved HRTF model, or a speaker system.
+
+    The lines are what this machine can be asked for; one it has refused before
+    says what it gave instead.  The HRTF model menu is deliberately a separate
+    list -- this one never lists models, so the two cannot disagree about what
+    "the HRTF model" means.
+    """
+    m = menu.Menu(
+        game,
+        "Select your sound system",
+        parrent=parent
+    )
+    set_default_sounds(m)
+    system = getattr(getattr(game, "audio_mngr", None), "output_system", None)
+    for key, label in output_system.menu_entries(
+            system, options.get_sound_system_refusals()):
+        m.add_items([
+            (label, functools.partial(set_sound_system, key, game, func_call))
+        ])
+    m.add_items([
+        ("go back", func_call)
+    ])
+    if replace_call is None: game.replace(m)
+    else: replace_call(m)
+
+
+def set_sound_system(key, game, func_call):
+    """Ask the card for a rendering and believe only what it answers back.
+
+    A refusal is remembered (so the picker says what this machine gave) and the
+    saved choice is left alone: the listener keeps the sound they already had
+    rather than being dropped into a downgraded one they never asked for.
+    """
+    model = options.get("hrtf_model", output_system.DEFAULT_HRTF_MODEL)
+    system = getattr(getattr(game, "audio_mngr", None), "output_system", None)
+    if system is None:
+        options.set_sound_system(key)
+        func_call()
+        speech.speak(
+            f"sound system set to {options.get_sound_system_label(key)}, "
+            "it will be used the next time the game starts"
+        )
+        return
+    attempt = system.apply(key, model=model, previous=options.get_sound_system())
+    if attempt.granted:
+        options.set_sound_system(key)
+        options.set_sound_system_refusal(key, None)
+    else:
+        # What the card gave for this request -- not what is playing now, which
+        # is the rendering the listener already had.
+        options.set_sound_system_refusal(key, attempt.gave or attempt.label)
+    log(f"[Audio] sound system {key!r}: {attempt.detail}")
+    func_call()
+    speech.speak(attempt.detail)
 
 
 def keyconfig_menu(game, func_call, replace_call=None, parent=None, in_game=False, restore_pos=None):
@@ -1157,8 +1238,13 @@ def set_device(game, device, func_call):
         if default_dev and default_dev != dev_name:
             with contextlib.suppress(Exception):
                 game.audio_mngr.context.device.reopen(name=default_dev)
+    # A reopened device starts from the card's own rendering, so the saved
+    # choice is asked for again the same way startup does it.
     with contextlib.suppress(Exception):
-        game.audio_mngr.hrtf.use(options.get("hrtf_model", "oalsoft_hrtf_48000"))
+        game.audio_mngr.output_system.start(
+            options.get_sound_system(),
+            options.get("hrtf_model", output_system.DEFAULT_HRTF_MODEL),
+        )
     func_call()
 
 def input_menu(game, func_call, replace_call=None, parent=None, in_game=False, target="voice"):

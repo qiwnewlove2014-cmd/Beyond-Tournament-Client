@@ -11,6 +11,7 @@ from collections import deque
 import pyogg
 import requests
 from .audio.soundgroup import SoundGroup
+from .audio.output_system import DEFAULT_HRTF_MODEL, OutputSystem
 from .audio.sound import Sound
 from .piano import PianoAudio
 from .drums import DrumAudio
@@ -110,7 +111,15 @@ class AudioManager():
             self.context = self._open_context(cyal_device)
         self.silent_buf = bytearray(96*options.get("jitter_buffer", 60))
         self.hrtf = cyal.hrtf.HrtfExtension(self.context.device)
-        self.hrtf.use(options.get("hrtf_model", "oalsoft_hrtf_48000"))
+        # What the card renders with: the saved HRTF model (the behaviour this
+        # game has always had) or a speaker system the listener chose.  Only the
+        # card's own answer is trusted -- it may refuse a mode, and ''default''
+        # is what a listener who never opened that picker still gets.
+        self.output_system = OutputSystem(self.context, self.hrtf)
+        self.output_system.start(
+            options.get_sound_system(),
+            options.get("hrtf_model", DEFAULT_HRTF_MODEL),
+        )
         self.muted=False
         self.max_distance = 59
         self.efx = cyal.efx.EfxExtension(self.context)

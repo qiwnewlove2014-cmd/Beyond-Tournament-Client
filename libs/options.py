@@ -5,6 +5,7 @@ from cryptography.fernet import Fernet
 import appdirs
 
 from . import consts, server_config
+from .audio.output_system import DEFAULT_SYSTEM, REFUSAL_OPTION_KEY, SYSTEMS
 
 config_dirs = appdirs.AppDirs("Beyond Tournament")
 # defaults.
@@ -162,3 +163,44 @@ def get_voice_chat_mode_label(mode=None):
     if mode is None:
         mode = get_voice_chat_mode()
     return VOICE_CHAT_MODES[mode]
+
+
+SOUND_SYSTEM_DEFAULT = DEFAULT_SYSTEM
+
+
+def get_sound_system():
+    """Return the saved rendering choice, clamped to the known set."""
+    system = get("sound_system", SOUND_SYSTEM_DEFAULT)
+    return system if system in SYSTEMS else SOUND_SYSTEM_DEFAULT
+
+
+def set_sound_system(system):
+    system = system if system in SYSTEMS else SOUND_SYSTEM_DEFAULT
+    set("sound_system", system)
+    return system
+
+
+def get_sound_system_label(system=None):
+    if system is None:
+        system = get_sound_system()
+    return SYSTEMS[system][0]
+
+
+def get_sound_system_refusals():
+    """What this machine gave instead, for systems it would not grant."""
+    refused = get(REFUSAL_OPTION_KEY, {})
+    if not isinstance(refused, dict):
+        return {}
+    return {key: value for key, value in refused.items()
+            if key in SYSTEMS and isinstance(value, str)}
+
+
+def set_sound_system_refusal(system, granted_label=None):
+    """Remember (or forget) that a system was asked for and not granted."""
+    refused = dict(get_sound_system_refusals())
+    if granted_label:
+        refused[system] = granted_label
+    else:
+        refused.pop(system, None)
+    set(REFUSAL_OPTION_KEY, refused)
+    return refused
