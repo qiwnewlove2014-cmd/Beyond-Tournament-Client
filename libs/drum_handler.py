@@ -82,6 +82,36 @@ class DrumHandler:
         if notify_server and self._game.network:
             self._game.network.send(consts.CHANNEL_MAP, "drum_stop", {})
 
+    def set_kit(self, kit):
+        """Switch the kit of a session that is already running.
+
+        Which samples a drumset plays is the whole of what a kit is, and the
+        Server can change it on a drumset already standing in the map (the
+        builder's element menu). The performer hears their own hits from their
+        own client, so without this the person testing the change would keep
+        the old samples until they stepped away from the kit and came back --
+        while every listener already heard the new kit on the next hit, because
+        a drum event carries the session's kit id with it.
+
+        Only a running session is touched: a kit change while walking around
+        must not silently arm drum mode nobody entered, and the preload is the
+        point of calling it at all, so a session that is playing gets the new
+        samples warm before the next hit.
+        """
+        if not self.active:
+            return False
+        drums = self._game.audio_mngr.drums
+        if not drums.is_valid_kit(kit):
+            return False
+        drums.set_active_kit(kit)
+        self._sample_paths = tuple(
+            path for _, path, _, _ in drums.pad_defs(drums._active_kit)
+            if path is not None
+        )
+        self._game.audio_mngr.instrument_samples.request(self._sample_paths)
+        self._update_sample_readiness()
+        return True
+
     @staticmethod
     def _held_enter_keys():
         """Release the interaction key before accepting Enter as an exit."""

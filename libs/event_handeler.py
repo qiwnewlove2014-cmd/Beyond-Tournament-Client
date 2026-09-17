@@ -1144,6 +1144,18 @@ class EventHandeler:
         kit = data.get("kit") if isinstance(data, dict) else None
         self.game.put(lambda: self.gameplay._start_drum_session(kit=kit))
 
+    def drum_kit(self, data):
+        """The kit of the drumset this player is playing was changed on the map.
+
+        Staff can retune a drumset that is already standing there, and the
+        performer's own ears are what they are listening with: switching the
+        samples under a running session is what makes the change audible
+        without leaving the kit. Queued onto the main thread because the drum
+        and audio states live there, exactly like entering a session.
+        """
+        kit = data.get("kit") if isinstance(data, dict) else None
+        self.game.put(lambda: self.gameplay.drum.set_kit(kit))
+
     def play_drum_hit(self, data):
         """Queue a validated remote one-shot for main-thread audio playback."""
         if self._instrument_peer_is_silenced(data):
