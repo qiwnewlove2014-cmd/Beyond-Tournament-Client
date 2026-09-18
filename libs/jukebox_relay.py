@@ -6,6 +6,7 @@ buffers, gain, EFX and final disposal belong to the constructing audio thread.
 
 import array
 import contextlib
+from collections import deque
 import queue
 import threading
 import time
@@ -23,11 +24,21 @@ class JukeboxRelayReceiver(threading.Thread):
     shed_frames = 0
     last_shed_at = None
     _shed_reported_at = None
+    # A room this receiver has been asked to hand its output to mid-song
+    # (``request_room``); ``None`` on every receiver that never was.
+    _pending_room = None
+    _swap_hold_frames = 0
+    swap_room_failed = False
     PREBUFFER_FRAMES = 4
     RESUME_FRAMES = 3
     MAX_PENDING_FRAMES = 32
     NUM_BUFFERS = 32
     MAX_QUEUED_BUFFERS = 10
+    # Frames this receiver remembers of what it fed, and how long a room swap
+    # may hold its feeding while a deep pair queue drains (see
+    # ``music_bot.streaming.AudioStreamer.request_room`` for both).
+    FED_RING_FRAMES = 64
+    SWAP_DRAIN_MAX_FRAMES = 64
     MAX_PCM_BYTES = 48000 * 2 * 2 * 120 // 1000
     # Shedding a frame is the client catching up to the live edge, and it is
     # only ever done because the queue grew past ``MAX_QUEUED_BUFFERS`` (a
@@ -84,6 +95,11 @@ class JukeboxRelayReceiver(threading.Thread):
         self.shed_frames = 0
         self.last_shed_at = None
         self._shed_reported_at = None
+        self._fed_ring = deque(maxlen=self.FED_RING_FRAMES)
+        self._ring_lock = threading.Lock()
+        self._pending_room = None
+        self._swap_hold_frames = 0
+        self.swap_room_failed = False
         self.failure_reason = None
         self._retire_started = None
         self._retire_duration = 0.0
@@ -109,6 +125,156 @@ class JukeboxRelayReceiver(threading.Thread):
         if not self._play_started or backlog < self.MAX_QUEUED_BUFFERS:
             return False
         self._shed_frame()
+        return True
+
+    # -------------------------------------------------- output handed over
+    #
+    # A cabinet's cinema mode can change while its song plays, and only its
+    # *output* changes with it: a room reshapes itself in place (the bank is
+    # the same object), so what is here is only the crossings between a room
+    # and the plain stereo pair (see the direct streamer for the long form).
+
+    def _ring(self):
+        ring = getattr(self, "_fed_ring", None)
+        if ring is None:
+            # Hand-built instances (tests) bypass __init__.
+            ring = self._fed_ring = deque(maxlen=self.FED_RING_FRAMES)
+            self._ring_lock = threading.Lock()
+        return ring
+
+    def _remember_frame(self, left, right):
+        self._ring()
+        with self._ring_lock:
+            self._fed_ring.append((left, right))
+
+    def pending_room(self):
+        """The room this receiver is waiting to hand its output to, or None."""
+        return self._pending_room
+
+    def pair_queued_frames(self):
+        """Frames the plain pair is holding ahead of what is audible."""
+        if self.cinema is not None:
+            return 0
+        if self.source_l is None or self.source_r is None:
+            return 0
+        try:
+            return min(int(self.source_l.buffers_queued),
+                       int(self.source_r.buffers_queued))
+        except Exception:
+            return 0
+
+    def request_room(self, bank):
+        """Ask this receiver to play through ``bank`` instead of the pair.
+
+        Committed from the pump (``_commit_room_swap``) once the pair's queue
+        is shallow enough for the room to hold, and refused by a receiver
+        that cannot make that window -- the caller then leaves the room for
+        the next song rather than rebuilding anything.
+        """
+        self._check_owner()
+        self._pending_room = bank
+        self._swap_hold_frames = 0
+        self.swap_room_failed = False
+        return True
+
+    def cancel_room(self, bank=None):
+        """Give up a room this receiver was asked to take over."""
+        self._check_owner()
+        if bank is None or bank is self._pending_room:
+            self._pending_room = None
+        return True
+
+    def switch_to_pair(self, pair):
+        """Play this receiver through the plain stereo pair from now on.
+
+        ``pair`` normally comes out of the room that was playing
+        (``CinemaSpeakerBank.detach_primary_pair``), so the two sources keep
+        the frames the room was about to play and the song keeps its content
+        instant while the room's other speakers stop.
+        """
+        self._check_owner()
+        src_l, src_r, ref, maxd = pair
+        self.source_l, self.source_r = src_l, src_r
+        self.reference_distance = float(ref)
+        self.max_distance = float(maxd)
+        self.cinema = None
+        self._pending_room = None
+        self._pool.clear()
+        self._allocated_buffers = 0
+        self._all_buffers.clear()
+        self._play_started = False
+        self._last_occluded = None
+        self._update_gain()
+        return True
+
+    def _configure_cinema(self, bank):
+        """Give a room taking this receiver over the cabinet's own numbers."""
+        try:
+            bank.set_volume(self.volume)
+            bank.set_cabinet_volume(self.cabinet_volume * 100.0)
+            if self.reverb_slot is not None:
+                bank.set_reverb(self.reverb_slot)
+            if self.eq_slot is not None:
+                bank.set_eq_slot(self.eq_slot)
+            bank.update_output()
+        except Exception:
+            pass
+
+    def _stop_pair_sources(self):
+        for source in (self.source_l, self.source_r):
+            if source is None:
+                continue
+            try:
+                source.stop()
+            except Exception:
+                pass
+
+    def _abandon_room_swap(self):
+        """Refuse a room this receiver could not prime; the caller hands it back."""
+        self._pending_room = None
+        self.swap_room_failed = True
+
+    def _commit_room_swap(self):
+        """Hand this receiver's output to a requested room, if it can be primed.
+
+        False only while the pair's queue is still draining.
+        """
+        bank = self._pending_room
+        if bank is None:
+            return True
+        capacity = int(bank.prime_frames() or 0)
+        depth = self.pair_queued_frames()
+        if capacity > 0 and depth > capacity:
+            if self._swap_hold_frames < self.SWAP_DRAIN_MAX_FRAMES:
+                self._swap_hold_frames += 1
+                return False
+            self._abandon_room_swap()
+            return True
+        take = max(depth, int(bank.wanted_for_start() or 0))
+        ring = list(self._ring())
+        if take <= 0 or len(ring) < take or (capacity > 0 and take > capacity):
+            self._abandon_room_swap()
+            return True
+        for left, right in ring[-take:]:
+            try:
+                if not bank.queue_frame(left, right):
+                    self._abandon_room_swap()
+                    return True
+            except Exception:
+                self._abandon_room_swap()
+                return True
+        self._configure_cinema(bank)
+        try:
+            started = bool(bank.start_playback())
+        except Exception:
+            started = False
+        if not started:
+            self._abandon_room_swap()
+            return True
+        self.cinema = bank
+        self._pending_room = None
+        self._play_started = True
+        self._stop_pair_sources()
         return True
 
     def _shed_frame(self):
@@ -371,6 +537,7 @@ class JukeboxRelayReceiver(threading.Thread):
             except Exception:
                 queued = False
             if queued:
+                self._remember_frame(left, right)
                 self.last_audio_activity = self._clock()
             else:
                 self.failure_reason = "relay cinema queue failed"
@@ -386,6 +553,7 @@ class JukeboxRelayReceiver(threading.Thread):
             left_queued = True
             audio_probe.call("relay.queue", self.source_r.queue_buffers, buf_r)
             right_queued = True
+            self._remember_frame(left, right)
             self.last_audio_activity = self._clock()
             return True
         except Exception:
@@ -417,6 +585,11 @@ class JukeboxRelayReceiver(threading.Thread):
             self._audio_generation = generation
         self._reclaim()
         self._update_gain()
+        if self._pending_room is not None and not self._commit_room_swap():
+            # The room is waiting for the pair's queue to come down to what it
+            # can hold: take no PCM this pump and let the queue already in
+            # OpenAL play out. Nothing is dropped -- the bytes stay queued.
+            return 0
         new_buffers = 0
         # A cinema room allocates its own per-speaker pools, so this receiver
         # never owns buffers while it is set.

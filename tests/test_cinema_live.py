@@ -1423,28 +1423,31 @@ class RoomSwitchTests(unittest.TestCase):
         self.assertEqual(room.renderer.profile.name, "theatre")
         self.assertEqual(len(room.sources), 4)
 
-    def test_a_relay_song_that_replaces_a_room_gets_a_fresh_one(self):
+    def test_a_new_shape_reshapes_the_room_without_a_new_stream(self):
+        """A mode pick is a change of *output*, so the room is re-shaped.
+
+        It used to stop the song and build a fresh room on a fresh stream (a
+        new relay receiver and a full re-buffer), which is the loading pause
+        every mode pick cost the listener. The bank a stream holds is the same
+        object, and ``reconfigure`` moves only the speakers that changed.
+        """
         game, player = self.build(transport="relay")
-        retiring = player.players["j1"]["cinema"]
-        old_entry = dict(player.players["j1"])
-        old_sources = list(retiring.sources)
+        room = player.players["j1"]["cinema"]
+        streamer = player.players["j1"]["streamer"]
+        old_sources = list(room.sources)
 
         player.set_local_cinema_mode("j1", "front_only")
         self.play(player, "relay", "front_only")
 
-        room = player.players["j1"]["cinema"]
-        self.assertIsNot(room, retiring)
-        self.assertTrue(retiring.spent)
+        self.assertIs(player.players["j1"]["cinema"], room)
+        self.assertIs(player.players["j1"]["streamer"], streamer)
         self.assertEqual(room.renderer.profile.name, "front_only")
-        self.assertFalse(any(source.deleted for source in room.sources))
-
-        # The old receiver's retire cleanup now runs, as the relay pump would.
-        player._release_sources(old_sources)
-        player._release_cinema("j1", old_entry)
-
-        self.assertIs(host_for(game).bank("j1"), room)
-        self.assertFalse(any(source.deleted for source in room.sources))
+        self.assertEqual(len(room.sources), 2)
         self.assertFalse(room.spent)
+        self.assertFalse(any(source.deleted for source in room.sources))
+        # The speakers the new shape does not feed were disposed of with it.
+        self.assertTrue(all(source.deleted for source in old_sources[2:]))
+        self.assertIs(host_for(game).bank("j1"), room)
         # And the room is not "lost": the refresh recognises it as its own.
         self.assertEqual(player.refresh_cinema_rooms(time.monotonic() + 30.0), 1)
 
@@ -1602,8 +1605,20 @@ class RoomLifetimeTests(unittest.TestCase):
         self.re_offer(player, "auto")
 
         entry = player.players["j1"]
-        self.assertIsNotNone(entry["cinema"])
-        self.assertFalse(any(source.deleted for source in entry["cinema"].sources))
+        # The room is *asked for*, not built on the spot: a room needs its
+        # pre-buffer, and the frames it is handed are the ones the pair is
+        # about to play (see test_cinema_mode_switch).
+        room = entry["cinema_pending"]
+        self.assertIsNotNone(room)
+        self.assertFalse(any(source.deleted for source in room.sources))
+
+        # What the stream does on the frame it can prime the room.
+        entry["streamer"].cinema = room
+        player._sweep_cinema_swaps(time.monotonic())
+
+        self.assertIs(player.players["j1"]["cinema"], room)
+        self.assertIsNone(player.players["j1"]["cinema_pending"])
+        self.assertFalse(any(source.deleted for source in room.sources))
 
     def test_an_unchanged_re_offer_stays_seamless(self):
         """A map reload that changed nothing must not restart the song."""

@@ -706,6 +706,221 @@ class JukeboxPlayer:
             refreshed += 1
         return refreshed
 
+    # How long a room asked for while a song plays is given to take it over
+    # before it is handed back: a stream that never feeds a frame (a paused
+    # song, a dead decode) must not hold a room's speakers and effect slots
+    # forever (see ``_sweep_cinema_swaps``).
+    CINEMA_SWAP_TIMEOUT = 10.0
+
+    def _retune_output(self, entry, jukebox_id, x, y, z, title, kwargs, volume):
+        """Apply a cabinet's new cinema mode to a song that is already playing.
+
+        A mode change is a change of *output*, and every output a cabinet can
+        have is reachable from the one that is playing: a room is re-shaped in
+        place (the bank a stream holds is the same object, and
+        ``CinemaSpeakerBank.reconfigure`` moves the speakers that changed
+        without touching the ones that did not), a room hands its own front
+        pair over to become the cabinet's plain pair, and a plain pair asks a
+        room to take over and waits for its pre-buffer. What this replaces is
+        a full rebuild -- a new decode (or relay receiver) and the buffer
+        refill that comes with it -- which is the loading pause a mode pick
+        used to cost the whole room.
+
+        Returns False when the change could not be made in place; the caller
+        then rebuilds exactly as it always did.
+        """
+        streamer = entry.get("streamer")
+        if streamer is None:
+            return False
+        mode = self._cinema_mode(jukebox_id, kwargs)
+        self._cinema_reach(jukebox_id, kwargs)
+        try:
+            pending = entry.get("cinema_pending")
+            running = entry.get("cinema")
+            if mode == CINEMA_OFF:
+                if pending is not None:
+                    self._cancel_pending_room(entry, jukebox_id, streamer, pending)
+                if running is None:
+                    with self._lock:
+                        entry["cinema_mode"] = mode
+                    return True
+                return self._hand_song_to_pair(entry, streamer, jukebox_id,
+                                                x, y, z, mode, volume)
+            if running is None:
+                if pending is None:
+                    return self._hand_song_to_room(entry, streamer, jukebox_id,
+                                                   x, y, z, mode, kwargs, volume)
+                keep = pending
+            else:
+                keep = running
+            reshaped = self._acquire_cinema(jukebox_id, x, y, z, volume, kwargs, keep=keep)
+            if reshaped is None:
+                # The mode names a room and the map no longer resolves one.
+                # A room that is playing is not yanked out from under the song
+                # for that: the cabinet keeps what it has (its mode still
+                # applies from the next song).
+                if running is None:
+                    with self._lock:
+                        entry["cinema_mode"] = mode
+                    return True
+                return self._hand_song_to_pair(entry, streamer, jukebox_id,
+                                                x, y, z, mode, volume)
+            if reshaped is not keep:
+                return False
+            if pending is not None:
+                # A room that was still waiting to take the song over is
+                # re-shaped instead of taken back and built again.
+                streamer.request_room(reshaped)
+                with self._lock:
+                    entry["cinema_pending"] = reshaped
+                    entry["cinema_pending_at"] = time.monotonic()
+                return True
+            with self._lock:
+                entry["cinema_mode"] = mode
+            log_line(f"[Jukebox] cinema room {jukebox_id}: mode {mode} "
+                     f"applied to the playing song")
+            return True
+        except Exception as ex:
+            from . import logger
+            logger.log_exception(ex, f"JukeboxPlayer cinema retune ({jukebox_id})")
+            return False
+
+    def _hand_song_to_pair(self, entry, streamer, jukebox_id, x, y, z, mode, volume):
+        """Hand the playing song from its room to the cabinet's own pair.
+
+        The room's front pair *is* the plain cabinet's pair: the two sources
+        come out of the room (``detach_primary_pair``) with the frames the
+        room was about to play still queued on them, so the song keeps its
+        content instant and the room's other speakers simply stop where they
+        stand. A front pair a builder crossed or trimmed is refused there, and
+        then this returns False so the caller rebuilds instead.
+        """
+        bank = entry.get("cinema")
+        if bank is None:
+            return False
+        pair = bank.detach_primary_pair()
+        if pair is None:
+            return False
+        src_l, src_r = pair
+        base_gain = max(0.0, min(1.0, volume / 100.0))
+        offset, ref, maxd = 2.5, 8.0, 40.0
+        for src, sx in ((src_l, float(x) - offset), (src_r, float(x) + offset)):
+            with contextlib.suppress(Exception):
+                src.position = (sx, float(y), float(z))
+                src.rolloff_factor = 0.0
+                src.reference_distance = maxd
+                src.max_distance = maxd
+                src.spatialize = True
+                src.direct_channels = False
+                src.gain = base_gain
+        streamer.switch_to_pair((src_l, src_r, ref, maxd))
+        with self._lock:
+            entry["cinema"] = None
+            entry["cinema_mode"] = mode
+            entry["source"] = src_l
+            entry["secondary_source"] = src_r
+        self._retire_room(jukebox_id, bank)
+        log_line(f"[Jukebox] cinema room {jukebox_id}: the playing song is the "
+                 f"cabinet's own pair now (mode {mode})")
+        return True
+
+    def _retire_room(self, jukebox_id, bank):
+        """Stop a room that is no longer this song's output and give it back.
+
+        Its speakers stop where they stand (the pair that took over already
+        holds the frames the room was about to play), and the room goes back
+        to the host so its effect slots are free for whatever comes next.
+        """
+        with contextlib.suppress(Exception):
+            bank.stop()
+        self._release_sources(list(bank.sources))
+        self._release_cinema(jukebox_id, {"cinema": bank})
+
+    def _hand_song_to_room(self, entry, streamer, jukebox_id, x, y, z, mode, kwargs, volume):
+        """Ask a room to take over a song that is playing plainly.
+
+        The room cannot start on the spot: it needs its pre-buffer, and the
+        frames it is handed have to be the ones the pair is about to play. So
+        it is *requested* -- the streamer commits it on the frame it can (see
+        ``AudioStreamer.request_room``) and the jukebox finishes the
+        bookkeeping in ``_sweep_cinema_swaps``. A stream that cannot make that
+        window hands the room back and the song plays plainly until the next
+        one; nothing is rebuilt either way.
+        """
+        request = getattr(streamer, "request_room", None)
+        if not callable(request):
+            return False
+        bank = self._acquire_cinema(jukebox_id, x, y, z, volume, kwargs)
+        if bank is None:
+            return False
+        request(bank)
+        with self._lock:
+            entry["cinema_pending"] = bank
+            entry["cinema_pending_at"] = time.monotonic()
+        log_line(f"[Jukebox] cinema room {jukebox_id}: room {mode} taking the "
+                 f"playing song over")
+        return True
+
+    def _cancel_pending_room(self, entry, jukebox_id, streamer, bank):
+        """Give back a room that was waiting to take a playing song over."""
+        cancel = getattr(streamer, "cancel_room", None)
+        if callable(cancel):
+            with contextlib.suppress(Exception):
+                cancel(bank)
+        with self._lock:
+            if entry.get("cinema_pending") is bank:
+                entry["cinema_pending"] = None
+                entry["cinema_pending_at"] = None
+        self._retire_room(jukebox_id, bank)
+
+    def _sweep_cinema_swaps(self, now):
+        """Finish or give back a room that was asked for while a song plays.
+
+        A room taking a playing stream over is primed by the streamer on the
+        frame it can do it (the pair's queue has to come down to what a room
+        can hold), so the jukebox learns about it here: the entry's room
+        becomes the one that is playing and the plain pair's sources are
+        deleted -- or a room that never got its window is handed back, and the
+        song keeps playing plainly (its mode still applies from the next
+        song).
+        """
+        with self._lock:
+            pending = [(jukebox_id, entry) for jukebox_id, entry in self.players.items()
+                       if entry.get("cinema_pending") is not None]
+        for jukebox_id, entry in pending:
+            bank = entry.get("cinema_pending")
+            streamer = entry.get("streamer")
+            if getattr(streamer, "cinema", None) is bank:
+                pair = (entry.get("source"), entry.get("secondary_source"))
+                mode = self.cinema_mode(jukebox_id)
+                with self._lock:
+                    entry["cinema"] = bank
+                    entry["cinema_pending"] = None
+                    entry["cinema_pending_at"] = None
+                    entry["cinema_mode"] = mode
+                    entry["source"] = getattr(bank, "primary_source", None)
+                    entry["secondary_source"] = getattr(bank, "secondary_source", None)
+                self._release_sources(pair)
+                log_line(f"[Jukebox] cinema room {jukebox_id}: room took the "
+                         f"playing song over (mode {mode})")
+                continue
+            if getattr(streamer, "swap_room_failed", False):
+                with contextlib.suppress(Exception):
+                    streamer.swap_room_failed = False
+                with self._lock:
+                    entry["cinema_pending"] = None
+                    entry["cinema_pending_at"] = None
+                self._retire_room(jukebox_id, bank)
+                log_line(f"[Jukebox] cinema room {jukebox_id}: the playing stream "
+                         f"could not take the room; it plays plainly until the next song")
+                continue
+            asked_at = float(entry.get("cinema_pending_at") or now)
+            if now - asked_at >= self.CINEMA_SWAP_TIMEOUT:
+                self._cancel_pending_room(entry, jukebox_id, streamer, bank)
+                log_line(f"[Jukebox] cinema room {jukebox_id}: the playing stream "
+                         f"never took the room; it plays plainly until the next song")
+
+
     @audio_probe.measured("jukebox.start", trigger=True)
     def play(self, jukebox_id, x, y, z, title, url, duration, volume=None, start_offset=0.0,
              playback_id=None, transport="direct", relay_id=None, stream_epoch=None,
@@ -760,6 +975,12 @@ class JukeboxPlayer:
             "received_at": time.monotonic(),
         }
 
+        # A re-offer that carries a different cinema mode is not a new
+        # playback: the song, its transport and its position are all the same
+        # and only the *output* changed. It is applied to the playing output
+        # below (outside this lock: resolving a room reads the map) instead of
+        # tearing a decode down.
+        retune = None
         with self._lock:
             self._control_serial += 1
             # A play event for this jukebox confirms it is still alive after a
@@ -791,6 +1012,11 @@ class JukeboxPlayer:
                 and existing.get("cinema_mode")
                 != self._cinema_mode(jukebox_id, _kwargs)
             )
+            if (mode_changed and existing is not None
+                    and existing.get("playback_key") == playback_key
+                    and existing.get("transport") == transport
+                    and same_relay_identity):
+                retune = existing
             if (
                 existing is not None
                 and existing.get("playback_key") == playback_key
@@ -817,6 +1043,10 @@ class JukeboxPlayer:
                         pass
                 log_line(f"[Jukebox] play({jukebox_id}) seamless continuity for {title!r}")
                 return
+
+        if retune is not None and self._retune_output(
+                retune, jukebox_id, x, y, z, title, _kwargs, effective_volume):
+            return
 
         # Make-before-break: a relay_pending event must not kill a working
         # stream for the same song. Map reloads re-offer the relay
@@ -1189,9 +1419,23 @@ class JukeboxPlayer:
         stored = entry.get("sources")
         if isinstance(stored, (list, tuple)):
             return [source for source in stored if source is not None]
-        bank = entry.get("cinema")
-        if bank is not None:
-            return list(bank.sources)
+        banks = [bank for bank in (entry.get("cinema"), entry.get("cinema_pending"))
+                 if bank is not None]
+        if banks:
+            sources, seen = [], set()
+            for bank in banks:
+                for source in bank.sources:
+                    if id(source) not in seen:
+                        seen.add(id(source))
+                        sources.append(source)
+            if entry.get("cinema_pending") is not None:
+                # A room waiting to take the song over does not own the pair
+                # that is still playing it: both are this entry's to release.
+                for source in (entry.get("source"), entry.get("secondary_source")):
+                    if source is not None and id(source) not in seen:
+                        seen.add(id(source))
+                        sources.append(source)
+            return sources
         return [source for source in (entry.get("source"), entry.get("secondary_source"))
                 if source is not None]
 
@@ -1201,13 +1445,14 @@ class JukeboxPlayer:
         Released after the sources so the bank can never keep a deleted
         OpenAL name, and its per-speaker buffers are returned with it.
         """
-        bank = (entry or {}).get("cinema")
-        if bank is None:
-            return
-        # Releasing by name, not by key: a retired room lingers half a second
-        # while the song that replaced it already owns the key.
-        release_renderer(self.game, jukebox_id, bank)
-        bank.forget_sources()
+        banks = [bank for bank in ((entry or {}).get("cinema"),
+                                   (entry or {}).get("cinema_pending"))
+                 if bank is not None]
+        for bank in banks:
+            # Releasing by name, not by key: a retired room lingers half a
+            # second while the song that replaced it already owns the key.
+            release_renderer(self.game, jukebox_id, bank)
+            bank.forget_sources()
 
     @audio_probe.measured("jukebox.stop")
     def stop(self, jukebox_id, playback_id=None, fade=False):
@@ -1455,6 +1700,12 @@ class JukeboxPlayer:
         # room the listener is hearing, without the song being restarted.
         try:
             self.refresh_cinema_rooms(now)
+        except Exception:
+            pass
+        # A room asked for while a song plays is committed by the stream
+        # itself; this finishes (or gives back) what it asked for.
+        try:
+            self._sweep_cinema_swaps(now)
         except Exception:
             pass
         rebuilds = []  # [(jukebox_id, reason)]

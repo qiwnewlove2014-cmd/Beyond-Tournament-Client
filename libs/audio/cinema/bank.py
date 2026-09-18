@@ -1048,6 +1048,61 @@ class CinemaSpeakerBank:
     def wanted_for_start(self):
         return RESUME_FRAMES if self._plays_started else PREBUFFER_FRAMES
 
+    def prime_frames(self):
+        """How many frames this room can be handed at once and still start.
+
+        What a room taking over a stream that is already playing is primed
+        with (see ``music_bot.streaming.AudioStreamer.request_room``): the
+        deepest pool a speaker has, less the pre-buffer it keeps back, less
+        the whole frames its delay trims wait out, and never more than a
+        playing room lets its queue reach. Handing it more than this does not
+        queue -- a pool that runs out mid-prime refuses the frame -- so a
+        caller whose output holds a deeper queue than this waits for it to
+        drain rather than dropping audio to make room.
+        """
+        return max(PREBUFFER_FRAMES,
+                   min(self.buffers_per_slot - PREBUFFER_FRAMES - 1,
+                       MAX_QUEUED_FRAMES))
+
+    def detach_primary_pair(self):
+        """Take the room's own front pair out of it, for a cabinet that stops
+        being a room while its song plays (a mode of ``off``).
+
+        What a plain cabinet plays through is two positioned sources at its
+        own front, and a room already owns exactly that: its first two
+        speakers in room order, carrying the frames the room was about to
+        play. Handing them over with their queues intact is what lets the
+        output change shape in place -- the song keeps its content instant
+        and only loses the speakers around it, where rebuilding the stream
+        would restart a decode and refill a buffer (the loading pause heard
+        every time the mode changed mid-song).
+
+        A front speaker a builder turned into a band (a crossover) or held
+        back (a delay trim) is not a cabinet's plain pair, so it is refused
+        here and the caller rebuilds instead: a bass-only left channel is not
+        the stereo a plain cabinet plays.
+        """
+        if self.spent or len(self.slot_sources) < 2:
+            return None
+        slots = [slot for slot in self.renderer.slots
+                 if self.slot_sources.get(slot) is not None]
+        if len(slots) < 2:
+            return None
+        pair = slots[:2]
+        for slot in pair:
+            if self._slot_crossover.get(slot, FULL_RANGE) not in (None, FULL_RANGE):
+                return None
+            if self.hold_frames(slot):
+                return None
+        sources = []
+        for slot in pair:
+            source = self.slot_sources.pop(slot)
+            self._pools.pop(slot, None)
+            self._slot_tier.pop(slot, None)
+            self._slot_crossover.pop(slot, None)
+            sources.append(source)
+        return tuple(sources)
+
     @_serialized
     def realign(self, *, play=True):
         """Put every speaker back on the same content instant as the room.

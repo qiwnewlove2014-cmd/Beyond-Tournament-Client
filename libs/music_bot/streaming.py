@@ -46,6 +46,15 @@ class AudioStreamer(threading.Thread):
     SAMPLES_PER_BUFFER = 960
     BUFFER_SIZE = SAMPLES_PER_BUFFER * 2 * 2  # stereo 16-bit (3840 bytes)
     NUM_BUFFERS = 32      # Total buffers in pool
+    # Frames this stream remembers of what it fed: the window a room handed
+    # this output mid-song is primed from (see ``request_room``). A room can
+    # hold ``prime_frames()`` of them, and a pair's queue is bounded by the
+    # pool that feeds it, so a ring deeper than the pool is always enough.
+    FED_RING_FRAMES = 64
+    # How many frames a requested room may hold the stream's feeding while a
+    # deep pair queue drains: 64 frames is 1.28 s of song, past which the swap
+    # has waited longer than any refill and the room is left for the next song.
+    SWAP_DRAIN_MAX_FRAMES = 64
     PRE_BUFFER_COUNT = 5  # Buffers to fill before starting local playback
                           # (100ms delay line; was 10/200ms — lowered together
                           # with MusicCompression.PRE_BUFFER_FRAMES so live
@@ -156,6 +165,16 @@ class AudioStreamer(threading.Thread):
         if self.cinema is not None:
             spatial_pair = None
         self.spatial_pair = spatial_pair
+        # A room handed this stream mid-song (``request_room``) is primed from
+        # the frames already fed, so the last few seconds of them are kept.
+        # Guarded by its own lock: the decode thread appends, the game thread
+        # (the mode pick) reads.
+        self._fed_ring = deque(maxlen=self.FED_RING_FRAMES)
+        self._ring_lock = threading.Lock()
+        self._pending_room = None
+        self._swap_hold_frames = 0
+        self.swap_room_failed = False
+        self._pool_swap_armed = False
         if self.spatial_pair:
             self.spatial_src_l, self.spatial_src_r = spatial_pair[0], spatial_pair[1]
             self.spatial_ref = float(spatial_pair[2])
@@ -453,6 +472,14 @@ class AudioStreamer(threading.Thread):
         """
         self._reclaim_processed()
 
+        if not self._buffer_pool and self._pool_swap_armed:
+            # A stream handed from a room to the plain pair never built a
+            # pool of its own (a room allocates per speaker), and it is being
+            # fed again before the pair's own queued frames have recycled a
+            # buffer. Build the pool here, on the thread that already owns
+            # this stream's buffers, instead of queueing nothing forever.
+            self._pool_swap_armed = False
+            self._init_buffer_pool()
         if self._buffer_pool:
             return self._buffer_pool.pop(0)
         return None
@@ -868,6 +895,11 @@ class AudioStreamer(threading.Thread):
 
     def _queue_local(self, data):
         """Queue a chunk of PCM data to the LOCAL OpenAL source(s)."""
+        if self._pending_room is not None and not self._commit_room_swap():
+            # The room is waiting for the pair's queue to come down to what
+            # it can hold: hold this frame (it is retried, never dropped) and
+            # let the song play out of the queue it already has.
+            return False
         if self.cinema is not None:
             return self._queue_local_cinema(data)
         if self.spatial_pair:
@@ -914,6 +946,7 @@ class AudioStreamer(threading.Thread):
             self.failure_reason = "cinema speaker queue failed"
             return False
         if queued:
+            self._remember_frame(left, right)
             self._note_fed_content(data)
         return queued
 
@@ -936,10 +969,164 @@ class AudioStreamer(threading.Thread):
             buf_r.set_data(right, sample_rate=48000, format=cyal.BufferFormat.MONO16)
             self.spatial_src_l.queue_buffers(buf_l)
             self.spatial_src_r.queue_buffers(buf_r)
+            self._remember_frame(left, right)
             self._note_fed_content(data)
             return True
         except Exception:
             return False
+
+    # -------------------------------------------------- output handed over
+    #
+    # A cabinet's cinema mode can be changed while its song plays, and the
+    # change is a change of *output*, not of song: nothing here decodes
+    # anything or seeks anything. A room reshapes in place on its own (the
+    # bank a stream holds is the same object, see ``CinemaSpeakerBank``), so
+    # the two methods below are only for the crossings between a room and the
+    # plain stereo pair.
+
+    def _remember_frame(self, left, right):
+        with self._ring_lock:
+            self._fed_ring.append((left, right))
+
+    def pending_room(self):
+        """The room this stream is waiting to hand its output to, or None."""
+        return self._pending_room
+
+    def pair_queued_frames(self):
+        """Frames the plain pair is holding ahead of what is audible."""
+        if not self.spatial_pair:
+            return 0
+        try:
+            return min(int(self.spatial_src_l.buffers_queued),
+                       int(self.spatial_src_r.buffers_queued))
+        except Exception:
+            return 0
+
+    def request_room(self, bank):
+        """Ask this stream to play through ``bank`` instead of the plain pair.
+
+        A room cannot take over in one step: it is handed one frame per
+        speaker, starts only once its pre-buffer is in, and the frames it
+        must be given are the ones the pair is *about to* play -- prime it
+        from the live edge instead and the room starts a whole queue behind
+        the song (heard as the song stepping back the moment a mode is
+        picked). So the room is remembered here and committed from the frame
+        path (``_commit_room_swap``), where the ring and the pair's own queue
+        depth are both known, and the song keeps playing out of the pair
+        until then. A stream that cannot make that window refuses the room
+        (``swap_room_failed``) and the caller leaves it for the next song.
+        """
+        self._pending_room = bank
+        self._swap_hold_frames = 0
+        self.swap_room_failed = False
+        return True
+
+    def cancel_room(self, bank=None):
+        """Give up a room this stream was asked to take over."""
+        if bank is None or bank is self._pending_room:
+            self._pending_room = None
+        return True
+
+    def switch_to_pair(self, pair):
+        """Play this stream through the plain stereo pair from now on.
+
+        ``pair`` is ``(src_l, src_r, reference_distance, max_distance)`` and
+        normally comes out of the room that was playing
+        (``CinemaSpeakerBank.detach_primary_pair``): its sources already hold
+        the frames the room was about to play, so the song keeps its content
+        instant and only its shape changes -- the room's other speakers stop
+        where they stand, and the two that remain carry the cabinet's own
+        stereo. Never refuses: the pair is what plays when a room cannot be
+        resolved at all.
+        """
+        src_l, src_r, ref, maxd = pair
+        self.spatial_src_l, self.spatial_src_r = src_l, src_r
+        self.spatial_ref, self.spatial_max = float(ref), float(maxd)
+        self.spatial_base_gain = max(0.0, min(1.0, self.volume / 100.0))
+        self.spatial_pair = (src_l, src_r, float(ref), float(maxd))
+        self.cinema = None
+        self._pending_room = None
+        self.channels = 2
+        self.BUFFER_SIZE = self.SAMPLES_PER_BUFFER * self.channels * 2
+        self._pool_swap_armed = True
+        self._update_spatial_gain()
+        return True
+
+    def _configure_cinema(self, bank):
+        """Give a room taking this stream over the cabinet's own numbers."""
+        try:
+            bank.set_volume(self.volume)
+            bank.set_cabinet_volume(getattr(self, "cabinet_gain", 1.0) * 100.0)
+            if getattr(self, "reverb_slot", None) is not None:
+                bank.set_reverb(self.reverb_slot)
+            if getattr(self, "eq_slot", None) is not None:
+                bank.set_eq_slot(self.eq_slot)
+            bank.update_output()
+        except Exception:
+            pass
+
+    def _stop_pair_sources(self):
+        for source in (getattr(self, "spatial_src_l", None),
+                       getattr(self, "spatial_src_r", None)):
+            if source is None:
+                continue
+            try:
+                source.stop()
+            except Exception:
+                pass
+
+    def _abandon_room_swap(self):
+        """Refuse a room this stream could not prime; the caller hands it back."""
+        self._pending_room = None
+        self.swap_room_failed = True
+
+    def _commit_room_swap(self):
+        """Hand this stream's output to a requested room, if it can be primed.
+
+        Returns False only while the pair's queue is still draining (the
+        frame is held and retried -- nothing is dropped). Anything that makes
+        the swap impossible refuses it instead: a ring shorter than the room
+        wants, a room whose pools refuse the frames, a room that will not
+        start.
+        """
+        bank = self._pending_room
+        if bank is None:
+            return True
+        capacity = int(bank.prime_frames() or 0)
+        depth = self.pair_queued_frames()
+        if capacity > 0 and depth > capacity:
+            if self._swap_hold_frames < self.SWAP_DRAIN_MAX_FRAMES:
+                self._swap_hold_frames += 1
+                return False
+            self._abandon_room_swap()
+            return True
+        take = max(depth, int(bank.wanted_for_start() or 0))
+        with self._ring_lock:
+            ring = list(self._fed_ring)
+        if take <= 0 or len(ring) < take or (capacity > 0 and take > capacity):
+            self._abandon_room_swap()
+            return True
+        for left, right in ring[-take:]:
+            try:
+                if not bank.queue_frame(left, right):
+                    self._abandon_room_swap()
+                    return True
+            except Exception:
+                self._abandon_room_swap()
+                return True
+        self._configure_cinema(bank)
+        try:
+            started = bool(bank.start_playback())
+        except Exception:
+            started = False
+        if not started:
+            self._abandon_room_swap()
+            return True
+        self.cinema = bank
+        self.spatial_pair = None
+        self._pending_room = None
+        self._stop_pair_sources()
+        return True
 
     def _diagnostic_startup_call(self, label, function, *args, **kwargs):
         # This class also handles personal music broadcasts. Only the direct
