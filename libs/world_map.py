@@ -1082,8 +1082,20 @@ class Reverb(BaseMapObj):
             ("room_rolloff_factor", float(room_rolloff_factor)),
         )
         self._retry_at = 0.0
-        self.reverb = self.map.game.audio_mngr.gen_effect(
-            "EAXREVERB", *self._reverb_params
+        # One EAXREVERB slot per distinct setting, shared by name: a map with
+        # five identical rooms asked the driver for five of its 64 slots and
+        # left the rest of the pool that much smaller (see AudioManager.
+        # lease_effect).  The label is unique per zone *instance* so replacing
+        # an element of the same id cannot release the slot the newcomer just
+        # borrowed.
+        audio = self.map.game.audio_mngr
+        # ``id`` is this element's own id on the map, so the label comes from
+        # the pool rather than from the object.
+        self._lease_label = (audio.lease_label("room")
+                             if hasattr(audio, "lease_label") else f"room:{id}")
+        self.reverb = audio.lease_effect(
+            "EAXREVERB", self._reverb_params, self._lease_label,
+            ref=self, kind="room",
         )
 
     def ensure_slot(self, force=False):
@@ -1105,8 +1117,9 @@ class Reverb(BaseMapObj):
             return None
         self._retry_at = now + 1.5
         try:
-            self.reverb = self.map.game.audio_mngr.gen_effect(
-                "EAXREVERB", *self._reverb_params
+            self.reverb = self.map.game.audio_mngr.lease_effect(
+                "EAXREVERB", self._reverb_params, self._lease_label,
+                ref=self, kind="room",
             )
         except Exception:
             self.reverb = None
@@ -1115,13 +1128,18 @@ class Reverb(BaseMapObj):
     def destroy(self):
         with contextlib.suppress(Exception):
             if self.reverb:
-                # Detach from audio manager sends if it was the active reverb
+                # Detach from the listener's own send if this zone was the
+                # active reverb; the lease returns the slot only when the last
+                # holder (of an identical setting) lets go, so a room that
+                # shares its parameters never silences its twin.
                 am = self.map.game.audio_mngr
                 for send_idx, slot in enumerate(am.sends):
                     if slot == self.reverb:
                         am.apply_effect(None, send_idx)
-                
-                am.release_effect_slot(self.reverb)
+
+                am.release_effect_lease(
+                    "EAXREVERB", self._reverb_params, self._lease_label
+                )
                 self.reverb = None
 
 

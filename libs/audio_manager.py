@@ -193,8 +193,11 @@ class AudioManager():
         # Pre-allocate a fixed pool of aux effect slots at startup.
         # This is the industry-standard approach (FMOD/Wwise/Unreal pattern):
         # slots are NEVER created or destroyed during gameplay, only borrowed/returned.
-        # OpenAL typically limits aux effect slots to 4-16, so we pre-allocate
-        # as many as the driver allows and reuse them forever.
+        # The shipped driver grants exactly 64 slots alive at once and no request
+        # raises that (measured through this build: asking for 128 sends still
+        # grants 64, and the 65th answers MemoryError), so 64 is the ceiling the
+        # whole game fits under -- which is why identical settings share one
+        # slot (lease_effect) rather than a map element owning one each.
         self._slot_pool = []      # Available slots
         self._slot_in_use = []    # Currently borrowed slots
         self._slot_pool_size = 0
@@ -205,6 +208,19 @@ class AudioManager():
         # that pointer slot is corrupted. Pooling filter wrappers means they
         # are NEVER garbage collected, so that code path never runs at all.
         self._filter_pool = []
+        # Who is holding each borrowed slot, so the pool can answer two
+        # questions a count alone cannot: what the slots are being spent on
+        # (the technician read-out) and which holders are gone (the sweep run
+        # on every map load).  A hold is ``(kind, key, weakref-or-None)`` and
+        # is bookkeeping only -- it never keeps a holder alive.
+        self._slot_hold = {}
+        # One EAXREVERB/EQUALIZER/CHORUS slot per distinct parameter set,
+        # shared by name.  A map that places five identical reverb zones asked
+        # the driver for five slots before this; the driver only ever grants
+        # 64 in total, so the duplicates were what starved the rooms.  Keyed by
+        # ``(type, params)`` -> ``{slot, holders: {label: weakref-or-None}}``.
+        self._effect_leases = {}
+        self._reclaimed_slots = 0
         self._init_slot_pool()
     
     # Sets the orientation, taking (horizontal angle, pitch, lean)
@@ -1008,16 +1024,51 @@ class AudioManager():
                 break  # Hit the driver's limit
         print(f"[AudioManager] Effect Slot Pool: {self._slot_pool_size} slots pre-allocated")
 
-    def acquire_effect_slot(self):
+    @staticmethod
+    def _owner_ref(ref):
+        """A weakref to the holder when it can have one, else None.
+
+        Bookkeeping must never keep a holder alive: a slot released by the
+        sweep is released because its holder is *gone*, and a strong reference
+        here would make that impossible.
+        """
+        if ref is None:
+            return None
+        try:
+            return weakref.ref(ref)
+        except TypeError:
+            return None
+
+    def hold_slot(self, slot, kind, key=None, ref=None):
+        """Record what a borrowed slot is for (bookkeeping, never a rule)."""
+        if slot is None:
+            return slot
+        self._slot_hold[slot] = (str(kind), key, self._owner_ref(ref))
+        return slot
+
+    def _drop_slot_hold(self, slot):
+        self._slot_hold.pop(slot, None)
+
+    def acquire_effect_slot(self, hold=None):
         """Borrow an auxiliary effect slot from the pool.
         Returns None if pool is exhausted (graceful degradation)."""
         if self._slot_pool:
             slot = self._slot_pool.pop()
             self._slot_in_use.append(slot)
+            if hold is not None:
+                self.hold_slot(slot, *hold)
             return slot
         print(f"[AudioManager] WARNING: Effect slot pool exhausted! "
               f"({self._slot_pool_size} slots all in use)")
+        self._warn_what_holds_the_pool()
         return None
+
+    def _warn_what_holds_the_pool(self):
+        """Name the holders when the pool runs out: the one honest clue there is."""
+        report = self.slot_report()
+        if not getattr(self, "_exhaustion_reported", False):
+            self._exhaustion_reported = True
+            print(f"[AudioManager] {report['line']}")
 
     def release_effect_slot(self, slot):
         """Return a slot to the pool. Detaches any effect but does NOT delete the slot."""
@@ -1027,6 +1078,7 @@ class AudioManager():
             slot.unload()  # Detach effect from slot before it is reused
         except Exception:
             pass
+        self._drop_slot_hold(slot)
         if slot in self._slot_in_use:
             self._slot_in_use.remove(slot)
         if slot not in self._slot_pool:
@@ -1048,15 +1100,183 @@ class AudioManager():
             print(f"[AudioManager] Could not create effect '{type}': {e}")
             return None
 
-    def gen_effect(self, type, *args):
+    def gen_effect(self, type, *args, hold=None):
         """Create an effect + acquire a slot from pool. Pool-aware version.
-        Returns the slot with the effect attached, or None."""
+        Returns the slot with the effect attached, or None.
+
+        ``hold`` is an optional ``(kind, key, ref)`` naming what the slot is
+        for; it only feeds the report and the sweep.
+        """
         efx = self.create_effect(type, *args)
         if efx is None:
             return None
-        slot = self.acquire_effect_slot()
+        slot = self.acquire_effect_slot(hold=hold)
         if slot is None:
             # Can't get a slot — effect is useless without one
             return None
         slot.effect = efx
         return slot
+
+    # === Shared effect leases ===
+    #
+    # The driver grants 64 auxiliary effect slots in total and no request can
+    # raise that (measured: asking for 128 sends still grants 64).  A map that
+    # places thirteen PA speakers carrying three distinct reverb settings was
+    # therefore asking for thirteen slots to serve three sounds -- and on a
+    # full lobby the rooms that could not borrow one stayed dry.  A lease gives
+    # one slot to every holder whose parameters are identical, and only the
+    # last holder to leave returns it to the pool.
+
+    def lease_label(self, kind="slot"):
+        """A holder name that cannot collide, for holders without a natural one.
+
+        A map element has an id and a peer has a name; a plain object does not,
+        and two builds of the same map must never share a label (a stale holder
+        would otherwise look like a fresh one).
+        """
+        self._lease_serial = getattr(self, "_lease_serial", 0) + 1
+        return f"{kind}#{self._lease_serial}"
+
+    def lease_effect(self, type, params, label, ref=None, kind=None):
+        """Borrow the one slot for ``(type, params)``, shared by name.
+
+        ``label`` names this holder and must be unique per holder for the
+        lifetime of the lease (an element id, a speaker index, a peer id).
+        Returns the slot, or None when the pool is exhausted -- the same
+        graceful degradation ``gen_effect`` has always had.
+        """
+        key = (str(type), tuple(params))
+        lease = self._effect_leases.get(key)
+        if lease is None or lease.get("slot") is None:
+            slot = self.gen_effect(
+                type, *params,
+                hold=(kind or str(type).lower(), label, ref),
+            )
+            if slot is None:
+                return None
+            lease = {"slot": slot, "holders": {},
+                     "kind": kind or str(type).lower()}
+            self._effect_leases[key] = lease
+        lease["holders"][label] = self._owner_ref(ref)
+        return lease["slot"]
+
+    def release_effect_lease(self, type, params, label):
+        """Give up one holder's claim; the last one returns the slot.
+
+        Returns True when the slot actually went back to the pool, so a caller
+        that also has to detach its own sends can tell whether anything else
+        was still listening to it.
+        """
+        key = (str(type), tuple(params))
+        lease = self._effect_leases.get(key)
+        if lease is None:
+            return False
+        lease["holders"].pop(label, None)
+        if lease["holders"]:
+            return False
+        self._effect_leases.pop(key, None)
+        slot = lease.get("slot")
+        if slot is None:
+            return False
+        self._detach_slot_from_long_lived_sources(slot)
+        self.release_effect_slot(slot)
+        return True
+
+    def _detach_slot_from_long_lived_sources(self, slot):
+        """Clear every send that still points at a slot about to be recycled.
+
+        A recycled slot is handed on to somebody else, so a source left
+        pointing at it would play through the next holder's effect -- the
+        wrong room rather than no room.  Only the two sets this manager owns
+        (its own send table and each soundgroup's) can be walked; per-source
+        sends are the owning system's own detach calls, which the map reload
+        already makes.
+        """
+        try:
+            for sendnum, current in enumerate(self.sends):
+                if current is slot:
+                    self.apply_effect(None, sendnum)
+        except Exception:
+            pass
+        try:
+            for soundgroup in list(self.soundgroups):
+                # A SoundGroup keeps one entry per send index, as a list
+                # (``SoundGroup.sends``); a dict is accepted too so a stand-in
+                # in a test is read the same way the real object is.
+                sends = getattr(soundgroup, "sends", None)
+                if sends is None:
+                    continue
+                indexes = (list(sends.keys()) if isinstance(sends, dict)
+                           else range(len(sends)))
+                for sendnum in indexes:
+                    if sends[sendnum] is not slot:
+                        continue
+                    with contextlib.suppress(Exception):
+                        soundgroup.apply_effect(None, sendnum)
+        except Exception:
+            pass
+
+    def reclaim_orphaned_slots(self, verbose=False):
+        """Return slots whose holder no longer exists, before demanding a new one.
+
+        Run after a map is rebuilt: a slot the previous map failed to hand back
+        (an element replaced in place, an entity overwritten in the table, a
+        lease nobody released) used to be gone for the rest of the session --
+        that is what made a client need a restart instead of recovering at the
+        next map load.  Only holders this manager can see through a weakref are
+        reclaimable; a slot nobody recorded is left exactly where it is.
+        """
+        freed = 0
+        for key, lease in list(self._effect_leases.items()):
+            holders = lease.get("holders", {})
+            for label in [label for label, ref in holders.items()
+                          if ref is not None and ref() is None]:
+                holders.pop(label, None)
+            if holders:
+                continue
+            self._effect_leases.pop(key, None)
+            slot = lease.get("slot")
+            if slot is not None:
+                self._detach_slot_from_long_lived_sources(slot)
+                self.release_effect_slot(slot)
+                freed += 1
+        for slot, hold in list(self._slot_hold.items()):
+            ref = hold[2] if len(hold) > 2 else None
+            if ref is None or ref() is not None:
+                continue
+            self._detach_slot_from_long_lived_sources(slot)
+            self.release_effect_slot(slot)
+            freed += 1
+        if freed:
+            self._reclaimed_slots += freed
+            if verbose:
+                print(f"[AudioManager] Reclaimed {freed} orphaned effect slot(s). "
+                      f"{self.slot_report()['line']}")
+        return freed
+
+    def slot_report(self):
+        """What the pool is doing: one dict, and one line to say it out loud."""
+        kinds = {}
+        for slot, hold in list(getattr(self, "_slot_hold", {}).items()):
+            if slot not in self._slot_in_use:
+                continue
+            kinds[hold[0]] = kinds.get(hold[0], 0) + 1
+        leased = sum(1 for lease in self._effect_leases.values()
+                     if lease.get("slot") is not None)
+        used = len(self._slot_in_use)
+        total = self._slot_pool_size
+        parts = " ".join(f"{kind} {count}" for kind, count in sorted(kinds.items()))
+        unlabelled = max(0, used - sum(kinds.values()))
+        if unlabelled:
+            parts = (parts + f" unlabelled {unlabelled}").strip()
+        line = (f"Effect slots: {used}/{total} in use"
+                + (f" ({parts})" if parts else " (all labelled)"))
+        return {"used": used, "free": len(self._slot_pool), "total": total,
+                "kinds": kinds, "shared": leased, "line": line}
+
+    def slot_report_line(self):
+        """The one line a staff read-out speaks (never raises)."""
+        try:
+            return self.slot_report()["line"]
+        except Exception:
+            return "Effect slot report unavailable."

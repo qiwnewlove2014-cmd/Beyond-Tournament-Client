@@ -1,3 +1,4 @@
+import contextlib
 import math
 import time
 import threading
@@ -77,7 +78,8 @@ class MegaphoneManager:
             ("reflections_gain", 0.3),     # Reduced to prevent harshness
             ("reflections_delay", 0.03),
             ("late_reverb_gain", 0.8),     # Reduced from 1.0
-            ("late_reverb_delay", 0.02)
+            ("late_reverb_delay", 0.02),
+            hold=("pa_global", "megaphone_reverb", None),
         )
         
         # --- EQ: Crisp Megaphone PA Cabinet Effect with Rich Bass ---
@@ -89,7 +91,8 @@ class MegaphoneManager:
             ("mid1_center", 1400.0),    # Human vocal presence center
             ("mid1_width", 1.0),
             ("high_gain", 0.8),         # Crisp treble (high clarity)
-            ("high_cutoff", 4000.0)
+            ("high_cutoff", 4000.0),
+            hold=("pa_global", "megaphone_eq", None),
         )
         
         # --- Low-Pass Filter: Bright & Clear PA Sound ---
@@ -102,7 +105,8 @@ class MegaphoneManager:
         # --- Compressor: Make voice levels consistent ---
         self.compressor_slot = self.game.audio_mngr.gen_effect(
             "COMPRESSOR",
-            ("onoff", 1)                  # Enable compressor
+            ("onoff", 1),                 # Enable compressor
+            hold=("pa_global", "megaphone_compressor", None),
         )
         
         # NOTE: Echo effect removed - using only reverb for clean sound
@@ -207,6 +211,27 @@ class MegaphoneManager:
             pass
         return 0.0  # Clear line-of-sight (or on error, assume not blocked)
 
+    def _release_speaker_reverb(self, data):
+        """Give back one speaker's claim on its reverb slot.
+
+        The slot is shared by every speaker with the same setting, so only the
+        last speaker to leave actually returns it to the pool; releasing it
+        per speaker was what used to hand a still-listening speaker's effect to
+        somebody else.
+        """
+        lease = data.get('reverb_lease')
+        slot = data.get('reverb_slot')
+        data['reverb_slot'] = None
+        data['reverb_lease'] = None
+        if lease is not None:
+            params, label = lease
+            with contextlib.suppress(Exception):
+                self.game.audio_mngr.release_effect_lease("EAXREVERB", params, label)
+            return
+        if slot:
+            with contextlib.suppress(Exception):
+                self.game.audio_mngr.release_effect_slot(slot)
+
     def release_speaker_slots(self):
         """Release the live per-speaker EFX resources BEFORE a map reload.
 
@@ -288,8 +313,8 @@ class MegaphoneManager:
                     # delete() and must never be GC-freed (crash-prone
                     # dealloc call).
                     self.game.audio_mngr.release_filter(filter_obj)
-            if data.get('reverb_slot'):
-                self.game.audio_mngr.release_effect_slot(data['reverb_slot'])
+            if data.get('reverb_slot') or data.get('reverb_lease'):
+                self._release_speaker_reverb(data)
         self.sources = []
         self.speaker_data = []
         self.player_sources = {}
@@ -302,6 +327,9 @@ class MegaphoneManager:
         if not force and hasattr(self, 'last_megaphone_setup') and time.time() - self.last_megaphone_setup < 1.0:
             return
         self.last_megaphone_setup = time.time()
+        # Every build numbers its speakers so a lease label from the previous
+        # build can never be mistaken for one of this build's.
+        self._speaker_build_serial = getattr(self, "_speaker_build_serial", 0) + 1
 
         # Clear speaker delay queues in voice_chat to force recalculation of propagation delays for new positions
         try:
@@ -402,8 +430,8 @@ class MegaphoneManager:
                     # delete() and must never be GC-freed (crash-prone
                     # dealloc call).
                     self.game.audio_mngr.release_filter(filter_obj)
-            if data.get('reverb_slot'):
-                self.game.audio_mngr.release_effect_slot(data['reverb_slot'])
+            if data.get('reverb_slot') or data.get('reverb_lease'):
+                self._release_speaker_reverb(data)
 
         self.sources = []
         self.speaker_data = []
@@ -544,25 +572,42 @@ class MegaphoneManager:
             # Per-speaker reverb effect with custom settings
             # Only create reverb if decay_time > 0.1 (otherwise it's basically disabled)
             speaker_reverb_slot = None
+            speaker_reverb_lease = None
             if hasattr(self.game.audio_mngr, 'efx') and speaker_reverb_decay > 0.1:
+                # One slot per distinct setting, shared by name: a map whose
+                # thirteen speakers carry three decays was borrowing thirteen
+                # of the driver's 64 slots to carry three sounds, which is what
+                # left the rooms of a busy map too little to borrow from.
+                speaker_reverb_params = (
+                    ("decay_time", speaker_reverb_decay),
+                    ("diffusion", speaker_reverb_diffusion),
+                    ("density", 1.0),
+                    ("gain", 0.6),        # Reduced to prevent clipping
+                    ("gainhf", 0.4),      # Reduced for warmer sound
+                    ("gainlf", 1.0),      # MAX value (was 1.2 - invalid!)
+                    ("decay_hfratio", 0.4),  # Warmer decay
+                    ("reflections_gain", 0.3),  # Reduced harshness
+                    ("reflections_delay", 0.03),
+                    ("late_reverb_gain", 0.8),  # Reduced from 1.0
+                    ("late_reverb_delay", 0.02),
+                )
                 try:
-                    speaker_reverb_slot = self.game.audio_mngr.gen_effect(
-                        "EAXREVERB",
-                        ("decay_time", speaker_reverb_decay),
-                        ("diffusion", speaker_reverb_diffusion),
-                        ("density", 1.0),
-                        ("gain", 0.6),        # Reduced to prevent clipping
-                        ("gainhf", 0.4),      # Reduced for warmer sound
-                        ("gainlf", 1.0),      # MAX value (was 1.2 - invalid!)
-                        ("decay_hfratio", 0.4),  # Warmer decay
-                        ("reflections_gain", 0.3),  # Reduced harshness
-                        ("reflections_delay", 0.03),
-                        ("late_reverb_gain", 0.8),  # Reduced from 1.0
-                        ("late_reverb_delay", 0.02)
+                    speaker_reverb_label = (
+                        f"pa-speaker:{getattr(self, '_speaker_build_serial', 0)}"
+                        f":{len(self.speaker_data)}"
                     )
+                    speaker_reverb_slot = self.game.audio_mngr.lease_effect(
+                        "EAXREVERB", speaker_reverb_params,
+                        label=speaker_reverb_label,
+                        kind="pa_speaker",
+                    )
+                    if speaker_reverb_slot is not None:
+                        speaker_reverb_lease = (speaker_reverb_params,
+                                                speaker_reverb_label)
                 except Exception as e:
                     print(f"[MEGAPHONE] Error creating per-speaker reverb: {e}")
                     speaker_reverb_slot = None
+                    speaker_reverb_lease = None
             
             eq_bass = speaker_data_list[i].get('eq_bass', 50.0)
             eq_mid = speaker_data_list[i].get('eq_mid', 50.0)
@@ -604,6 +649,7 @@ class MegaphoneManager:
                 'delay': speaker_delay,
                 'hearing_range': hearing_range,  # Save for update loop!
                 'reverb_slot': speaker_reverb_slot,  # Store for cleanup
+                'reverb_lease': speaker_reverb_lease,  # (params, label) of the shared slot, if leased
                 'cone_settings': {
                     'inner': inner_cone,
                     'outer': outer_cone,
@@ -1123,8 +1169,8 @@ class MegaphoneManager:
                             f.delete()
                         except Exception:
                             pass
-                if data.get('reverb_slot'):
-                    self.game.audio_mngr.release_effect_slot(data['reverb_slot'])
+                if data.get('reverb_slot') or data.get('reverb_lease'):
+                    self._release_speaker_reverb(data)
                 if data.get('reflection_source'):
                     try:
                         data['reflection_source'].stop()

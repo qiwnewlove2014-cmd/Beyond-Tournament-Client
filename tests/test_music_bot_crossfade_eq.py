@@ -178,9 +178,12 @@ class FakeAudio:
         self.release_effect_slot = lambda slot: self.released.append(slot)
         self.volume_categories = {"music": [100]}
 
-    def _gen_effect(self, name, *params):
+    def _gen_effect(self, name, *params, hold=None):
+        # ``hold`` is the pool's bookkeeping (which job the slot is for); the
+        # real manager records it and the EQ path passes it through.
         eff = FakeEffect()
         eff.params = params
+        eff.hold = hold
         self.created.append((name, params, eff))
         return eff
 

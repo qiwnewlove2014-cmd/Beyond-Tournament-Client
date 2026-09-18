@@ -102,6 +102,10 @@ class Entity(Object):
                 self.radio_source.relative = True
                 self.radio_source.gain=0.7
             try:
+                # Tagged with this entity as the holder: an entity dropped
+                # without its destroy() (overwritten in the entity table during
+                # a reload) used to keep these two slots for the rest of the
+                # session, and the map-load sweep can now see that it is gone.
                 self.eq_slot = self.soundgroup.parent.gen_effect(
                     "EQUALIZER",
                     ("low_gain", 0.126),
@@ -110,6 +114,7 @@ class Entity(Object):
                     ("high_cutoff", 4000.0),
                     ("mid1_gain", 1.0),
                     ("mid2_gain", 1.0),
+                    hold=("voice_effects", f"{self.name}:eq", self),
                 )
                 self.distortion_slot = self.soundgroup.parent.gen_effect(
                     "DISTORTION",
@@ -118,6 +123,7 @@ class Entity(Object):
                     ("lowpass_cutoff", 8000.0),
                     ("eqcenter", 3000.0),
                     ("eqbandwidth", 1000.0),
+                    hold=("voice_effects", f"{self.name}:radio", self),
                 )
             except Exception:
                 self.eq_slot = None

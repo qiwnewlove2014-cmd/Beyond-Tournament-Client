@@ -288,7 +288,10 @@ class JukeboxPlayer:
             slot = self.custom_eq_slots.get(jukebox_id)
             if slot is None:
                 try:
-                    slot = audio.gen_effect("EQUALIZER", *params)
+                    slot = audio.gen_effect(
+                        "EQUALIZER", *params,
+                        hold=("cabinet_eq", f"custom:{jukebox_id}", None),
+                    )
                 except Exception:
                     slot = None
                 self.custom_eq_slots[jukebox_id] = slot
@@ -311,7 +314,10 @@ class JukeboxPlayer:
         if profile not in self.eq_slots:
             try:
                 params = self.EQ_PRESETS[profile]
-                self.eq_slots[profile] = audio.gen_effect("EQUALIZER", *params)
+                self.eq_slots[profile] = audio.gen_effect(
+                    "EQUALIZER", *params,
+                    hold=("cabinet_eq", f"preset:{profile}", None),
+                )
             except Exception:
                 self.eq_slots[profile] = None
         return self.eq_slots.get(profile)

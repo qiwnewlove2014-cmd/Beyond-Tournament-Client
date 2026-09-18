@@ -509,7 +509,13 @@ class PianoAudio:
         if slot is not None:
             return slot
         try:
-            slot = self.am.gen_effect("CHORUS", *self._CHORUS_PARAMETERS)
+            # Labelled for the pool report: one of the driver's 64 slots is
+            # held per performer while their chorus is on, and the read-out is
+            # where that cost stops being invisible.
+            slot = self.am.gen_effect(
+                "CHORUS", *self._CHORUS_PARAMETERS,
+                hold=("chorus", f"chorus:{peer_id}", None),
+            )
             if slot is not None:
                 slot.gain = (
                     self._CHORUS_WET_GAIN

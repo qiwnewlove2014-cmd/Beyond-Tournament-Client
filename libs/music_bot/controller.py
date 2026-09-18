@@ -2762,7 +2762,10 @@ class MapMusicBot:
             slot = self._custom_eq_slot
             if slot is None:
                 try:
-                    slot = audio.gen_effect("EQUALIZER", *params)
+                    slot = audio.gen_effect(
+                        "EQUALIZER", *params,
+                        hold=("music_bot_eq", "custom", None),
+                    )
                 except Exception:
                     slot = None
                 self._custom_eq_slot = slot
@@ -2785,7 +2788,8 @@ class MapMusicBot:
         if profile not in self._eq_slots:
             try:
                 self._eq_slots[profile] = audio.gen_effect(
-                    "EQUALIZER", *self.EQ_PRESETS[profile])
+                    "EQUALIZER", *self.EQ_PRESETS[profile],
+                    hold=("music_bot_eq", f"preset:{profile}", None))
             except Exception:
                 self._eq_slots[profile] = None
         return self._eq_slots.get(profile)

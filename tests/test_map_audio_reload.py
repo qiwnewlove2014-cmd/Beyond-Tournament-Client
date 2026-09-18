@@ -526,14 +526,19 @@ class TestReverbSlotRecovery(unittest.TestCase):
         from libs.world_map import Reverb
 
         calls = []
-        slot_a, slot_b = object(), object()
+        slot_b = object()
 
         class FakeAudio:
-            def gen_effect(self, etype, *params):
-                calls.append((etype, params))
+            """The pool's lease face of the API: one slot per setting."""
+
+            def lease_effect(self, etype, params, label, ref=None, kind=None):
+                calls.append((etype, tuple(params)))
                 # First allocation attempt is starved (pool exhausted); the
                 # retry succeeds with a freshly freed slot.
                 return None if len(calls) == 1 else slot_b
+
+            def release_effect_lease(self, etype, params, label):
+                return True
 
         class FakeGame:
             audio_mngr = FakeAudio()
@@ -558,7 +563,8 @@ class TestReverbSlotRecovery(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         etype, params = calls[0]
         self.assertEqual(etype, "EAXREVERB")
-        # The retry used the exact same parameters as the first attempt.
+        # The retry asked for the exact same setting as the first attempt, so
+        # a room that recovers shares the slot of every room built like it.
         self.assertEqual(params, calls[1][1])
         # A healthy zone returns its slot immediately without re-allocating.
         self.assertIs(rev.ensure_slot(force=True), slot_b)
@@ -595,6 +601,186 @@ class TestReverbSlotRecovery(unittest.TestCase):
         self.assertEqual(applied, [(slot, 0)])
 
 
+
+class AMapChangeKeepsTheListenersRoomTests(unittest.TestCase):
+    """What a map change does to reverb on a step, a shot or a voice.
+
+    Everything walked, fired or said on this machine plays through a
+    SoundGroup (the listener's, or a megaphone/PA source), and its send 0 is
+    the room that object stands in. A reload detaches those sends before the
+    old map hands its slots back -- so the property worth pinning is that the
+    reload path itself binds the NEW map's room again, and that a map which
+    ends up with no room leaves the listener dry instead of ringing in the
+    room that just went away. Both are run through the real
+    ``_apply_update_map``, with the real pool arithmetic underneath.
+    """
+
+    class Group:
+        def __init__(self):
+            # The real shape: one entry per send index, as a list.
+            self.sends = [None, None, None, None]
+            self.position = None
+
+        def apply_effect(self, slot, sendnum=0, filter=None):
+            self.sends[sendnum] = slot
+
+        def apply_filter(self, filter_obj, replace=True, clear=False):
+            self.filter = filter_obj
+
+        def play(self, path, **kwargs):
+            # The step itself is not what this class is about; the send 0 that
+            # shapes it is.
+            self.played = getattr(self, "played", []) + [path]
+
+    class Slot:
+        def __init__(self, name):
+            self.name = name
+            self.effect = None
+
+        def unload(self):
+            self.effect = None
+
+    def _audio(self, slots=8):
+        """A real AudioManager with a fake device: only the pool is real."""
+        from libs.audio_manager import AudioManager
+
+        class FakeEfx:
+            created = 0
+
+            def gen_effect(self, type):
+                return SimpleNamespace(set=lambda *a: None)
+
+            def send(self, source, index, slot, filter=None):
+                pass
+
+        class _TestAudio(AudioManager):
+            # The armor INCREFs an effect wrapper so cyal's dealloc can never
+            # run; a fake has no such dealloc.
+            def _armor_filter(self, filter_obj, site, label="filter"):
+                return None
+
+        audio = _TestAudio.__new__(_TestAudio)
+        audio._slot_pool = [self.Slot(f"slot{i}") for i in range(slots)]
+        audio._slot_in_use = []
+        audio._slot_pool_size = slots
+        audio._slot_hold = {}
+        audio._effect_leases = {}
+        audio._reclaimed_slots = 0
+        audio._exhaustion_reported = False
+        audio.efx = FakeEfx()
+        audio.sends = [None, None, None, None]
+        audio.soundgroups = set()
+        audio.unbound_sources = []
+        audio._filter_pool = []
+        audio.filter = {}
+        return audio
+
+    def _scene(self, group, map_obj=None):
+        """A listener, a real map and the handler that reloads it."""
+        from libs.event_handeler import EventHandeler
+        from libs.objects.entity import Entity
+
+        audio = self._audio()
+        audio.soundgroups = {group}
+        if map_obj is None:
+            map_obj = bare_map()
+            map_obj.game = SimpleNamespace(audio_mngr=audio)
+            map_obj.reverb_list = []
+            map_obj.entities = {}
+            # A floor to stand on, so the listener is not read as falling and
+            # the reload's move() stays the plain walk it is in game.
+            map_obj.tile_list = [SimpleNamespace(
+                in_bound=lambda x, y, z: True, tiletype="grass")]
+
+        player = Entity.__new__(Entity)
+        player.map = map_obj
+        player.name = "listener"
+        player.x = player.y = player.z = 1
+        player.soundgroup = group
+        player.on_move = None
+        player._player = False
+        player.falling = False
+        map_obj.player = player
+
+        game = SimpleNamespace(
+            automations=[],
+            exclude_water=set(),
+            ignore_others_water=False,
+            audio_mngr=audio,
+            network=SimpleNamespace(send=lambda *a, **k: None),
+        )
+        player.game = game
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.game = game
+        handler.gameplay = SimpleNamespace(
+            player=player,
+            map=map_obj,
+            megaphone=None,
+            music_bot=None,
+            jukebox_player=None,
+        )
+        return handler, audio, player, map_obj
+
+    def _room(self, map_obj, room_id="hall"):
+        map_obj.spawn_reverb(0, 8, 0, 8, 0, 4, id=room_id)
+        return map_obj.reverb_list[0]
+
+    def test_the_new_maps_room_is_bound_back_by_the_reload_itself(self):
+        group = self.Group()
+        handler, audio, player, map_obj = self._scene(group)
+        self._room(map_obj)
+        player.sync_reverb()
+        first_slot = map_obj.reverb_list[0].reverb
+        self.assertIs(group.sends[0], first_slot)
+
+        seen = []
+        parser = SimpleNamespace()
+
+        def load(data, in_place=True):
+            # Exactly what a rebuild does: the old elements are destroyed (and
+            # hand their slots back) before the new ones are spawned.
+            seen.append(("before", group.sends[0]))
+            map_obj.reverb_list[0].destroy()
+            map_obj.reverb_list = []
+            seen.append(("torn_down", group.sends[0]))
+            self._room(map_obj)
+            seen.append(("rebuilt", group.sends[0]))
+
+        parser.load = load
+        handler.gameplay.parser = parser
+        handler._apply_update_map({"data": {}})
+
+        # The send was detached when the old room let go -- never left pointing
+        # at a slot another room is about to stand on -- and the reload bound
+        # the new map's room before it returned.
+        self.assertEqual([step for step, _ in seen],
+                         ["before", "torn_down", "rebuilt"])
+        self.assertIsNone(seen[1][1])
+        self.assertIs(group.sends[0], map_obj.reverb_list[0].reverb)
+        self.assertIsNotNone(group.sends[0], "the room must come back")
+        # The old room handed its slot back and the new one holds exactly one:
+        # a reload may not leak a slot per rebuild (that is what made a client
+        # run out and need a restart).
+        self.assertEqual(len(audio._slot_in_use), 1)
+        self.assertIs(audio._slot_in_use[0], map_obj.reverb_list[0].reverb)
+
+    def test_a_rebuilt_map_without_a_room_leaves_the_listener_dry(self):
+        group = self.Group()
+        handler, audio, player, map_obj = self._scene(group)
+        self._room(map_obj)
+        player.sync_reverb()
+        self.assertIsNotNone(group.sends[0])
+
+        def load(data, in_place=True):
+            map_obj.reverb_list[0].destroy()
+            map_obj.reverb_list = []
+
+        handler.gameplay.parser = SimpleNamespace(load=load)
+        handler._apply_update_map({"data": {}})
+
+        # No room on this map is dry, not a tail of the room that went away.
+        self.assertIsNone(group.sends[0])
+        self.assertEqual(len(audio._slot_pool), 8)
 
 
 if __name__ == "__main__":

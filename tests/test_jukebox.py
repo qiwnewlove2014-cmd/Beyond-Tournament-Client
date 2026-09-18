@@ -194,8 +194,9 @@ class TestAccessibleJukeboxSliders(unittest.TestCase):
                 self.efx = object()
                 self.created = []
 
-            def gen_effect(self, *_args):
+            def gen_effect(self, *_args, hold=None):
                 slot = Slot()
+                slot.hold = hold
                 self.created.append(slot)
                 return slot
 

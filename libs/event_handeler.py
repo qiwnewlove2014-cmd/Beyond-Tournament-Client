@@ -512,6 +512,16 @@ class EventHandeler:
         music_bot = getattr(gp, 'music_bot', None)
         if music_bot and hasattr(music_bot, '_sync_map_reverb'):
             music_bot._sync_map_reverb()
+        # Anything the map that just went away failed to hand back is returned
+        # here. The pool holds the 64 slots the driver grants for the life of
+        # the process, so a holder that vanished without releasing (an element
+        # replaced in place, an entity overwritten in the table) used to cost a
+        # slot until the client was restarted. The sweep only frees a slot
+        # whose holder is provably gone, so a live room is never taken away.
+        audio_mngr = getattr(self.game, 'audio_mngr', None)
+        reclaim = getattr(audio_mngr, 'reclaim_orphaned_slots', None)
+        if callable(reclaim):
+            audio_probe.call("map.reclaim_slots", reclaim)
 
     def map_renamed(self, data):
         """The map this client is standing in was renamed on the Server.
@@ -2414,6 +2424,23 @@ class EventHandeler:
         if opener is None:
             return
         opener(None)
+
+    def sound_engine_report(self, data):
+        """The technician menu asked what the sound card's effect slots hold.
+
+        The pool belongs to the machine that listens -- the driver grants 64
+        auxiliary effect slots for the life of the process, and every room, PA
+        speaker, voice and chorus borrows from that one pool here. So the
+        Server sends only the invitation and this client answers with its own
+        numbers; nothing is written, no state is kept, and reading it leaves
+        the sound exactly as it was.
+        """
+        from .logger import log
+        audio_mngr = getattr(self.game, "audio_mngr", None)
+        report = getattr(audio_mngr, "slot_report_line", None)
+        line = report() if callable(report) else "Effect slot report unavailable."
+        speak(line)
+        log(f"[AudioManager] {line}")
 
     def music_bot_cinema(self, data):
         """Which cabinet's room another player's Music Bot plays through.

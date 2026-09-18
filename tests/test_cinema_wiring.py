@@ -113,7 +113,9 @@ class FakeAudio:
     def gen_filter(self, kind, *params):
         return ("filter", kind, params)
 
-    def gen_effect(self, kind, *params):
+    def gen_effect(self, kind, *params, hold=None):
+        # ``hold`` is the pool's bookkeeping for the read-out; the EQ slot this
+        # cabinet borrows is the same one it always was.
         return ("effect", kind, params)
 
 
