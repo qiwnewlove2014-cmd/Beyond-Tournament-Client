@@ -25,12 +25,12 @@ import time
 from math import sqrt
 
 from ...deferred_log import log_deferred as log_line
-from .crossover import FULL_RANGE, crossover_hz
+from .crossover import FULL_RANGE, crossover_hz, mark_of
 from .listener import (distance_gain, speaker_aim_gain, tone_openness,
                        TONE_NEUTRAL)
 from .pan import DEFAULT_DIRECTION, apply_direction
-from .plugin import (CINEMA_AUTO, CINEMA_OFF, cabinet_anchors, preview_room,
-                     room_diagnosis)
+from .plugin import (CINEMA_AUTO, CINEMA_OFF, cabinet_anchors, cabinet_reach,
+                     preview_room, room_diagnosis)
 from .profiles import get_profile
 from .layout import (ROOM_MAX_DISTANCE, ROOM_RADIUS, ROOM_REFERENCE_DISTANCE)
 
@@ -239,11 +239,28 @@ def _same_point(first, second):
     return _distance(first, second) < 0.01
 
 
-def inside_room(plan, position, *, radius=ROOM_RADIUS):
+def plan_reach(plan, fallback=None):
+    """The reach of a resolved room, or the module default when it has none.
+
+    A room carries its own number (``RoomPlan.reach``: the cabinet's
+    ``cinema_radius``, or the room's default), and everything that has to know
+    how far this room reaches asks it here -- membership, audibility and the
+    distance a performer has to stand within to be "in" it are one number, so
+    they are read from one place.
+    """
+    default = float(ROOM_MAX_DISTANCE if fallback is None else fallback)
+    try:
+        value = float(getattr(plan, "reach", None))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def inside_room(plan, position, *, radius=None):
     """Whether a point stands inside a resolved room's own reach.
 
-    The measurement the room hands its speakers out by -- ``ROOM_RADIUS``
-    around the cabinet is where a speaker may stand to belong to it -- asked
+    The measurement the room hands its speakers out by -- the cabinet's reach
+    around it is where a speaker may stand to belong to the room -- asked
     about a person instead: a room is somewhere somebody can be *in*, and the
     cabinet nearest a performer across the map is not their room. The voice
     path has always required this (a talker out in the map keeps the PA); the
@@ -261,7 +278,7 @@ def inside_room(plan, position, *, radius=ROOM_RADIUS):
         gap = _distance(anchor, position)
     except Exception:
         return True
-    return gap <= float(radius)
+    return gap <= plan_reach(plan, radius)
 
 
 def _provider_key(provider):
@@ -396,7 +413,11 @@ class LiveRoomRouter:
         cabinet_id, anchor, gap = best
         if cabinet_mode(self.game, cabinet_id) == CINEMA_OFF:
             return None
-        if gap > ROOM_RADIUS:
+        # The same reach the room takes its speakers in at: a performer 80 m
+        # from a cabinet whose room reaches 90 m is inside it, and one 80 m
+        # from a cabinet that reaches 20 m is not -- so "the room I am
+        # standing in" follows the cabinet's own size instead of the default.
+        if gap > cabinet_reach(self.game, cabinet_id):
             return None
         plan = preview_room(self.game, anchor, room_id=cabinet_id)
         if plan is None:
@@ -429,7 +450,7 @@ class LiveRoomRouter:
 
     def speaker_terms(self, position, listener=None, occlusion_provider=None,
                       reference_distance=ROOM_REFERENCE_DISTANCE,
-                      max_distance=ROOM_MAX_DISTANCE,
+                      max_distance=None,
                       direction=DEFAULT_DIRECTION):
         """One term per speaker of the room near ``position``.
 
@@ -452,6 +473,10 @@ class LiveRoomRouter:
         target = self.route_for(position)
         if target is None:
             return []
+        if max_distance is None:
+            # The room's own reach, never the module constant: a note is heard
+            # exactly as far as the room carrying it (see ``RoomPlan.reach``).
+            max_distance = plan_reach(target[1])
         point = _as_point(position)
         heard = _as_point(listener)
         provider = _provider_key(occlusion_provider)
@@ -474,7 +499,7 @@ class LiveRoomRouter:
 
     def terms_for_plan(self, plan, listener=None, occlusion_provider=None,
                        reference_distance=ROOM_REFERENCE_DISTANCE,
-                       max_distance=ROOM_MAX_DISTANCE,
+                       max_distance=None,
                        direction=DEFAULT_DIRECTION):
         """The same terms, for a caller that already resolved the room.
 
@@ -483,7 +508,12 @@ class LiveRoomRouter:
         shape itself against the plan it is following rather than re-answer
         "which room is this" fifty times a second. Same numbers either way, so
         one speaker is exactly as loud for speech as it is for the band.
+
+        Without an explicit ``max_distance`` the room's own reach is used, so
+        the song, the band and a voice are one room rather than three.
         """
+        if max_distance is None:
+            max_distance = plan_reach(plan)
         placement = getattr(plan, "placement", None)
         channels = plan_channels(plan)
         terms = []
@@ -498,7 +528,7 @@ class LiveRoomRouter:
             tier = self._wall_tier(spot, listener, occlusion_provider, max_distance)
             terms.append((slot, spot, gain, float(spec.delay_ms), tier,
                           channels.get(slot), float(getattr(spec, "tone", 1.0)),
-                          crossover_hz(getattr(spec, "crossover", None))))
+                          mark_of(spec)))
         # A staff pan leans the room towards a side of itself, at the same
         # overall energy: the direction law is pure arithmetic and lives in
         # ``pan.py``, and ``auto`` (the default) leaves these terms untouched.
@@ -530,9 +560,10 @@ class LiveRoomRouter:
         cabinet_id, anchor, gap = best
         if cabinet_mode(self.game, cabinet_id) == CINEMA_OFF:
             return f"jukebox {cabinet_id} is set to play its own stereo (off)"
-        if gap > ROOM_RADIUS:
+        reach = cabinet_reach(self.game, cabinet_id)
+        if gap > reach:
             return (f"jukebox {cabinet_id} is {gap:.0f} m away "
-                    f"(a room reaches {ROOM_RADIUS:.0f} m)")
+                    f"(its room reaches {reach:.0f} m)")
         return room_diagnosis(self.game, anchor, room_id=cabinet_id)
 
 

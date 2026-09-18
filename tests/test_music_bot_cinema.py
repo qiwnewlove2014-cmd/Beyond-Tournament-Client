@@ -787,7 +787,7 @@ class OwnSoundLineTests(unittest.TestCase):
     def _labels(self, menu):
         return [norm(label) for label, _action in menu.items]
 
-    def test_it_sits_beside_the_three_listening_switches(self):
+    def test_it_sits_beside_the_listening_switches(self):
         _game, _gp, bot = self._bot()
         menu = self._open_menu(bot)
         labels = self._labels(menu)
@@ -799,7 +799,12 @@ class OwnSoundLineTests(unittest.TestCase):
         self.assertEqual(
             next(text for text in labels if text.startswith("Your sound:")),
             "Your sound: where you stand (no staff pan)")
-        self.assertEqual(labels[speech + 1].split(":")[0], "Your sound",
+        # The reading line sits directly under the three listening switches:
+        # they are choices and it is an answer, so it must not look like one.
+        sound = next(index for index, text in enumerate(labels)
+                     if text.startswith("Your sound:"))
+        self.assertEqual(sound, speech + 1)
+        self.assertEqual(labels[sound].split(":")[0], "Your sound",
                          "the reading line belongs under the listening ones")
 
     def test_pressing_it_says_where_you_are_and_writes_nothing(self):

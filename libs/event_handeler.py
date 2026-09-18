@@ -14,8 +14,6 @@ from . import party_sync_audio
 from .speech import speak
 from .weapons import weapon
 from . import tickets
-# Speech through a cabinet's room: whether an incoming megaphone frame belongs
-# to a room (see libs/audio/cinema/speech.py).
 from .audio.cinema import pan as cinema_pan
 from .audio.cinema import peer as cinema_peer
 from .audio.cinema import sound_test as cinema_sound_test
@@ -234,6 +232,12 @@ class EventHandeler:
             self.gameplay.can_use_cinema_pan = bool(
                 data.get("can_use_cinema_pan", False)
             )
+            # Locking a cabinet's cinema mode is the other rank rule a cabinet
+            # menu line hangs off: the Server owns it, the menu behind it does
+            # not exist for anyone else (libs/jukebox.py).
+            self.gameplay.can_lock_cinema_mode = bool(
+                data.get("can_lock_cinema_mode", False)
+            )
             # This client's own voice channel, needed to pan *yourself*: the
             # Server tells a joiner about everyone on the map except them, so
             # it never arrives in a spawn packet (libs/cinema_pan_menu.py).
@@ -249,6 +253,7 @@ class EventHandeler:
             self.gameplay.can_use_music_bot = False
             self.gameplay.can_use_cinema_speakers = False
             self.gameplay.can_use_cinema_pan = False
+            self.gameplay.can_lock_cinema_mode = False
             
         # Reset PA Test Mode state
         if hasattr(self.gameplay, 'pa_test_mode'):
@@ -1645,6 +1650,11 @@ class EventHandeler:
             # The Server sends this range with the prompt too; this is the
             # fallback for it.
             min_val, max_val = 0, 100
+        elif stage in ('cinema_band_low', 'cinema_band_high'):
+            # A cinema speaker's band, asked as two edges in a row: the speaker
+            # keeps the middle, between this one and the next. The Server sends
+            # this range with each prompt too; this is the fallback for it.
+            min_val, max_val = 40, 6000
         elif stage == 'cinema_crossover':
             # A cinema speaker's crossover: the sign is the side the speaker
             # keeps, so the one field spans both bands -- 40-300 Hz is a bass
@@ -2978,6 +2988,18 @@ class EventHandeler:
             for jid, box in boxes.items():
                 if not isinstance(box, dict):
                     continue
+                # How each cabinet plays is part of this payload, and it is
+                # the only description of a cabinet that is SILENT -- a map
+                # join, a band in a hall with no song, a staff pan into a
+                # room. The player's caches are what the routing asks (the
+                # menus read the payload itself), so they are fed here, or a
+                # cabinet nobody has heard a song from yet answers ``auto``
+                # to the very paths that decide where sound comes out.
+                if box.get("cinema_mode") is not None:
+                    player.set_local_cinema_mode(jid, box.get("cinema_mode"))
+                reach = box.get("cinema_reach", box.get("cinema_radius"))
+                if reach is not None:
+                    player.set_local_cinema_reach(jid, reach)
                 if box.get("paused") or not box.get("current"):
                     self.game.put(lambda jid=jid: player.stop(jid))
 
@@ -3183,6 +3205,8 @@ class EventHandeler:
             # The same refusal rule as the routing above: a Server that predates
             # the pan key must not be read as "you lost it".
             gp.can_use_cinema_pan = bool(data.get("can_use_cinema_pan", False))
+        if "can_lock_cinema_mode" in data:
+            gp.can_lock_cinema_mode = bool(data.get("can_lock_cinema_mode", False))
         if "can_use_cinema_speakers" in data:
             had_cinema_routing = bool(
                 getattr(gp, "can_use_cinema_speakers", False)

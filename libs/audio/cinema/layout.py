@@ -39,6 +39,20 @@ ROOM_RADIUS = 60.0
 ROOM_REFERENCE_DISTANCE = 8.0     # full volume within this many metres
 ROOM_MAX_DISTANCE = 60.0          # silent at (and beyond) this many metres
 
+# A cabinet may reach further or less far than every other cabinet: a hall
+# whose back wall stands 90 m from the cabinet needs a 90 m room, and a
+# cabinet squeezed into a booth wants a short one so it stops claiming the
+# stage's speakers. The reach is the cabinet's own ``cinema_radius`` (written
+# in the map, sent by the server) and it is ONE number under two names -- how
+# far a speaker may stand from the cabinet to belong to the room, and how far
+# from a listener it is still heard (see ``placement.RoomPlan.reach``).
+#
+# The bounds are the same on the server (``CINEMA_RADIUS_MIN`` / ``_MAX``),
+# and a value outside them is ignored rather than obeyed: a hand-edited map
+# must not be able to stretch a room across the whole map -- or collapse it.
+MIN_ROOM_REACH = 10.0
+MAX_ROOM_REACH = 240.0
+
 # Bearing bands used to snap an `auto` speaker to a slot, in degrees where
 # 0 is straight ahead, positive is to the listener's right and +/-180 is
 # directly behind. The front gets the widest band because the screen wall is
@@ -137,16 +151,23 @@ class CinemaSpeakerSpec:
     number *means* is decided in one place where it is used -- the room's own
     ``crossover`` -- rather than clamped into the right band by whoever reads
     it next.
+
+    ``crossover_high`` is the second edge, and it is what makes the speaker a
+    *band* (a mid cabinet: it keeps what lies between the two edges) rather than
+    a two-way split. It is carried raw for the same reason -- and it is a
+    separate field rather than being folded in here because this module is part
+    of the portable core, which may not import the reader that composes a mark
+    (``crossover.mark_of``).
     """
 
     __slots__ = ("slot", "position", "level", "delay_ms", "tone", "crossover",
-                 "name", "room", "aim_yaw", "cone_inner", "cone_outer",
-                 "cone_outer_gain", "declared")
+                 "crossover_high", "name", "room", "aim_yaw", "cone_inner",
+                 "cone_outer", "cone_outer_gain", "declared")
 
     def __init__(self, slot, position, level=1.0, delay_ms=0.0, tone=1.0,
                  name=None, room=None, aim_yaw=None, cone_inner=None,
                  cone_outer=None, cone_outer_gain=None, declared=None,
-                 crossover=None):
+                 crossover=None, crossover_high=None):
         self.slot = str(slot or AUTO_SLOT).strip().lower()
         self.position = (float(position[0]), float(position[1]), float(position[2]))
         self.level = max(0.0, min(4.0, float(level)))
@@ -161,6 +182,12 @@ class CinemaSpeakerSpec:
             self.crossover = None if crossover is None else float(crossover)
         except (TypeError, ValueError):
             self.crossover = None
+        # The band's other edge, as written: what it means is decided with the
+        # first one (``crossover.crossover_hz(value, crossover_high)``).
+        try:
+            self.crossover_high = None if crossover_high is None else float(crossover_high)
+        except (TypeError, ValueError):
+            self.crossover_high = None
         self.name = name
         self.room = str(room or "").strip()
         self.aim_yaw = None if aim_yaw is None else float(aim_yaw) % 360.0
@@ -246,7 +273,7 @@ def coerce_spec(raw):
         source = {key: getattr(raw, key) for key in (
             "x", "y", "z", "minx", "maxx", "miny", "maxy", "minz", "maxz",
             "channel", "slot", "room", "level", "volume", "delay", "delay_ms",
-            "tone", "crossover",
+            "tone", "crossover", "crossover_high",
             "aim_yaw", "aim_pitch", "inner_cone_angle", "outer_cone_angle",
             "outer_cone_gain", "id") if hasattr(raw, key)}
         position = getattr(raw, "position", None)
@@ -283,6 +310,7 @@ def coerce_spec(raw):
         delay_ms=delay_ms,
         tone=tone,
         crossover=_number(_first(source, ("crossover",)), None),
+        crossover_high=_number(_first(source, ("crossover_high",)), None),
         name=_first(source, ("id", "name")),
         room=_first(source, ("room",), ""),
         aim_yaw=_number(_first(source, ("aim_yaw",))),
@@ -406,17 +434,36 @@ class CinemaLayout:
         return spec.tone if spec is not None else 1.0
 
     def crossover(self, slot):
-        """This slot's crossover mark, signed, 0.0 when it has none.
+        """This slot's *first* crossover edge, signed, 0.0 when it has none.
 
-        The sign is the side the speaker keeps -- a positive mark is a bass
+        The sign is the side the speaker keeps -- a positive number is a bass
         cabinet, a negative one a tweeter -- and ``crossover_hz`` is the one
-        place that says what a mark means. Same rule as ``tone``: a ring
-        speaker (a slot a profile invented, with no map element behind it)
-        never carries one, because a mark is something a builder puts on a
-        speaker they placed.
+        place that says what a mark means. This is the map's own number, not
+        the mark: a speaker that also holds ``crossover_high`` is a band (see
+        :meth:`crossover_high`), and the two are composed into one mark by
+        ``crossover.mark_of`` -- which this module may not import, because the
+        portable core imports nothing but the standard library and its five
+        siblings. Same rule as ``tone``: a ring speaker (a slot a profile
+        invented, with no map element behind it) never carries one, because a
+        mark is something a builder puts on a speaker they placed.
         """
+        return self._edge_of(slot, "crossover")
+
+    def crossover_high(self, slot):
+        """This slot's *second* crossover edge, 0.0 when it has none.
+
+        A second edge next to a positive first one is a band: the speaker keeps
+        the middle (a mid cabinet, the third speaker of a three-way room) and
+        the room's own reader builds it from the pair. Read here only as the
+        number the map wrote, exactly like the first edge, so the renderer's
+        signature can carry both without this module knowing what a band means.
+        """
+        return self._edge_of(slot, "crossover_high")
+
+    def _edge_of(self, slot, name):
+        """One raw crossover attribute of one slot, 0.0 when it is unusable."""
         spec = self._specs.get(slot)
-        value = getattr(spec, "crossover", None) if spec is not None else None
+        value = getattr(spec, name, None) if spec is not None else None
         if not value:
             return 0.0
         try:

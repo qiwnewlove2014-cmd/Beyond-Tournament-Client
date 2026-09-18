@@ -31,11 +31,11 @@ shipped behaviour, so a misconfigured room degrades into the audio the
 project already had rather than into silence.
 """
 
-from math import sqrt
+from math import floor, sqrt
 
-from .layout import (AUTO_SLOT, IDEAL_BEARING, ROOM_RADIUS, SLOT_ORDER,
-                     SLOT_PAIRS, CinemaSpeakerSpec, bearing_from, coerce_spec,
-                     slot_for_bearing)
+from .layout import (AUTO_SLOT, IDEAL_BEARING, ROOM_MAX_DISTANCE, ROOM_RADIUS,
+                     SLOT_ORDER, SLOT_PAIRS, CinemaSpeakerSpec, bearing_from,
+                     coerce_spec, slot_for_bearing)
 
 # ROOM_RADIUS (the room's own scale, in metres) lives with the rest of the
 # room's geometry in ``layout`` and is re-exported here, because that is where
@@ -256,7 +256,7 @@ def _report(report, message):
         report.append(str(message))
 
 
-def resolve_room(speakers, anchor, *, radius=ROOM_RADIUS, room=None,
+def resolve_room(speakers, anchor, *, radius=ROOM_RADIUS, room=None, area=None,
                  tolerance_deg=TOLERANCE_DEG, yaw=None, profile=AUTO_PROFILE,
                  max_speakers=MAX_ROOM_SPEAKERS, report=None):
     """Resolve speakers into a room, or return None when there is no room.
@@ -264,6 +264,11 @@ def resolve_room(speakers, anchor, *, radius=ROOM_RADIUS, room=None,
     ``room`` filters by the speaker's own room id (a cabinet id or a zone
     name). Speakers without a room id belong to whichever cabinet they are
     near, so a builder who never touches the field still gets a working room.
+
+    ``area`` is the rectangle of the map zone this cabinet stands in (see
+    :func:`exclusive_speakers`, which is where a speaker outside it is
+    reported): passing it here as well keeps the rule in one place for callers
+    that hand raw speakers straight to the resolver.
 
     ``report`` is an optional list that receives the reason for a refusal (see
     :func:`_report`); passing it changes nothing about the decision.
@@ -274,7 +279,7 @@ def resolve_room(speakers, anchor, *, radius=ROOM_RADIUS, room=None,
         speaker = coerce_spec(raw)
         if speaker is None:
             continue
-        if not _in_room(speaker, anchor, radius, room):
+        if not _in_room(speaker, anchor, radius, room, area):
             continue
         candidates.append(speaker)
     if not candidates:
@@ -352,7 +357,62 @@ def nearest_anchor(position, anchors, limit=None):
     return (best_index, best_distance)
 
 
-def exclusive_speakers(speakers, anchor, rivals=(), radius=ROOM_RADIUS):
+def inside_area(position, area):
+    """True when ``position`` stands inside ``area``'s block footprint.
+
+    ``area`` is a plain ``(minx, maxx, miny, maxy, minz, maxz)`` rectangle --
+    the bounds of the map zone a cabinet stands in (see
+    ``plugin.cabinet_area``) -- or None, which means "no area, distance
+    decides". Compare against the map's own ``BaseMapObj.in_bound``: a block
+    belongs to a zone when its ``floor``ed coordinate is within the zone's
+    bounds, and a speaker is a block, so the same rule is used here. This is
+    deliberately not a float comparison: a builder who draws the zone around
+    a room and then asks the game what zone they are standing in must get the
+    answer this function would give.
+    """
+    if area is None:
+        return True
+    try:
+        x, y, z = (float(value) for value in position[:3])
+        minx, maxx, miny, maxy, minz, maxz = (float(value) for value in area[:6])
+    except (TypeError, ValueError, IndexError):
+        return True        # unreadable area data must never silence a room
+    return (floor(x) >= floor(minx) and floor(x) <= floor(maxx)
+            and floor(y) >= floor(miny) and floor(y) <= floor(maxy)
+            and floor(z) >= floor(minz) and floor(z) <= floor(maxz))
+
+
+def claims_point(position, anchor, radius=ROOM_RADIUS, area=None):
+    """Whether a cabinet would take a speaker standing at ``position``.
+
+    The single statement of "this one is mine", shared by the resolver and by
+    the read-outs (a menu asking who owns a speaker asks this, per cabinet, so
+    a menu can never promise a speaker a room would not feed): inside the
+    cabinet's area, and no further than the cabinet's reach.
+    """
+    if not inside_area(position, area):
+        return False
+    return _distance(anchor, position) <= float(radius)
+
+
+def claims_speaker(speaker, anchor, radius=ROOM_RADIUS, area=None):
+    """``claims_point`` for a speaker, which may name its own room.
+
+    A speaker that names its room is always a candidate here: a builder who
+    spelled the room out wins over the geometry, and ``_in_room`` decides it
+    exactly.
+    """
+    spec = coerce_spec(speaker)
+    if spec is None:
+        return False
+    if spec.room:
+        return True
+    return claims_point(spec.position, anchor, radius, area)
+
+
+def exclusive_speakers(speakers, anchor, rivals=(), radius=ROOM_RADIUS,
+                       area=None, rival_areas=None, report=None,
+                       area_name=""):
     """Keep only the speakers that belong to this cabinet and no other.
 
     Rooms on one map are close together -- two cabinets in neighbouring rooms
@@ -362,8 +422,23 @@ def exclusive_speakers(speakers, anchor, rivals=(), radius=ROOM_RADIUS):
     alone: a builder who spelled the room out wins over the geometry.
 
     Ties go to the cabinet asking, so a symmetric layout stays symmetric.
+
+    ``area`` is the rectangle of the map zone this cabinet stands in (None
+    when the map has no zone around it): a speaker *outside* it is not this
+    cabinet's however close it stands, which is what keeps two halls well
+    apart on one wide map from claiming each other's speakers. ``rival_areas``
+    is the same rectangle for each rival, aligned with ``rivals`` (None
+    entries mean "no area"), because a rival that could not claim a speaker
+    either -- it stands in another hall -- must not be able to take one away
+    by being nearer: without it a speaker next to a shared wall would be
+    dropped by both cabinets and belong to nobody. ``report`` receives one
+    line per speaker this cabinet refuses; passing it changes nothing about
+    the decision.
     """
     rivals = [tuple(float(value) for value in rival) for rival in rivals or ()]
+    areas = list(rival_areas) if rival_areas is not None else [None] * len(rivals)
+    if len(areas) < len(rivals):
+        areas.extend([None] * (len(rivals) - len(areas)))
     kept = []
     for raw in speakers or ():
         speaker = coerce_spec(raw)
@@ -373,17 +448,45 @@ def exclusive_speakers(speakers, anchor, rivals=(), radius=ROOM_RADIUS):
             kept.append(raw)
             continue
         mine = _distance(anchor, speaker.position)
-        if any(_distance(rival, speaker.position) < mine for rival in rivals):
+        if not inside_area(speaker.position, area):
+            # Close, and somebody else's hall: not this cabinet's, whatever
+            # the distance says.
+            where = f"the area {area_name}" if area_name else "this cabinet's area"
+            _report(report, f"{_name_of(speaker)}: stands outside {where}, "
+                            f"so it is not this cabinet's speaker")
+            continue
+        if any(_distance(rival, speaker.position) < mine
+               and inside_area(speaker.position, areas[index])
+               for index, rival in enumerate(rivals)):
             continue
         if mine > radius:
+            # The cabinet's own reach, said out loud when the speaker stood
+            # close enough that somebody would expect it to be part of this
+            # room (the room's own default scale). A speaker a hundred metres
+            # past a wide hall's reach is simply another room, and a report per
+            # speaker on a big map is noise; one that is a metre past a reach
+            # somebody just set low is the picture of a room that stopped
+            # working, and that is the report worth having.
+            if mine <= ROOM_MAX_DISTANCE:
+                _report(report,
+                        f"{_name_of(speaker)}: stands {mine:.0f} m from the "
+                        f"cabinet, past its reach of {float(radius):.0f} m (the "
+                        f"room's own default is {ROOM_MAX_DISTANCE:.0f} m), so "
+                        f"it is not this cabinet's speaker")
             continue
         kept.append(raw)
     return kept
 
 
-def _in_room(speaker, anchor, radius, room):
+def _in_room(speaker, anchor, radius, room, area=None):
     if speaker.room and room is not None:
         return speaker.room == str(room)
+    if not inside_area(speaker.position, area):
+        # The same boundary ``exclusive_speakers`` applies, repeated here so a
+        # caller that hands the resolver raw speakers (a tool, a test) gets
+        # the rule too. The reason is reported upstream, where the speaker was
+        # dropped, exactly once.
+        return False
     if speaker.room and room is None:
         # A speaker assigned to some other room may still be this cabinet's
         # when it is standing right next to it; distance decides.
@@ -494,15 +597,32 @@ class RoomPlan:
     broken. It stays ``True`` when the profile was *asked for* (a server
     ``cinema_profile``, or a map with no speakers placed at all), because
     then the ring is the only thing there is to play.
+
+    ``reach`` is how far a speaker may stand from this cabinet -- and, at the
+    same time, how far from a listener it is still heard: **one number under
+    two names**, deliberately. It is the cabinet's own ``cinema_radius`` (see
+    ``plugin.cabinet_reach``) or the room's default
+    (:data:`layout.ROOM_MAX_DISTANCE`). A room whose speakers were claimed
+    within 90 m and then faded out at 60 m would be a room with holes in it,
+    and the two numbers drifting apart is the bug this field exists to make
+    impossible: whoever builds the bank reads ``plan.reach``, and whoever
+    claims the speaker used it already.
     """
 
-    __slots__ = ("profile", "specs", "placement", "fill")
+    __slots__ = ("profile", "specs", "placement", "fill", "reach", "notes")
 
-    def __init__(self, profile, specs=None, placement=None, fill=False):
+    def __init__(self, profile, specs=None, placement=None, fill=False,
+                 reach=None, notes=()):
         self.profile = profile
         self.specs = specs
         self.placement = placement
         self.fill = bool(fill)
+        self.reach = float(ROOM_MAX_DISTANCE if reach is None else reach)
+        # A plan with no placement (the ring behind the cabinet) still has
+        # something to say: which of the map's speakers were refused and why,
+        # so the fallback is never the silent one. A plan built from a
+        # placement keeps its placement's own warnings and adds these.
+        self.notes = tuple(str(note) for note in notes or ())
 
     @property
     def profile_name(self):
@@ -510,7 +630,11 @@ class RoomPlan:
 
     @property
     def warnings(self):
-        return self.placement.warnings if self.placement is not None else ()
+        """Everything this plan has to report, placement first."""
+        own = self.notes
+        if self.placement is None:
+            return own
+        return tuple(self.placement.warnings) + own
 
     def summary(self):
         """Human-readable room description for menus and logs."""

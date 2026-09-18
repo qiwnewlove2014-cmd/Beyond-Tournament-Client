@@ -38,8 +38,13 @@ from .audio_diagnostics import probe as audio_probe
 # cabinet with no room around it is the two-source playback below, untouched.
 from .audio.cinema import (CINEMA_AUTO, CINEMA_OFF, ROOM_MAX_DISTANCE,
                            ROOM_REFERENCE_DISTANCE, acquire_bank, cabinet_anchor,
-                           cinema_room, preview_room, profile_names,
-                           release_renderer, room_diagnosis, room_plan)
+                           cabinet_area, cabinet_reach, cinema_room,
+                           neighbour_line, neighbour_note, preview_room,
+                           profile_names, release_renderer, room_diagnosis,
+                           room_extent, room_plan)
+from .audio.cinema.crossover import FULL_RANGE as CROSSOVER_FULL_RANGE
+from .audio.cinema.crossover import band_edges, describe as crossover_band
+from .audio.cinema.crossover import hz_label, mark_of
 
 # The profile ids a cabinet's mode may name, and the shape every jukebox
 # caller can rely on (see plugin.CINEMA_AUTO / CINEMA_OFF).
@@ -122,6 +127,10 @@ class JukeboxPlayer:
         # re-resolves the room without a fresh play event, and because the
         # cabinet menu has to answer before another song starts.
         self._cinema_modes = {}
+        # Each cabinet's own reach, in metres (``cinema_radius``): how far its
+        # room takes speakers in and how far from a listener it is heard. One
+        # number, two names -- see ``audio.cinema.plugin.cabinet_reach``.
+        self._cinema_reaches = {}
         # Placement warnings already written to the log, per cabinet.
         self._cinema_warned = {}
         # When the playing rooms last re-resolved their shape (see
@@ -491,6 +500,10 @@ class JukeboxPlayer:
             mode = self._cinema_mode(jukebox_id, kwargs)
             if mode == CINEMA_OFF:
                 return None
+            # The reach arrives with the play event too, and it has to be in
+            # the cache before the room is resolved: it decides which speakers
+            # the room takes in, not only how far it is heard.
+            self._cinema_reach(jukebox_id, kwargs)
             requested = None if mode == CINEMA_AUTO else mode
             plan = cinema_room(self.game, jukebox_id, (float(x), float(y), float(z)),
                                requested)
@@ -518,9 +531,12 @@ class JukeboxPlayer:
                                 else self.cabinet_volumes.get(jukebox_id, 100)),
                 # The ROOM's own scale, not the plain pair's 8/40: a room is
                 # heard from the back row, while the two-source playback this
-                # replaces keeps its falloff exactly as it shipped.
+                # replaces keeps its falloff exactly as it shipped. The reach
+                # is the cabinet's own -- the very number its speakers were
+                # claimed with -- so a hall that takes speakers in at 90 m is
+                # heard to 90 m instead of fading out at the room's default.
                 reference_distance=ROOM_REFERENCE_DISTANCE,
-                max_distance=ROOM_MAX_DISTANCE,
+                max_distance=plan.reach,
                 occlusion_provider=self.occlusion_tier,
                 reverb_slot=keep.reverb_slot if keep is not None else None,
                 eq_slot=keep.eq_slot if keep is not None else None,
@@ -551,6 +567,54 @@ class JukeboxPlayer:
         instead of taking the seamless-continuity shortcut.
         """
         self._cinema_modes[jukebox_id] = str(mode or "").strip().lower() or CINEMA_AUTO
+
+    def cinema_reach(self, jukebox_id):
+        """This cabinet's own reach in metres, or None when the map has none.
+
+        None is a real answer -- "the map never said", so the room's own
+        default is used -- which is why it is not folded into a number here:
+        the reader that needs the number (``plugin.cabinet_reach``) is the one
+        that knows what the default is, and it also knows to look at the
+        cached server state for a client whose player has not been built yet.
+        """
+        value = self._cinema_reaches.get(jukebox_id)
+        return None if value is None else float(value)
+
+    def set_local_cinema_reach(self, jukebox_id, reach):
+        """Echo a reach change locally so the cabinet menu answers immediately.
+
+        Same rule as the mode: the Server owns the number (it is written into
+        the map and sent to everybody), and the re-offer that follows a change
+        is what re-shapes a playing room. This only makes the menu behind the
+        prompt read the value that was just typed.
+        """
+        try:
+            self._cinema_reaches[jukebox_id] = float(reach)
+        except (TypeError, ValueError):
+            self._cinema_reaches.pop(jukebox_id, None)
+
+    def _cinema_reach(self, jukebox_id, kwargs=None):
+        """The reach the map gives this cabinet, cached from what arrived.
+
+        It travels with every play event and with the cabinet state, exactly
+        as the mode does. A value that is not a number is not a reach: it is
+        forgotten rather than obeyed, so a bad packet cannot stretch a room
+        across the map -- and a map that says nothing keeps the default.
+        """
+        kwargs = kwargs or {}
+        if "cinema_reach" not in kwargs and "cinema_radius" not in kwargs:
+            return self.cinema_reach(jukebox_id)
+        raw = kwargs.get("cinema_reach", kwargs.get("cinema_radius"))
+        if raw is None:
+            return self.cinema_reach(jukebox_id)
+        try:
+            reach = float(raw)
+        except (TypeError, ValueError):
+            return self.cinema_reach(jukebox_id)
+        if reach <= 0:
+            return self.cinema_reach(jukebox_id)
+        self._cinema_reaches[jukebox_id] = reach
+        return reach
 
     def _cinema_mode(self, jukebox_id, kwargs=None):
         """What the map says this cabinet plays through, right now.
@@ -611,7 +675,8 @@ class JukeboxPlayer:
                 # re-offer (which rebuilds the output), and reshaping the
                 # running room to a shape it is about to be replaced with
                 # churned the speakers in the window between the two.
-                options = {"cinema_mode": running_mode or self.cinema_mode(jukebox_id)}
+                options = {"cinema_mode": running_mode or self.cinema_mode(jukebox_id),
+                           "cinema_reach": self.cinema_reach(jukebox_id)}
                 bank = self._acquire_cinema(
                     jukebox_id, anchor[0], anchor[1], anchor[2],
                     self.volume, options, keep=expected,
@@ -1234,6 +1299,13 @@ class JukeboxPlayer:
         with self._lock:
             self._pending_map_change = set()
             self._pending_map_change_serial = None
+            # The mode and the reach are properties of a cabinet *on a map*.
+            # Element ids are strings written into the map file, so a copy of
+            # a map carries the same ids: left behind, a stale entry would
+            # answer for the wrong hall on the next map until a play event
+            # corrected it.
+            self._cinema_modes.clear()
+            self._cinema_reaches.clear()
             ids = list(self.players.keys())
         for jukebox_id in ids:
             self.stop(jukebox_id)
@@ -1881,6 +1953,47 @@ def _current_state(gp):
     return state if isinstance(state, dict) else {"jukeboxes": {}}
 
 
+def _cabinet_cinema_lock(gp, jukebox_id):
+    """The lock on a cabinet's cinema mode, from the cached server state.
+
+    ``(owner, coded)`` or None. The Server never sends the code itself -- only
+    who holds the lock and whether a code exists -- so nothing here can leak
+    one; the cabinet menu uses it to say who to ask and to warn that a pick
+    will need the code before it is applied.
+    """
+    box = (_current_state(gp).get("jukeboxes", {}) or {}).get(jukebox_id) or {}
+    lock = box.get("cinema_lock")
+    if not isinstance(lock, dict):
+        return None
+    owner = str(lock.get("owner") or "").strip()
+    if not owner:
+        return None
+    return owner, bool(lock.get("coded", True))
+
+
+def _may_lock_cinema_mode(gp):
+    """Whether this account may lock a cabinet's mode (the Server's own rank).
+
+    Read from the login/permission snapshot (``can_lock_cinema_mode``) rather
+    than guessed from a staff flag: the Creator/Contributor rule is one the
+    Server owns, and a menu line that exists must be one that works. The Server
+    answers the same rank again when the request comes back, so this only
+    decides whether the line is offered at all.
+    """
+    return bool(getattr(gp, "can_lock_cinema_mode", False))
+
+
+def _own_name(gp):
+    """This client's own player name, or "" when login has not set it yet.
+
+    The lock's owner is a *name*, so the one client that may manage it without
+    asking its own permission is the one whose name matches -- an empty name
+    matches nobody, which is the honest answer before login.
+    """
+    player = getattr(gp, "player", None)
+    return str(getattr(player, "name", "") or "")
+
+
 def _cabinet_cinema_mode(gp, jukebox_id):
     """The mode the map has for a cabinet, from the cached server state.
 
@@ -1898,6 +2011,41 @@ def _cabinet_cinema_mode(gp, jukebox_id):
     return CINEMA_AUTO
 
 
+# How far a cabinet's room reaches, offered as short choices rather than a
+# number to type. The number is what the map stores (``cinema_radius``), but
+# somebody picking one is answering "how big is this venue" -- and 90 typed
+# into a box is one keystroke away from 900. The bounds of what the Server
+# will accept are ``layout.MIN_ROOM_REACH``/``MAX_ROOM_REACH``.
+CINEMA_REACHES = (
+    (20, "Booth or small room"),
+    (60, "Room - the default every room has had"),
+    (90, "Hall"),
+    (140, "Wide stage or outdoor"),
+)
+
+
+def _cinema_reach_label(reach):
+    """A reach as a menu line: the number first, then what it is for."""
+    value = float(reach)
+    for choice, description in CINEMA_REACHES:
+        if abs(value - choice) < 0.5:
+            return f"{choice} m - {description}"
+    return f"{value:.0f} m - set by the map"
+
+
+def _cabinet_cinema_reach(gp, jukebox_id):
+    """The reach the map has for a cabinet, asked of the one reader.
+
+    Deliberately not a copy of the rule: the live path builds a cabinet's room
+    with ``plugin.cabinet_reach``, so a menu that read the state itself could
+    say 60 m while the room was really built at 90 -- the drift this feature
+    exists to remove. A play event updates the player's own cache and a join
+    payload updates the state, and both are the same question, so the reader
+    that answers for the room answers for the menu.
+    """
+    return cabinet_reach(gp, jukebox_id, default=float(ROOM_MAX_DISTANCE))
+
+
 def _cinema_mode_label(mode):
     """Short form of a mode, for a menu line."""
     if mode == CINEMA_OFF:
@@ -1911,12 +2059,23 @@ def _cinema_detail(game, gp, jukebox_id, mode=None):
     """The full answer to "what is this cabinet playing through", and why.
 
     The room is *previewed*, never acquired: saying out loud what the map
-    could do must not create a speaker or change how anything plays.
+    could do must not create a speaker or change how anything plays. What
+    stands *around* the cabinet is part of the same answer -- two cabinets
+    close enough to share the speakers between them is exactly why a speaker
+    here can be somebody else's -- so the sentence ends with the neighbours
+    (nothing at all when this is the only cabinet on the map).
     """
+    return (_cinema_room_sentence(game, gp, jukebox_id, mode)
+            + neighbour_note(game, jukebox_id))
+
+
+def _cinema_room_sentence(game, gp, jukebox_id, mode=None):
+    """What this cabinet's own room is, said without its neighbours."""
     mode = mode or _cabinet_cinema_mode(gp, jukebox_id)
+    reach = _cinema_reach_note(game, gp, jukebox_id)
     if mode == CINEMA_OFF:
         return ("This cabinet plays its own stereo: the map turned its cinema "
-                "room off.")
+                "room off." + reach)
     anchor = cabinet_anchor(game, jukebox_id)
     if anchor is None:
         return ("This cabinet has no cinema room: it is not on the map (or its "
@@ -1925,10 +2084,11 @@ def _cinema_detail(game, gp, jukebox_id, mode=None):
     if plan is not None and plan.placement is not None:
         if mode == CINEMA_AUTO:
             return (f"Playing through the room speakers around this cabinet "
-                    f"({plan.summary()}).")
+                    f"({plan.summary()})." + _cinema_band_note(plan) + reach)
         return (f"This cabinet plays as {mode}: {plan.summary()}. A shape "
                 f"nobody placed around it is filled from the ring behind it."
-                + _silent_speaker_note(silent))
+                + _silent_speaker_note(silent, plan)
+                + _cinema_band_note(plan) + reach)
     if mode != CINEMA_AUTO:
         # The shape outlives the map: it is played from the ring behind the
         # cabinet. Every speaker standing here is outside it (named when there
@@ -1936,26 +2096,172 @@ def _cinema_detail(game, gp, jukebox_id, mode=None):
         return (f"This cabinet plays as {mode} from a ring of speakers behind "
                 f"it, because the map has no room here: "
                 f"{room_diagnosis(game, anchor, room_id=jukebox_id)}."
-                + _silent_speaker_note(silent))
+                + _silent_speaker_note(silent, plan) + reach)
     return (f"No cinema room here, so this cabinet plays its own stereo: "
-            f"{room_diagnosis(game, anchor, room_id=jukebox_id)}.")
+            f"{room_diagnosis(game, anchor, room_id=jukebox_id)}." + reach)
 
 
-def _silent_speaker_note(silent):
-    """Name the speakers a shape does not use, or say nothing when it uses all.
+def _cinema_reach_note(game, gp, jukebox_id):
+    """The cabinet's reach and area, said where the room is described.
+
+    Two answers to "which speakers are mine": the reach is one number under
+    two names (how far a speaker may stand from the cabinet and still belong
+    to its room, and how far from a listener that speaker is still heard), and
+    the area is the map zone the cabinet stands in -- on a wide map with
+    several halls it is the area, not the distance, that stops two venues
+    claiming each other's speakers (see ``audio.cinema.plugin.cabinet_area``).
+    A cabinet the map draws no zone around says only the distance, which is
+    what every map did before this existed.
+    """
+    reach = _cabinet_cinema_reach(gp, jukebox_id)
+    sentence = (f" Its reach is {reach:.0f} m: a speaker further than that belongs"
+                f" to another room, and nothing here is heard past it either.")
+    name, _bounds = cabinet_area(game, jukebox_id)
+    if name:
+        sentence += (f" It stands in the map's '{name}' area, so a speaker outside"
+                     f" that area is another room's however close it is.")
+    # ...and what that number is measured against, so "nothing is heard past it"
+    # is answerable without a tape measure: the speakers somebody placed and
+    # the room's own drawn edge, both from the readers the room is built with.
+    extent = _room_extent(game, jukebox_id)
+    if extent is not None:
+        summary = extent.summary()
+        if summary:
+            sentence += f" Measured from the cabinet: {summary}"
+    return sentence
+
+
+def _room_extent(game, jukebox_id):
+    """This cabinet's geometry, or None when its position is not known.
+
+    ``room_extent`` is a read-out that takes an anchor, and both callers here
+    hold the cabinet's own anchor already; None keeps a cabinet the map has
+    not placed yet from answering with a room measured from nowhere.
+    """
+    anchor = cabinet_anchor(game, jukebox_id) if game is not None else None
+    if anchor is None:
+        return None
+    try:
+        return room_extent(game, jukebox_id, anchor)
+    except Exception:
+        return None
+
+
+def _silent_speaker_note(silent, plan=None):
+    """Name the speakers a room does not use, or say nothing when it uses all.
 
     A requested shape names a fixed set of slots, so a speaker somebody placed
     on a slot that shape does not have is silent -- and "silent with nothing on
     any screen that says so" is indistinguishable from a broken room. One
     sentence, in the shape's own words, is the whole fix (see
-    ``cinema_plugin.room_plan``).
+    ``cinema_plugin.room_plan``). A shape with no room on the map at all is a
+    different sentence: the ring behind the cabinet is playing, so *every*
+    speaker placed here goes unread (a crossover, a tone, a level, a delay)
+    and saying "this shape does not use them" would hide exactly that.
     """
     if not silent:
         return ""
     names = ", ".join(str(name or slot) for name, slot in silent)
+    if plan is not None and getattr(plan, "placement", None) is None:
+        return (f" None of the map's speakers here is fed: the room is the "
+                f"ring behind the cabinet, so no crossover, tone, level or "
+                f"delay placed on them is heard ({names})")
     return (f" Speakers this shape does not use are silent: {names}"
             f" ({len(silent)} of the speakers placed here); Auto plays"
             f" whatever stands around the cabinet.")
+
+
+# What a room is heard *across*, for the one read-out that looks at every
+# speaker together: a room's speakers are a set of bands, and the ends are the
+# bounds of hearing rather than anything a builder set.
+AUDIBLE_HZ = (20.0, 20000.0)
+
+
+def _kept_span(mark):
+    """The span of the range one speaker keeps, or None when it keeps all of it."""
+    edges = band_edges(mark)
+    if edges:
+        return (float(edges[0]), float(edges[1]))
+    if mark == CROSSOVER_FULL_RANGE:
+        return None
+    if mark < 0:
+        return (abs(float(mark)), AUDIBLE_HZ[1])
+    return (AUDIBLE_HZ[0], float(mark))
+
+
+def _missing_spans(marks):
+    """The spans of the range *no* speaker of this room keeps.
+
+    Nothing else in the game looks at a room's crossovers together, and that is
+    the whole reason a room can sound broken while every value on screen looks
+    deliberate: a sub below 120 and a tweeter above 1.5 kHz between them keep
+    no middle, and a three-way room whose edges do not line up loses exactly
+    the same octave (a sub that stops at 120 beside a mid that starts at 200).
+    One full-range speaker in the room keeps everything, so the answer is empty
+    and the room says nothing -- which is every map that has no crossover at
+    all. Only the gaps *between* the bands are reported: what a room keeps at
+    the very bottom and the very top is the room's own business (a room of two
+    mids keeps no sub and no air, and saying so every time would be noise on a
+    read-out nobody asked to be lectured by), while a hole *between* two bands
+    is a seam that was meant to meet. Returns ``[(low, high), ...]``, in Hz and
+    in order.
+    """
+    spans = [_kept_span(mark) for mark in marks]
+    if any(span is None for span in spans):
+        return []
+    spans = sorted(spans)
+    missing = []
+    reach = spans[0][1]
+    for low, high in spans[1:]:
+        if low > reach:
+            missing.append((reach, low))
+        reach = max(reach, high)
+    return missing
+
+
+def _missing_bands_note(marks):
+    """The hole a room's own speakers leave, said as the span it falls in."""
+    spans = _missing_spans(marks)
+    if not spans:
+        return ""
+    said = [f"{hz_label(low)} to {hz_label(high)}" for low, high in spans]
+    plural = "s" if len(said) > 1 else ""
+    verb = "are" if len(said) > 1 else "is"
+    return (f". The range{plural} {', '.join(said)} {verb} not heard here at all")
+
+
+def _cinema_band_note(plan):
+    """What each speaker this room feeds keeps: the bottom, the middle, the top, or all.
+
+    A crossover is silent about itself, and a room whose fed speakers are one
+    sub and one tweeter keeps no middle at all -- heard as a broken room, with
+    every value on screen looking deliberate. Saying the band each fed speaker
+    keeps, next to the room that feeds it, is the whole fix; a room of
+    full-range speakers (every map with no crossover anywhere) says nothing at
+    all, so nothing about it changes.
+
+    The bands are then read *together* (``_missing_spans``), because the list
+    alone still leaves the hole to be worked out in somebody's head -- and the
+    hole is the thing that is heard. A room that keeps everything says nothing
+    extra, so no map without a gap changes by a word.
+    """
+    placement = getattr(plan, "placement", None)
+    if placement is None:
+        return ""
+    parts = []
+    marks = []
+    for slot in getattr(placement, "slots", ()):
+        spec = placement.speakers[slot].spec
+        mark = mark_of(spec)
+        band = crossover_band(mark)
+        if band:
+            parts.append(f"{getattr(spec, 'name', None) or slot} {band}")
+            marks.append(mark)
+    if not parts:
+        return ""
+    return (" Speakers here keep: " + ", ".join(parts)
+            + ". A band no speaker here keeps is not heard at all"
+            + _missing_bands_note(marks) + ".")
 
 
 def _cinema_mode_choices(game, gp, jukebox_id):
@@ -1972,15 +2278,23 @@ def _cinema_mode_choices(game, gp, jukebox_id):
     def _note(name):
         if anchor is None:
             return ""
-        _plan, silent = room_plan(game, anchor, requested=name, room_id=jukebox_id)
-        return _silent_speaker_note(silent)
+        plan, silent = room_plan(game, anchor, requested=name, room_id=jukebox_id)
+        return _silent_speaker_note(silent, plan)
+
+    # A locked cabinet still lists every mode -- the pick is what asks for the
+    # code -- so each line says that it will, instead of the box appearing
+    # after a choice nobody was warned about.
+    lock = _cabinet_cinema_lock(gp, jukebox_id)
+    needs_code = bool(lock) and not _may_lock_cinema_mode(gp) \
+        and lock[0] != _own_name(gp)
+    code_note = f" - needs {lock[0]}'s code" if needs_code else ""
 
     choices = [
         (CINEMA_AUTO, "Auto - use the speakers placed around this cabinet"
-         + _note(CINEMA_AUTO)),
-        (CINEMA_OFF, "Off - always this cabinet's own stereo"),
+         + _note(CINEMA_AUTO) + code_note),
+        (CINEMA_OFF, "Off - always this cabinet's own stereo" + code_note),
     ]
-    choices.extend((name, f"Force the {name} room shape{_note(name)}")
+    choices.extend((name, f"Force the {name} room shape{_note(name)}{code_note}")
                    for name in profile_names())
     return current, choices
 
@@ -2007,6 +2321,80 @@ def _open_cinema_mode_menu(game, gp, jukebox_id):
     m.add_items(items)
     menus.set_default_sounds(m)
     gp.add_substate(m)
+
+
+def _open_cinema_reach_menu(game, gp, jukebox_id):
+    """Staff menu: how big this cabinet's room is.
+
+    The reach is the same number under two names -- how far a speaker may
+    stand from the cabinet to belong to its room, and how far from a listener
+    it is still heard -- so widening it both takes in a hall's back wall and
+    makes that wall audible. It is chosen here, at the cabinet, because it is
+    a property of *this room*: on a wide map with several venues, the cabinet
+    you are standing at is the one whose reach you mean.
+    """
+    from . import menu as menu_mod, menus
+
+    current = _cabinet_cinema_reach(gp, jukebox_id)
+    lock = _cabinet_cinema_lock(gp, jukebox_id)
+    needs_code = bool(lock) and not _may_lock_cinema_mode(gp) \
+        and lock[0] != _own_name(gp)
+    code_note = f" - needs {lock[0]}'s code" if needs_code else ""
+
+    # What each choice would do to *this* room, one line each: a reach is a
+    # number, and the two things it is measured against (the speakers placed
+    # here and the edge of the zone the map drew) are the reason a small one
+    # goes unheard at the back. A choice that covers the room stays short.
+    extent = _room_extent(game, jukebox_id)
+    items = []
+    for value, description in CINEMA_REACHES:
+        geometry = extent.note(value) if extent is not None else ""
+        label = (f"{value} m - {description}"
+                 f"{' (now)' if abs(current - value) < 0.5 else ''}"
+                 f"{geometry}{code_note}")
+        items.append((label, functools.partial(
+            _apply_cinema_reach, game, gp, jukebox_id, value)))
+    items.append(("Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))))
+
+    m = menu_mod.Menu(game, "Jukebox Cinema Reach", parrent=gp)
+    m.add_items(items)
+    menus.set_default_sounds(m)
+    gp.add_substate(m)
+
+
+def _apply_cinema_reach(game, gp, jukebox_id, reach):
+    """Ask the server to change a cabinet's reach (it checks who may)."""
+    from . import consts
+
+    gp.pop_last_substate()
+    game.network.send(consts.CHANNEL_MISC, "jukebox_cinema_reach",
+                      {"id": jukebox_id, "radius": int(reach)})
+    player = getattr(game, "gameplay", None)
+    jukebox_player = getattr(player, "jukebox_player", None)
+    if jukebox_player is not None:
+        jukebox_player.set_local_cinema_reach(jukebox_id, reach)
+    # Like the mode, this does not wait for the next track: the server writes
+    # the number into the map and re-offers the song, which re-shapes the
+    # playing room -- a speaker the wider reach now takes in joins on the beat.
+    extent = _room_extent(game, jukebox_id)
+    geometry = extent.note(reach, prefix=" ") if extent is not None else ""
+    speak(f"Cinema reach {int(reach)} m ({_cinema_reach_label(reach)}). "
+          "Re-shaping this cabinet's room." + geometry)
+
+
+def _open_cinema_lock_menu(game, gp, jukebox_id):
+    """Ask the Server for one cabinet's lock controls.
+
+    The Server owns the lock (it writes the code's hash into the map), so the
+    menu is the Server's too: this sends the question and whatever comes back
+    is the same server menu every lock on the server is managed through. A
+    refusal -- an account without the rank, or a cabinet somebody else locked
+    -- arrives as the Server's own words.
+    """
+    from . import consts
+
+    game.network.send(consts.CHANNEL_MENUS, "builder_cinema_mode_lock",
+                      {"elementId": jukebox_id})
 
 
 def _apply_cinema_mode(game, gp, jukebox_id, mode):
@@ -2057,6 +2445,20 @@ def open_jukebox_menu(game, gp):
         speak("There is no jukebox available here.")
         return
     jukebox_id = jb.get("id")
+
+    # Who is opening this cabinet, and what stands near it: both are asked
+    # here, before the menu below, and both are reused further down (the menu
+    # lines a staff member gets, and the read-out of a neighbouring cabinet).
+    is_staff = bool(
+        getattr(gp, "is_staff", False)
+        or getattr(gp, "is_builder", False)
+        or getattr(gp, "is_technician", False)
+        or getattr(gp, "can_broadcast_megaphone", False)
+    )
+    nearby = neighbour_line(game, jukebox_id)
+
+    def go_cancel():
+        gp.pop_last_substate()
 
     def go_search():
         gp.pop_last_substate()
@@ -2133,7 +2535,21 @@ def open_jukebox_menu(game, gp):
         gp.pop_last_substate()
         _open_cinema_mode_menu(game, gp, jukebox_id)
 
+    def go_cinema_reach():
+        gp.pop_last_substate()
+        _open_cinema_reach_menu(game, gp, jukebox_id)
+
+    def go_cinema_lock():
+        gp.pop_last_substate()
+        _open_cinema_lock_menu(game, gp, jukebox_id)
+
+    def speak_lock():
+        owner, _coded = lock_now
+        speak(f"This cabinet's cinema mode is locked by {owner}. Staff who know "
+              "its code can change the mode; the room is heard exactly as it is.")
+
     mode_now = _cabinet_cinema_mode(gp, jukebox_id)
+    lock_now = _cabinet_cinema_lock(gp, jukebox_id)
 
     menu_items = [
         ("Search YouTube and queue a song", go_search),
@@ -2148,12 +2564,6 @@ def open_jukebox_menu(game, gp):
         ("Remove my queued song", go_remove),
     ]
 
-    is_staff = bool(
-        getattr(gp, "is_staff", False)
-        or getattr(gp, "is_builder", False)
-        or getattr(gp, "is_technician", False)
-        or getattr(gp, "can_broadcast_megaphone", False)
-    )
     if is_staff:
         menu_items.append((_eq_label, go_eq))
         menu_items.append(("Clear queue and stop (Staff only)", go_clear_all))
@@ -2163,10 +2573,34 @@ def open_jukebox_menu(game, gp):
     # for everybody -- it answers "am I hearing the room or the box" -- and a
     # staff member gets the mode menu underneath it.
     menu_items.append((f"Cinema: {_cinema_mode_label(mode_now)}", go_cinema_status))
+    # The cabinets around this one, read where a person is standing: two
+    # cabinets close enough to share the speakers between them are the one
+    # thing a map does not show by itself, and the line speaks the whole
+    # answer (which rooms are whose) rather than only the distance.
+    if nearby:
+        menu_items.append((nearby, lambda: speak(neighbour_note(game, jukebox_id))))
     if is_staff:
         menu_items.append((f"Set cinema mode (now: {mode_now})", go_cinema_mode))
+        # How big this room is. It sits under the mode because it answers the
+        # next question a staff member asks at a cabinet: the room is on, but
+        # the speakers down the hall are silent -- are they mine?
+        menu_items.append((f"Set cinema reach (now: {_cabinet_cinema_reach(gp, jukebox_id):.0f} m)",
+                           go_cinema_reach))
+    # A locked cabinet says who holds it and how to get in, and only the
+    # accounts that may lock one get the line that manages it -- a menu line
+    # that exists is a line that works (the Server answers the same rank).
+    if lock_now:
+        owner, coded = lock_now
+        if _may_lock_cinema_mode(gp) or owner == _own_name(gp):
+            menu_items.append((f"Manage cinema mode lock (owner: {owner})…",
+                               go_cinema_lock))
+        elif coded:
+            menu_items.append((f"Cinema mode is locked by {owner} "
+                               "(the code opens one change)", speak_lock))
+    elif _may_lock_cinema_mode(gp):
+        menu_items.append(("Lock cinema mode (set a code)…", go_cinema_lock))
 
-    menu_items.append(("Cancel", lambda: gp.pop_last_substate()))
+    menu_items.append(("Cancel", go_cancel))
 
     m = menu_mod.Menu(game, "Music Jukebox", parrent=gp)
     m.add_items(menu_items)

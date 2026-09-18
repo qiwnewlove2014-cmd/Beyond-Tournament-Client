@@ -40,8 +40,9 @@ the cabinet's *own* playback rather than a veto over somebody else's stream.
 import time
 
 from ...deferred_log import log_deferred as log_line
-from .crossover import crossover_hz
-from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
+from .crossover import mark_key, mark_of
+from .layout import ROOM_REFERENCE_DISTANCE
+from .live import plan_reach
 from .plugin import (acquire_bank, cabinet_anchor, preview_room,
                      release_renderer, room_diagnosis, rooms_enabled)
 
@@ -304,9 +305,11 @@ class PeerRoomHost:
                 profile=plan.profile, specs=plan.specs, placement=plan.placement,
                 fill=plan.fill,
                 # The room's own scale, not the plain feed's 50 m: this is the
-                # room the map describes, heard from its back row.
+                # room the map describes, heard from its back row -- and the
+                # room's own reach, so a stream somebody else feeds into this
+                # hall is heard exactly as far as the hall's own songs are.
                 reference_distance=ROOM_REFERENCE_DISTANCE,
-                max_distance=ROOM_MAX_DISTANCE,
+                max_distance=plan_reach(plan),
                 occlusion_provider=self._occlusion,
                 reverb_slot=reverb_slot,
                 eq_slot=eq_slot,
@@ -473,8 +476,7 @@ class PeerRoomFeed:
                           float(getattr(spec, "delay_ms", 0.0)),
                           getattr(spec, "aim_yaw", None),
                           None if tone is None else round(float(tone), 4),
-                          round(crossover_hz(getattr(spec, "crossover", None)),
-                                4)))
+                          mark_key(mark_of(spec))))
         return (str(getattr(plan, "profile", "")), tuple(parts))
 
     def adopt(self, plan, bank):

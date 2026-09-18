@@ -18,7 +18,8 @@ from .. import options
 from .. import state
 from ..audio.cinema import (ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE,
                             acquire_bank as cinema_acquire_bank,
-                            live_instruments_enabled, preview_room,
+                            live_instruments_enabled, plan_reach,
+                            preview_room,
                             release_renderer as cinema_release,
                             room_diagnosis as cinema_diagnosis, rooms_enabled,
                             set_enabled as cinema_set_enabled,
@@ -793,9 +794,11 @@ class MapMusicBot:
             fill=room.fill,
             volume=self.volume, cabinet_volume=100,
             # A room is heard from the back row; the bot's own ear source keeps
-            # its own falloff and is not part of this.
+            # its own falloff and is not part of this. The reach is the
+            # cabinet's own, so a bot feeding a hall is heard as far as the
+            # hall's own songs are -- one room, not two.
             reference_distance=ROOM_REFERENCE_DISTANCE,
-            max_distance=ROOM_MAX_DISTANCE,
+            max_distance=plan_reach(room),
             occlusion_provider=self._cinema_occlusion,
             # The bot's own output answers to the Music slider, not the
             # Jukebox one: the room is only where it comes out.
@@ -1120,8 +1123,8 @@ class MapMusicBot:
         # a room is how *this* listener hears a cabinet, so none of them takes
         # anything from anybody and all three are open to everyone who can
         # open this menu (the song routing above stays Developer/Contributor,
-        # because that one turns a cabinet over). Songs, instruments, and now
-        # a voice: the same three things a room carries.
+        # because that one turns a cabinet over). Songs, instruments and a
+        # voice: the same three things a room carries.
         if self.cinema_listening_allowed():
             items.append((self.cinema_rooms_label, self.toggle_cinema_rooms))
             items.append((self.instruments_cinema_label,

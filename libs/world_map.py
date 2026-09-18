@@ -724,6 +724,7 @@ class Map:
         delay=0.0,
         tone=100,
         crossover=0,
+        crossover_high=0,
         **kwargs,
     ):
         """Spawns a cinema speaker element (one speaker of a room)."""
@@ -739,7 +740,7 @@ class Map:
         obj = CinemaSpeakerZone(
             id, minx, maxx, miny, maxy, minz, maxz,
             channel=channel, room=room, level=level, delay=delay, tone=tone,
-            crossover=crossover,
+            crossover=crossover, crossover_high=crossover_high,
             aim_yaw=kwargs.get("aim_yaw"),
             cone_inner=kwargs.get("inner_cone_angle"),
             cone_outer=kwargs.get("outer_cone_angle"),
@@ -1642,7 +1643,7 @@ class CinemaSpeakerZone(BaseMapObj):
 
     def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, channel="auto",
                  room="", level=100, delay=0.0, tone=100, crossover=0,
-                 aim_yaw=None, cone_inner=None, cone_outer=None,
+                 crossover_high=0, aim_yaw=None, cone_inner=None, cone_outer=None,
                  cone_outer_gain=None, **kwargs):
         super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "cinemaSpeaker")
         self.label = "Cinema Speaker"
@@ -1671,6 +1672,13 @@ class CinemaSpeakerZone(BaseMapObj):
             self.crossover = float(crossover)
         except (TypeError, ValueError):
             self.crossover = 0.0
+        # The band's second edge: set next to a positive first one, the speaker
+        # keeps the middle (a mid cabinet) and 0 here is "no band". Stored as
+        # written for the same reason.
+        try:
+            self.crossover_high = float(crossover_high)
+        except (TypeError, ValueError):
+            self.crossover_high = 0.0
         self.aim_yaw = aim_yaw
         self.cone_inner = cone_inner
         self.cone_outer = cone_outer
@@ -1697,6 +1705,7 @@ class CinemaSpeakerZone(BaseMapObj):
             "delay_ms": self.delay,
             "tone": self.tone,
             "crossover": self.crossover,
+            "crossover_high": self.crossover_high,
         }
         x, y, z = self.position
         spec["x"], spec["y"], spec["z"] = x, y, z

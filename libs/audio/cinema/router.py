@@ -34,6 +34,23 @@ PARITY_PLAN = (("front_l", 1.0, 0.0), ("front_r", 0.0, 1.0))
 MONO_PROFILE = "mono_spread"
 
 
+def ordered_edges(low, high):
+    """A slot's two raw crossover edges, rounded and in order.
+
+    The edges are carried *as the map wrote them* -- this module may not import
+    the reader that decides what a mark means (it is part of the portable
+    core, which imports nothing but the standard library and its five
+    siblings) -- but they are ordered here, because a band written the other
+    way round is the same band and must not read as a different room. Ordering
+    is pure arithmetic; the vocabulary each edge is settled into is the
+    reader's, and a change only it would make is a change the room re-reads
+    anyway.
+    """
+    first = round(float(low or 0.0), 4)
+    second = round(float(high or 0.0), 4)
+    return (first, second) if first <= second else (second, first)
+
+
 class CinemaRenderer:
     """Per-jukebox renderer: stereo PCM in, per-slot mono PCM out.
 
@@ -180,7 +197,14 @@ class CinemaRenderer:
         renderer it already has, so nothing re-reads the map. A crossover's
         *sign* is what makes it one mark or the other (a bass cabinet below a
         frequency, a tweeter above it), so it is carried as it was written and
-        a room that swaps one for the other is a different room.
+        a room that swaps one for the other is a different room. **Both**
+        edges are carried, because a speaker that grew a second one became a
+        *band* rather than a two-way split: a mid cabinet's upper edge is as
+        much a property of the room as its lower one, and a builder who dials
+        200-3 kHz onto a speaker already set to 200-1.5 kHz must get a room
+        that re-cuts -- the two numbers are read as the map wrote them here,
+        not composed into a mark, because this module is part of the portable
+        core and may not import the reader that composes one.
         """
         slots = []
         for slot in self._slots:
@@ -193,7 +217,8 @@ class CinemaRenderer:
                 round(float(self.layout.level(slot)), 4),
                 round(float(self.layout.delay_ms(slot)), 4),
                 round(float(self.layout.tone(slot)), 4),
-                round(float(self.layout.crossover(slot)), 4),
+                ordered_edges(self.layout.crossover(slot),
+                              self.layout.crossover_high(slot)),
                 None if spec is None or spec.aim_yaw is None else round(float(spec.aim_yaw), 3),
                 False if spec is None else bool(spec.has_cone),
             ))

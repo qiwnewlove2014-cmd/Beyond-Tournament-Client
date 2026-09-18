@@ -5,9 +5,13 @@ Reported wish, twice over: a speaker behind or beside the room that is only a
 top not merely quieter but gone -- and the mirror of it, a speaker that is only
 a **tweeter**, with the bass and the mids gone instead. Both are one attribute
 whose sign says which half the speaker keeps, so a speaker can hold one
-crossover and never two (two of them is a band-pass, and nobody is asking for
-one). Neither can be an OpenAL filter, and the reason is worth pinning down
-here because it is what decides the shape of this feature:
+crossover and never two. The third wish is the shape a single sign cannot say --
+a **mid cabinet**, a speaker that keeps only the middle, with the bass below it
+and the air above it gone -- and that one is asked for as two edges
+(``crossover`` and ``crossover_high``, one band) rather than as two crossovers
+that happened to land on one speaker. Neither can be an OpenAL filter, and the
+reason is worth pinning down here because it is what decides the shape of this
+feature:
 
 * every filter gain EFX offers is capped at 1.0 (``AL_LOWPASS_MAX_GAIN`` and
   friends), so a filter only ever cuts;
@@ -58,7 +62,9 @@ from libs.audio.cinema import CinemaRenderer, CinemaSpeakerBank
 from libs.audio.cinema.crossover import (FULL_RANGE, MAX_CROSSOVER_HZ,
                                          MAX_TREBLE_HZ, MIN_CROSSOVER_HZ,
                                          MIN_TREBLE_HZ, apply as crossover_apply,
-                                         crossover_hz, initial_state, smoothing)
+                                         band_edges, crossover_hz, describe,
+                                         initial_state, mark_key, mark_of,
+                                         sections, smoothing)
 from libs.audio.cinema.layout import CinemaSpeakerSpec, IDEAL_BEARING, coerce_spec
 from libs.world_map import Map
 
@@ -239,7 +245,7 @@ def rms(pcm):
 # ---------------------------------------------------------------------- room
 
 
-def placed(slot, delay_ms=0.0, crossover=None, radius=8.0):
+def placed(slot, delay_ms=0.0, crossover=None, radius=8.0, crossover_high=None):
     from math import cos, radians, sin
     angle = radians(IDEAL_BEARING[slot])
     return CinemaSpeakerSpec(
@@ -248,6 +254,7 @@ def placed(slot, delay_ms=0.0, crossover=None, radius=8.0):
          ANCHOR[2]),
         delay_ms=delay_ms,
         crossover=crossover,
+        crossover_high=crossover_high,
     )
 
 
@@ -258,12 +265,15 @@ class Room:
     PROFILE = "front_only"
 
     def __init__(self, crossovers=None, delays=None, samples=SAMPLES,
-                 maker=signal_frame):
+                 maker=signal_frame, highs=None):
         self.crossovers = dict(crossovers or {})
         self.delays = dict(delays or {})
+        self.highs = dict(highs or {})
         self.profile = self.PROFILE
         specs = [placed(slot, self.delays.get(slot, 0.0),
-                        self.crossovers.get(slot)) for slot in self.SLOTS]
+                        self.crossovers.get(slot),
+                        crossover_high=self.highs.get(slot))
+                 for slot in self.SLOTS]
         # The channel verdict is not what this file is about (see
         # test_cinema_live for it), and with it off the front pair passes the
         # signal through untouched -- which is exactly what makes "this
@@ -290,7 +300,7 @@ class Room:
         """
         return self.bank.slot_sources
 
-    def remap(self, crossovers, slots=None, profile=None, delays=None):
+    def remap(self, crossovers, slots=None, profile=None, delays=None, highs=None):
         """The builder's edit, and the room re-resolved exactly as the game does.
 
         A live room is re-shaped when the map under it changes
@@ -300,11 +310,14 @@ class Room:
         built the way the transports build it, and handed over the same way.
         """
         self.crossovers = dict(crossovers or {})
+        if highs is not None:
+            self.highs = dict(highs)
         if delays is not None:
             self.delays = dict(delays)
         self.profile = profile or self.profile
         specs = [placed(slot, self.delays.get(slot, 0.0),
-                        self.crossovers.get(slot))
+                        self.crossovers.get(slot),
+                        crossover_high=self.highs.get(slot))
                  for slot in (slots or self.SLOTS)]
         self.renderer = CinemaRenderer(ANCHOR, self.profile, None, specs=specs,
                                        detect_channels=False)
@@ -1019,6 +1032,215 @@ class TheRoomFollowsTheMarkTests(unittest.TestCase):
         self.assertEqual(left.played, plays, "a room was restarted for nothing")
         self.assertEqual(room.bank._crossover_streams, {},
                          "a stream nobody asked for")
+
+
+# ------------------------------------------------------------------ the band
+
+
+MID = (200.0, 4000.0)
+MIDDLE_HZ = 1000.0
+
+
+class TheBandTests(unittest.TestCase):
+    """A speaker that keeps the middle: two edges, and the room's own filter."""
+
+    def test_two_edges_are_a_band(self):
+        self.assertEqual(crossover_hz(200, 4000), MID)
+        self.assertEqual(crossover_hz("200", "4000"), MID)
+        self.assertEqual(band_edges(crossover_hz(200, 4000)), MID)
+
+    def test_a_band_written_the_other_way_round_is_the_same_band(self):
+        # A builder who typed 4000 first and 200 second asked for one shape,
+        # and the pair is ordered rather than refused: a refusal here would
+        # leave a speaker playing everything, which is the opposite of a mid.
+        self.assertEqual(crossover_hz(4000, 200), MID)
+        self.assertEqual(crossover_hz(-4000, 200), MID)
+
+    def test_each_edge_is_settled_in_the_whole_vocabulary(self):
+        # A band's edges come from either half's ends, which is why a low edge
+        # of 500 Hz (past the bass half's own ceiling of 300) is a real band
+        # and not a bass cabinet: the reader of the *pair* takes the wider
+        # range, and only a lone edge is clamped into a half.
+        self.assertEqual(crossover_hz(500, 3000), (500.0, 3000.0))
+        self.assertEqual(crossover_hz(500), 300.0, "a lone edge is the bass half")
+        self.assertEqual(crossover_hz(10, 9000), (float(MIN_CROSSOVER_HZ),
+                                                  float(MAX_TREBLE_HZ)))
+
+    def test_a_lone_second_edge_is_not_a_mark(self):
+        # Nothing to be the low edge *of*: the map said nothing about a band,
+        # and the shape its ``crossover`` names stands (here: nothing at all).
+        self.assertEqual(crossover_hz(None, 4000), FULL_RANGE)
+        self.assertEqual(crossover_hz(0, 4000), FULL_RANGE)
+        self.assertEqual(crossover_hz("loud", 4000), FULL_RANGE)
+
+    def test_a_signed_first_edge_is_the_bands_low_edge_when_one_is_asked_for(self):
+        # A band's low edge is a magnitude whatever the map signed it, and the
+        # Server's own element settles the pair exactly this way (a band edge
+        # next to a tweeter is a band, and the written mark comes back
+        # positive) -- so a hand-edited map cannot mean one thing here and
+        # another once the Server re-writes it.
+        self.assertEqual(crossover_hz(-3000, 4000), (3000.0, 4000.0))
+
+    def test_a_pair_that_cannot_be_a_band_leaves_the_edge_it_has(self):
+        # Two edges that settle onto each other are a band with nothing in it.
+        # The single edge the map also wrote is still a shape it asked for, so
+        # the speaker keeps that rather than falling back to full range -- the
+        # answer that would make a "sub only" speaker play the whole song.
+        self.assertEqual(crossover_hz(200, 200), 200.0)
+        self.assertEqual(crossover_hz(120, "loud"), 120.0)
+        self.assertEqual(crossover_hz(120, None), 120.0)
+
+    def test_a_mark_handed_back_in_is_the_mark_handed_back_out(self):
+        # Every caller that stores marks (a bank, a speech leg, a cache key)
+        # reads one without knowing bands exist.
+        mark = crossover_hz(200, 4000)
+        self.assertEqual(crossover_hz(mark), mark)
+        self.assertEqual(crossover_hz(mark_key(mark)), mark)
+        self.assertEqual(mark_key(mark), MID)
+        self.assertEqual(mark_key(120.0), 120.0)
+        self.assertEqual(mark_key(mark)[0], MID[0],
+                         "a signature holds the two edges, not a rounded pair")
+
+    def test_a_specs_mark_is_read_from_both_of_its_attributes(self):
+        self.assertEqual(mark_of(placed("front_l")), FULL_RANGE)
+        self.assertEqual(mark_of(placed("front_l", crossover=120)), 120.0)
+        self.assertEqual(mark_of(placed("front_l", crossover=200,
+                                        crossover_high=4000)), MID)
+        self.assertEqual(mark_of(None), FULL_RANGE)
+
+    def test_the_map_values_travel_through_the_spec(self):
+        spec = coerce_spec({"x": 1, "y": 2, "z": 0, "channel": "front_l",
+                            "crossover": "200", "crossover_high": "4000"})
+        self.assertEqual(mark_of(spec), MID)
+        spec = coerce_spec({"x": 1, "y": 2, "z": 0, "channel": "front_l",
+                            "crossover": "200"})
+        self.assertEqual(mark_of(spec), 200.0)
+
+    def test_a_band_names_both_of_its_edges(self):
+        self.assertEqual(describe(200, 4000),
+                         "between 200 Hz and 4 kHz (the middle of the range)")
+        self.assertEqual(describe(crossover_hz(200, 4000)),
+                         describe(200, 4000), "the wording reads a mark too")
+
+    def test_the_filter_keeps_the_middle_and_loses_both_ends(self):
+        pcm, _ = tone_frame(MIDDLE_HZ)
+        (middle,), _ = crossover_apply((pcm,), None, crossover_hz(*MID))
+        # Two one-pole skirts never sum to exactly unity, so a band's own
+        # middle sits about a decibel down -- the same tilt the two-way halves
+        # have at their corners, and the honest shape of a 12 dB/oct split.
+        self.assertGreater(magnitude(middle, MIDDLE_HZ),
+                           0.8 * magnitude(pcm, MIDDLE_HZ))
+        # Two octaves below the low edge and well above the high one: a 12
+        # dB/oct skirt is down about 24 and 19 dB there, which is "gone" for a
+        # speaker that is meant to keep the middle. (One octave out it is only
+        # about 12 dB, which is the honest, deliberate softness of the slope --
+        # 500 Hz through a 200 Hz high-pass is 2 dB down, not 20.)
+        for frequency in (50.0, 12000.0):
+            pcm, _ = tone_frame(frequency)
+            (out,), _ = crossover_apply((pcm,), None, crossover_hz(*MID))
+            self.assertLess(magnitude(out, frequency),
+                            0.15 * magnitude(pcm, frequency),
+                            f"{frequency} Hz survived a 200 Hz-4 kHz band")
+
+    def test_a_narrow_band_isolates_one_driver(self):
+        # A band-pass sub and a band-pass tweeter: the deep end and the very
+        # top, with no middle at either -- which is the other reason a band is
+        # two edges, because a one-sided cut cannot isolate a driver.
+        sub = crossover_hz(40, 120)
+        top = crossover_hz(3000, 6000)
+        self.assertEqual(sub, (40.0, 120.0))
+        self.assertEqual(top, (3000.0, 6000.0))
+        for mark, keeps, loses in ((sub, 80.0, 4000.0), (top, 4000.0, 80.0)):
+            for frequency, expect_kept in ((keeps, True), (loses, False)):
+                pcm, _ = tone_frame(frequency)
+                (out,), _ = crossover_apply((pcm,), None, mark)
+                loud = magnitude(out, frequency) > 0.25 * magnitude(pcm, frequency)
+                self.assertEqual(loud, expect_kept,
+                                 f"{mark} and {frequency} Hz: kept={loud}")
+
+    def test_the_filter_is_a_stream_and_its_own_memories(self):
+        # Two one-pole sections per edge: four per channel, and a state of the
+        # wrong shape (a bass cabinet's two, a band's four) must settle rather
+        # than be indexed past its end -- a builder dials a band onto a bass
+        # cabinet mid-song, and that must not be the thing that raises.
+        counts = sections(crossover_hz(*MID))
+        self.assertEqual(counts, 4)
+        self.assertEqual(sections(120.0), 2)
+        self.assertEqual(sections(FULL_RANGE), 2)
+        self.assertEqual(len(initial_state(1, crossover_hz(*MID))), 4)
+        pcm, _ = tone_frame(MIDDLE_HZ)
+        (first,), state = crossover_apply((pcm,), None, crossover_hz(*MID))
+        self.assertEqual(len(state), 4)
+        for short in (None, (), (0.0, 0.0), (0.0,) * 4):
+            again, _ = crossover_apply((pcm,), short, crossover_hz(*MID))
+            self.assertEqual(digests([again]), digests([first]))
+        # And a band stream that has run keeps running: the same bytes as the
+        # state it was handed, frame for frame.
+        streamed, state = [], None
+        for index in range(6):
+            frame, _ = tone_frame(MIDDLE_HZ, index=index)
+            (out,), state = crossover_apply((frame,), state, crossover_hz(*MID))
+            streamed.append(out)
+        self.assertEqual(len(streamed), 6)
+        self.assertEqual(len(state), 4)
+
+    def test_a_band_does_not_overshoot_the_buffer(self):
+        # The high-pass half of a band is the one cascade that can overshoot its
+        # input by up to twice its amplitude: a full-scale step has to be
+        # clamped into s16 rather than handed to ``array("h")``, which raises.
+        step = array.array("h", [0] * 8 + [32767] * 480).tobytes()
+        (out,), _ = crossover_apply((step,), None, crossover_hz(200, 4000))
+        self.assertEqual(len(samples_of(out)), 488)
+        self.assertLessEqual(max(samples_of(out)), 32767)
+        self.assertGreaterEqual(min(samples_of(out)), -32768)
+
+
+class TheBandInARoomTests(unittest.TestCase):
+    """A band mark in the bank: its own stream, its own signature, one room."""
+
+    def test_a_band_is_its_own_stream_not_two_crossovers(self):
+        room = Room(crossovers={"front_l": 200}, highs={"front_l": 4000})
+        room.run(12)
+        self.assertEqual(room_hz(room, "front_l"), crossover_hz(*MID))
+        self.assertEqual(room_hz(room, "front_r"), FULL_RANGE)
+        self.assertEqual(list(room.bank._crossover_streams), [crossover_hz(*MID)],
+                         "the edges were cut as two separate streams")
+        self.assertEqual(digests(room.handed["front_l"]),
+                         digests(room.stream("front_l")))
+        # The unmarked speaker is still the room's own frames, byte for byte.
+        self.assertEqual(digests(room.handed["front_r"]),
+                         digests(room.stream("front_r")))
+
+    def test_the_room_re_cuts_when_only_the_bands_high_edge_changes(self):
+        # 200-1.5 kHz and 200-4 kHz are different rooms, and the *upper* edge
+        # is the one that used to be left out of the room's signature: a
+        # builder who dials a wider band on a speaker already in one would hear
+        # nothing at all until the next track.
+        room = Room(crossovers={"front_l": 200}, highs={"front_l": 1500}).settle()
+        source = room.sources["front_l"]
+        narrow = room.handed["front_l"][-1]
+        self.assertTrue(room.remap({"front_l": 200}, highs={"front_l": 4000}),
+                        "a wider band did not re-shape the room")
+        room.run(24)
+        self.assertIs(room.sources["front_l"], source,
+                      "a re-cut must keep the speaker, not rebuild it")
+        self.assertEqual(room_hz(room, "front_l"), crossover_hz(*MID))
+        # The room's own 4 kHz is the thing the new band reaches and the old one
+        # did not: 200-1.5 kHz is far enough above its own corner that the tone
+        # is gone, and 200-4 kHz has the corner sitting right on it.
+        reference = room.maker(room.fed[-1], room.samples)[0]
+        wide = room.handed["front_l"][-1]
+        self.assertLess(magnitude(narrow, TOP), 0.15 * magnitude(reference, TOP))
+        self.assertGreater(magnitude(wide, TOP), 0.3 * magnitude(reference, TOP),
+                           "the wider band did not reach the speaker")
+        self.assertLess(magnitude(wide, BASS),
+                        0.25 * magnitude(reference, BASS),
+                        "the wider band let the bass back in")
+
+    def test_the_same_band_written_the_other_way_round_is_not_a_new_room(self):
+        room = Room(crossovers={"front_l": 200}, highs={"front_l": 4000}).settle()
+        self.assertFalse(room.remap({"front_l": 4000}, highs={"front_l": 200}),
+                         "one band read as two rooms")
 
 
 if __name__ == "__main__":

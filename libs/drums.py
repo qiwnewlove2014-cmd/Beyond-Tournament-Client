@@ -437,6 +437,10 @@ class DrumAudio:
                 path, px, py, pz,
                 volume=volume, cat="miscelaneous",
                 # Flat at the source: the room's ramp already shaped this hit.
+                # Flat also makes ``max_distance`` inert here -- the room's own
+                # reach decided whether this speaker got the hit at all (see
+                # ``live.room_terms_for``), and the room's bank carries it for
+                # the song, so this is not a second home for the room's size.
                 reference_distance=ROOM_REFERENCE_DISTANCE, rolloff=0.0,
                 max_distance=ROOM_MAX_DISTANCE,
                 direct_filter=cinema_live.wall_filter(self, tier, tone),

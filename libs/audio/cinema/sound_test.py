@@ -147,7 +147,7 @@ def play(game, gameplay, cabinet, direction, *, test_id=0, mine=False):
             report["reason"] = _bounded(
                 cinema_plugin.room_diagnosis(game, anchor, room_id=cabinet))
         else:
-            report["reason"] = _bounded(_out_of_reach(game, anchor))
+            report["reason"] = _bounded(_out_of_reach(game, anchor, cabinet))
         return report
     piano = getattr(getattr(game, "audio_mngr", None), "piano", None)
     spoken = 0
@@ -204,15 +204,16 @@ def cabinet_anchor(game, cabinet):
     return None
 
 
-def _out_of_reach(game, anchor):
+def _out_of_reach(game, anchor, cabinet=None):
     """Why this listener heard none of a room that resolves: the distance.
 
-    The room's own reach is ``ROOM_RADIUS`` from the cabinet, and a listener
-    outside it hears nothing of a note the room carries (see
-    ``live.note_goes_to_a_room``), so naming the gap says exactly how far back
-    to walk.
+    The room's own reach is the *cabinet's* -- a hall that takes its speakers
+    in at 90 m is heard to 90 m -- and a listener outside it hears nothing of a
+    note the room carries (see ``live.note_goes_to_a_room``), so naming the gap
+    and the reach says exactly how far back to walk. The number is read from
+    the cabinet that was fired at, not from a module constant: a test that
+    reported the wrong reach would send somebody walking the wrong distance.
     """
-    from .layout import ROOM_MAX_DISTANCE
     position = getattr(getattr(game, "audio_mngr", None), "position", None)
     if position is None:
         return "out of reach here"
@@ -221,10 +222,13 @@ def _out_of_reach(game, anchor):
                   for i in range(3)) ** 0.5
     except Exception:
         return "out of reach here"
+    reach = cinema_plugin.cabinet_reach(game, cabinet) if cabinet else None
+    if reach is None:
+        return f"out of reach here ({gap:.0f} m)"
     # Short enough to survive the packet schema's 48 characters even with a
     # four-digit distance: the number is the fix (how far back to walk).
     return (f"out of reach here ({gap:.0f} m; "
-            f"reach is {ROOM_MAX_DISTANCE:.0f} m)")
+            f"reach is {reach:.0f} m)")
 
 
 def _silent_here(game):

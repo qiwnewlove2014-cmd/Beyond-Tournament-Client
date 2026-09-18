@@ -54,25 +54,31 @@ like the plain two-source jukebox it always was.
 from .bank import CinemaSpeakerBank
 from .channel import (ChannelAnalyzer, mid_side, mix_channels, mix_samples,
                      source_layout, to_samples)
-from .layout import (IDEAL_BEARING, ROOM_MAX_DISTANCE, ROOM_RADIUS,
-                     ROOM_REFERENCE_DISTANCE, SLOT_ORDER, CinemaLayout,
-                     CinemaSpeakerSpec, coerce_spec, slot_for_bearing)
+from .layout import (IDEAL_BEARING, MAX_ROOM_REACH, MIN_ROOM_REACH,
+                     ROOM_MAX_DISTANCE, ROOM_RADIUS, ROOM_REFERENCE_DISTANCE,
+                     SLOT_ORDER, CinemaLayout, CinemaSpeakerSpec, coerce_spec,
+                     slot_for_bearing)
 from .listener import ListenerPose, cone_gain, facing_report
 from .placement import (AUTO_PROFILE, PlacedSpeaker, RoomPlacement, RoomPlan,
-                        auto_profile, exclusive_speakers, nearest_anchor,
+                        auto_profile, claims_point, claims_speaker,
+                        exclusive_speakers, inside_area, nearest_anchor,
                         resolve_room, room_profile)
 from .live import (LiveRoomRouter, cabinet_mode, live_instruments_enabled,
-                   route_to_room, router_for, set_live_instruments,
-                   wall_filter)
+                   plan_reach, route_to_room, router_for,
+                   set_live_instruments, wall_filter)
 from .peer import (PeerRoomFeed, PeerRoomHost, describe as peer_describe,
                    forget as peer_forget, note_routing as peer_note_routing,
                    release_all as release_peer_rooms,
                    route as peer_route, routing_for as peer_routing_for)
-from .plugin import (CINEMA_AUTO, CINEMA_OFF, CinemaSpeakerHost, acquire_bank,
-                     acquire_renderer, cabinet_anchor, cinema_room, host_for,
-                     map_cabinet_anchors, map_speakers, preview_room, release_all,
-                     release_renderer, room_diagnosis, room_plan, rooms_enabled,
-                     set_enabled, set_rooms_enabled)
+from .plugin import (CINEMA_AUTO, CINEMA_OFF, CabinetNeighbour,
+                     CinemaSpeakerHost, RoomExtent, SpeakerOwner, acquire_bank,
+                     acquire_renderer, cabinet_anchor, cabinet_area,
+                     cabinet_neighbours, cabinet_reach, cinema_room, host_for,
+                     map_cabinet_anchors, map_speakers, neighbour_line,
+                     neighbour_note, preview_room, release_all,
+                     release_renderer, room_diagnosis, room_extent, room_plan,
+                     rooms_enabled, set_enabled, set_rooms_enabled,
+                     speaker_owner)
 from .profiles import (DEFAULT_PROFILE, PROFILES, CinemaProfile,
                        get_profile, profile_names)
 from .speech import (SpeechRooms, describe as speech_describe, drop as speech_drop,
@@ -87,6 +93,19 @@ __all__ = [
     "ROOM_RADIUS",
     "ROOM_REFERENCE_DISTANCE",
     "ROOM_MAX_DISTANCE",
+    "MIN_ROOM_REACH",
+    "MAX_ROOM_REACH",
+    "cabinet_area",
+    "cabinet_reach",
+    "cabinet_neighbours",
+    "CabinetNeighbour",
+    "neighbour_line",
+    "neighbour_note",
+    "plan_reach",
+    "room_extent",
+    "RoomExtent",
+    "speaker_owner",
+    "SpeakerOwner",
     "AUTO_PROFILE",
     "LiveRoomRouter",
     "route_to_room",

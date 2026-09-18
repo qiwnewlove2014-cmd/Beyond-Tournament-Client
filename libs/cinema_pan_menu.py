@@ -129,22 +129,30 @@ def _cabinets_menu(game, gp, name, channel, mode=MODE_PAN):
         who = _display(gp, name)
         items.append((f"Clear - {who} goes back to {_back_to(gp, name, auto)}",
                       _apply(game, gp, name, channel, "", "auto")))
-    cabinets = _map_cabinets(game)
+    cabinets = _cabinets_by_distance(game, gp)
     if not cabinets:
         items.append(("This map has no jukebox to play through",
                       lambda: speak("This map has no jukebox cabinet.")))
-    for cabinet_id, anchor, room in cabinets:
+    for cabinet_id, anchor, room, gap in cabinets:
         position = f"({anchor[0]:.0f}, {anchor[1]:.0f}, {anchor[2]:.0f})"
+        # How far this cabinet is from the person reading the menu. On a map
+        # wide enough to hold several venues, the same list asks "which hall is
+        # this" -- and a pan or a test aimed at the hall you are NOT standing
+        # in is a mistake that says nothing until somebody listens. The list is
+        # ordered by it (see ``_cabinets_by_distance``) and every line carries
+        # it, so nothing is hidden and nothing is refused for being far: the
+        # distance is the whole warning.
+        far = _gap_note(gap)
         if room is None:
             # A cabinet with no room cannot carry a voice at all. It is listed
             # with its own diagnosis rather than hidden, because "my cabinet is
             # missing from the menu" and "my cabinet cannot carry sound" are
             # very different things to the person who just placed speakers.
             why = cinema_plugin.room_diagnosis(game, anchor, room_id=cabinet_id)
-            items.append((f"Jukebox {cabinet_id} {position} - {why}",
+            items.append((f"Jukebox {cabinet_id} {position} - {why}{far}",
                           _refused(cabinet_id, why)))
             continue
-        label = f"Jukebox {cabinet_id} {position} - {room.summary()}"
+        label = f"Jukebox {cabinet_id} {position} - {room.summary()}{far}"
         if current is not None and current[0] == str(cabinet_id):
             label = f"* {label} (playing there)"
         elif current is None and auto is not None and str(cabinet_id) == auto:
@@ -251,6 +259,52 @@ def _map_cabinets(game):
     for cabinet_id, anchor in cinema_plugin.cabinet_anchors(game):
         room = cinema_plugin.preview_room(game, anchor, room_id=cabinet_id)
         found.append((cabinet_id, anchor, room))
+    return found
+
+
+def _my_position(gp):
+    """Where the person reading this menu is, or None when it is not known."""
+    player = getattr(gp, "player", None)
+    try:
+        return (float(player.x), float(player.y), float(player.z))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _gap_note(gap):
+    """``" [128 m]"`` for a cabinet this far away, or nothing when unknown.
+
+    Short on purpose: these lines already carry an id, a position and the
+    room's own reading, and the distance is the one part that answers "am I
+    about to move somebody's sound into the hall I am not standing in".
+    """
+    if gap is None:
+        return ""
+    return f" [{gap:.0f} m]"
+
+
+def _cabinets_by_distance(game, gp):
+    """Every cabinet on the map, nearest to this staff member first.
+
+    ``[(cabinet_id, anchor, room, metres_or_None)]``. The order is the whole
+    point on a wide map: a hall you have to walk to comes after the one you
+    are standing in, so "which cabinet am I panning into" answers itself
+    before it is picked. Nothing is dropped -- a cabinet whose distance cannot
+    be measured (a menu opened before the entity exists) still appears, at the
+    end, with no metres beside it.
+    """
+    here = _my_position(gp)
+    found = []
+    for cabinet_id, anchor, room in _map_cabinets(game):
+        gap = None
+        if here is not None:
+            try:
+                gap = sum((float(anchor[index]) - here[index]) ** 2
+                          for index in range(3)) ** 0.5
+            except (TypeError, ValueError, IndexError):
+                gap = None
+        found.append((cabinet_id, anchor, room, gap))
+    found.sort(key=lambda entry: (entry[3] is None, entry[3] if entry[3] is not None else 0.0))
     return found
 
 

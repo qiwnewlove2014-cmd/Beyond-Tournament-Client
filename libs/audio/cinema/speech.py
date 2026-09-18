@@ -42,7 +42,7 @@ from contextlib import suppress
 
 from .crossover import FULL_RANGE
 from .crossover import apply as crossover_apply
-from .crossover import crossover_hz
+from .crossover import mark_key, mark_of
 from .listener import restore_filter, speaker_filter
 from .pan import DEFAULT_DIRECTION, target_for_channel
 
@@ -666,8 +666,7 @@ class RoomSpeechLeg:
                 # wait for the next talker to be heard. The marked speaker's
                 # own filter state is deliberately kept -- it is a stream, and
                 # a filter that starts from silence clicks (see ``crossover``).
-                self.crossovers[slot] = crossover_hz(
-                    getattr(spec, "crossover", None))
+                self.crossovers[slot] = mark_of(spec)
                 self.tones[slot] = None   # re-apply the map's voicing too
                 continue
             source = self._new_source(spec)
@@ -680,7 +679,7 @@ class RoomSpeechLeg:
             self.tiers[slot] = None       # force the wall to be measured
             self.tones[slot] = None       # and the speaker's voicing to be read
             self.environments[slot] = None  # and the room's reverb to be sent
-            self.crossovers[slot] = crossover_hz(getattr(spec, "crossover", None))
+            self.crossovers[slot] = mark_of(spec)
             self.filters[slot] = None     # a marked speaker starts from silence
         if not self.sources:
             # Nothing could be created (a dead context, or a room with no
@@ -960,5 +959,5 @@ def _signature(plan):
                       float(getattr(spec, "delay_ms", 0.0)),
                       getattr(spec, "aim_yaw", None),
                       None if tone is None else round(float(tone), 4),
-                      round(crossover_hz(getattr(spec, "crossover", None)), 4)))
+                      mark_key(mark_of(spec))))
     return tuple(parts)

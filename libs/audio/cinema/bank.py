@@ -33,7 +33,7 @@ import cyal
 from ...deferred_log import log_deferred as log_line
 from .crossover import FULL_RANGE
 from .crossover import apply as crossover_apply
-from .crossover import crossover_hz
+from .crossover import crossover_hz, mark_of
 from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
 from .listener import (distance_gain, occlusion_filter, restore_filter,
                        speaker_aim_gain, speaker_filter)
@@ -105,6 +105,18 @@ def _serialized(method):
         with self._lock:
             return method(self, *args, **kwargs)
     return wrapper
+
+
+def _mark_order(mark):
+    """A comparable key for a mark, so one room feeds its speakers in order.
+
+    A mark is one edge (a float) or a band (a tuple), and a room can hold both
+    at once, so sorting the marks themselves is a TypeError rather than an
+    order. One-edge marks come first, each group by its own numbers.
+    """
+    if isinstance(mark, tuple):
+        return (1, float(mark[0]), float(mark[1]))
+    return (0, float(mark), 0.0)
 
 
 class CinemaSpeakerBank:
@@ -294,7 +306,7 @@ class CinemaSpeakerBank:
         # because a room's speakers are not all created at the same moment
         # (see the docstring). Written last, so a speaker that never came to
         # be (a dead context, no buffers) leaves no mark behind.
-        mark = crossover_hz(self.renderer.layout.crossover(slot))
+        mark = mark_of(self.renderer.layout.spec(slot))
         self._slot_crossover[slot] = mark
         # A marked speaker joining a room that is already playing is filled
         # from this stream on the very frame it appears (``realign``), so it
@@ -814,7 +826,7 @@ class CinemaSpeakerBank:
         """
         changed = []
         for slot in self.renderer.slots:
-            mark = crossover_hz(self.renderer.layout.crossover(slot))
+            mark = mark_of(self.renderer.layout.spec(slot))
             if self._slot_crossover.get(slot, FULL_RANGE) != mark:
                 changed.append(slot)
                 self._slot_crossover[slot] = mark
@@ -925,7 +937,7 @@ class CinemaSpeakerBank:
                        else self._applied_trim(slot, window[0]))
             groups.setdefault((mark, samples), []).append(slot)
         feeds = []
-        for mark, samples in sorted(groups):
+        for mark, samples in sorted(groups, key=lambda item: _mark_order(item[0])):
             history, index = programmes[mark][0], programmes[mark][1]
             source = self._delayed_window(history, index, samples)
             if source is None:

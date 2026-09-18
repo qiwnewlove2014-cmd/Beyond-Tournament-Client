@@ -1217,7 +1217,12 @@ class PianoAudio:
                 volume=volume, cat="miscelaneous",
                 # Flat at the source: the room's own ramp already shaped this
                 # note, and letting OpenAL attenuate it again would fade the
-                # same speaker twice.
+                # same speaker twice. Because it is flat, this ``max_distance``
+                # does no work either -- the room's own reach decided *whether*
+                # this speaker gets the note at all (``live.room_terms_for``
+                # shaped the gain), and the room's bank carries the reach for
+                # the song. It is here so the source is built like every other
+                # room source, not as a second home for the room's size.
                 reference_distance=ROOM_REFERENCE_DISTANCE, rolloff=0.0,
                 max_distance=ROOM_MAX_DISTANCE,
                 direct_filter=cinema_live.wall_filter(self, tier, tone),
