@@ -1445,9 +1445,14 @@ class EventHandeler:
         m.menu_type = data.get("menu_type", "normal")
         options = []
         for idx, i in enumerate(data["options"]):
-            options.append(
-                (i["title"], functools.partial(on_select, i["value"], i["close"], idx), i.get("preview_sound"))
-            )
+            # A line the Server described carries that description as a fourth
+            # field (Tab speaks it; see ``menu.Menu.speak_current_help``). A line
+            # with none is left a three-tuple, so every menu written before this
+            # existed -- and every menu that sets no descriptions -- builds
+            # exactly the items it always did.
+            help_text = i.get("help")
+            item = (i["title"], functools.partial(on_select, i["value"], i["close"], idx), i.get("preview_sound"))
+            options.append(item + (help_text,) if help_text else item)
         has_server_back = False
         if data.get("options"):
             for opt in data["options"]:

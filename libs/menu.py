@@ -328,10 +328,18 @@ class Menu(state.State):
         if self.open:
             self.direct_soundgroup.play(self.open, cat="ui")
 
-    def add_item(self, title, action=None, preview_sound=None):
+    def add_item(self, title, action=None, preview_sound=None, help=None):
         if action is None:
             action = lambda: None
-        self.items.append((title, action, preview_sound))
+        # The description is appended only when there is one, so an item that
+        # carries none is the same three-tuple it has always been -- a menu with
+        # no descriptions anywhere answers Tab exactly as it did before this
+        # existed (it does not speak at all), and nothing downstream has to
+        # learn a fourth field it never asked for.
+        if help:
+            self.items.append((title, action, preview_sound, help))
+        else:
+            self.items.append((title, action, preview_sound))
 
     def add_items(self, items: list[tuple]):
         """
@@ -385,6 +393,37 @@ class Menu(state.State):
             "soundgroup": mus,
             "kept": False
         }
+
+    def menu_has_help(self):
+        """Whether any line of this menu carries a description at all.
+
+        A menu that sets none is left exactly as it was: Tab does what it always
+        did in it (nothing -- menus swallow their events), so nothing about the
+        game's own menus changes, and only a menu the Server described answers
+        the key.
+        """
+        for item in self.items:
+            if len(item) > 3 and item[3]:
+                return True
+        return False
+
+    def speak_current_help(self):
+        """Say what the focused line does, for the line the cursor is on.
+
+        Asked for, never given: the label has just been spoken and a menu that
+        read out an explanation of every entry would make arrowing past one
+        unusable. A line with nothing written about it says so, so that the key
+        never reads as broken, and the menu is not moved, closed or changed by
+        asking -- only spoken to.
+        """
+        if self.pos < 0 or not self.menu_has_help():
+            return
+        item = self.items[self.pos]
+        text = item[3] if len(item) > 3 else ""
+        if callable(text):
+            text = text()
+        text = str(text or "").strip()
+        speech.speak(text or "No extra description for this line.", id="menu_help")
 
     def speak_current_item(self):
         item = self.items[self.pos]
@@ -450,6 +489,16 @@ class Menu(state.State):
                     elif key == pg.K_RIGHTBRACKET:
                         target_gp.buffer_cycle_r(event.mod)
                         continue
+
+                # Tab: help for the focused line. It is the key a Technician
+                # Menu (and Edit Map Elements) answers with a spoken
+                # description, and it can be that key here because Tab is
+                # otherwise taken only in a minigame match -- where it toggles
+                # the Match History pane, so that use is asked for first and a
+                # menu that describes nothing keeps Tab silent.
+                if key == pg.K_TAB and not is_minigame_match:
+                    self.speak_current_help()
+                    continue
 
                 # Tab / Shift+Tab Dual-Pane Toggle (Match History vs Card Actions) - ONLY in minigame matches!
                 if key == pg.K_TAB and is_minigame_match:
