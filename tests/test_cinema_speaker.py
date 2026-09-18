@@ -281,10 +281,12 @@ class RendererTests(unittest.TestCase):
 
     def test_a_mono_programme_never_reaches_the_stereo_weights(self):
         renderer = self.renderer("theatre")
-        mono = mono_bytes(LEFT)
         rendered = []
         for _ in range(10):
-            rendered = renderer.render(mono, mono)
+            # Ten frames of the same programme, handed the way a transport
+            # hands them: a frame is the bytes object the caller passed, and
+            # the renderer decides it once (see ``CinemaRenderer._frame``).
+            rendered = renderer.render(mono_bytes(LEFT), mono_bytes(LEFT))
         self.assertEqual(renderer.active_kind, "mono")
         feeds = dict(rendered)
         # The stereo weights would have collapsed the sides to silence and fed
@@ -309,6 +311,44 @@ class RendererTests(unittest.TestCase):
         for value, l_value, r_value in zip(to_mono_values(feeds["front_l"]), LEFT, RIGHT):
             self.assertAlmostEqual(value, ((l_value + r_value) >> 1) * scale, delta=1)
         self.assertFalse(renderer.channel.confident)
+
+    def test_only_renders_the_slots_it_is_asked_for(self):
+        """A frame is mixed per *group*, so a group asks for its own slots.
+
+        The room feeds one frame in one group per distinct crossover and delay
+        trim. Asking the renderer for the whole room from every group mixed
+        every speaker once per group -- the room's whole per-frame cost
+        multiplied by the number of groups, on the main thread, while a song
+        played.
+        """
+        renderer = self.renderer("theatre")
+        whole = dict(renderer.render(LEFT_PCM, RIGHT_PCM))
+        asked = dict(renderer.render(LEFT_PCM, RIGHT_PCM,
+                                     only=("front_c", "side_r")))
+        self.assertEqual(sorted(asked), ["front_c", "side_r"])
+        for slot in asked:
+            self.assertEqual(asked[slot], whole[slot])
+
+    def test_the_whole_channel_slots_are_the_source_bytes(self):
+        """(1, 0) and (0, 1) are the channels themselves, not a mix of them."""
+        renderer = self.renderer("theatre")
+        feeds = dict(renderer.render(LEFT_PCM, RIGHT_PCM))
+        self.assertIs(feeds["front_l"], LEFT_PCM)
+        self.assertIs(feeds["front_r"], RIGHT_PCM)
+
+    def test_a_frame_is_judged_once_however_many_groups_ask(self):
+        """The detector's evidence is one vote per frame, not one per group."""
+        renderer = self.renderer("theatre")
+        votes = []
+        original = renderer.channel.observe
+        renderer.channel.observe = lambda left, right: (
+            votes.append(1), original(left, right))[1]
+        for _ in range(10):
+            # A new object per frame, the way a transport hands them.
+            mono = mono_bytes(LEFT)
+            renderer.render(mono, mono, only=("front_c",))
+            renderer.render(mono, mono, only=("front_l",))
+        self.assertEqual(len(votes), 10)
 
     def test_max_speakers_drops_the_back_of_the_room_first(self):
         renderer = self.renderer("theatre", max_speakers=3)

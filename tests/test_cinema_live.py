@@ -597,16 +597,93 @@ class RendererSignatureTests(unittest.TestCase):
 
 
 def spy_render(renderer):
-    """Record the stereo frames a renderer is asked for, in order."""
+    """Record the stereo frames a renderer is asked for, in order.
+
+    ``only`` and ``live`` are what a room passes per group; the spy records
+    the *frames*, so it forwards whatever it was given rather than re-deciding
+    the slots or the verdict.
+    """
     recorded = []
     original = renderer.render
 
-    def wrapper(left, right):
+    def wrapper(left, right, only=None, live=None):
         recorded.append((left, right))
-        return original(left, right)
+        return original(left, right, only=only, live=live)
 
     renderer.render = wrapper
     return recorded
+
+
+class OneFrameCostsOneMixPerSpeakerTests(unittest.TestCase):
+    """A frame costs one mix per fed speaker, however many groups it is in.
+
+    The room feeds a frame in one *group* per distinct crossover and delay
+    trim, and each group asks the renderer for the slots that belong to it.
+    Asking for the whole room from every group mixed every speaker once per
+    group: a seven-speaker room with three marks and two trims mixed
+    thirty-five feeds for a frame that has seven speakers in it, which is 9 ms
+    of main-thread work per 20 ms frame -- and 18 ms of every 40 ms frame the
+    server relay sends, which is what a listener feels as the game stuttering
+    for as long as a cabinet plays.
+    """
+
+    SLOTS = ("front_l", "front_c", "front_r", "side_l", "side_r",
+             "rear_l", "rear_r")
+    MARKS = {"front_l": -3000.0, "front_r": -3000.0, "front_c": 120.0}
+    DELAYS = {"front_l": 20.0, "side_l": 30.0}
+
+    def make(self):
+        from math import cos, radians, sin
+        from libs.audio.cinema.layout import IDEAL_BEARING
+        room_specs = []
+        for slot in self.SLOTS:
+            angle = radians(IDEAL_BEARING[slot])
+            room_specs.append(CinemaSpeakerSpec(
+                slot,
+                (ANCHOR[0] + sin(angle) * 8.0,
+                 ANCHOR[1] + cos(angle) * 8.0,
+                 ANCHOR[2]),
+                delay_ms=self.DELAYS.get(slot, 0.0),
+                crossover=self.MARKS.get(slot),
+            ))
+        renderer = CinemaRenderer(ANCHOR, "theatre", specs=room_specs)
+        bank = CinemaSpeakerBank(FakeGame(), renderer, volume=100,
+                                 cabinet_volume=100,
+                                 occlusion_provider=lambda *a: 0)
+        return bank
+
+    def test_every_fed_speaker_is_mixed_once(self):
+        bank = self.make()
+        original = bank.renderer.render
+        groups = []
+
+        def spy(left, right, only=None, live=None):
+            groups.append(None if only is None else set(only))
+            return original(left, right, only=only, live=live)
+
+        bank.renderer.render = spy
+        # Prime the room first: a speaker carrying a trim can only be fed once
+        # the room holds the audio that trim reaches back to, so the first
+        # frame or two reach fewer speakers than the room has.
+        for tag in range(3):
+            self.assertTrue(bank.queue_frame(*frame(tag, size=960)))
+        groups.clear()
+        self.assertTrue(bank.queue_frame(*frame(3, size=960)))
+        # The frame really is fed in several groups: that is the shape that
+        # made the whole room's cost multiply.
+        self.assertGreater(len(groups), 2)
+        seen = [slot for group in groups for slot in (group or ())]
+        self.assertEqual(sorted(seen), sorted(set(seen)))
+        self.assertEqual(sorted(seen), sorted(bank._feed_slots()))
+
+    def test_a_frame_is_judged_once_however_many_groups_feed_it(self):
+        bank = self.make()
+        original = bank.renderer.channel.observe
+        votes = []
+        bank.renderer.channel.observe = lambda left, right: (
+            votes.append(1), original(left, right))[1]
+        bank.queue_frame(*frame(0, size=960))
+        self.assertEqual(len(votes), 1)
 
 
 class BankReshapeTests(unittest.TestCase):

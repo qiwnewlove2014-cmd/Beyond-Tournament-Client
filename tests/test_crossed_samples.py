@@ -347,6 +347,29 @@ class CrossedSampleCacheTests(unittest.TestCase):
         self.assertIsNone(cache.get("note", 120))
         self.assertIsNone(cache._worker)
 
+    def test_the_default_bound_holds_a_keyboards_working_set(self):
+        """One instrument in one room must fit, or the cache is a treadmill.
+
+        A least-recently-used cache smaller than the working set is not a
+        graceful degradation: every copy is given up before its sample comes
+        round again, so the same notes are filtered over and over for the whole
+        performance -- and the worker never idles, competing with the game's
+        own thread for the interpreter, which a listener feels as the game
+        stuttering while a band plays. A piano is 85 notes (about 474 KB each
+        decoded), and a room feeds one copy per mark plus the screen wall's
+        halves, so the defaults have to hold a few hundred.
+        """
+        from libs.crossed_samples import DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES
+        piano_notes, marks = 85, 2
+        working_set = piano_notes * marks * 2      # a copy per half per mark
+        self.assertGreaterEqual(DEFAULT_MAX_ENTRIES, working_set)
+        self.assertGreaterEqual(DEFAULT_MAX_BYTES,
+                                working_set * 474 * 1024 // 2)
+        cache = self.cache()
+        for index in range(working_set):
+            cache._store((f"note{index}", 120, None), object(), 1024)
+        self.assertEqual(cache.stats()["entries"], working_set)
+
     def test_limits_must_be_positive(self):
         for kwargs in ({"max_entries": 0}, {"max_bytes": -1},
                        {"max_sample_bytes": 0}, {"max_failures": 0}):

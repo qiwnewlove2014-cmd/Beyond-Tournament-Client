@@ -52,11 +52,19 @@ CHANNEL_RIGHT = "r"
 
 # One sample's own bound, the same one the instrument cache decodes under.
 MAX_SAMPLE_BYTES = 32 * 1024 * 1024
-# Bounded so a map with many marked speakers and a pianist walking a keyboard
-# cannot grow the copies without end: 64 copies is around 20 MB of notes, and
-# the least recently used one is the one given up.
-DEFAULT_MAX_ENTRIES = 64
-DEFAULT_MAX_BYTES = 48 * 1024 * 1024
+# # Bounded so a map with many marked speakers and a pianist walking a keyboard
+# cannot grow the copies without end: the least recently used one is the one
+# given up. The bound is sized for the *working set* of one instrument in one
+# room -- the whole keyboard times the marks that room feeds -- because an
+# LRU smaller than the working set is not a graceful degradation but the worst
+# case: every copy is evicted before its sample is played again, so the same
+# notes are filtered over and over for the whole performance (and the worker
+# never idles, competing with the game's own thread for the interpreter). A
+# piano is 85 notes (about 474 KB each decoded) and a room feeds one copy per
+# mark, so ~170-250 copies at 0.25-0.5 MB is the room a real band plays in.
+# Nobody who never crosses a speaker and never plays a note pays any of it.
+DEFAULT_MAX_ENTRIES = 384
+DEFAULT_MAX_BYTES = 96 * 1024 * 1024
 MAX_FAILURES = 64
 # The upload queue: a copy is made on a whim of the map, so a burst of notes
 # must not be able to grow a queue without bound.

@@ -382,7 +382,10 @@ class CinemaSpeakerBank:
             return False
         targets = set(self._feed_slots())
         programmes = self._programme(left, right, targets)
-        feeds = self._slot_feeds(programmes, targets)
+        # The frame itself travels with the feeds: every group is a window cut
+        # out of this one frame (its own crossover, its own delay trim), and
+        # the layout verdict belongs to the frame, not to a window of it.
+        feeds = self._slot_feeds(programmes, targets, live=(left, right))
         if not feeds:
             return False
         claimed = []
@@ -899,7 +902,7 @@ class CinemaSpeakerBank:
             return None
         return lefts[start:end], rights[start:end]
 
-    def _slot_feeds(self, programmes, targets):
+    def _slot_feeds(self, programmes, targets, live=None):
         """``[(slot, mono_pcm16), ...]`` for one frame, each at its own delay.
 
         Slots are grouped by the trim they carry *and* the crossover they are
@@ -908,8 +911,12 @@ class CinemaSpeakerBank:
         (crossover, offset) instead of once per speaker. A room with neither
         trims nor crossovers (the shipped jukebox) takes exactly the path it
         always did: one render of the live frame, byte for byte.
+
+        ``live`` is the frame every group is a window of, so a trimmed group's
+        window is not judged as a frame of its own (see
+        ``CinemaRenderer.render``).
         """
-        feeds = self._feeds_for(programmes, targets, bound=False)
+        feeds = self._feeds_for(programmes, targets, bound=False, live=live)
         if feeds:
             return feeds
         # Nobody could be fed: every speaker of this room carries a trim deeper
@@ -923,9 +930,9 @@ class CinemaSpeakerBank:
         # mode went quiet"). Cut every trim back to what this frame can reach:
         # each speaker starts a little early for the few frames the room needs
         # and carries its real trim from then on.
-        return self._feeds_for(programmes, targets, bound=True)
+        return self._feeds_for(programmes, targets, bound=True, live=live)
 
-    def _feeds_for(self, programmes, targets, bound):
+    def _feeds_for(self, programmes, targets, bound, live=None):
         """One render per distinct (mark, trim), or nothing if unreachable."""
         groups = {}
         for slot in targets:
@@ -942,8 +949,15 @@ class CinemaSpeakerBank:
             source = self._delayed_window(history, index, samples)
             if source is None:
                 continue
+            # One group, its own slots: the renderer is asked for exactly the
+            # speakers this group feeds rather than for the whole room, so a
+            # frame is mixed once per fed speaker instead of once per group
+            # (a room with crossovers and trims renders one frame in several
+            # groups, and asking for all of them every time was the room's
+            # whole per-frame cost multiplied by the number of groups).
             wanted = set(groups[(mark, samples)])
-            for slot, pcm in self.renderer.render(*source):
+            for slot, pcm in self.renderer.render(*source, only=wanted,
+                                                  live=live):
                 if slot in wanted:
                     feeds.append((slot, pcm))
         return feeds
@@ -1136,7 +1150,12 @@ class CinemaSpeakerBank:
                 pair = self._delayed_window(stream, origin + step, offset)
                 if pair is None:
                     continue
-                pcm = dict(self.renderer.render(*pair)).get(slot)
+                pcm = dict(self.renderer.render(
+                    *pair, only=(slot,),
+                    # A refill replays frames the room already holds: the
+                    # verdict is the room's current frame, not each replayed
+                    # window (see ``CinemaRenderer._prepared``).
+                    live=self._recent[-1] if self._recent else None)).get(slot)
                 if pcm is None or not pool or speaker is None:
                     continue
                 buffer = pool.pop()

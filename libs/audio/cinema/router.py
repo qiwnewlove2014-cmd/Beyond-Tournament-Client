@@ -74,6 +74,17 @@ class CinemaRenderer:
         self.active_kind = STEREO
         self._plans = {}
         self._slots = ()
+        # The frame this renderer last decided, and the last window it decoded:
+        # ``(left, right, verdict, plan)`` and ``(left, right, l_samples,
+        # r_samples)``. The room feeds one frame in several *groups* -- one per
+        # distinct crossover and delay trim -- and each group asks for the
+        # slots that belong to it, so a frame must be judged once (the layout
+        # detector counts one vote per frame) and a window decoded once
+        # however many groups are cut out of it. Told apart by identity: the
+        # transport hands the same objects to every group of one frame and new
+        # objects for the next.
+        self._frame = None
+        self._window = None
         self._build_plans()
 
     # ---------------------------------------------------------------- plans
@@ -139,35 +150,98 @@ class CinemaRenderer:
             return STEREO
         return self.channel.observe(left, right)
 
-    def render(self, left, right):
+    def _prepared(self, left, right, live=None):
+        """``(verdict, plan)`` for the frame ``left``/``right`` belong to.
+
+        The verdict is the frame's own evidence -- one vote per frame -- so the
+        second window of a frame gets the first window's answer rather than a
+        second opinion (see ``_frame``).
+
+        ``live`` is that frame when ``left``/``right`` are a *window* cut out
+        of it: a speaker carrying a delay trim is fed the same programme a few
+        milliseconds late, and that window is the room's audio, not a frame of
+        its own. Judging the window would count one frame of the song as
+        several votes of layout evidence. ``None`` means the bytes being fed
+        are the frame, which is what a caller reading or replaying the room
+        hands in.
+        """
+        subject_l, subject_r = (left, right) if live is None else live
+        cached = self._frame
+        if (cached is not None and cached[0] is subject_l
+                and cached[1] is subject_r):
+            return cached[2], cached[3]
+        stereo = self._plans.get(STEREO) or ()
+        mono = self._plans.get(MONO) or ()
+        verdict = self._verdict(subject_l, subject_r)
+        self.active_kind = verdict
+        plan = mono if verdict == MONO and mono else stereo
+        self._frame = (subject_l, subject_r, verdict, plan)
+        return verdict, plan
+
+    def _samples_for(self, left, right):
+        """The two channels of this *window* as sample arrays, decoded once.
+
+        Decoding is only needed for the blends (a whole-channel slot is handed
+        the source bytes), so a room whose plan is only the front pair never
+        decodes at all. A window fed twice -- a refused frame offered again --
+        is not decoded twice either.
+        """
+        cached = self._window
+        if cached is not None and cached[0] is left and cached[1] is right:
+            return cached[2], cached[3]
+        left_samples = to_samples(left)
+        right_samples = to_samples(right)
+        self._window = (left, right, left_samples, right_samples)
+        return left_samples, right_samples
+
+    def render(self, left, right, only=None, live=None):
         """Return ``[(slot, mono_pcm16), ...]`` for this frame.
 
         Slots the active plan does not use are simply absent, so an idle
-        speaker is never fed silence buffers.
+        speaker is never fed silence buffers. ``only`` is the set of slots the
+        caller is about to feed this frame: the room renders one frame in
+        several groups -- one per distinct crossover and delay trim -- and a
+        group that asked for the whole room would mix every speaker once per
+        group, so each group asks for its own slots and the room mixes each
+        fed speaker exactly once. ``None`` means the whole plan, which is what
+        a caller reading the room (a test, a read-out) wants.
+
+        ``live`` is the frame these bytes are cut from, for a caller feeding a
+        delayed window of it (see ``_prepared``); the verdict is that frame's.
         """
         # An empty frame means nothing arrived; queueing a silent buffer for
         # every speaker would burn the transport's pool for no audio.
         if not left and not right:
+            self._frame = self._window = None
             return []
-        stereo = self._plans.get(STEREO) or ()
-        mono = self._plans.get(MONO) or ()
-        if not stereo and not mono:
-            return []
-        verdict = self._verdict(left, right)
-        self.active_kind = verdict
-        if verdict == MONO and mono:
-            plan = mono
-        else:
-            plan = stereo
+        verdict, plan = self._prepared(left, right, live)
         if not plan:
             return []
+        wanted = None if only is None else set(only)
         if self._parity and verdict != MONO and len(plan) == len(PARITY_PLAN):
             # Zero-copy and byte-exact: this is the plain jukebox pair.
-            return [(PARITY_PLAN[0][0], left), (PARITY_PLAN[1][0], right)]
-        left_samples = to_samples(left)
-        right_samples = to_samples(right)
-        return [(slot, mix_samples(left_samples, right_samples, gain_l, gain_r))
-                for slot, gain_l, gain_r in plan]
+            feeds = [(PARITY_PLAN[0][0], left), (PARITY_PLAN[1][0], right)]
+            return feeds if wanted is None else [feed for feed in feeds
+                                                 if feed[0] in wanted]
+        left_samples = right_samples = None
+        feeds = []
+        for slot, gain_l, gain_r in plan:
+            if wanted is not None and slot not in wanted:
+                continue
+            if gain_l == 1.0 and gain_r == 0.0:
+                # Exactly the source channel (``_GAIN_SCALE`` is 1 << 15, so
+                # ``sample * 32768 >> 15`` is the sample): handed over as the
+                # bytes it already is instead of mixed back to itself.
+                feeds.append((slot, left))
+                continue
+            if gain_l == 0.0 and gain_r == 1.0:
+                feeds.append((slot, right))
+                continue
+            if left_samples is None:
+                left_samples, right_samples = self._samples_for(left, right)
+            feeds.append((slot, mix_samples(left_samples, right_samples,
+                                            gain_l, gain_r)))
+        return feeds
 
     # ----------------------------------------------------------- inspection
 
