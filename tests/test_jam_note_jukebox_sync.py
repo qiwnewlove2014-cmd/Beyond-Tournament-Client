@@ -170,6 +170,93 @@ class ActiveJukeboxBufferTests(unittest.TestCase):
         self.assertEqual(handler._active_jukebox_buffer_ms(), 100)
 
 
+class TheSongTheNoteIsPlayedAgainstTests(unittest.TestCase):
+    """A note is synced to the cabinet its own room belongs to.
+
+    A map can play two cabinets at once, and the sync used to measure
+    whichever played first: a band jamming into one room was held by the other
+    song's queue -- heard as the band trailing by a whole queue, or "playing
+    along to the previous song", and only on some machines.
+    """
+
+    def _two_cabinet_handler(self):
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.gameplay = SimpleNamespace(jukebox_player=SimpleNamespace(players={
+            "boxA": _relay_entry(queued=4),    # 160ms
+            "boxB": _relay_entry(queued=9),    # 360ms
+        }))
+        handler.game = _FakeGame()
+        handler._clock_offset_ms = 0.0
+        handler._clock_offset_samples = 10
+        handler._last_jam_sync_log = 0.0
+        return handler
+
+    def _room_patch(self, cabinet):
+        room = (cabinet, object()) if cabinet else None
+        return (mock.patch("libs.audio.cinema.live.room_for", return_value=room),
+                mock.patch("libs.audio.cinema.pan.target_for_name", return_value=None))
+
+    def test_naming_a_cabinet_measures_that_cabinet_only(self):
+        handler = self._two_cabinet_handler()
+        self.assertEqual(handler._active_jukebox_buffer_ms(cabinet="boxB"), 360)
+
+    def test_unnamed_keeps_the_old_first_playing_stream(self):
+        handler = self._two_cabinet_handler()
+        self.assertEqual(handler._active_jukebox_buffer_ms(), 160)
+
+    def test_a_cabinet_that_is_not_playing_here_answers_none(self):
+        """The beat it was played against is not audible here: play on arrival.
+
+        Being held by a queue -- any queue -- for a song nobody hears on this
+        machine is what made a jam drift on some machines and not others.
+        """
+        handler = self._two_cabinet_handler()
+        self.assertIsNone(handler._active_jukebox_buffer_ms(cabinet="boxC"))
+
+    def test_the_notes_cabinet_is_the_room_the_performer_stands_in(self):
+        handler = self._two_cabinet_handler()
+        first, second = self._room_patch("boxB")
+        with first as room_for, second:
+            cabinet = handler._note_song_cabinet((1.0, 2.0, 0.0), peer="Ann")
+        self.assertEqual(cabinet, "boxB")
+        self.assertEqual(room_for.call_args[0][1], (1.0, 2.0, 0.0))
+
+    def test_a_note_that_belongs_to_no_room_has_no_cabinet(self):
+        handler = self._two_cabinet_handler()
+        first, second = self._room_patch(None)
+        with first, second:
+            self.assertIsNone(handler._note_song_cabinet((1.0, 2.0, 0.0), peer="Ann"))
+        # No position at all (a legacy packet): nothing to resolve, no crash.
+        self.assertIsNone(handler._note_song_cabinet(None, peer="Ann"))
+
+    def test_the_room_imposes_its_cabinet_on_the_hold(self):
+        handler = self._two_cabinet_handler()
+        enqueue = mock.Mock()
+        now_ms = time.time() * 1000.0
+        data = {"server_time": now_ms, "x": 1.0, "y": 2.0, "z": 0.0,
+                "peer_id": "Ann"}
+        first, second = self._room_patch("boxB")
+        with first, second, mock.patch("libs.event_handeler.time.time",
+                                       return_value=now_ms / 1000.0):
+            handler._schedule_remote_note(data, enqueue)
+        enqueue.assert_not_called()
+        scheduled_ms, _ = handler.game.after_calls[0]
+        # boxB's own 360ms backlog (minus the advance), never boxA's 160.
+        self.assertGreater(scheduled_ms, 200)
+        self.assertLessEqual(scheduled_ms, 360)
+
+    def test_a_room_whose_song_is_not_playing_here_is_immediate(self):
+        handler = self._two_cabinet_handler()
+        enqueue = mock.Mock()
+        data = {"server_time": time.time() * 1000.0,
+                "x": 1.0, "y": 2.0, "z": 0.0, "peer_id": "Ann"}
+        first, second = self._room_patch("boxC")
+        with first, second:
+            handler._schedule_remote_note(data, enqueue)
+        enqueue.assert_called_once_with()
+        self.assertEqual(handler.game.after_calls, [])
+
+
 class ScheduleRemoteNoteTests(unittest.TestCase):
     def _schedule(self, handler, server_time_ms_ahead, buffer_ms,
                   sender_lag_ms=None):

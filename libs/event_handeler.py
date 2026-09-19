@@ -1814,8 +1814,50 @@ class EventHandeler:
         alpha = 0.3
         self._clock_offset_ms = alpha * instant_offset + (1 - alpha) * self._clock_offset_ms
 
-    def _active_jukebox_buffer_ms(self):
+    def _note_song_cabinet(self, position, peer=None):
+        """The cabinet whose song a live note is played along to, or None.
+
+        One answer on both ends of a note, and it is the *routing's* own
+        resolver (``live.room_for``): a staff pan names its cabinet, and with
+        no pan it is the room the performer is standing in -- so the song a
+        note is synced to and the room it comes out of can never be two
+        different places. A map can be playing two cabinets at once, and the
+        live-note sync used to measure whichever played first; a band jamming
+        into one room while another cabinet played elsewhere was then held by
+        the wrong song's queue (heard as the band trailing by a queue, or by
+        "the previous song", and only on some machines).
+
+        None means the note belongs to no room at all -- every map without
+        cinema speakers, a performer standing outside every room -- and the
+        caller then measures the playing jukebox exactly as it always did.
+        """
+        if position is None:
+            return None
+        try:
+            spot = tuple(float(value) for value in position)
+        except (TypeError, ValueError):
+            return None
+        gameplay = getattr(self, "gameplay", None)
+        try:
+            from .audio.cinema import live as cinema_live
+            from .audio.cinema import pan as cinema_pan
+            room = cinema_live.room_for(
+                getattr(gameplay, "game", None), spot,
+                pan=cinema_pan.target_for_name(gameplay, peer))
+        except Exception:
+            return None
+        return room[0] if room else None
+
+    def _active_jukebox_buffer_ms(self, *, cabinet=None):
         """How far behind the song's shared clock our jukebox audio is (ms), or None.
+
+        ``cabinet`` names the song this measurement is *for* (see
+        ``_note_song_cabinet``): with it, only that cabinet's own playback is
+        measured and None means "that song is not playing here", which is the
+        honest answer -- a note played against a beat that is not audible on
+        this machine is better off immediate than held by an unrelated song's
+        queue. Called with no cabinet, the first playing jukebox answers,
+        exactly as it always did, for a note that belongs to no room.
 
         Returns None when no jukebox song is actively playing, so live
         jamming without background music keeps the low-latency immediate
@@ -1843,7 +1885,13 @@ class EventHandeler:
             if jp is None:
                 return None
             from .jukebox import JukeboxRelayReceiver
-            for entry in list(getattr(jp, "players", {}).values()):
+            players = getattr(jp, "players", None) or {}
+            if cabinet is not None:
+                entry = players.get(cabinet)
+                entries = [entry] if isinstance(entry, dict) else []
+            else:
+                entries = list(players.values())
+            for entry in entries:
                 streamer = entry.get("streamer") if isinstance(entry, dict) else None
                 if (isinstance(streamer, JukeboxRelayReceiver)
                         and getattr(streamer, "running", False)
@@ -1929,7 +1977,10 @@ class EventHandeler:
         (the low-latency live-jam path). Uses game.call_after (one main-loop
         scheduler) instead of spawning a thread per note.
         """
-        buffer_ms = self._active_jukebox_buffer_ms()
+        cabinet = self._note_song_cabinet(
+            (data.get("x"), data.get("y"), data.get("z")),
+            peer=data.get("peer_id"))
+        buffer_ms = self._active_jukebox_buffer_ms(cabinet=cabinet)
         if (buffer_ms is None or not self.SYNC_JAM_NOTES_WITH_JUKEBOX
                 or self._clock_offset_samples < 3):
             # Arrival-time jamming (see SYNC_JAM_NOTES_WITH_JUKEBOX): no

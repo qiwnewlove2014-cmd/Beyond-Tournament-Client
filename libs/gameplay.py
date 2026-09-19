@@ -477,11 +477,22 @@ class Gameplay(state.State):
 
         Reuses the listener-side measurement (queue depth + audible-start
         lateness for direct; relay frame backlog for relay), so sender and
-        listener always agree on what "behind the room" means.
+        listener always agree on what "behind the room" means. The song it is
+        measured against is the one this note is played along to -- the room
+        the performer stands in (``_note_song_cabinet``), never whichever
+        cabinet happens to play first on a map that is playing two.
         """
+        player = getattr(self, "player", None)
+        position = None
+        if player is not None:
+            position = (getattr(player, "x", None), getattr(player, "y", None),
+                        getattr(player, "z", None))
         try:
             eh = getattr(getattr(self.game, "network", None), "event_handeler", None)
-            lag = eh._active_jukebox_buffer_ms() if eh is not None else None
+            if eh is None:
+                return packet
+            cabinet = eh._note_song_cabinet(position, peer=getattr(player, "name", None))
+            lag = eh._active_jukebox_buffer_ms(cabinet=cabinet)
         except Exception:
             lag = None
         if lag is not None and lag > 0:
