@@ -351,7 +351,8 @@ class World:
     """The song, the machines, and the one wall clock they all read."""
 
     def __init__(self, machines, *, phase_ms=0.0, note_transit_ms=NOTE_TRANSIT_MS,
-                 warmup_ms=WARMUP_MS):
+                 warmup_ms=WARMUP_MS, strip_stamp=False):
+        self.strip_stamp = bool(strip_stamp)
         self.clock = Clock(start_ms=5000.0 + phase_ms)
         self.source = Source(self.clock.now)
         self.machines = {machine.name: machine for machine in machines}
@@ -366,6 +367,21 @@ class World:
         self._warmup_ms = float(warmup_ms)
 
     # ------------------------------------------------------------- the code
+
+    def through_the_server(self, packet):
+        """What the note looks like to a listener, after the Server's relay.
+
+        ``strip_stamp`` is a Server older than the position stamp: its packet
+        schema declares no such field, so it is *stripped* rather than the note
+        rejected (the schema has stripped unknown keys since the earliest
+        version, which is what makes adding a field safe in both directions).
+        Everything else the note carries arrives, exactly as it does on the
+        real path -- and this is the case the bridge was tried for: whether a
+        stamp can reach a listener without the Server being updated at all.
+        """
+        if self.strip_stamp:
+            packet.pop("sender_position_ms", None)
+        return packet
 
     def handler(self, machine):
         """A real ``EventHandeler`` for one machine, on a world it can measure.
@@ -454,8 +470,8 @@ class World:
         names = listeners or [name for name in self.machines
                               if name != performer_name]
         for name in names:
-            self._deliver(self.machines[name], dict(packet), beat_ms,
-                          performer_name)
+            self._deliver(self.machines[name], self.through_the_server(dict(packet)),
+                          beat_ms, performer_name)
         # The scenario's own events belong to the world, not to one listener's
         # copy of the note: one shed is one shed.
         for offset, event in events:
@@ -573,20 +589,22 @@ class Scenario:
     """
 
     def __init__(self, name, machines, *, performer="Ann", measure=True,
-                 stamp=True, events=(), title="", strikes=STRIKES,
-                 cap_ms=RUN_LIMIT_MS):
+                 stamp=True, strip_stamp=False, events=(), title="",
+                 strikes=STRIKES, cap_ms=RUN_LIMIT_MS):
         self.name = name
         self.machines = machines
         self.performer = performer
         self.measure = measure
         self.stamp = stamp
+        self.strip_stamp = strip_stamp
         self.events = events
         self.title = title
         self.strikes = strikes
         self.cap_ms = float(cap_ms)
 
     def play(self, phase_ms):
-        world = World(self.machines(), phase_ms=phase_ms)
+        world = World(self.machines(), phase_ms=phase_ms,
+                      strip_stamp=self.strip_stamp)
         with world_clock(world.clock):
             world.run()
             world.strike(self.performer, measure=self.measure,
@@ -664,6 +682,18 @@ def _sender_slow():
           stamp=False)
 def _sender_slow_nostamp():
     return _machines(Ann=dict(transport="relay", transit_ms=120.0, stage_ms=160.0))
+
+
+@scenario("sender_slow_oldserver", title="the same, on a Server older than the stamp",
+          strip_stamp=True)
+def _sender_slow_oldserver():
+    return _machines(Ann=dict(transport="relay", transit_ms=120.0, stage_ms=160.0))
+
+
+@scenario("honest_oldserver", title="every number right, on a Server older than the stamp",
+          strip_stamp=True)
+def _honest_oldserver():
+    return _machines()
 
 
 @scenario("listener_shed", title="a listener's queue sheds under the wait",

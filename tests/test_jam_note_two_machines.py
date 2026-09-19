@@ -177,6 +177,53 @@ class ALatenessNobodyMeasuresTests(unittest.TestCase):
         self.assertGreater(missing[HELD], 3 * FRAME)         # a queue, not a frame
 
 
+class AServerOlderThanTheStampTests(unittest.TestCase):
+    """What a listener loses when the note's own Server has not been updated.
+
+    The stamp crosses inside the packet the Server relays, so a Server that
+    predates the field strips it (it has stripped unknown keys since its
+    earliest schema, which is what makes adding one safe) and the listener is
+    left with the lag path. That is the whole reason the Server has to be
+    updated -- and the reason a *bridge* was looked for: an older Server that
+    would carry the stamp some other way. None exists, and this class is where
+    that is measured rather than assumed: the two ways a note can reach a
+    listener without a stamp (a performer who cannot send one, and a Server
+    that does not carry it) land the band in exactly the same place.
+    """
+
+    def test_a_stripped_stamp_is_the_same_music_as_no_stamp_at_all(self):
+        stripped, _a = means("sender_slow_oldserver")
+        absent, _b = means("sender_slow_nostamp")
+        for machine in stripped:
+            self.assertAlmostEqual(stripped[machine], absent[machine], delta=0.5)
+
+    def test_and_the_band_is_a_fixed_distance_behind_the_beat_again(self):
+        """The old timing, to the millisecond: +80 ms on every listener.
+
+        The performer's own transit (120 ms against 40 ms) is unreported and
+        nothing can see it, so the note waits its own queue and lands late by
+        the difference -- the report the users gave, reproduced on a Server that
+        predates the stamp.
+        """
+        honest, _a = means("honest")
+        stripped, _b = means("sender_slow_oldserver")
+        self.assertAlmostEqual(stripped[HELD] - honest[HELD], 80.0, delta=FRAME)
+        self.assertAlmostEqual(stripped[NOW] - honest[NOW], 80.0, delta=FRAME)
+
+    def test_a_band_that_was_already_honest_loses_nothing(self):
+        """Which is why this is a *refinement*: an old Server costs nobody a note.
+
+        The stamp only ever repairs a performer whose own stream trails the
+        Server's clock; when every machine is level with it, the lost
+        refinement is invisible, so an old Server is not a reason to stay off
+        the new Client.
+        """
+        honest, _a = means("honest")
+        old, _b = means("honest_oldserver")
+        for machine in honest:
+            self.assertAlmostEqual(honest[machine], old[machine], delta=0.5)
+
+
 class WhatANoteCostsHereTests(unittest.TestCase):
     """The constant is an allowance; the machine measures what it really pays."""
 
