@@ -1886,7 +1886,7 @@ class EventHandeler:
         try:
             jp = getattr(self.gameplay, "jukebox_player", None)
             if jp is None:
-                return None
+                return self._party_leg_backlog_ms()
             from .jukebox import JukeboxRelayReceiver
             players = getattr(jp, "players", None) or {}
             if cabinet is not None:
@@ -1968,9 +1968,47 @@ class EventHandeler:
                     self._jam_buffer_detail = (f"direct {max(queued, 1)} buffers"
                                                f" late={late_ms}ms")
                     return max(queued, 1) * 20 + late_ms
-            return None
+            # No jukebox of this map is playing: a song this client hears
+            # through a Party Sync leg is still a beat a band can land on.
+            return self._party_leg_backlog_ms()
         except Exception:
             return None
+
+    def _party_leg_backlog_ms(self):
+        """This machine's own distance behind the session's song, or None.
+
+        A Party Sync song is not a jukebox: it reaches this client as a stream
+        (a member's entity when they are standing here, else the sink kept for
+        them while they are on another map -- ``party_sync_audio.receiver_for``),
+        so the frames its own output still holds are the backlog a note waits
+        out, exactly as a cabinet's relay queue is. Only a leg that is playing
+        with something queued answers: a stopped stream, or one still building
+        its pre-buffer, is not a beat. None means the note plays on arrival, as
+        it always did for a jam with no shared song.
+
+        Both sides of a note ask this same question -- the performer's client
+        attaches its own answer as ``sender_lag_ms`` and the listener holds the
+        note for its own -- so the subtraction lands the note on the shared
+        beat rather than on either machine's buffer.
+        """
+        leg = party_sync_audio.session_music_leg(self.gameplay, self.game)
+        compression = getattr(leg, "music_compression", None)
+        if compression is None:
+            return None
+        try:
+            queued = int(compression.pair_queued_frames())
+            frame_ms = float(compression.pair_frame_ms())
+        except Exception:
+            return None
+        if queued <= 0:
+            return None
+        self._jam_buffer_kind = "party"
+        # What is stored is the object that holds the leg's clock -- the feed, as
+        # a streamer is for a plain pair (``_pair_clock_for_note`` asks one
+        # thing of it either way).
+        self._jam_streamer = compression
+        self._jam_buffer_detail = f"party {queued} frames"
+        return int(round(queued * frame_ms))
 
     def _schedule_remote_note(self, data, enqueue, instrument=None):
         """Play a remote instrument note now, or aligned with the jukebox song.
@@ -2060,12 +2098,21 @@ class EventHandeler:
         # listening to one room disagree about whether the band is on the beat.
         # The room also knows what its own notes cost to sound on this machine
         # (``bank.note_spawn_ms``), and spending that *before* the beat is what
-        # keeps a slower computer from playing the band behind it.
+        # keeps a slower computer from playing the band behind it -- only the
+        # part the target does not already allow for (``_spawn_excess_ms``),
+        # which is the rule the pair below follows too: a room and a plain
+        # cabinet measure the same stage of the same note, so one constant must
+        # not land the same band a constant apart depending on which one the
+        # listener is hearing.
         bank = self._note_room_bank(cabinet)
         if bank is not None:
             try:
-                tail_ms = max(self.JAM_NOTE_ADVANCE_MS, bank.note_spawn_ms())
-                if bank.wait_advance(delay, enqueue, tail_ms=tail_ms):
+                excess_ms = self._spawn_excess_ms(bank.note_spawn_ms())
+                if excess_ms > 0.0:
+                    took = bank.wait_advance(delay, enqueue, tail_ms=excess_ms)
+                else:
+                    took = bank.wait_advance(delay, enqueue)
+                if took:
                     return
             except Exception:
                 pass
@@ -2080,13 +2127,13 @@ class EventHandeler:
         if clock is not None:
             # What *this* machine measured one of the instrument's remote notes
             # to cost to sound is spent before the beat, exactly as the room's
-            # own measurement is -- but only the part the target does not
-            # already allow for: ``JAM_NOTE_ADVANCE_MS`` (subtracted above) is
-            # the game-frame wait plus the instrument's queue drain, and the
-            # instrument measures the work after that. A machine that has not
-            # measured a note yet keeps the timing it always had, to the byte
+            # own measurement above is, and by the one rule
+            # (``_spawn_excess_ms``): the target already allows for the
+            # game-frame wait and the instrument's queue drain, the instrument
+            # measures the work after that, and a machine that has not measured
+            # a note yet keeps the timing it always had, to the byte
             # (``spawn_ms`` was read above, and is 0 until a note has sounded).
-            extra_ms = max(0.0, float(spawn_ms) - self.JAM_NOTE_ADVANCE_MS)
+            extra_ms = self._spawn_excess_ms(spawn_ms)
             try:
                 if extra_ms > 0.0:
                     if clock.wait_advance(delay, enqueue, tail_ms=extra_ms):
@@ -2098,6 +2145,26 @@ class EventHandeler:
         # Cap guards against a wildly wrong offset stalling notes; the
         # intended hold never exceeds the backlog plus skew slack.
         self.game.call_after(min(int(delay), int(buffer_ms + 1000)), enqueue)
+
+    def _spawn_excess_ms(self, measured_ms):
+        """What a wait may spend before the beat, over the target's own allowance.
+
+        ``JAM_NOTE_ADVANCE_MS`` is already inside the target the wait is
+        measured from (the game-frame wait plus the instrument's queue drain),
+        and what an output measures is its work *after* that point: a room's
+        ``route_to_room`` and a plain cabinet's instrument both time from the
+        play call's own entry. So only the excess over the constant is spent
+        early -- *one rule for a room and a pair alike*, because both are the
+        same number about the same stage of the same note. A machine that
+        measured less than the constant, or has not measured a note here at
+        all (0 is "never measured", not "free"), keeps the timing it always
+        had, to the byte.
+        """
+        try:
+            measured = float(measured_ms)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, measured - float(self.JAM_NOTE_ADVANCE_MS))
 
     def _instrument_note_spawn_ms(self, instrument):
         """What that instrument's remote notes cost to sound here (int ms).
@@ -2122,14 +2189,17 @@ class EventHandeler:
         """The plain pair's own clock for this note, or None.
 
         The streamer is the one whose backlog measured the hold
-        (``_jam_streamer``, set by ``_active_jukebox_buffer_ms``), and it must
+        (``_jam_streamer``, set by ``_active_jukebox_buffer_ms`` -- for a
+        session leg it is the feed that holds that leg's clock), and it must
         have answered as a *plain pair*: a cinema room has already been offered
         the note (it has the room's own clock, one speaker at a time), and a
-        streamer with nothing playing has no clock to offer at all. An older
-        streamer with no clock falls through to the frame timer, exactly as it
-        did before any of this existed.
+        streamer with nothing playing has no clock to offer at all. A session's
+        music leg answers as ``party`` and is asked the same way, because it is
+        one output with one key exactly as a stereo pair is. An older streamer
+        with no clock falls through to the frame timer, exactly as it did
+        before any of this existed.
         """
-        if getattr(self, "_jam_buffer_kind", None) not in ("relay", "direct"):
+        if getattr(self, "_jam_buffer_kind", None) not in ("relay", "direct", "party"):
             return None
         streamer = getattr(self, "_jam_streamer", None)
         if streamer is None:
@@ -2175,11 +2245,12 @@ class EventHandeler:
         """Say how late a note came out of a cinema room, and what held it.
 
         Reported for any note that was held for a song on this machine: a room
-        (its frame queue, its speakers' trims and their measured spawn) and a
-        plain cabinet's pair (its queue and the instrument's measured spawn)
-        both answer "the band feels late here", and the line names every
-        component, because that cannot be told apart from "this machine's song
-        is behind" or "the performer is reporting no lag" without them.
+        (its frame queue, its speakers' trims and their measured spawn), a plain
+        cabinet's pair (its queue and the instrument's measured spawn) and a
+        Party Sync session's leg (the frames its own feed still holds) all
+        answer "the band feels late here", and the line names every component,
+        because that cannot be told apart from "this machine's song is behind"
+        or "the performer is reporting no lag" without them.
 
         Once per five seconds: a drum roll is twenty notes a second and every
         one of them answers the same.
@@ -2187,7 +2258,9 @@ class EventHandeler:
         # Read defensively: the measurement is what records both, and it is
         # the one thing a test (or an older build's caller) can replace.
         kind = getattr(self, "_jam_buffer_kind", None)
-        if (kind not in ("room", "relay", "direct")
+        # A session's leg held the note exactly as a cabinet's pair did, so it
+        # reports too: the one jam nobody can see is the one that is off the beat.
+        if (kind not in ("room", "relay", "direct", "party")
                 or heard_ms < self.JAM_LATENCY_REPORT_MS):
             return
         now = time.time()
@@ -2398,21 +2471,15 @@ class EventHandeler:
     def _party_audio_receiver(self, channel_id):
         """Who plays one member's audio on this client.
 
-        This map's entity for that voice channel when the member is standing
-        here, otherwise the Party Sync sink kept for them while they are on
-        another map (libs/party_sync_audio.py). An entity always wins: it is
-        the real body, with a position, a reverb zone and the map's own
-        shaping, and the sink exists only for the case no entity can serve.
-
-        Read-only by design: the packet paths run on the receive thread and
-        must never create an OpenAL source, so a missing sink means "not ours"
-        rather than "make one".
+        The rule itself lives in ``party_sync_audio.receiver_for``: this map's
+        entity for that voice channel when the member is standing here,
+        otherwise the sink kept for them while they are on another map, with an
+        entity always winning. It has one home because three paths need the same
+        answer -- the music packet path, the voice path, and a jam note looking
+        for the song it was played against. This is that reader, kept as a
+        method for the callers that already ask the handler.
         """
-        entity = (getattr(self.gameplay, "voice_channels", None) or {}).get(channel_id)
-        if entity is not None:
-            return entity
-        sinks = party_sync_audio.sinks_for(self.gameplay, self.game)
-        return sinks.sink_for(channel_id) if sinks is not None else None
+        return party_sync_audio.receiver_for(self.gameplay, self.game, channel_id)
 
     def process_music_data(self, data):
         # Data format: [1 byte Entity VoiceChannel ID] + [Opus Packet]

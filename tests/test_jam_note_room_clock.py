@@ -331,15 +331,29 @@ class TheSchedulerHandsTheNoteToTheRoomTests(unittest.TestCase):
         self.assertIs(enqueue_arg, enqueue)
         self.assertGreater(held_ms, 0)
         self.assertLessEqual(held_ms, 200)
-        self.assertEqual(bank.wait_advance.call_args[1].get("tail_ms"),
-                         handler.JAM_NOTE_ADVANCE_MS)
+        # Nothing measured here yet, and the target already allows for the
+        # frame wait and the queue drain: the wait spends no allowance twice.
+        self.assertEqual(bank.wait_advance.call_args[1], {})
 
     def test_a_slow_machines_measured_spawn_raises_the_allowance(self):
-        """This computer measured notes costing 90 ms: spend it before the beat."""
+        """This computer measured notes costing 90 ms: the excess is spent early.
+
+        Only the part over ``JAM_NOTE_ADVANCE_MS`` -- the same rule a plain
+        cabinet's pair follows, so a room and a pair cannot land one band a
+        constant apart (both measure the same stage of the same note).
+        """
         bank = self._bank(spawn_ms=90.0)
         handler = self._handler(bank)
         self._hit(handler)
-        self.assertEqual(bank.wait_advance.call_args[1].get("tail_ms"), 90.0)
+        self.assertEqual(bank.wait_advance.call_args[1].get("tail_ms"),
+                         90.0 - handler.JAM_NOTE_ADVANCE_MS)
+
+    def test_a_spawn_inside_the_allowance_is_not_spent_twice(self):
+        """A room that measured less than the constant keeps the old timing."""
+        bank = self._bank(spawn_ms=30.0)
+        handler = self._handler(bank)
+        self._hit(handler)
+        self.assertEqual(bank.wait_advance.call_args[1], {})
 
     def test_a_room_that_cannot_take_the_note_keeps_the_frame_timer(self):
         bank = self._bank(took=False)

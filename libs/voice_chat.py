@@ -8,6 +8,10 @@ from . import consts
 from .speech import speak
 from . import options
 from . import logger
+# A note held for a song waits on the audio the listener is *hearing*, and that
+# rule has one home (``libs/jukebox_clock.py``): a member's music feed is an
+# output exactly as a cabinet's pair is, so it builds the same clock.
+from .jukebox_clock import PAIR_KEY, SpotClock, mono_ms
 # A cinema cabinet's room, for the megaphone frames that belong to one (see
 # libs/audio/cinema/speech.py). Aliased because libs/speech.py above is the
 # text-to-speech announcer and has nothing to do with this.
@@ -1338,6 +1342,12 @@ class MusicCompression(threading.Thread):
             self._timeline_anchor_seq = None
             self._timeline_anchor_time = None
             self._timeline_pending = []
+            # This feed's own clock (see the section below): the frames it has
+            # handed to its output, the size of one measured from the audio, and
+            # the source those landed on.
+            self.pair_frames_fed = 0
+            self._pair_frame_ms = 0.0
+            self._pair_source = None
             self._running = True
             self.start()
         except Exception as e:
@@ -1539,6 +1549,113 @@ class MusicCompression(threading.Thread):
         self._timeline_epoch = None
         self._timeline_last_received_seq = None
         self._last_recv_time = None
+        self._pair_clock_reset()
+
+    # --------------------------------------------------- this feed's clock
+    #
+    # A note played along a song someone else is streaming -- a Party Sync
+    # session's music, or a Music Broadcast -- waits on the frames this feed has
+    # *played*, re-projected every frame, exactly as a cabinet's pair and a
+    # room's speakers do: the rule is one home (``libs/jukebox_clock.py``), and
+    # what is this feed's own is the counter and the frame's measured size.
+    # Without it a session's band was aligned for listeners on the performer's
+    # map and played on arrival for everybody else -- off the song by that
+    # listener's own jitter buffer (a pre-buffer and up), which is what "it
+    # feels late" means when the friend is on another map.
+
+    def _note_pair_fed(self, pcm, stereo=False):
+        """Record one frame handed to this feed's own output (its clock input)."""
+        self.pair_frames_fed = int(getattr(self, "pair_frames_fed", 0)) + 1
+        # A true-stereo frame carries two interleaved channels at the same
+        # rate, so measuring it as one channel of double the rate is the same
+        # duration -- and the duration is what a wait is counted in.
+        measured = mono_ms(pcm, 48000 * (2 if stereo else 1))
+        if measured > 0.0:
+            self._pair_frame_ms = measured
+
+    def _pair_clock_reset(self):
+        """Start this feed's clock over (a new session, or a queue that was cut).
+
+        The epochs are forgotten rather than the waits dropped: a note already
+        waiting here keeps the instant it was going to sound at, which is what
+        a note lost to a hiccup would not have (``SpotClock.forget``).
+        """
+        self.pair_frames_fed = 0
+        self._pair_frame_ms = 0.0
+        clock = getattr(self, "_pair_spot_clock", None)
+        if clock is not None:
+            clock.forget()
+
+    def pair_frame_ms(self):
+        """How long one frame of this feed is, measured from the audio (ms).
+
+        Latched from the frames actually handed over -- the pre-buffer's own
+        arithmetic (``PRE_BUFFER_FRAMES`` frames = 240 ms) says 20 ms, and this
+        says what the decoder really produced. Falls back to 20 ms until one
+        frame has been queued.
+        """
+        measured = float(getattr(self, "_pair_frame_ms", 0.0) or 0.0)
+        return measured if measured > 0.0 else 20.0
+
+    def pair_queued_frames(self):
+        """Frames this feed's own output still holds (OpenAL's own count)."""
+        source = getattr(self, "_pair_source", None)
+        try:
+            return max(0, int(getattr(source, "buffers_queued", 0) or 0))
+        except Exception:
+            return 0
+
+    def pair_played_frames(self):
+        """Frames this feed has already played: handed over minus still queued.
+
+        ``pair_queued_frames`` is what OpenAL reports as still ahead of the
+        listener and the fed counter is this feed's own, so the difference is
+        the content instant the output is playing right now -- what a live
+        note's wait is measured against, every frame.
+        """
+        fed = int(getattr(self, "pair_frames_fed", 0) or 0)
+        return max(0, fed - self.pair_queued_frames())
+
+    def pair_is_playing(self):
+        """True while this feed's own output is playing (see ``SpotClock``).
+
+        A feed whose frames are going into a cabinet's room has no output of
+        its own to measure -- the room's own bank is the clock then -- and a
+        source that is not playing reports everything it holds as finished, so
+        neither is a clock for a live note. A queue still building its
+        pre-buffer says nothing about where the song is either.
+        """
+        if getattr(self, "cinema_feed", None) is not None:
+            return False
+        if not getattr(self, "_has_started", False):
+            return False
+        source = getattr(self, "_pair_source", None)
+        if source is None:
+            return False
+        try:
+            return source.state == cyal.SourceState.PLAYING
+        except Exception:
+            return False
+
+    @property
+    def pair_clock(self):
+        """This feed's own clock, made on first use (see the note above).
+
+        Named like a cabinet's pair on purpose: the scheduler's question is one
+        question -- "where is the audio this listener hears?" -- and it is
+        asked of every output the same way (``EventHandeler._pair_clock_for_note``).
+        """
+        clock = getattr(self, "_pair_spot_clock", None)
+        if clock is None:
+            clock = SpotClock(
+                progress_of=lambda key: self.pair_played_frames(),
+                frame_ms_of=self.pair_frame_ms,
+                playing_of=lambda key: self.pair_is_playing(),
+                keys_of=lambda: (PAIR_KEY,),
+                lead_of=lambda key: self.pair_queued_frames(),
+            )
+            self._pair_spot_clock = clock
+        return clock
 
     def recieve_timeline(self, data, music_source, radio_source, channelID,
                          gameplay, epoch, frame_seq):
@@ -1695,6 +1812,9 @@ class MusicCompression(threading.Thread):
                     self._timeline_first_queued_seq = None
                     self._timeline_anchor_seq = None
                     self._timeline_anchor_time = None
+                    # A new session's song starts at the pre-buffer: the clock
+                    # a live note waits on starts over with it.
+                    self._pair_clock_reset()
                 if timeline_changed:
                     self._timeline_epoch = epoch
                     self._timeline_last_received_seq = frame_seq
@@ -1726,9 +1846,16 @@ class MusicCompression(threading.Thread):
                 except Exception:
                     state = cyal.SourceState.STOPPED
 
-                # If we were playing but just hit an underrun and STOPPED, we need to
-                # flush out the old processed buffers and restart the pre-buffering phase.
-
+                # If we were playing but just hit an underrun and STOPPED, we
+                # need to flush out the old processed buffers and restart the
+                # pre-buffering phase. The `if` line above the suite was
+                # missing: a comment stood where it belongs, the suite sat at
+                # the *handler's* own indentation (so CPython attached it to
+                # the try above, and it ran only if reading `state` raised --
+                # which it does not), and the flush (and the clock reset with
+                # it) was dead. A stopped source was then drained by the
+                # recycle below while it was rebuilt one frame at a time.
+                if self._has_started and state == cyal.SourceState.STOPPED:
                     try:
                         self._has_started = False
                         self._timeline_first_queued_seq = None
@@ -1738,6 +1865,9 @@ class MusicCompression(threading.Thread):
                             music_source.unqueue_buffers()
                     except Exception:
                         pass
+                    # The queue this feed's clock was measuring is gone: the
+                    # song restarts at the pre-buffer.
+                    self._pair_clock_reset()
 
                 # Recycle or generate buffer
                 # Only recycle if we are actively playing. If we are in STOPPED/INITIAL state,
@@ -1773,6 +1903,11 @@ class MusicCompression(threading.Thread):
                                 else cyal.BufferFormat.MONO16),
                     )
                     music_source.queue_buffers(buf)
+                    # The frame is this feed's clock input (see the clock
+                    # section above); the source is remembered too, because
+                    # that is the queue a note's wait is measured on.
+                    self._pair_source = music_source
+                    self._note_pair_fed(pcm, stereo)
                     if epoch is not None and self._timeline_first_queued_seq is None:
                         self._timeline_first_queued_seq = frame_seq
                 except Exception as e:

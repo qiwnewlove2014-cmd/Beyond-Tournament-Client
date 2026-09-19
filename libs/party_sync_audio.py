@@ -332,6 +332,10 @@ class PartySinkSet:
             return
         for sink in self._sinks.values():
             sink.apply_gains()
+        # The session's song is a clock for live notes as well as a song (see
+        # `session_music_leg`): the note fires on this thread, once a frame.
+        if gameplay is not None:
+            pump_jam_clocks(gameplay, self.game)
 
     def release_all(self):
         for sink in list(self._sinks.values()):
@@ -358,6 +362,85 @@ def sinks_for(gameplay, game=None):
         sinks = PartySinkSet(game)
         gameplay._party_sync_sinks = sinks
     return sinks
+
+
+def receiver_for(gameplay, game, channel_id):
+    """Who plays one member's audio on this client (entity here, else sink).
+
+    THE one reader of the rule: this map's entity for that voice channel when
+    the member is standing here, otherwise the sink kept for them while they are
+    on another map. An entity always wins -- it is the real body, with a
+    position, a reverb zone and the map's own shaping -- and the sink exists only
+    for the case no entity can serve.
+
+    Read-only by design: the packet paths run on the receive thread and must
+    never create an OpenAL source, so a missing sink means "not ours" rather
+    than "make one".
+    """
+    entity = (getattr(gameplay, "voice_channels", None) or {}).get(channel_id)
+    if entity is not None:
+        return entity
+    sinks = sinks_for(gameplay, game)
+    return sinks.sink_for(channel_id) if sinks is not None else None
+
+
+def session_music_leg(gameplay, game=None):
+    """The session leg this client is *hearing* a song through, or None.
+
+    Host first, then the guests: a session plays one song for everybody, and the
+    leg that is playing it is the one this machine hears. A leg that is not
+    playing, or whose output holds nothing, is not a song -- so it answers None
+    and a note keeps the timing it always had (the same rule a jukebox follows).
+
+    The channels are the session state's own (`state_members`), never a guess:
+    only a member's channel can be carrying the session's music, and only a
+    non-local member has a sink at all. Read-only (see `receiver_for`).
+    """
+    members = state_members(getattr(gameplay, "party_sync", None))
+    if not members:
+        return None
+    ordered = sorted(members, key=lambda channel: 0 if members[channel]["host"] else 1)
+    for channel in ordered:
+        leg = receiver_for(gameplay, game, channel)
+        compression = getattr(leg, "music_compression", None)
+        if compression is None:
+            continue
+        try:
+            if compression.pair_is_playing() and compression.pair_queued_frames() > 0:
+                return leg
+        except Exception:
+            continue
+    return None
+
+
+def pump_jam_clocks(gameplay, game=None):
+    """Fire the notes waiting on the session's song (game thread, once a frame).
+
+    A note held on a session leg has to be fired on the thread that can spawn
+    sources, and its wait has to be re-projected every frame -- so this rides the
+    per-frame party tick rather than the receive path.
+
+    **Every** member's leg is pumped, not only the one playing right now: a wait
+    registered on a leg whose song stopped (a paused host, an underrun) must
+    still reach its own instant instead of hanging until the song comes back.
+    Deciding what a stopped output means is the clock's own rule (``SpotClock``:
+    it keeps that wait on the wall clock), and a rule nobody pumps can never be
+    applied -- the cabinet's pump is unconditional for the same reason.
+    """
+    members = state_members(getattr(gameplay, "party_sync", None))
+    if not members:
+        return 0
+    fired = 0
+    for channel in members:
+        leg = receiver_for(gameplay, game, channel)
+        compression = getattr(leg, "music_compression", None)
+        if compression is None:
+            continue
+        try:
+            fired += compression.pair_clock.pump_waits()
+        except Exception:
+            pass
+    return fired
 
 
 # ── the two seams (main thread) ────────────────────────────────────────
