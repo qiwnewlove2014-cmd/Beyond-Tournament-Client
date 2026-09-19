@@ -87,6 +87,32 @@ FRAME_SIZE_STABLE_FRAMES = 3
 # How often the routine sink is told a room had to hold for a refill.
 HOLD_REPORT_INTERVAL = 30.0
 
+# A live note waits on the room's *own* content clock (see ``wait_advance``),
+# because the room's queue is what a listener is really hearing and that queue
+# moves: a sleep measured from a snapshot taken when the note arrived walks
+# away from the song whenever the queue changes under it -- read as the band
+# trailing by a whole queue on one machine and sitting on the beat on the next.
+# The wait follows the clock instead, and these are its two bounds:
+#
+# * a clock that never moves (a paused song, a stalled room) must not hold a
+#   note forever -- a live player is playing, and a note held forever is a note
+#   lost -- so every wait fires this much after its own wall-clock target anyway;
+# * a queue that really moved (a drain, a shed, a realign) may pull a note
+#   earlier than its wall-clock target, but a *wrong* reading (a speaker that
+#   stopped, a reset queue) must not fire it wildly early. Two frames is the
+#   widest honest correction: one for the reading, one for the frame in hand.
+JAM_WAIT_SLACK_MS = 250.0
+JAM_WAIT_EARLY_FRAMES = 2
+
+# What this room measured its own note spawn to cost, in milliseconds: the time
+# from ``route_to_room`` to the first speaker actually playing the note (see
+# ``note_spawn_report``). 0 means "nothing measured yet" and the caller keeps
+# its own default; the value only ever *raises* the scheduler's allowance,
+# because under-compensating a slow machine's spawn is the failure that is
+# audible ("the band is behind the beat on that one computer").
+NOTE_SPAWN_CEILING_MS = 150.0
+NOTE_SPAWN_WEIGHT = 0.25
+
 SAMPLERATE = 48000
 
 # The cabinet's own playback uses its own category, not map music.
@@ -212,6 +238,13 @@ class CinemaSpeakerBank:
         # A delay trim is measured from there, so it survives the room's own
         # start rules changing once playback has begun.
         self._start_frame = None
+        # A live note's clock: frames *fed* to a speaker (its own count, so a
+        # speaker that rejoined late has its own instant), the wall time a
+        # content boundary was last seen at, and the notes waiting on it.
+        self._n_fed = {}
+        self._content_epoch = {}
+        self._jam_waits = []
+        self._note_spawn_ms = 0.0
         self._build()
 
     # ------------------------------------------------------------- lifetime
@@ -346,6 +379,7 @@ class CinemaSpeakerBank:
         if self._stopped:
             return
         self._stopped = True
+        self._drop_waits()
         self._reset_output(stamp=False)
         self.release_buffers()
         self._recent.clear()
@@ -360,9 +394,12 @@ class CinemaSpeakerBank:
     @_serialized
     def forget_sources(self):
         """Called once the owning player has deleted the OpenAL sources."""
+        self._drop_waits()
         self.slot_sources.clear()
         self._recent.clear()
         self._crossover_streams.clear()
+        self._n_fed.clear()
+        self._content_epoch.clear()
         self._stopped = True
 
     # ---------------------------------------------------------------- output
@@ -408,6 +445,11 @@ class CinemaSpeakerBank:
                 buffer.set_data(pcm, sample_rate=SAMPLERATE,
                                 format=cyal.BufferFormat.MONO16)
                 self.slot_sources[slot].queue_buffers(buffer)
+                # A speaker that appears mid-song (``reconfigure``) is filled
+                # from the frames the room already holds, which do not pass
+                # through here: it starts from the room's own count so its
+                # content position is the room's, not zero.
+                self._n_fed[slot] = self._n_fed.get(slot, self.frames_queued) + 1
                 queued += 1
             self.frames_queued += 1
             self._commit(left, right, programmes)
@@ -1035,6 +1077,203 @@ class CinemaSpeakerBank:
         except Exception:
             return 0
 
+    # ---------------------------------------------------- a live note's clock
+    #
+    # A note played into this room has to land on the beat a listener is
+    # *hearing*, and what a listener is hearing is this room's queue -- not the
+    # server's live edge. The queue moves (frames drained, a shed, a realign, a
+    # hold), so a note that slept out a duration measured at the moment it
+    # arrived walks away from the song as the queue changes under it: the two
+    # machines listening to one room disagree about whether the band is on the
+    # beat, which is the "some computers hear it straight, some do not" report.
+    # Everything below anchors the wait to the room's own content position
+    # instead of to the wall clock: ``_progress_of`` is the instant a speaker is
+    # playing right now, in frames, and ``wait_advance`` runs its callable when
+    # that instant has moved the note's own distance.
+
+    def _progress_of(self, slot):
+        """The instant this speaker is playing right now, in frames.
+
+        Frames fed minus frames still queued, both of which this room knows
+        exactly (the driver reports the second): the difference is the position
+        of the frame at the front of that speaker's queue -- the song's content
+        position as these ears hear it. Per speaker, because a speaker that
+        rejoined late has an instant of its own, and a note played at it has to
+        land on *its* beat.
+        """
+        try:
+            return int(self._n_fed.get(slot, 0)) - self._queued_of(slot)
+        except Exception:
+            return 0
+
+    def _slot_is_playing(self, slot):
+        """True while this speaker is actually playing audio.
+
+        The one thing a content reading cannot be taken from: a source that is
+        not playing is the driver's own way of saying "everything I hold is
+        finished", so an unplayed queue and a played one are the same number.
+        """
+        source = self.slot_sources.get(slot)
+        if source is None:
+            return False
+        try:
+            return source.state == cyal.SourceState.PLAYING
+        except Exception:
+            return False
+
+    def _pick_jam_slot(self, slot=None):
+        """The speaker a wait is measured on: the one named, else the leading
+        edge (the shallowest queue -- the same answer ``buffered_ms`` gives)."""
+        if slot is not None and slot in self.slot_sources:
+            return slot
+        best, best_depth = None, None
+        for candidate in self._feed_slots():
+            depth = self._queued_of(candidate)
+            if best_depth is None or depth < best_depth:
+                best, best_depth = candidate, depth
+        return best
+
+    def note_spawn_ms(self):
+        """What this room measured one note's own spawn to cost here (ms)."""
+        return self._note_spawn_ms
+
+    def note_spawn_report(self, ms):
+        """Note how long this room's last note took to reach a speaker (ms).
+
+        Reported by ``live.route_to_room`` -- the one place a note is played at
+        a room's speakers -- and averaged, because a single reading is one game
+        frame that happened to be busy. Zero means "never measured", so a room
+        that has not played a note yet leaves the caller's own allowance alone;
+        the value only ever exists to *raise* that allowance, because
+        under-compensating a slow machine's spawn is the failure that is heard
+        ("the band is behind the beat on that one computer").
+        """
+        try:
+            value = float(ms)
+        except (TypeError, ValueError):
+            return
+        # One chained comparison, deliberately: a NaN answer is refused rather
+        # than latched, and NaN is what a bad clock reading hands in (every
+        # comparison against it is False).
+        if not (0.0 <= value <= NOTE_SPAWN_CEILING_MS * 4):
+            return
+        value = min(value, NOTE_SPAWN_CEILING_MS)
+        if self._note_spawn_ms <= 0.0:
+            self._note_spawn_ms = value
+        else:
+            self._note_spawn_ms += (value - self._note_spawn_ms) * NOTE_SPAWN_WEIGHT
+
+    def wait_advance(self, ms, fire, *, slot=None, tail_ms=0.0):
+        """Run ``fire`` when this room's own clock has advanced ``ms``.
+
+        ``ms`` is the music the note still has to wait for to land on the beat
+        the listener hears -- the scheduler's own figure (the room's queue plus
+        this machine's distance behind the room, less the performer's reported
+        lag) -- and ``tail_ms`` is what this room measured its own spawn to
+        cost (``note_spawn_ms``), which the wait spends *before* the beat
+        instead of after it.
+
+        Returns True when the room took the wait, and False when there is no
+        clock to wait on (no speakers, a stopped room): the caller then fires
+        the note itself, exactly as it did before this existed.
+        """
+        if self._stopped or not self.slot_sources or not callable(fire):
+            return False
+        advance = max(0.0, float(ms or 0.0))
+        tail = max(0.0, min(float(tail_ms or 0.0), NOTE_SPAWN_CEILING_MS))
+        chosen = self._pick_jam_slot(slot)
+        if chosen is None:
+            return False
+        now = time.monotonic()
+        wait_for = max(0.0, advance - tail)
+        self._jam_waits.append({
+            "slot": chosen,
+            "progress0": self._progress_of(chosen),
+            "remaining": wait_for,
+            "target": now + wait_for / 1000.0,
+            "fire": fire,
+        })
+        return True
+
+    def pump_waits(self):
+        """Fire every note this room's own clock has reached (game thread).
+
+        Called once per gameplay frame while the room is playing. Each wait is
+        re-projected from the room's *current* content position every time, so
+        a queue that drained (or grew, or was realigned) moves the note with it
+        instead of leaving it where the arrival snapshot put it. A speaker that
+        is not playing is not a clock (``_slot_is_playing``), and two bounds
+        keep a wrong reading from being heard as a wrong instant: a wait never
+        fires past its wall-clock target plus ``JAM_WAIT_SLACK_MS`` (a clock
+        that stopped moving), and never more than
+        ``JAM_WAIT_EARLY_FRAMES`` early of it.
+        """
+        if not self._jam_waits:
+            return 0
+        now = time.monotonic()
+        fired = 0
+        for wait in list(self._jam_waits):
+            slot = wait["slot"]
+            if slot not in self.slot_sources:
+                self._jam_waits.remove(wait)
+                continue
+            due = None
+            if self._slot_is_playing(slot):
+                progress = self._progress_of(slot)
+                seen = self._content_epoch.get(slot)
+                if seen is None or seen[0] != progress:
+                    # A content boundary was seen at most one poll ago; half the
+                    # interval since the last observation is the best estimate of
+                    # when it happened, and the error that leaves is a constant
+                    # offset for every note of this room rather than a per-note one.
+                    interval = (now - seen[2]) if seen else 0.0
+                    seen = (progress, now - interval / 2.0, now)
+                    self._content_epoch[slot] = seen
+                advanced = (progress - wait["progress0"]) * (self._frame_ms / 1000.0)
+                due = seen[1] + max(0.0, wait["remaining"] / 1000.0 - advanced)
+            else:
+                # A speaker that is not playing reports *everything* it holds as
+                # finished (``AL_BUFFERS_PROCESSED`` counts a buffer done the
+                # moment its source is not playing it), so its queue reads as
+                # empty and its content position jumps by whatever it happened to
+                # hold. That is not the room moving on -- it is the room saying
+                # nothing -- so this note keeps its wall-clock instant, and the
+                # stale epoch is forgotten rather than left to be believed when
+                # the speaker starts again.
+                self._content_epoch.pop(slot, None)
+            if due is None:
+                due = wait["target"]
+            due = min(due, wait["target"] + JAM_WAIT_SLACK_MS / 1000.0)
+            due = max(due, wait["target"] - JAM_WAIT_EARLY_FRAMES * self._frame_ms / 1000.0)
+            if now < due:
+                continue
+            self._jam_waits.remove(wait)
+            fired += 1
+            try:
+                wait["fire"]()
+            except Exception:
+                pass
+        return fired
+
+    def pending_waits(self):
+        """How many notes are waiting on this room's clock (read-out/tests)."""
+        return len(self._jam_waits)
+
+    def _drop_waits(self, slots=None):
+        """Drop the notes waiting on this room (a teardown, or a slot that went).
+
+        Dropped rather than fired: a note was played against *this* room's song,
+        and firing it into a room that is being taken apart would sound it at an
+        instant nobody asked for. One lost note is invisible next to that.
+        """
+        if not self._jam_waits:
+            return
+        if slots is None:
+            self._jam_waits.clear()
+            return
+        gone = set(slots)
+        self._jam_waits = [wait for wait in self._jam_waits if wait["slot"] not in gone]
+
     def playing(self):
         """True when every speaker is playing."""
         for source in self.slot_sources.values():
@@ -1471,7 +1710,18 @@ class CinemaSpeakerBank:
             self.slot_sources.pop(slot, None)
             self._slot_tier.pop(slot, None)
             self._slot_crossover.pop(slot, None)
+            self._n_fed.pop(slot, None)
+            self._content_epoch.pop(slot, None)
             self._dispose_speaker(old_sources[slot])
+        if dropped:
+            # A note waiting on a speaker that just went has no clock left.
+            self._drop_waits(dropped)
+        for slot in added:
+            # The newcomer is filled from the frames the room still holds
+            # (below, not through ``queue_frame``): start it on the room's own
+            # content position so its instant is the room's.
+            self._n_fed[slot] = self.frames_queued
+            self._content_epoch.pop(slot, None)
         changes = []
         if added:
             changes.append("+" + ", ".join(added))
@@ -1528,6 +1778,11 @@ class CinemaSpeakerBank:
         self._plays_started = False
         self._start_frame = None
         self._refill_hold = False
+        # The room's clock starts over with its queue: a note waiting on the
+        # old one would be projected against frames that no longer exist.
+        self._drop_waits()
+        self._n_fed.clear()
+        self._content_epoch.clear()
 
     # ------------------------------------------------------------------ gain
 

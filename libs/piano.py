@@ -1169,7 +1169,12 @@ class PianoAudio:
                                    self._room_note_gain()),
             occlusion_provider=getattr(getattr(gameplay, "jukebox_player", None),
                                        "occlusion_tier", None),
-            schedule=getattr(game, "call_after", None),
+            # A trimmed speaker waits out *the room's* time, not the wall
+            # clock: the song's own trim is measured on that clock, so the
+            # speaker's note lands with the speaker's song (see room_schedule).
+            # No room playing here (or no room at all) keeps the frame timer.
+            schedule=(cinema_live.room_schedule(game, (x, y, z), pan=panned)
+                      or getattr(game, "call_after", None)),
             wanted=lambda: key in self.active_piano_notes,
             pan=panned,
         )
@@ -1283,7 +1288,12 @@ class PianoAudio:
                                    self._room_note_gain()),
             occlusion_provider=getattr(getattr(gameplay, "jukebox_player", None),
                                        "occlusion_tier", None),
-            schedule=getattr(game, "call_after", None),
+            # The shot travels the band's own path, trims included: a room
+            # that is playing here hands over its clock, so a trimmed speaker
+            # is checked the way it will be heard during a song.
+            schedule=(cinema_live.room_schedule(game, position,
+                                                pan=(cabinet, direction))
+                      or getattr(game, "call_after", None)),
             wanted=lambda: key in self.active_piano_notes,
             pan=(cabinet, direction),
         )

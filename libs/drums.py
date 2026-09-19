@@ -461,7 +461,11 @@ class DrumAudio:
             game, (x, y, z), _spawn,
             occlusion_provider=getattr(getattr(gameplay, "jukebox_player", None),
                                        "occlusion_tier", None),
-            schedule=getattr(game, "call_after", None),
+            # A trimmed speaker waits out the *room's* time, exactly like the
+            # song's own trim (see live.room_schedule); no room playing here
+            # keeps the game's frame timer.
+            schedule=(cinema_live.room_schedule(game, (x, y, z), pan=panned)
+                      or getattr(game, "call_after", None)),
             wanted=wanted,
             pan=panned,
         )

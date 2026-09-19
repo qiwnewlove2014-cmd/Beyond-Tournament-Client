@@ -1907,9 +1907,11 @@ class EventHandeler:
                         # at its own speaker, so adding the deepest trim here
                         # delayed every speaker, the untrimmed ones included.
                         self._jam_buffer_kind = "room"
+                        spawn = self._room_note_spawn_ms(room)
                         self._jam_buffer_detail = (
                             f"room queue={room.buffered_ms()}ms"
-                            f" trims={room.extra_latency_ms()}ms")
+                            f" trims={room.extra_latency_ms()}ms"
+                            + (f" spawn={spawn}ms" if spawn else ""))
                         return room.buffered_ms()
                     try:
                         src = getattr(streamer, "source_l", None)
@@ -2033,10 +2035,59 @@ class EventHandeler:
             self._log_jam_sync_anomaly(delay, buffer_ms)
         if delay <= 0:
             enqueue()
-        else:
-            # Cap guards against a wildly wrong offset stalling notes; the
-            # intended hold never exceeds the backlog plus skew slack.
-            self.game.call_after(min(int(delay), int(buffer_ms + 1000)), enqueue)
+            return
+        # A note whose room is playing *here* waits on that room's own clock
+        # instead of on the wall clock: the room's queue is the beat a listener
+        # actually hears, and it moves (a drain, a shed, a realign, a hold), so
+        # a wait measured once and slept out walks away from the song whenever
+        # the queue changes under it -- which is exactly how two machines
+        # listening to one room disagree about whether the band is on the beat.
+        # The room also knows what its own notes cost to sound on this machine
+        # (``bank.note_spawn_ms``), and spending that *before* the beat is what
+        # keeps a slower computer from playing the band behind it.
+        bank = self._note_room_bank(cabinet)
+        if bank is not None:
+            try:
+                tail_ms = max(self.JAM_NOTE_ADVANCE_MS, bank.note_spawn_ms())
+                if bank.wait_advance(delay, enqueue, tail_ms=tail_ms):
+                    return
+            except Exception:
+                pass
+        # Cap guards against a wildly wrong offset stalling notes; the
+        # intended hold never exceeds the backlog plus skew slack.
+        self.game.call_after(min(int(delay), int(buffer_ms + 1000)), enqueue)
+
+    def _note_room_bank(self, cabinet):
+        """The bank playing the note's room on this machine, or None.
+
+        The room itself is already resolved (``_note_song_cabinet``); this only
+        asks whether *that* room is playing here, because a beat that is not
+        audible on this machine is not a beat this note can land on.
+        """
+        if not cabinet:
+            return None
+        try:
+            from .audio.cinema import live as cinema_live
+            return cinema_live.room_runtime(
+                getattr(self.gameplay, "game", None), None, cabinet=cabinet)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _room_note_spawn_ms(room):
+        """What this room measured one of its own notes to cost here (int ms).
+
+        Asked, never re-derived: the room measures its own spawn cost the first
+        time one of its notes sounds (``CinemaSpeakerBank.note_spawn_ms``), and
+        this only lifts the number into the line below -- which is the one place
+        a person can read it. Zero until a note has sounded there (and for any
+        object that is not a room), because "not measured" is not "free".
+        """
+        try:
+            ms = float(getattr(room, "note_spawn_ms")())
+        except Exception:
+            return 0
+        return int(round(ms)) if ms > 0.0 else 0
 
     def _report_room_note_latency(self, heard_ms, buffer_ms, sender_lag_ms, delay):
         """Say how late a note came out of a cinema room, and what held it.

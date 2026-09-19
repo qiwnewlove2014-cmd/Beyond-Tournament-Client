@@ -1708,6 +1708,16 @@ class JukeboxPlayer:
             self._sweep_cinema_swaps(now)
         except Exception:
             pass
+        # A live note waits on its room's own clock (``bank.wait_advance``),
+        # and this is the thread it has to fire on: the room's queue is what
+        # the listener is hearing, so the note is played when *that* has moved.
+        try:
+            for entry in list(self.players.values()):
+                room = entry.get("cinema") if isinstance(entry, dict) else None
+                if room is not None:
+                    room.pump_waits()
+        except Exception:
+            pass
         rebuilds = []  # [(jukebox_id, reason)]
         stalled_ids = []  # relays relying on a warm-up un-stick this cycle
         needs_resync = False

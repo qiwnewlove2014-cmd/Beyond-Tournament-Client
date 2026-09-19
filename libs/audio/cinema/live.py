@@ -662,6 +662,59 @@ def room_for(game, position, *, pan=None):
     return router.room_by_id(cabinet)
 
 
+def room_runtime(game, position, *, pan=None, cabinet=None):
+    """The bank this note's room is *playing through* on this machine, or None.
+
+    ``room_for`` is the room a note belongs to, and it is the same answer on
+    every client because nothing there measures a listener. Whether a song is
+    playing in that room -- and therefore whether there is a beat to be on --
+    is this machine's own question: the bank is that song's own output, so its
+    frame queue is the clock a note has to land on (``wait_advance``) and its
+    speakers are where the note's copies come out. None means nothing is
+    playing in that room *here*, and the caller keeps the arrival-time path
+    rather than holding a note for a song nobody on this machine can hear.
+
+    The song asked for is the map cabinet's own jukebox song, never a Music Bot
+    feed: a bot's song is one listener's private one (a different song on every
+    machine), so it can never be the beat two players share.
+    """
+    if cabinet is None:
+        room = room_for(game, position, pan=pan)
+        if room is None:
+            return None
+        cabinet = room[0]
+    players = getattr(getattr(game, "gameplay", None), "jukebox_player", None)
+    entry = (getattr(players, "players", None) or {}).get(cabinet)
+    bank = entry.get("cinema") if isinstance(entry, dict) else None
+    if bank is None or not getattr(bank, "sources", None):
+        return None
+    return bank
+
+
+def room_schedule(game, position, *, pan=None):
+    """The room's own clock as a ``schedule(ms, fire)`` callable, or None.
+
+    What a speaker carrying a delay trim waits out is *the room's* time, not
+    the wall clock: the same clock the song's own trim is measured on, so a
+    trimmed speaker's note lands with that speaker's song instead of with a
+    frame boundary of this machine's game loop. The room's own spawn cost
+    rides along (``tail_ms``), for the same reason the note's own wait spends
+    it: being audible *at* the instant is what is being asked for.
+
+    A room that is not playing here has no clock to offer, and the caller keeps
+    ``game.call_after`` -- which is also every map without a room.
+    """
+    bank = room_runtime(game, position, pan=pan)
+    if bank is None:
+        return None
+    tail = bank.note_spawn_ms()
+
+    def schedule(ms, fire):
+        return bank.wait_advance(ms, fire, tail_ms=tail)
+
+    return schedule
+
+
 def room_terms_for(game, position, *, pan=None, listener=None,
                    occlusion_provider=None):
     """The speakers a live note plays at through a room, or ``()`` for none.
@@ -718,6 +771,17 @@ def note_goes_to_a_room(game, position, *, pan=None):
     if not note_reaches_a_room(game):
         return False
     return room_for(game, position, pan=pan) is not None
+
+
+def _report_spawn_cost(game, position, pan, cost_ms):
+    """Tell the room what one of its own notes cost to reach a speaker (ms)."""
+    bank = room_runtime(game, position, pan=pan)
+    if bank is None:
+        return
+    try:
+        bank.note_spawn_report(cost_ms)
+    except Exception:
+        pass
 
 
 def _report_reach(game, position, pan, terms):
@@ -802,6 +866,13 @@ def route_to_room(game, position, play_one, *, listener=None,
                            occlusion_provider=occlusion_provider)
     _report_reach(game, position, pan, terms)
     spoken = 0
+    # What this room's notes cost to sound *here*, measured on the way out:
+    # the note is audible as soon as its first speaker starts, so the first
+    # inline copy is the one that answers "how late is a note on this
+    # machine", and it is the number the scheduler spends before the beat
+    # (``bank.note_spawn_ms``) instead of guessing one value for every machine.
+    started = time.perf_counter()
+    measured = False
     for slot, spot, gain, delay_ms, tier, *rest in terms:
         channel = rest[0] if rest else None
         tone = rest[1] if len(rest) > 1 else None
@@ -841,5 +912,9 @@ def route_to_room(game, position, play_one, *, listener=None,
             schedule(delay_ms, _spawn)
         else:
             _spawn()
+            if not measured:
+                measured = True
+                _report_spawn_cost(game, position, pan,
+                                   (time.perf_counter() - started) * 1000.0)
         spoken += 1
     return spoken

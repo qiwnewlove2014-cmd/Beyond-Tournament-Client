@@ -45,11 +45,20 @@ def _handler_with_jukebox(entries):
     return handler
 
 
-def _room(buffered_ms=120, extra_ms=60):
-    """A cinema room's own measurement: its frame queue and its delay trims."""
-    return SimpleNamespace(sources=(object(), object()),
+def _room(buffered_ms=120, extra_ms=60, spawn_ms=None):
+    """A cinema room's own measurement: its frame queue and its delay trims.
+
+    ``spawn_ms`` is what the room measured one of its own notes to cost to
+    sound here (``CinemaSpeakerBank.note_spawn_ms``). A room that has not
+    played a note of its own yet has no number at all -- which is not the same
+    as a free one.
+    """
+    room = SimpleNamespace(sources=(object(), object()),
                            buffered_ms=lambda: buffered_ms,
                            extra_latency_ms=lambda: extra_ms)
+    if spawn_ms is not None:
+        room.note_spawn_ms = lambda: spawn_ms
+    return room
 
 
 def _relay_entry(queued=4, started=True):
@@ -375,6 +384,27 @@ class ScheduleRemoteNoteTests(unittest.TestCase):
             # same; the listener needs the line once.
             handler._schedule_remote_note({"server_time": now_ms}, mock.Mock())
         self.assertEqual(len(log_line.call_args_list), 1)
+
+    def test_the_rooms_own_measurement_of_a_notes_cost_is_readable(self):
+        """The number that says whether a slower machine needs anything more.
+
+        A room measures what one of its own notes costs to sound here, and the
+        wait already spends that before the beat; reading it back is what tells
+        a person whether the measurement is doing anything on this machine at
+        all. A room that has never played a note of its own says nothing rather
+        than "free", and neither does an object that is not a room.
+        """
+        entry = _relay_entry(queued=4)
+        entry["streamer"].cinema = _room(buffered_ms=400, extra_ms=60, spawn_ms=90.0)
+        handler = _handler_with_jukebox(entry)
+        now_ms = time.time() * 1000.0
+        with mock.patch("libs.event_handeler.time.time",
+                        return_value=now_ms / 1000.0), \
+                mock.patch("libs.deferred_log.log_deferred") as log_line:
+            handler._schedule_remote_note({"server_time": now_ms}, mock.Mock())
+            self.assertIn("spawn=90ms", log_line.call_args_list[0].args[0])
+        self.assertEqual(handler._room_note_spawn_ms(_room()), 0)
+        self.assertEqual(handler._room_note_spawn_ms(SimpleNamespace()), 0)
 
     def test_a_plain_pair_note_is_not_reported_as_a_room(self):
         """The report is about the output a listener stands beside."""
