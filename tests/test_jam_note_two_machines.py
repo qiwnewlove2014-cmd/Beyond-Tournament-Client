@@ -203,28 +203,33 @@ class AQueueThatMovesTakesTheNoteWithItTests(unittest.TestCase):
 
 
 class AnOutputThatWentAwayTests(unittest.TestCase):
-    """A note waiting on a pair whose streamer is replaced (pinned defect).
+    """A note waiting when its output is replaced is still heard.
 
     The wait lives on the clock of the streamer that *measured* it, and the
-    only pump of a pair's clock is the jukebox player's own frame, which pumps
-    the entry's *current* streamer (``libs/jukebox.py``). A cinema room drops
-    what it is holding when it goes away (``CinemaSpeakerBank._drop_waits``);
-    a plain pair has no equivalent, so a note that is waiting when the relay
-    falls back to direct (``JukeboxPlayer._switch_to_direct``) is never fired
-    and never dropped -- it is simply not heard. Pinned here so that fixing it
-    (fire it, drop it with a report, or hand it to the new output) changes a
-    test that says what it is, instead of a silent behaviour nobody wrote down.
+    only pump of a pair's clock is the jukebox player's own frame, which pumped
+    the entry's *current* streamer -- so a note waiting when the relay fell back
+    to direct (``JukeboxPlayer._switch_to_direct``) was never fired and never
+    dropped: not late, simply not heard. The player keeps a replaced output's
+    clock now and pumps it until it has nothing left, and the mechanism is
+    pinned against the real ``JukeboxPlayer`` in
+    ``test_jam_note_pair_clock.AnOutputThatIsReplacedTests``; this is what it
+    buys at the level of the music -- the note lands where the others do, on
+    the song it was played against, instead of vanishing.
     """
 
-    def test_a_note_waiting_when_the_relay_goes_is_not_heard(self):
-        _error, result = means("switch_to_direct")
-        self.assertEqual(result["lost"].get(HELD), result["strikes"])
-        self.assertNotIn(HELD, result["errors"])
+    def test_a_note_waiting_when_the_relay_goes_still_lands_on_the_music(self):
+        honest_error, honest = means("honest")
+        error, result = means("switch_to_direct")
+        self.assertEqual(result["lost"].get(HELD, 0), 0)
+        self.assertLessEqual(abs(error[HELD] - honest_error[HELD]),
+                             JAM_WAIT_EARLY_FRAMES * FRAME)
+        self.assertLessEqual(abs(error[HELD]), 2 * FRAME)
 
     def test_the_machine_that_did_not_switch_is_unaffected(self):
-        _error, result = means("switch_to_direct")
+        honest_error, honest = means("honest")
+        error, result = means("switch_to_direct")
         self.assertEqual(result["lost"].get(NOW, 0), 0)
-        self.assertIn(NOW, result["errors"])
+        self.assertAlmostEqual(error[NOW], honest_error[NOW], delta=FRAME)
 
 
 if __name__ == "__main__":

@@ -445,6 +445,72 @@ class ThePumpSiteTests(unittest.TestCase):
         self.assertIn("box", player.players)
 
 
+class AnOutputThatIsReplacedTests(unittest.TestCase):
+    """A note outlives the output it was waiting on (the pump keeps it).
+
+    A live note waits on the clock of the streamer that measured it, and the
+    only pump of a pair's clock is the player's own frame, which pumps the
+    entry's *current* streamer. So a streamer replaced under a waiting note --
+    the relay going away for direct playback, a song advancing, a rebuild --
+    left a note nothing ever fired and nothing ever dropped: not late, simply
+    not heard (a cinema room drops what it holds when it goes; a pair had no
+    equivalent). ``_keep_waiting_notes`` remembers the clock and ``update``
+    pumps it until it has nothing left, while a map change drops it -- a map
+    change is not a hiccup, and firing a note into the next map would sound it
+    at an instant nobody asked for.
+    """
+
+    def _player(self, clock):
+        game = SimpleNamespace(network=SimpleNamespace(send=lambda *a: None),
+                               audio_mngr=None)
+        player = jukebox.JukeboxPlayer(game)
+        player._last_recovery_request_at = 0.0
+        player.players["box"] = {
+            "source": None, "secondary_source": None,
+            "streamer": SimpleNamespace(is_alive=lambda: True, pair_clock=clock,
+                                        last_packet_at=time.monotonic()),
+            "title": "Song", "url": "https://youtu.be/x", "transport": "relay",
+            "playback_key": ("id", 4), "relay_key": (1001, 2001),
+            "created_at": time.monotonic(), "play_params": {},
+        }
+        return player
+
+    def _clock(self, waits=1):
+        clock = mock.Mock()
+        clock.pending_waits.return_value = waits
+        return clock
+
+    def test_a_replaced_output_keeps_the_note_waiting_on_it(self):
+        clock = self._clock()
+        player = self._player(clock)
+        player.stop("box")       # the streamer goes; the song is on another one
+        self.assertIn(clock, player._orphan_clocks)
+        player.update()
+        self.assertEqual(clock.pump_waits.call_count, 1)
+
+    def test_and_is_forgotten_once_it_has_nothing_left(self):
+        clock = self._clock()
+        player = self._player(clock)
+        player.stop("box")
+        clock.pending_waits.return_value = 0        # the note sounded
+        player.update()
+        self.assertEqual(player._orphan_clocks, [])
+
+    def test_an_output_with_nothing_waiting_is_not_kept(self):
+        clock = self._clock(waits=0)
+        player = self._player(clock)
+        player.stop("box")
+        self.assertEqual(player._orphan_clocks, [])
+
+    def test_a_map_change_drops_what_a_replaced_output_was_holding(self):
+        clock = self._clock()
+        player = self._player(clock)
+        player.stop("box")
+        player.stop_all()
+        clock.drop_waits.assert_called()
+        self.assertEqual(player._orphan_clocks, [])
+
+
 class ThePairSpendsWhatANoteCostsTests(unittest.TestCase):
     """The pair's own spawn cost, measured by the instrument that plays it.
 

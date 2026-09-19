@@ -180,6 +180,12 @@ class Machine:
         self.hold_ms = 0.0
         self.streamer = None
         self._pair_sources = []
+        # Clocks of outputs that were replaced while a note was waiting on
+        # them, mirroring ``JukeboxPlayer``: it keeps them
+        # (``_keep_waiting_notes``) and pumps them every gameplay frame
+        # (``_pump_orphan_clocks``), which is the only reason a note survives
+        # its own output going away.
+        self.orphan_clocks = []
         self._build()
 
     # ----------------------------------------------------------- distances
@@ -262,10 +268,20 @@ class Machine:
                             self.source.ms_at(now - self.behind_ms))
 
     def pump(self):
-        """One gameplay frame: the pair's own clock fires what it has reached."""
+        """One gameplay frame: the pair's own clock fires what it has reached.
+
+        The current output's clock and the ones the player kept when an output
+        was replaced, exactly as ``JukeboxPlayer.update`` pumps both.
+        """
         clock = getattr(self.streamer, "pair_clock", None)
         if clock is not None:
             clock.pump_waits()
+        still = []
+        for orphan in self.orphan_clocks:
+            orphan.pump_waits()
+            if orphan.pending_waits():
+                still.append(orphan)
+        self.orphan_clocks[:] = still
 
     # ------------------------------------------------------- what can move
 
@@ -300,6 +316,9 @@ class Machine:
         """
         if self.transport == "direct":
             return
+        clock = getattr(self.streamer, "pair_clock", None)
+        if clock is not None and clock.pending_waits():
+            self.orphan_clocks.append(clock)
         self.streamer.running = False
         self.streamer._stopped = True
         self.transport = "direct"

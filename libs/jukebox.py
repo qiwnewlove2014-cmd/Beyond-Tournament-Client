@@ -94,6 +94,11 @@ class JukeboxPlayer:
         self.volume = 65
         self._lock = threading.Lock()
         self.relay_routes = {}
+        # Clocks whose output was replaced while a jam note was still waiting on
+        # it (see ``_keep_waiting_notes``): ``update`` pumps only the entry's
+        # *current* streamer, so these are pumped here until they have nothing
+        # left, and dropped when a map change takes the song with it.
+        self._orphan_clocks = []
         # Frames buffered for relay routes whose jukebox_play event is still
         # sitting on the deferred game queue (see pend_relay_route) — this is
         # what keeps the first fraction of a song (its intro) from being
@@ -1471,6 +1476,10 @@ class JukeboxPlayer:
             return False
         log_line(f"[Jukebox] stop({jukebox_id}) title={player.get('title')!r}")
         streamer = player.get("streamer")
+        # A jam note waiting on this output's clock must still sound: the
+        # streamer goes, the clock it was holding the note on does not
+        # (``_keep_waiting_notes``).
+        self._keep_waiting_notes(streamer)
         relay_key = player.get("relay_key")
         if relay_key is not None:
             with self._lock:
@@ -1560,7 +1569,13 @@ class JukeboxPlayer:
             ids = list(self.players.keys())
         for jukebox_id in ids:
             self.stop(jukebox_id)
+        # A map change takes the songs with it: a note waiting on a replaced
+        # output belongs to a beat that is not on this map any more, so it is
+        # dropped rather than fired into the next one -- the same choice a
+        # cinema room makes for what it is holding when it goes away.
+        self._drop_orphan_clocks()
         for receiver in list(self._retired_relays):
+            self._drop_waiting_notes(receiver)
             receiver.stop()  # Finishes its owner-thread source cleanup too.
         self._stop_retiring_direct()
         with self._occlusion_lock:
@@ -1577,6 +1592,82 @@ class JukeboxPlayer:
                     except Exception:
                         pass
 
+    def _keep_waiting_notes(self, streamer):
+        """Remember an output's clock if a jam note is still waiting on it.
+
+        A live note waits on the clock of the output that *measured* it
+        (``libs/jukebox_clock.py``), and the only pump of a pair's clock is
+        this player's own frame, which pumps the entry's current streamer. So
+        a streamer replaced under a waiting note -- the relay going away for
+        direct playback, a song advancing, a rebuild -- left a note that
+        nothing ever fired and nothing ever dropped: not late, simply not
+        heard. A cinema room drops what it holds when it goes
+        (``CinemaSpeakerBank._drop_waits``); a pair had no equivalent, and the
+        clock's own promise is the opposite -- an output that is not playing
+        any more is not a clock, and the note keeps the instant it was given.
+
+        So the clock is kept here and pumped by ``update`` until it has
+        nothing left. ``stop_all`` drops them instead (a map change is not a
+        hiccup), and a clock that was never asked for a wait is not kept at
+        all: ``pair_clock`` is made on first use.
+        """
+        clock = getattr(streamer, "pair_clock", None)
+        if clock is None:
+            return False
+        try:
+            if not clock.pending_waits():
+                return False
+        except Exception:
+            return False
+        with self._lock:
+            if any(existing is clock for existing in self._orphan_clocks):
+                return False
+            self._orphan_clocks.append(clock)
+        return True
+
+    @staticmethod
+    def _drop_waiting_notes(streamer):
+        """Throw away what an output that is going was still holding."""
+        clock = getattr(streamer, "pair_clock", None)
+        if clock is None:
+            return False
+        try:
+            clock.drop_waits()
+        except Exception:
+            return False
+        return True
+
+    def _drop_orphan_clocks(self):
+        """Drop the notes kept from replaced outputs (a map change)."""
+        with self._lock:
+            clocks = list(self._orphan_clocks)
+            self._orphan_clocks[:] = []
+        for clock in clocks:
+            try:
+                clock.drop_waits()
+            except Exception:
+                pass
+
+    def _pump_orphan_clocks(self):
+        """Fire the notes a replaced output was still holding (one frame).
+
+        Pumped next to the entries' own clocks, on the game thread, because
+        firing a note can spawn sources. A clock with nothing left to fire is
+        forgotten.
+        """
+        with self._lock:
+            clocks = list(self._orphan_clocks)
+        keep = []
+        for clock in clocks:
+            try:
+                clock.pump_waits()
+                if clock.pending_waits():
+                    keep.append(clock)
+            except Exception:
+                keep.append(clock)      # an unreadable clock is not a verdict
+        with self._lock:
+            self._orphan_clocks[:] = keep
+
     def _retire_or_stop(self, jukebox_id):
         """Song advance: let a nearly-finished direct song play out its tail.
 
@@ -1590,6 +1681,10 @@ class JukeboxPlayer:
         """
         from . import music_bot as mb
         budget = mb.AudioStreamer.DIRECT_LEAD_IN_S + self.DIRECT_RETIRE_TAIL_MARGIN_S
+        with self._lock:
+            waiting_on = (self.players.get(jukebox_id) or {}).get("streamer")
+        # Outside the lock: ``_keep_waiting_notes`` takes it as well.
+        self._keep_waiting_notes(waiting_on)
         with self._lock:
             existing = self.players.get(jukebox_id)
             if existing is not None:
@@ -1724,6 +1819,7 @@ class JukeboxPlayer:
                 clock = getattr(entry.get("streamer"), "pair_clock", None)
                 if clock is not None:
                     clock.pump_waits()
+            self._pump_orphan_clocks()
         except Exception:
             pass
         rebuilds = []  # [(jukebox_id, reason)]
