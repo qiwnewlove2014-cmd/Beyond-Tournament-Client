@@ -275,7 +275,11 @@ class Entity(Object):
             if getattr(self.game, 'pong_mode', False) and getattr(self, 'is_user', False):
                 pass # suppress normal footstep; server plays pong-specific move sound
             else:
-                if mode == "run" and not os.path.exists(
+                # The surface has a run variant iff its run *folder* is there
+                # (one folder holding one or more .ogg).  Asked as a folder
+                # on purpose: a compiled client resolves assets through the
+                # VFS pack, where a directory is the pack's own index entry.
+                if mode == "run" and not os.path.isdir(
                     f"{consts.SOUNDPREPEND}/steps/{tile}/run"
                 ):
                     mode = "walk"

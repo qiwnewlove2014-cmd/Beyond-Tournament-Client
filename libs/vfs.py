@@ -318,6 +318,34 @@ class PackVFS:
         except (KeyError, ValueError):
             return None
 
+    def ensure_dir(self, name):
+        """Create the on-disk folder for a pack directory (no member read).
+
+        ``exists()`` must not merely *claim* a folder is there: callers such
+        as ``os.makedirs(..., exist_ok=True)`` trust the answer and then write
+        into that path.  Creating the empty folder keeps the answer and the
+        disk in agreement; the samples inside are still decrypted only when a
+        member is materialized.  Returns False when *name* is not a folder.
+        """
+        canonical = self._canonical_dir(name)
+        if canonical is None:
+            return False
+        target = os.path.join(self.cache_root, *canonical.split("/"))
+        # Real filesystem check (the hooks may be installed and would answer
+        # from the pack index, which is exactly what we are materializing).
+        real_isdir = _ORIGINALS.get("isdir", os.path.isdir)
+        if real_isdir(target):
+            return True
+        walked = self.cache_root
+        os.makedirs(walked, exist_ok=True)
+        for part in canonical.split("/"):
+            walked = os.path.join(walked, part)
+            try:
+                os.mkdir(walked)
+            except FileExistsError:
+                pass
+        return True
+
     def close(self):
         try:
             self._zip.close()
@@ -358,6 +386,16 @@ def _hooked_exists(path):
         ).replace("\\", "/")
         if _INSTANCE.member_exists(rel):
             _INSTANCE.materialize(rel)
+            return True
+        # A pack *folder* is a real path too.  Answering False for it made
+        # every caller that asks "is this folder there?" read a compiled
+        # install differently from a source one -- most visibly the run
+        # footstep fallback in Entity.move, which then downgraded every
+        # sprinting surface to its walk sample.  The folder itself is
+        # materialized (empty) so a later write into that path still works;
+        # the samples inside stay encrypted until asked for.
+        if _INSTANCE.member_is_dir(rel):
+            _INSTANCE.ensure_dir(rel)
             return True
     return _ORIGINALS["exists"](path)
 

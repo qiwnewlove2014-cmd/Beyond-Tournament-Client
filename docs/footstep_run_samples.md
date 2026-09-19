@@ -10,7 +10,7 @@ silently.
 `client/libs/objects/entity.py` (in `Entity.move`):
 
 ```python
-if mode == "run" and not os.path.exists(
+if mode == "run" and not os.path.isdir(
     f"{consts.SOUNDPREPEND}/steps/{tile}/run"
 ):
     mode = "walk"
@@ -22,6 +22,15 @@ is needed: `AudioManager.load_buffer` -> `path_utils.random_item` picks a
 random file out of that folder on every step, and `get_next_cycle_item` is
 only involved for attack/hit sets. Dropping the files in is the whole change —
 no code edit, no test edit, no map edit.
+
+The probe is a *folder* question on purpose. A compiled run has no `data/`
+folder: assets live in the `sounds.dat` pack and the VFS path hooks
+(`client/libs/vfs.py`) answer for them, so `os.path.exists` — which looks for
+a file member — used to answer "no" to every folder and made the released
+build play the walking sample on all 33 surfaces (fixed 2026-09-19;
+`PackVFS.ensure_dir` also creates the empty folder, so a caller that writes
+into a path after an `exists` probe still works). Both runs are pinned by
+`client/tests/test_footstep_run_fallback.py`.
 
 ## Missing today (24 of 33 surfaces)
 

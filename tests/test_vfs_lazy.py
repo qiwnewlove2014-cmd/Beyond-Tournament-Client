@@ -221,6 +221,7 @@ class PackVFSHookTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(root, "menu/hover.ogg")))
             self.assertFalse(os.path.exists(os.path.join(root, "missing.ogg")))
             self.assertTrue(os.path.isdir(os.path.join(root, "menu")))
+            self.assertTrue(os.path.exists(os.path.join(root, "menu")))
             self.assertFalse(os.path.isdir(os.path.join(root, "menu/click.ogg")))
 
             # builtins.open on a pack path returns decrypted bytes.
@@ -305,6 +306,70 @@ class PackVFSHookTests(unittest.TestCase):
             self.assertEqual(result, "decoded:" + calls[0])
         finally:
             vfs._INSTANCE = None
+            fixture.close()
+
+    def test_pack_folder_answers_exists_without_materializing(self):
+        # Regression (players heard it): Entity.move keeps the run footstep
+        # only while os.path.exists(f"{SOUNDPREPEND}/steps/<tile>/run") is
+        # True.  In a compiled build that folder is a pack member, and
+        # exists() looked at files alone -- so every sprinting surface of the
+        # built game fell back to its walk sample while the same data from
+        # source sounded right.  A pack folder must answer True exactly like
+        # the real filesystem, and probing it must not decrypt the samples
+        # inside (the check runs on every step).
+        fixture = LazyPackFixture()
+        fixture.reader.close()
+        nested = Path(tempfile.mkdtemp(prefix="bt-vfs-folders-"))
+        import libs.consts as consts
+        saved_prepend = consts.SOUNDPREPEND
+        try:
+            assets = nested / "data"
+            (assets / "steps/wood/run").mkdir(parents=True)
+            (assets / "steps/wood/walk").mkdir(parents=True)
+            (assets / "steps/wood/run/run-01.ogg").write_bytes(b"OGG-RUN" * 32)
+            (assets / "steps/wood/walk/walk-01.ogg").write_bytes(b"OGG-WALK" * 32)
+            pak = nested / "sounds.dat"
+            pack_data.pack_data(assets, pak, "official.example", 13000)
+            reader = vfs.PackVFS(pak, nested / "cache")
+            try:
+                vfs._INSTANCE = reader
+                consts.SOUNDPREPEND = str(nested / "cache") + "/"
+                consts.SOUNDSPREPEND = "/" + consts.SOUNDPREPEND
+                vfs.install_hooks()
+                root = os.path.abspath(consts.SOUNDPREPEND)
+                run_folder = os.path.join(root, "steps/wood/run")
+                self.assertTrue(os.path.exists(run_folder))
+                self.assertTrue(
+                    os.path.exists(os.path.join(root, "steps/wood/walk")))
+                self.assertTrue(os.path.exists(os.path.join(root, "steps")))
+                # A spelling that only differs by case still answers.
+                self.assertTrue(os.path.exists(os.path.join(root, "Steps")))
+                self.assertFalse(
+                    os.path.exists(os.path.join(root, "steps/wood/sprint")))
+                # The answer and the disk agree: exists() True means a write
+                # into that path works (os.makedirs trusts exists()).
+                self.assertTrue(
+                    vfs._ORIGINALS["isdir"](str(nested / "cache/steps/wood/run")))
+                # ...but no sample was decrypted just for the probe; the
+                # check runs on every step and must stay cheap.  (Ask the
+                # saved originals: the hooked ones answer from the pack.)
+                self.assertFalse(vfs._ORIGINALS["exists"](
+                    str(nested / "cache/steps/wood/run/run-01.ogg")))
+                self.assertFalse(vfs._ORIGINALS["exists"](
+                    str(nested / "cache/steps/wood/walk/walk-01.ogg")))
+                # A file member still materializes on exists/isfile.
+                sample = os.path.join(run_folder, "run-01.ogg")
+                self.assertTrue(os.path.isfile(sample))
+                with open(sample, "rb") as handle:
+                    self.assertEqual(handle.read(), b"OGG-RUN" * 32)
+            finally:
+                vfs._INSTANCE = None
+                reader.close()
+        finally:
+            consts.SOUNDPREPEND = saved_prepend
+            consts.SOUNDSPREPEND = "/" + saved_prepend
+            import shutil
+            shutil.rmtree(nested, ignore_errors=True)
             fixture.close()
 
     def test_uninstall_restores_originals(self):
