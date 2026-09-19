@@ -109,14 +109,56 @@ class ALatenessNobodyMeasuresTests(unittest.TestCase):
         """The same band, the same song, one performer on a slower line.
 
         Their ear is further behind the song while ours is not, so the beat
-        they struck is an older piece of music -- the note can only be late by
-        exactly the difference in the *unmeasured* half of the two distances
-        (120 ms against 40 ms), and that is the same number for every listener.
+        they struck is an older piece of music -- with nothing but a wall clock
+        the note can only be late by exactly the difference in the *unmeasured*
+        half of the two distances (120 ms against 40 ms), and that is the same
+        number for every listener: the band behind the song on every machine at
+        once, by a fixed amount. This is the row above, on a build whose
+        packets carry ``sender_lag_ms`` only -- what shipped before the
+        position stamp -- and it is here so that removing the stamp means
+        something.
         """
         honest, _a = means("honest")
-        slow, _b = means("sender_slow")
-        self.assertAlmostEqual(slow[HELD] - honest[HELD], 80.0, delta=FRAME)
-        self.assertAlmostEqual(slow[NOW] - honest[NOW], 80.0, delta=FRAME)
+        without, _c = means("sender_slow_nostamp")
+        self.assertAlmostEqual(without[HELD] - honest[HELD], 80.0, delta=FRAME)
+        self.assertAlmostEqual(without[NOW] - honest[NOW], 80.0, delta=FRAME)
+
+    def test_a_position_stamp_takes_the_performers_stream_out_of_the_hold(self):
+        """What the stamp buys, on the very same machines.
+
+        The lag number says how far the performer's stream trails the Server's
+        clock; the stamp says where in the *song* their ears were. Only the
+        second one is what a listener can aim at, so the note that is held (a
+        deep queue) lands on the beat instead of a fixed distance behind it,
+        and the difference from the unstamped run is the performer's own
+        transit -- the half of their distance that no packet ever measured.
+
+        The listener whose queue is no deeper than the performer's is *not*
+        helped, and must not be claimed to be: their note arrives after the
+        beat it was aimed at (the performer's slow link is in the packet's own
+        flight time), and no scheduling on the listening side can pull a note
+        back in time. That half is a network, not a bug.
+        """
+        honest, _a = means("honest")
+        stamped, _b = means("sender_slow")
+        without, _c = means("sender_slow_nostamp")
+        self.assertLessEqual(abs(stamped[HELD] - honest[HELD]), 2 * FRAME)
+        self.assertAlmostEqual(without[HELD] - honest[HELD], 80.0, delta=FRAME)
+        self.assertAlmostEqual(stamped[NOW], without[NOW], delta=FRAME)
+
+    def test_a_stamp_that_never_arrives_changes_nothing(self):
+        """A Server that predates the field drops it; the timing is the same.
+
+        ``packet_validator`` strips what it does not declare, so an old Server
+        simply forwards no stamp -- and an old listener ignores one. Both runs
+        must be the same music to the millisecond, because a build that cannot
+        answer where it is must keep the path it always had.
+        """
+        for scenario in ("honest", "listener_shed"):
+            stamped, _a = means(scenario)
+            without, _b = means(scenario + "_nostamp")
+            for machine in stamped:
+                self.assertAlmostEqual(stamped[machine], without[machine], delta=0.5)
 
     def test_a_performer_that_cannot_measure_leaves_a_whole_queue_window(self):
         """The reported symptom, reproduced: behind by one queue.

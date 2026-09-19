@@ -481,6 +481,19 @@ class Gameplay(state.State):
         measured against is the one this note is played along to -- the room
         the performer stands in (``_note_song_cabinet``), never whichever
         cabinet happens to play first on a map that is playing two.
+
+        Two numbers ride along, and they answer the same question two ways:
+        ``sender_lag_ms`` says how far this machine trails the song *as a
+        clock* (what the note timing was built on), while
+        ``sender_position_ms`` says where in the song this performer's own ears
+        were when they struck. The second one is the honest one -- a listener
+        that can answer its own position in the same song lands the note on the
+        beat whatever the performer's stream did, while the first is only ever
+        right when the performer's stream is level with the Server's clock
+        (``tests/two_machine_jam_sim.py`` has a row for the case where it is
+        not: the whole band lands one queue late). Older listeners ignore the
+        new field; older servers drop it (the validator strips what it does not
+        declare), and both fall back to the lag path, byte for byte.
         """
         player = getattr(self, "player", None)
         position = None
@@ -493,10 +506,14 @@ class Gameplay(state.State):
                 return packet
             cabinet = eh._note_song_cabinet(position, peer=getattr(player, "name", None))
             lag = eh._active_jukebox_buffer_ms(cabinet=cabinet)
+            beat = eh._audible_song_position_ms(buffer_ms=lag, cabinet=cabinet)
         except Exception:
             lag = None
+            beat = None
         if lag is not None and lag > 0:
             packet["sender_lag_ms"] = int(lag)
+        if beat is not None:
+            packet["sender_position_ms"] = int(max(0.0, beat))
         return packet
 
     def _send_jam_note(self, event, packet):

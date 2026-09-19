@@ -238,6 +238,13 @@ class Machine:
         streamer.pair_frames_fed = 0
         streamer._pair_frame_ms = self.frame_ms
         self.streamer = streamer
+        # The cabinet entry, as the player holds it: the streamer, plus what
+        # the Server said about the song (``start_offset`` and when it
+        # arrived). Built here rather than on the first note, because a
+        # machine has to be able to answer where in the song it is *before*
+        # anything is played -- that answer is what it stamps a note with.
+        self._entry = {"streamer": streamer, "start_offset": 0.0,
+                       "start_offset_received_at": None}
 
     # ------------------------------------------------------------- the world
 
@@ -256,6 +263,19 @@ class Machine:
             source.buffers_queued = queued
             source.state = (cyal.SourceState.PLAYING if self.playing
                             else cyal.SourceState.STOPPED)
+        # What the Server's own position for this song would have been when
+        # this machine's play event arrived, rebuilt from where its ears are:
+        # the position the client reads is that number plus the time since,
+        # minus the trail measured above, so writing the inverse makes this
+        # machine's own answer equal to ``music_ms`` to the millisecond -- the
+        # same thing the real client reports about itself.
+        entry = getattr(self, "_entry", None)
+        if entry is not None:
+            buffer_ms = max(queued, 1) * self.frame_ms
+            if self.transport == "direct":
+                buffer_ms += self.late_ms
+            entry["start_offset"] = (self.music_ms + buffer_ms) / 1000.0
+            entry["start_offset_received_at"] = now
 
     def play(self, dt_ms, now):
         """Play ``dt_ms`` of the song, or freeze -- a hold, an underrun."""
@@ -359,7 +379,12 @@ class World:
         handler = getattr(machine, "_handler", None)
         if handler is not None:
             return handler
-        entry = {"streamer": machine.streamer}
+        # The entry carries what the Server said about the song as well as the
+        # streamer: ``EventHandeler._audible_song_position_ms`` reads the
+        # position the play event named and the time it arrived, so a machine
+        # that knows where in the song its own ears are can answer where that
+        # is -- and the stamp it attaches to a note is that answer.
+        entry = machine._entry
         handler = EventHandeler.__new__(EventHandeler)
         handler.gameplay = SimpleNamespace(
             jukebox_player=SimpleNamespace(players={CABINET: entry}),
@@ -381,13 +406,19 @@ class World:
         machine._handler = handler
         return handler
 
-    def _sender_lag(self, performer, packet, *, measure=True):
+    def _sender_lag(self, performer, packet, *, measure=True, stamp=True):
         """The payload the game sends, built by the game's own code.
 
         ``measure=False`` is a performer whose own client cannot answer at
         that instant -- a stream mid-rebuild, still pre-buffering, or handing
         its output to a room -- which is the one case that leaves
-        ``sender_lag_ms`` out of the packet entirely.
+        ``sender_lag_ms`` out of the packet entirely (and the position stamp
+        with it: a client that cannot say how far behind it is cannot say
+        where in the song it is either). ``stamp=False`` models the build that
+        came before the stamp existed -- the same machines, the same song, the
+        number that cannot see the performer's own stream taken out of the
+        packet -- which is how the fix is proven to be the stamp rather than
+        the rig moving under it.
         """
         fake = SimpleNamespace(
             player=SimpleNamespace(name=performer.name, x=1.0, y=2.0, z=0.0),
@@ -400,12 +431,14 @@ class World:
             Gameplay._attach_jukebox_sender_lag(fake, packet)
         finally:
             performer.streamer.running = was
+        if not stamp:
+            packet.pop("sender_position_ms", None)
         return packet
 
     # ------------------------------------------------------------- the note
 
     def strike(self, performer_name, *, listeners=None, measure=True,
-               events=()):
+               stamp=True, events=()):
         """Strike one note and register it on every listener.
 
         The beat is the music the *performer* is hearing at this instant --
@@ -417,7 +450,7 @@ class World:
         beat_ms = performer.music_ms
         packet = {"server_time": self.clock.ms(), "x": 1.0, "y": 2.0, "z": 0.0,
                   "peer_id": performer_name}
-        self._sender_lag(performer, packet, measure=measure)
+        self._sender_lag(performer, packet, measure=measure, stamp=stamp)
         names = listeners or [name for name in self.machines
                               if name != performer_name]
         for name in names:
@@ -435,6 +468,7 @@ class World:
         """The packet arrives: the real scheduler places the hold."""
         note = {"machine": machine.name, "performer": performer_name,
                 "beat_ms": beat_ms, "sender_lag_ms": packet.get("sender_lag_ms"),
+                "sender_position_ms": packet.get("sender_position_ms"),
                 "strike_ms": float(packet.get("server_time") or 0.0),
                 "fired_ms": None, "heard_ms": None}
         self.notes.append(note)
@@ -539,11 +573,13 @@ class Scenario:
     """
 
     def __init__(self, name, machines, *, performer="Ann", measure=True,
-                 events=(), title="", strikes=STRIKES, cap_ms=RUN_LIMIT_MS):
+                 stamp=True, events=(), title="", strikes=STRIKES,
+                 cap_ms=RUN_LIMIT_MS):
         self.name = name
         self.machines = machines
         self.performer = performer
         self.measure = measure
+        self.stamp = stamp
         self.events = events
         self.title = title
         self.strikes = strikes
@@ -553,7 +589,8 @@ class Scenario:
         world = World(self.machines(), phase_ms=phase_ms)
         with world_clock(world.clock):
             world.run()
-            world.strike(self.performer, measure=self.measure, events=self.events)
+            world.strike(self.performer, measure=self.measure,
+                         stamp=self.stamp, events=self.events)
             world.run_out(self.cap_ms)
         return world
 
@@ -606,8 +643,26 @@ def _sender_missing():
     return _machines()
 
 
+@scenario("honest_nostamp", title="every number right, on a build with no stamp",
+          stamp=False)
+def _honest_nostamp():
+    return _machines()
+
+
+@scenario("listener_shed_nostamp", title="a shed, on a build with no stamp",
+          stamp=False, events=((60.0, lambda world: world.machines["Bob"].shed(2)),))
+def _listener_shed_nostamp():
+    return _machines()
+
+
 @scenario("sender_slow", title="the performer is the one on the slow link")
 def _sender_slow():
+    return _machines(Ann=dict(transport="relay", transit_ms=120.0, stage_ms=160.0))
+
+
+@scenario("sender_slow_nostamp", title="the same, on a build with no position stamp",
+          stamp=False)
+def _sender_slow_nostamp():
     return _machines(Ann=dict(transport="relay", transit_ms=120.0, stage_ms=160.0))
 
 
@@ -692,7 +747,8 @@ def describe(name):
 
 def read_out(names=None, strikes=None):
     """The table, as text -- what the CLI prints and a person reads."""
-    header = ("scenario", "listener", "error", "held", "sender_lag", "detail")
+    header = ("scenario", "listener", "error", "held", "sender_lag", "stamp",
+              "detail")
     lines = ["  ".join(header)]
     for name in (names or list(SCENARIOS)):
         result = run(name, strikes=strikes)
@@ -704,10 +760,12 @@ def read_out(names=None, strikes=None):
                     else ("   lost" if lost else "") )
             if lost and values:
                 mean = f"{sum(values) / len(values):+6.1f}ms+{lost}lost"
+            stamp = detail.get("sender_position_ms")
             lines.append("  ".join((
                 name, machine, mean,
                 f"{detail.get('held_ms', 0)}ms",
                 f"{detail.get('sender_lag_ms', 0)}ms",
+                f"{int(stamp)}ms" if stamp is not None else "None",
                 str(detail.get("detail")),
             )))
         lines.append("  ".join((

@@ -1883,6 +1883,7 @@ class EventHandeler:
         self._jam_buffer_kind = None
         self._jam_buffer_detail = None
         self._jam_streamer = None
+        self._jam_entry = None
         try:
             jp = getattr(self.gameplay, "jukebox_player", None)
             if jp is None:
@@ -1925,6 +1926,7 @@ class EventHandeler:
                     # is the listener's current distance behind the live edge.
                     self._jam_buffer_kind = "relay"
                     self._jam_streamer = streamer
+                    self._jam_entry = entry
                     self._jam_buffer_detail = f"relay {max(queued, 1)} frames"
                     return max(queued, 1) * 40
                 if (getattr(streamer, "_direct_anchor", False)
@@ -1965,6 +1967,7 @@ class EventHandeler:
                         queued = 0
                     self._jam_buffer_kind = "direct"
                     self._jam_streamer = streamer
+                    self._jam_entry = entry
                     self._jam_buffer_detail = (f"direct {max(queued, 1)} buffers"
                                                f" late={late_ms}ms")
                     return max(queued, 1) * 20 + late_ms
@@ -1973,6 +1976,84 @@ class EventHandeler:
             return self._party_leg_backlog_ms()
         except Exception:
             return None
+
+    @staticmethod
+    def _sender_position_ms(data):
+        """The position stamp a note carries, or None if it carries none.
+
+        Only a finite, non-negative millisecond reading is a position in a
+        song: a Server that predates the field does not forward it at all
+        (``packet_validator`` strips what it does not declare), and a build
+        that cannot measure its own position simply says nothing. None keeps
+        the listener on the wall-clock path rather than on a guess.
+        """
+        try:
+            value = data.get("sender_position_ms")
+        except AttributeError:
+            return None
+        # A number, and only a number: the Server's own schema refuses a string
+        # here (a packet that carried one would never reach a listener), and a
+        # build that cannot measure its position must not be able to aim
+        # somebody else's note with a guess that happens to parse.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        position = float(value)
+        if position != position or position in (float("inf"), float("-inf")):
+            return None
+        if position < 0.0:
+            return None
+        return position
+
+    def _audible_song_position_ms(self, *, buffer_ms, cabinet=None):
+        """Where in the song this machine's ears are, in ms, or None.
+
+        The one number two machines can compare without trusting each other's
+        clocks. A jam note must land at the *position in the song* the
+        performer heard when they struck it, and neither the instant they
+        struck (a wall clock, shared) nor the distance they reported
+        (``sender_lag_ms``, a number this side cannot check) says that: a
+        performer whose own song reaches them late reports a number that is
+        right about *their* stream and wrong about the beat, and the note lands
+        a whole queue behind the music for everyone listening
+        (``tests/two_machine_jam_sim.py`` measures exactly that row).
+
+        Both ends compute a position the same way, from what the Server said
+        about the song rather than from either machine's clock: the position
+        the song had when this machine's play event was built
+        (``start_offset``, re-sent at the current position for a joiner and on
+        every resync), plus the time since it arrived, minus what this machine
+        trails by -- the frames its own output still holds, which *is* what
+        ``_active_jukebox_buffer_ms`` measured (``buffer_ms``). One rule for
+        both transports, deliberately: that measurement already counts a direct
+        stream's late audible start (``direct_late_s``) as part of its trail,
+        so subtracting the lateness again here would read the song too early by
+        it -- for a listener, being late to start and holding frames ahead of
+        the ear are the same distance behind the music.
+
+        What remains is the transit of the play event itself -- tens of ms, and
+        equal on two machines only by luck -- which is why this is only ever
+        used as a *stamp* on a note and never to re-time a song. None when no
+        song of this map is playing here, or the entry does not carry the
+        Server's position: an unknown position falls back to the wall-clock
+        path, byte for byte (see ``_schedule_remote_note``).
+        """
+        if buffer_ms is None:
+            return None
+        entry = getattr(self, "_jam_entry", None)
+        if not isinstance(entry, dict):
+            return None
+        received_at = entry.get("start_offset_received_at")
+        if received_at is None:
+            return None
+        try:
+            start_ms = float(entry.get("start_offset") or 0.0) * 1000.0
+            elapsed_ms = max(0.0, (time.monotonic() - float(received_at)) * 1000.0)
+            position = start_ms + elapsed_ms - float(buffer_ms)
+        except (TypeError, ValueError):
+            return None
+        if position < 0.0:
+            return None
+        return position
 
     def _party_leg_backlog_ms(self):
         """This machine's own distance behind the session's song, or None.
@@ -2058,11 +2139,31 @@ class EventHandeler:
             sender_lag_ms = max(0.0, min(sender_lag_ms, 30000.0))
         except (TypeError, ValueError):
             sender_lag_ms = 0.0
-        target_local = (
-            server_time - self._clock_offset_ms + buffer_ms
-            - sender_lag_ms - self.JAM_NOTE_ADVANCE_MS
-        )
-        delay = target_local - time.time() * 1000
+        # Where in the song the performer's own ears were when they struck.
+        # This outranks the lag above because the lag *is* their stream's own
+        # distance, and the beat is the song's: a performer whose stream sits a
+        # whole queue behind the Server's clock reports a lag that is true about
+        # their player and false about the music, and every listener then lands
+        # the note one queue late (``tests/two_machine_jam_sim.py``,
+        # ``sender_missing``). A position needs no clock of either machine to be
+        # true, and this machine answers the same question about itself
+        # (``_audible_song_position_ms``), so the note waits exactly until the
+        # song reaches the instant the performer played against. Both ends must
+        # be able to answer -- a map where this listener has no song of its own
+        # playing keeps the wall-clock path, byte for byte.
+        position_stamp = self._sender_position_ms(data)
+        my_position = (self._audible_song_position_ms(
+            buffer_ms=buffer_ms, cabinet=cabinet)
+            if position_stamp is not None else None)
+        if position_stamp is not None and my_position is not None:
+            delay = (position_stamp - my_position) - self.JAM_NOTE_ADVANCE_MS
+            target_local = time.time() * 1000 + delay
+        else:
+            target_local = (
+                server_time - self._clock_offset_ms + buffer_ms
+                - sender_lag_ms - self.JAM_NOTE_ADVANCE_MS
+            )
+            delay = target_local - time.time() * 1000
         # What this machine measured one of the instrument's remote notes to
         # cost to sound (``_instrument_note_spawn_ms``), read *before* the line
         # below: that line is built from the detail, and a number nobody can
