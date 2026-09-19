@@ -10,6 +10,7 @@ import cyal.exceptions
 import pyogg
 
 from . import consts
+from .jukebox_clock import SpawnCost
 
 
 class DrumAudio:
@@ -111,6 +112,10 @@ class DrumAudio:
         # instead of being dropped, so a listener never permanently loses the
         # first strike of a pad.
         self._deferred_hits = []
+        # What one of this kit's remote hits costs to sound *here*, measured as
+        # it sounds (see ``_play_remote_hit``): the scheduler spends it before
+        # the beat so a slow computer does not play the band behind it.
+        self._spawn_cost = SpawnCost()
         self._occlusion_filter = None
         self._light_occlusion_filter = None
         # A room speaker's own voicing, composed with the wall in the way (see
@@ -550,7 +555,23 @@ class DrumAudio:
         self._enforce_voice_limits(peer_id, pad)
         return primary
 
+    def note_spawn_ms(self):
+        """What one of this kit's remote hits cost to sound here (ms).
+
+        0 until one has sounded ("not measured" is not "free"); the scheduler
+        asks this instead of assuming one figure for every machine.
+        """
+        return self._spawn_cost.ms()
+
     def _play_remote_hit(self, data):
+        """Main-thread playback of one queued remote hit.
+
+        Also where a hit's own cost is measured: the time from here to the hit
+        being played is this machine's work (occlusion, the choke and voice
+        bookkeeping, the PA and venue copies), and it is the figure the
+        scheduler spends before the beat instead of guessing one for every
+        computer.
+        """
         gameplay = self.gameplay
         player = getattr(gameplay, "player", None) if gameplay else None
         if player is None:
@@ -564,6 +585,7 @@ class DrumAudio:
         # Wait (bounded) for the sample instead of dropping the hit: before
         # this, the first strike of a pad outside the warmed kit was silent
         # for listeners while the drummer heard it locally.
+        started = time.perf_counter()
         state = self._hit_sample_state(pad, data.get("kit"))
         if state != "ready":
             if state == "loading":
@@ -598,6 +620,7 @@ class DrumAudio:
             via_megaphone=data.get("via_megaphone") is True,
             kit=data.get("kit"),
         )
+        self._spawn_cost.report((time.perf_counter() - started) * 1000.0)
         if sound and getattr(gameplay, "map", None):
             reverb = gameplay.map.get_reverb_at(x, y, z)
             if reverb and reverb.reverb:

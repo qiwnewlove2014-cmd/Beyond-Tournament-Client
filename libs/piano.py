@@ -18,6 +18,7 @@ import pyogg
 from . import consts
 from . import path_utils
 from .audio.sound import Sound
+from .jukebox_clock import SpawnCost
 
 
 class PianoAudio:
@@ -57,6 +58,11 @@ class PianoAudio:
         # instead of being dropped, so a listener never permanently loses the
         # first strike of a note.
         self._deferred_notes = []
+        # What one of this instrument's remote notes costs to sound *here*,
+        # measured as it sounds (see ``_play_queued_note``), because that cost
+        # is what a jam note must spend before the beat on this machine -- the
+        # same figure a cinema room measures for its own speakers.
+        self._spawn_cost = SpawnCost()
 
     # Maximum number of queued events to process per update tick. Bounds the
     # worst-case frame cost when a performer floods notes faster than 60 FPS.
@@ -905,11 +911,25 @@ class PianoAudio:
             elif op == "stop":
                 self._stop_queued_note(data)
 
+    def note_spawn_ms(self):
+        """What one of this instrument's remote notes cost to sound here (ms).
+
+        0 until one has sounded ("not measured" is not "free"); the scheduler
+        asks this instead of assuming one figure for every machine.
+        """
+        return self._spawn_cost.ms()
+
     def _play_queued_note(self, data):
         """Main-thread playback of a queued remote piano note.
 
         Handles BOTH packet shapes (play_piano_note and play_unbound's piano
         branch) so the queue is the single OpenAL entry point.
+
+        This is also where a note's own cost is measured: the time from here to
+        the note being played is this machine's work (occlusion, the sample and
+        its filters, the PA and venue copies), and it is the figure the
+        scheduler spends before the beat instead of guessing one for every
+        computer.
         """
         gameplay = self.gameplay
         player = getattr(gameplay, "player", None) if gameplay else None
@@ -923,6 +943,7 @@ class PianoAudio:
             return
         if not isinstance(note_name, str) or not note_name:
             return
+        started = time.perf_counter()
         # Wait (bounded) for the sample instead of dropping the note: before
         # this, the first strike of any note outside the warmed range never
         # sounded for listeners while the performer heard it locally.
@@ -969,6 +990,7 @@ class PianoAudio:
             volume=volume, occluded=(occlusion >= 1.0), occlusion=occlusion,
             soft=soft, via_megaphone=via_megaphone
         )
+        self._spawn_cost.report((time.perf_counter() - started) * 1000.0)
         if snd and getattr(gameplay, "map", None):
             reverb = gameplay.map.get_reverb_at(x, y, z)
             if reverb and reverb.reverb:

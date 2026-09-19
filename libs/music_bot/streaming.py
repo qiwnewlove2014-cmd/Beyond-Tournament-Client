@@ -16,6 +16,7 @@ import cyal.exceptions
 
 from .. import logger
 from ..audio_diagnostics import probe
+from ..jukebox_clock import PAIR_KEY, SpotClock, mono_ms
 from ..party_sync import stereo_upload_eligible
 from ..speech import speak
 from .media import FFMPEG_PATH, YouTubeSearcher
@@ -174,6 +175,12 @@ class AudioStreamer(threading.Thread):
         self._pending_room = None
         self._swap_hold_frames = 0
         self.swap_room_failed = False
+        # Frames handed to the plain pair, and what one of them measured: the
+        # pair's own content clock (``pair_played_frames``), which a live
+        # note's wait is re-projected from instead of a queue depth measured
+        # once when the note arrived (see ``libs/jukebox_clock.py``).
+        self.pair_frames_fed = 0
+        self._pair_frame_ms = 0.0
         self._pool_swap_armed = False
         if self.spatial_pair:
             self.spatial_src_l, self.spatial_src_r = spatial_pair[0], spatial_pair[1]
@@ -970,6 +977,7 @@ class AudioStreamer(threading.Thread):
             self.spatial_src_l.queue_buffers(buf_l)
             self.spatial_src_r.queue_buffers(buf_r)
             self._remember_frame(left, right)
+            self._note_pair_fed(left)
             self._note_fed_content(data)
             return True
         except Exception:
@@ -1001,6 +1009,93 @@ class AudioStreamer(threading.Thread):
                        int(self.spatial_src_r.buffers_queued))
         except Exception:
             return 0
+
+    # ------------------------------------------- a live note's own clock
+    #
+    # A note played along to this cabinet waits on the frames the pair has
+    # *played*, re-projected every frame, instead of on a queue depth measured
+    # once when the note arrived: the queue drains and refills, and a hold that
+    # does not follow it walks away from the song -- differently on each
+    # machine. The rule lives in one place (``libs/jukebox_clock.py``), shared
+    # with a cinema room's bank; what is the streamer's own is the counter and
+    # the frame's measured size.
+
+    def _note_pair_fed(self, mono_pcm):
+        """Record one frame handed to the plain pair (its own clock's input)."""
+        self.pair_frames_fed = int(getattr(self, "pair_frames_fed", 0)) + 1
+        measured = mono_ms(mono_pcm)
+        if measured > 0.0:
+            self._pair_frame_ms = measured
+
+    def _pair_clock_reset(self):
+        """Start the pair's clock over (new sources, or a queue that was cut).
+
+        The epochs are forgotten rather than the waits dropped: a note already
+        waiting here keeps the instant it was going to sound at, which is what
+        a note lost to a hiccup would not have.
+        """
+        self.pair_frames_fed = 0
+        self._pair_frame_ms = 0.0
+        clock = getattr(self, "_pair_spot_clock", None)
+        if clock is not None:
+            clock.forget()
+
+    def pair_frame_ms(self):
+        """How long one pair frame is here, measured from the audio (ms).
+
+        Latched from the frames actually handed over, because the transports do
+        not agree (this streamer decodes 20 ms; the relay is sent 40 ms), and a
+        note's wait is counted in those frames.
+        """
+        measured = float(getattr(self, "_pair_frame_ms", 0.0) or 0.0)
+        return measured if measured > 0.0 else self.SAMPLES_PER_BUFFER / 48.0
+
+    def pair_played_frames(self):
+        """Frames the plain pair has already played: fed minus still queued.
+
+        ``pair_queued_frames`` is what OpenAL reports as still ahead of the
+        listener and the fed counter is this stream's own, so the difference is
+        the content instant the pair is playing right now -- what a live note's
+        wait is measured against, every frame.
+        """
+        fed = int(getattr(self, "pair_frames_fed", 0) or 0)
+        return max(0, fed - int(self.pair_queued_frames()))
+
+    def pair_is_playing(self):
+        """True while the plain pair is this stream's output, and playing.
+
+        A stream that handed its output to a cinema room has no pair to
+        measure, and a pair whose sources are not playing reports everything it
+        holds as finished -- neither is a clock for a live note (see
+        ``libs/jukebox_clock.py``).
+        """
+        if self.cinema is not None or not self.spatial_pair:
+            return False
+        if not self.running or self.paused:
+            return False
+        # The pair only starts once its own pre-buffer is in (the direct path
+        # anchors its audible start), and a queue that has not started says
+        # nothing about where the song is.
+        return self._all_playing()
+
+    @property
+    def pair_clock(self):
+        """The plain pair's own clock, made on first use.
+
+        Hand-built instances (tests) bypass ``__init__``, so nothing here is
+        assumed to exist before the first call.
+        """
+        clock = getattr(self, "_pair_spot_clock", None)
+        if clock is None:
+            clock = SpotClock(
+                progress_of=lambda key: self.pair_played_frames(),
+                frame_ms_of=self.pair_frame_ms,
+                playing_of=lambda key: self.pair_is_playing(),
+                keys_of=lambda: (PAIR_KEY,),
+                lead_of=lambda key: self.pair_queued_frames(),
+            )
+            self._pair_spot_clock = clock
+        return clock
 
     def request_room(self, bank):
         """Ask this stream to play through ``bank`` instead of the plain pair.
@@ -1049,8 +1144,24 @@ class AudioStreamer(threading.Thread):
         self.channels = 2
         self.BUFFER_SIZE = self.SAMPLES_PER_BUFFER * self.channels * 2
         self._pool_swap_armed = True
+        self._pair_credit_from_room()
         self._update_spatial_gain()
         return True
+
+    def _pair_credit_from_room(self):
+        """Start the pair's clock level with the queue it arrived holding.
+
+        A pair taken out of a room keeps the frames the room was about to
+        play, so that queue is not a standing debt: the fed counter starts
+        level with it and ``pair_played_frames`` begins at zero *played*
+        rather than reading the whole queue as still to come (which would
+        hold every note at its wall-clock instant for the queue's length).
+        """
+        self.pair_frames_fed = int(self.pair_queued_frames())
+        self._pair_frame_ms = 0.0
+        clock = getattr(self, "_pair_spot_clock", None)
+        if clock is not None:
+            clock.forget()
 
     def _configure_cinema(self, bank):
         """Give a room taking this stream over the cabinet's own numbers."""
@@ -1066,6 +1177,7 @@ class AudioStreamer(threading.Thread):
             pass
 
     def _stop_pair_sources(self):
+        self._pair_clock_reset()
         for source in (getattr(self, "spatial_src_l", None),
                        getattr(self, "spatial_src_r", None)):
             if source is None:

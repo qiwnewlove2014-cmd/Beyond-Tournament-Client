@@ -1026,6 +1026,7 @@ class EventHandeler:
                         data,
                         lambda data=data: self.game.audio_mngr.piano.enqueue_remote_note(data),
                     ),
+                    instrument="piano",
                 )
             return
         # ALL remaining unbound sounds (zombie splashes/summons, foley,
@@ -1228,6 +1229,7 @@ class EventHandeler:
                     data,
                     lambda data=data: self.game.audio_mngr.drums.enqueue_remote_hit(data),
                 ),
+                instrument="drums",
             )
 
     def set_game_mode(self, data):
@@ -1880,6 +1882,7 @@ class EventHandeler:
         """
         self._jam_buffer_kind = None
         self._jam_buffer_detail = None
+        self._jam_streamer = None
         try:
             jp = getattr(self.gameplay, "jukebox_player", None)
             if jp is None:
@@ -1921,6 +1924,7 @@ class EventHandeler:
                     # OpenAL plays the queue at 40ms per frame; the queue depth
                     # is the listener's current distance behind the live edge.
                     self._jam_buffer_kind = "relay"
+                    self._jam_streamer = streamer
                     self._jam_buffer_detail = f"relay {max(queued, 1)} frames"
                     return max(queued, 1) * 40
                 if (getattr(streamer, "_direct_anchor", False)
@@ -1960,6 +1964,7 @@ class EventHandeler:
                     except Exception:
                         queued = 0
                     self._jam_buffer_kind = "direct"
+                    self._jam_streamer = streamer
                     self._jam_buffer_detail = (f"direct {max(queued, 1)} buffers"
                                                f" late={late_ms}ms")
                     return max(queued, 1) * 20 + late_ms
@@ -1967,7 +1972,7 @@ class EventHandeler:
         except Exception:
             return None
 
-    def _schedule_remote_note(self, data, enqueue):
+    def _schedule_remote_note(self, data, enqueue, instrument=None):
         """Play a remote instrument note now, or aligned with the jukebox song.
 
         With a jukebox relay playing, every listener schedules the note on
@@ -2020,6 +2025,17 @@ class EventHandeler:
             - sender_lag_ms - self.JAM_NOTE_ADVANCE_MS
         )
         delay = target_local - time.time() * 1000
+        # What this machine measured one of the instrument's remote notes to
+        # cost to sound (``_instrument_note_spawn_ms``), read *before* the line
+        # below: that line is built from the detail, and a number nobody can
+        # read is not a measurement. A room's own figure is already in its
+        # detail, so this adds only the pair's.
+        spawn_ms = self._instrument_note_spawn_ms(instrument)
+        if (spawn_ms
+                and getattr(self, "_jam_buffer_kind", None) in ("relay", "direct")
+                and getattr(self, "_jam_buffer_detail", None)):
+            self._jam_buffer_detail = (
+                f"{self._jam_buffer_detail} spawn={spawn_ms}ms")
         # What the listener will actually hear, against the instant the
         # performer struck (the same audio clock both ends measure against).
         sound_local = target_local if delay > 0 else time.time() * 1000
@@ -2053,9 +2069,75 @@ class EventHandeler:
                     return
             except Exception:
                 pass
+        # A plain cabinet's pair is a clock too, and the same rule applies to
+        # it: the hold was measured when the note arrived, and the queue it was
+        # measured from drains and refills under it -- which is why a band on
+        # an ordinary jukebox is straight on one machine and behind on the
+        # next. Only the streamer whose backlog answered the measurement is
+        # asked, and only when that answer was a plain pair: a room playing
+        # here already took the note above.
+        clock = self._pair_clock_for_note()
+        if clock is not None:
+            # What *this* machine measured one of the instrument's remote notes
+            # to cost to sound is spent before the beat, exactly as the room's
+            # own measurement is -- but only the part the target does not
+            # already allow for: ``JAM_NOTE_ADVANCE_MS`` (subtracted above) is
+            # the game-frame wait plus the instrument's queue drain, and the
+            # instrument measures the work after that. A machine that has not
+            # measured a note yet keeps the timing it always had, to the byte
+            # (``spawn_ms`` was read above, and is 0 until a note has sounded).
+            extra_ms = max(0.0, float(spawn_ms) - self.JAM_NOTE_ADVANCE_MS)
+            try:
+                if extra_ms > 0.0:
+                    if clock.wait_advance(delay, enqueue, tail_ms=extra_ms):
+                        return
+                elif clock.wait_advance(delay, enqueue):
+                    return
+            except Exception:
+                pass
         # Cap guards against a wildly wrong offset stalling notes; the
         # intended hold never exceeds the backlog plus skew slack.
         self.game.call_after(min(int(delay), int(buffer_ms + 1000)), enqueue)
+
+    def _instrument_note_spawn_ms(self, instrument):
+        """What that instrument's remote notes cost to sound here (int ms).
+
+        Asked of the instrument itself -- it is the object that *places* a
+        remote note (``PianoAudio._play_queued_note`` /
+        ``DrumAudio._play_remote_hit``), so it is the one that measures the
+        work, and it measures its own (see ``libs/jukebox_clock.SpawnCost``).
+        Zero until one of its notes has sounded here, because "not measured"
+        is not "free".
+        """
+        if not instrument:
+            return 0
+        try:
+            player = getattr(self.game.audio_mngr, instrument, None)
+            ms = float(player.note_spawn_ms())
+        except Exception:
+            return 0
+        return int(round(ms)) if ms > 0.0 else 0
+
+    def _pair_clock_for_note(self):
+        """The plain pair's own clock for this note, or None.
+
+        The streamer is the one whose backlog measured the hold
+        (``_jam_streamer``, set by ``_active_jukebox_buffer_ms``), and it must
+        have answered as a *plain pair*: a cinema room has already been offered
+        the note (it has the room's own clock, one speaker at a time), and a
+        streamer with nothing playing has no clock to offer at all. An older
+        streamer with no clock falls through to the frame timer, exactly as it
+        did before any of this existed.
+        """
+        if getattr(self, "_jam_buffer_kind", None) not in ("relay", "direct"):
+            return None
+        streamer = getattr(self, "_jam_streamer", None)
+        if streamer is None:
+            return None
+        try:
+            return streamer.pair_clock
+        except Exception:
+            return None
 
     def _note_room_bank(self, cabinet):
         """The bank playing the note's room on this machine, or None.
@@ -2092,19 +2174,20 @@ class EventHandeler:
     def _report_room_note_latency(self, heard_ms, buffer_ms, sender_lag_ms, delay):
         """Say how late a note came out of a cinema room, and what held it.
 
-        Only a room is reported. That is the output a listener stands beside
-        and plays along with, and the one whose hold is bigger than the plain
-        pair's -- a room's frame queue, plus that speaker's own trim once the
-        note is spawned at it. The line names every component, because "the
-        drums feel late" cannot be told apart from "this machine's song is
-        behind the room" or "the performer is reporting no lag" without them.
+        Reported for any note that was held for a song on this machine: a room
+        (its frame queue, its speakers' trims and their measured spawn) and a
+        plain cabinet's pair (its queue and the instrument's measured spawn)
+        both answer "the band feels late here", and the line names every
+        component, because that cannot be told apart from "this machine's song
+        is behind" or "the performer is reporting no lag" without them.
 
         Once per five seconds: a drum roll is twenty notes a second and every
         one of them answers the same.
         """
         # Read defensively: the measurement is what records both, and it is
         # the one thing a test (or an older build's caller) can replace.
-        if (getattr(self, "_jam_buffer_kind", None) != "room"
+        kind = getattr(self, "_jam_buffer_kind", None)
+        if (kind not in ("room", "relay", "direct")
                 or heard_ms < self.JAM_LATENCY_REPORT_MS):
             return
         now = time.time()
@@ -2113,7 +2196,8 @@ class EventHandeler:
         self._last_jam_sync_log = now
         from .deferred_log import log_deferred as log_line
         log_line(
-            f"[Cinema] a live note is heard {int(heard_ms)}ms after it was "
+            f"{'[Cinema]' if kind == 'room' else '[Jam]'} "
+            f"a live note is heard {int(heard_ms)}ms after it was "
             f"struck: {getattr(self, '_jam_buffer_detail', None)}"
             f" - sender_lag={int(sender_lag_ms)}ms hold={int(max(delay, 0.0))}ms")
 

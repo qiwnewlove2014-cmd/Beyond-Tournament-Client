@@ -1708,14 +1708,22 @@ class JukeboxPlayer:
             self._sweep_cinema_swaps(now)
         except Exception:
             pass
-        # A live note waits on its room's own clock (``bank.wait_advance``),
-        # and this is the thread it has to fire on: the room's queue is what
-        # the listener is hearing, so the note is played when *that* has moved.
+        # A live note waits on the clock of whatever the listener is actually
+        # hearing (``libs/jukebox_clock.py``), and this is the thread it has to
+        # fire on: a room's queue, or a plain cabinet's stereo pair. Both are
+        # pumped here, once per gameplay frame, rather than from the audio
+        # owner -- firing a note can spawn sources, and that belongs to the
+        # game thread.
         try:
             for entry in list(self.players.values()):
-                room = entry.get("cinema") if isinstance(entry, dict) else None
+                if not isinstance(entry, dict):
+                    continue
+                room = entry.get("cinema")
                 if room is not None:
                     room.pump_waits()
+                clock = getattr(entry.get("streamer"), "pair_clock", None)
+                if clock is not None:
+                    clock.pump_waits()
         except Exception:
             pass
         rebuilds = []  # [(jukebox_id, reason)]

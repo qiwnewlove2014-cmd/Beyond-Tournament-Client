@@ -406,8 +406,13 @@ class ScheduleRemoteNoteTests(unittest.TestCase):
         self.assertEqual(handler._room_note_spawn_ms(_room()), 0)
         self.assertEqual(handler._room_note_spawn_ms(SimpleNamespace()), 0)
 
-    def test_a_plain_pair_note_is_not_reported_as_a_room(self):
-        """The report is about the output a listener stands beside."""
+    def test_a_plain_pair_note_is_reported_as_a_jam_not_a_room(self):
+        """The same question, asked of the output the note actually uses.
+
+        A room's line is ``[Cinema]`` and a plain cabinet's is ``[Jam]``: both
+        answer "the band feels late here", and which output held the note is
+        the first thing a person reading one needs to know.
+        """
         entry = _relay_entry(queued=10)          # 400ms of plain pair backlog
         handler = _handler_with_jukebox(entry)
         now_ms = time.time() * 1000.0
@@ -415,7 +420,10 @@ class ScheduleRemoteNoteTests(unittest.TestCase):
                         return_value=now_ms / 1000.0), \
                 mock.patch("libs.deferred_log.log_deferred") as log_line:
             handler._schedule_remote_note({"server_time": now_ms}, mock.Mock())
-        log_line.assert_not_called()
+        line = log_line.call_args_list[0].args[0]
+        self.assertIn("[Jam] a live note is heard", line)
+        self.assertIn("relay 10 frames", line)
+        self.assertNotIn("[Cinema]", line)
 
     def test_relay_hold_stays_uncapped_below_its_backlog(self):
         handler = _handler_with_jukebox(_relay_entry(queued=4))

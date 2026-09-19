@@ -34,8 +34,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs.audio.cinema import CinemaRenderer, CinemaSpeakerBank
 from libs.audio.cinema import live
-from libs.audio.cinema.bank import JAM_WAIT_EARLY_FRAMES, JAM_WAIT_SLACK_MS
 from libs.audio.cinema.crossover import FULL_RANGE
+from libs.jukebox_clock import JAM_WAIT_EARLY_FRAMES, JAM_WAIT_SLACK_MS
 from libs.event_handeler import EventHandeler
 
 from test_cinema_live import FakeGame, frame, specs
