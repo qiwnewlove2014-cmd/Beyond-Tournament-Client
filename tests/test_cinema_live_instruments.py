@@ -779,6 +779,40 @@ class PianoThroughTheRoomTests(unittest.TestCase):
             piano.stop_note("peer", "C4")
         self.assertNotIn("cin-peer-C4", piano.active_piano_notes)
 
+    def test_every_room_copy_goes_on_the_audio_threads_fade_queue(self):
+        """A hall makes one note into N sounds; the release starts no thread.
+
+        Each speaker's copy used to get a ``threading.Thread`` of its own to
+        fade it, so a key release in a six-speaker room meant seven threads and
+        seven OpenAL writes off the audio thread (see
+        ``tests/test_piano_damper_fade.py``). The room's copies ride the same
+        queue as the instrument's own sound: nothing is touched at the release,
+        and one ``update`` pass past the fade stops every one of them.
+        """
+        game = make_game()
+        piano = self.piano(game)
+        piano.route_to_cinema_room("peer", "C4", 10.0, 25.0, 0.0, 300)
+        copies = list(piano.active_piano_notes["cin-peer-C4"])
+        self.assertEqual(len(copies), 2)               # one per speaker
+        stopped = []
+        for sound in copies:
+            sound.source.stop = lambda: stopped.append(True)
+        clock = SimpleNamespace(now=1000.0)
+        fake_time = SimpleNamespace(monotonic=lambda: clock.now,
+                                    perf_counter=lambda: clock.now,
+                                    sleep=lambda seconds: None)
+        with mock.patch("libs.piano.time", fake_time), \
+                mock.patch.object(piano, "_schedule_filter_cleanup"):
+            piano.stop_note("peer", "C4")
+            self.assertEqual([fade["sound"] for fade in piano._fades], copies)
+            self.assertEqual([sound.source.gain for sound in copies], [1.0, 1.0])
+            self.assertEqual(stopped, [])
+            clock.now += float(piano._DAMPER_FADE_SECONDS) + 0.01
+            piano.update()
+        self.assertEqual([sound.source.gain for sound in copies], [0.0, 0.0])
+        self.assertEqual(stopped, [True, True])
+        self.assertEqual(piano._fades, [])
+
     def test_a_key_released_inside_the_trim_never_comes_out_of_the_room(self):
         """The reported bug: a quick tap left a note ringing at the cabinet.
 

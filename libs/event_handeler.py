@@ -3464,6 +3464,11 @@ class EventHandeler:
                 relay_id=data.get("relay_id"),
                 stream_epoch=data.get("stream_epoch"),
                 http_headers=data.get("http_headers"),
+                # The page this song IS, alongside the signed stream URL: a
+                # direct listener rebuilds its own stream on every resume and
+                # seek, and only this link can fetch a fresh one when the signed
+                # URL it was handed has gone stale.
+                canonical_url=data.get("canonical_url"),
                 eq_profile=data.get("eq_profile", "normal"),
                 eq_values=data.get("eq_values"),
                 cabinet_volume=data.get("volume", 100),
@@ -3486,7 +3491,14 @@ class EventHandeler:
         state = getattr(gp, "jukebox_state", None)
         if isinstance(state, dict):
             boxes = state.setdefault("jukeboxes", {})
-            boxes.setdefault(jid, {"id": jid})["paused"] = True
+            box = boxes.setdefault(jid, {"id": jid})
+            box["paused"] = True
+            # The frozen needle. It is the only position a paused cabinet has
+            # (nothing is playing here to measure) and it is what a scrub, a
+            # resume, and the cabinet menu's own read-out all start from.
+            position = data.get("position")
+            if isinstance(position, (int, float)):
+                box["position"] = float(position)
         player = getattr(gp, "jukebox_player", None)
         if player is not None:
             playback_id = data.get("playback_id")

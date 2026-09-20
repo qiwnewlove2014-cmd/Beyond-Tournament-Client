@@ -6,7 +6,6 @@ filtering, active note tracking, and damper fade-out for piano performances.
 """
 import contextlib
 import os
-import threading
 import time
 import array
 import queue
@@ -58,6 +57,14 @@ class PianoAudio:
         # instead of being dropped, so a listener never permanently loses the
         # first strike of a note.
         self._deferred_notes = []
+        # Released notes waiting to be faded out by ``update``, on the audio
+        # thread -- never by a thread of their own. A note is one sound at the
+        # instrument, one per PA speaker and one per cinema-room speaker, so
+        # "a thread per sound" meant seven threads and seven OpenAL writes per
+        # key release in a six-speaker room, every one of them outside the
+        # frame batch (see ``_schedule_fade``). The drums have always faded
+        # this way; this is the same queue for the piano.
+        self._fades = []
         # What one of this instrument's remote notes costs to sound *here*,
         # measured as it sounds (see ``_play_queued_note``), because that cost
         # is what a jam note must spend before the beat on this machine -- the
@@ -93,6 +100,11 @@ class PianoAudio:
     _CHORUS_SEND_INDEX = 3
     _CHORUS_WET_GAIN = 0.24
     _CHORUS_FADE_SECONDS = 0.12
+    # A released note's damper fade, advanced one step per audio pass (the
+    # drums' own rule): the whole note -- its sound at the instrument, its PA
+    # copies and its cinema-room copies -- fades out together, on the one
+    # thread that owns the context.
+    _DAMPER_FADE_SECONDS = 0.18
     _CHORUS_PARAMETERS = (
         ("WAVEFORM", 0),
         ("PHASE", 90),
@@ -698,6 +710,8 @@ class PianoAudio:
         self._process_pending_notes()
         self._retry_deferred_notes()
         now = time.monotonic()
+        # Released keys fade here, on this pass, where the OpenAL calls belong.
+        self._finish_fades(now)
         transitioning_peers = set()
         base_values_by_mode = {}
 
@@ -834,6 +848,9 @@ class PianoAudio:
         # Drop any queued events so a stale note doesn't fire after teardown.
         self._drain_pending_notes()
         self._deferred_notes = []
+        # Fades in flight go with the sounds they were fading: every one of them
+        # was stopped just above, and the next map starts clean.
+        self._fades.clear()
         # Release preloaded piano buffers so memory does not accumulate across
         # map changes. Matches DrumAudio.reset() behavior.
         for key in [k for k in list(self.am._preloaded_buffers) if "piano/Piano" in k]:
@@ -1418,6 +1435,61 @@ class PianoAudio:
         except Exception:
             pass
 
+    def _schedule_fade(self, sounds, duration):
+        """Put a released note's sounds on the audio thread's fade queue.
+
+        Called from the note-off path, which may run on a network handler's or
+        an input handler's thread: the queue is what keeps every OpenAL call
+        this makes -- the gain steps and the ``stop`` -- on the audio thread,
+        inside ``update`` (see ``_finish_fades``). Nothing here touches a
+        source, not even to read its gain: the start gain is read on the first
+        pass instead, so a key release costs OpenAL nothing at all.
+
+        A sound whose source is already gone (destroyed by the manager's own
+        cleanup) is dropped rather than queued -- a note nobody can hear is not
+        an error. ``duration`` is how long the whole fade takes.
+        """
+        now = time.monotonic()
+        duration = max(0.001, float(duration))
+        for snd in self._iter_sounds(sounds):
+            if snd is None or getattr(snd, "source", None) is None:
+                continue
+            self._fades.append({
+                "sound": snd,
+                "started": now,
+                "duration": duration,
+                # Read once, on the audio thread: reading it here would be an
+                # OpenAL call on a thread that must make none.
+                "gain": None,
+            })
+
+    def _finish_fades(self, now):
+        """Advance every fade in flight: one gain step, then the stop.
+
+        The rule is the drums' own (``DrumAudio._finish_fades``): a linear ramp
+        from the gain the note had down to silence over ``duration`` seconds,
+        and the source is stopped exactly when the ramp reaches zero. Nothing in
+        this method runs from the note-off path -- that is the whole point of
+        the queue (see ``_schedule_fade``).
+        """
+        remaining = []
+        for fade in self._fades:
+            source = getattr(fade["sound"], "source", None)
+            if source is None:
+                continue
+            try:
+                if fade["gain"] is None:
+                    fade["gain"] = float(source.gain)
+                progress = min(1.0, (now - fade["started"]) / fade["duration"])
+                source.gain = fade["gain"] * (1.0 - progress)
+                if progress >= 1.0:
+                    source.stop()
+                else:
+                    remaining.append(fade)
+            except Exception:
+                continue
+        self._fades = remaining
+
     def stop_note(self, peer_id, note_name):
         """Stop a piano note with a smooth 180ms damper fade-out.
         
@@ -1440,18 +1512,8 @@ class PianoAudio:
             all_snds.extend(cinema_snds if isinstance(cinema_snds, (list, tuple)) else [cinema_snds])
 
         if all_snds:
-            for snd in all_snds:
-                if snd and hasattr(snd, 'source') and snd.source:
-                    # Smooth damper fade-out (~180ms) instead of harsh instant stop
-                    def _fade_out(source, steps=10, duration=0.18):
-                        try:
-                            original_gain = source.gain
-                            step_time = duration / steps
-                            for i in range(steps, 0, -1):
-                                source.gain = original_gain * (i / steps)
-                                time.sleep(step_time)
-                            source.stop()
-                        except Exception:
-                            pass
-                    threading.Thread(target=_fade_out, args=(snd.source,), daemon=True).start()
+            # Smooth damper fade-out instead of a harsh instant stop, run from
+            # ``update`` on the audio thread: one queue entry per sound, no
+            # thread per sound (see ``_schedule_fade``).
+            self._schedule_fade(all_snds, self._DAMPER_FADE_SECONDS)
         self._schedule_filter_cleanup(peer_id)

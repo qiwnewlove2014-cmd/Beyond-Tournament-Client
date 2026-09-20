@@ -930,7 +930,7 @@ class JukeboxPlayer:
     def play(self, jukebox_id, x, y, z, title, url, duration, volume=None, start_offset=0.0,
              playback_id=None, transport="direct", relay_id=None, stream_epoch=None,
              http_headers=None, room_lead_in_s=None, join_playing_room=False,
-             received_at=None, **_kwargs):
+             received_at=None, canonical_url=None, **_kwargs):
         """Start (or seamlessly continue) the song for one jukebox at (x, y, z).
 
         Stereo-spatial like piano/drums: the STEREO stream is split into two
@@ -977,6 +977,13 @@ class JukeboxPlayer:
             "title": title, "url": url, "duration": int(duration or 0),
             "start_offset": float(start_offset or 0.0),
             "http_headers": http_headers,
+            # The page this song IS, sent beside the signed stream URL: direct
+            # playback rebuilds its own stream on every resume and seek, and the
+            # signed URL it was handed can have expired by then. Retrying a
+            # stale URL never helps; re-resolving the page does (see
+            # AudioStreamer.canonical_url), and that is the difference between a
+            # direct listener resuming and a direct listener going silent.
+            "canonical_url": canonical_url,
             "received_at": time.monotonic(),
         }
 
@@ -1250,6 +1257,7 @@ class JukeboxPlayer:
                     start_offset=start_offset,
                     start_offset_received_at=received_at or time.monotonic(),
                     http_headers=http_headers,
+                    canonical_url=canonical_url,
                     timeline_anchor=play_params["duration"] > 0,
                     media_cache=self._media_cache if play_params["duration"] > 0 else None,
                     room_lead_in_s=room_lead_in_s,
@@ -2058,6 +2066,7 @@ class JukeboxPlayer:
             params.get("title", ""), params["url"], params.get("duration") or 0,
             transport="direct", start_offset=offset,
             http_headers=params.get("http_headers"),
+            canonical_url=params.get("canonical_url"),
             # This machine fell back while the rest of the room still hears
             # the server relay. The relay room holds no lead-in, so the
             # direct anchor must not hold one either — otherwise this
@@ -2424,6 +2433,50 @@ def _cinema_mode_label(mode):
     if mode == CINEMA_AUTO:
         return "Auto - the speakers around it, if any"
     return f"{mode} - that room shape, speakers or not"
+
+
+def _cabinet_title(game, gp, jukebox_id, mode=None):
+    """The cabinet's own name: a plain jukebox, or the mode it is playing.
+
+    A menu title is the first thing a person hears when they walk up to a
+    cabinet, and "Music Jukebox" is the wrong sentence for one the map has
+    given a room: the same key opens both, so this line is the only thing that
+    tells them apart. The room is *previewed* with the very resolver the
+    read-out and the playback use (``room_plan``), so the name can never
+    promise a room that would not play -- a cabinet the map set to ``off``, one
+    with no speakers around it, and one whose position is not known yet all
+    keep the plain name they always had.
+
+    The tail is the **mode itself** -- the same token the mode picker offers
+    and the map stores (``front_only``, ``theatre``, ``auto``), never a
+    description of the speakers it feeds. The line right underneath says "Set
+    cinema mode (now: front_only)", and a title answering "Front speakers
+    only" would have the cabinet and its own mode line name one thing two
+    ways, which reads as two different settings to whoever is standing there.
+    Auto says ``auto`` for the same reason: it is not a shape of its own, and
+    neither the mode nor the title may claim the profile it resolved to.
+
+    The listener's own ``Cinema rooms:`` switch is deliberately not part of
+    this. The title says what the *cabinet* is, which is the same thing its
+    ``Cinema:`` line says; what these particular ears do with it is that line's
+    and the detail read-out's job to explain, and a title that followed a local
+    option would have two people reading the same cabinet disagree about it.
+    """
+    mode = mode or _cabinet_cinema_mode(gp, jukebox_id)
+    if mode == CINEMA_OFF:
+        return "Music Jukebox"
+    anchor = cabinet_anchor(game, jukebox_id) if game is not None else None
+    if anchor is None:
+        return "Music Jukebox"
+    try:
+        plan, _silent = room_plan(game, anchor, requested=mode, room_id=jukebox_id)
+    except Exception:
+        # A name is read out the moment a menu opens: nothing a map could hold
+        # is worth breaking that for (same rule as ``_room_extent``).
+        return "Music Jukebox"
+    if plan is None:
+        return "Music Jukebox"
+    return f"Cinema Jukebox: {mode}"
 
 
 def _cinema_detail(game, gp, jukebox_id, mode=None):
@@ -2926,6 +2979,21 @@ def open_jukebox_menu(game, gp):
         ("Search YouTube and queue a song", go_search),
         ("Queue by YouTube URL or livestream", go_direct_url),
         (lambda: _pause_menu_label(gp, jukebox_id), go_pause),
+    ]
+
+    # The scrub sits directly under Pause/Resume because that is what it is
+    # built on: reaching for an arrow pauses the cabinet for the room, lets the
+    # needle move while nothing is sounding (which is the only way a move costs
+    # nothing), and plays on by itself once the hand stops. The line *is* the
+    # control -- Left and Right work on it without opening anything (Menu hands
+    # an arrow to a line whose action offers one) -- and it is offered only when
+    # there is a needle to move: no song, or a livestream with no length, has
+    # nothing to scrub and does not pretend to.
+    if _scrub_spot(gp, jukebox_id) is not None:
+        scrub = _JukeboxScrubControl(game, gp, jukebox_id)
+        menu_items.append((scrub.label, scrub))
+
+    menu_items.extend([
         ("Skip current song", go_skip),
         ("Stop playback", go_stop),
         (_repeat_label, go_repeat),
@@ -2933,7 +3001,7 @@ def open_jukebox_menu(game, gp):
         (_volume_label, go_volume),
         ("View queue", go_queue),
         ("Remove my queued song", go_remove),
-    ]
+    ])
 
     if is_staff:
         menu_items.append((_eq_label, go_eq))
@@ -2973,7 +3041,11 @@ def open_jukebox_menu(game, gp):
 
     menu_items.append(("Cancel", go_cancel))
 
-    m = menu_mod.Menu(game, "Music Jukebox", parrent=gp)
+    # The title says which thing this is: a plain cabinet, or one playing
+    # through a room. Read once here (the menu's own ``Cinema:`` line stays a
+    # callable, so it is still fresh every time the menu speaks).
+    m = menu_mod.Menu(game, _cabinet_title(game, gp, jukebox_id, mode_now),
+                      parrent=gp)
     m.add_items(menu_items)
     menus.set_default_sounds(m)
     gp.add_substate(m)
@@ -3085,6 +3157,260 @@ def _open_eq_menu(game, gp, jukebox_id):
     """Open the accessible, real-time Jukebox Equalizer sliders."""
     gp.add_substate(_JukeboxEqSlider(game, gp, jukebox_id))
 
+
+class _JukeboxScrubControl:
+    """The cabinet's Scrub line: Left and Right move its needle.
+
+    The line *is* the control. Enter says what it does, and the arrow keys work
+    on the line itself with nothing to open first, because a scrub you had to
+    enter and leave again would be a menu wrapped around a keystroke.
+
+    The first arrow freezes the cabinet for the room -- reusing the pause, so
+    the packet every listener already understands is the one that tells them why
+    it went quiet -- and moves the needle. Every press inside SCRUB_HOLD_S is
+    free, instant and silent, because nothing is sounding while the needle moves:
+    that is the whole reason a scrub costs one audio interruption rather than one
+    per arrow. Nobody touching it for that long plays on from where the needle
+    stopped, and a held arrow skims at speed (this client never calls
+    ``pygame.key.set_repeat``, so a held key would otherwise produce exactly one
+    step).
+
+    Whether the room hears the song again is the *Server's* answer, never this
+    machine's guess: the session a scrub opens remembers whether it found the
+    cabinet playing, and only that session may play it on (see
+    ``jukeboxSeekEnd``). A scrub whose client escaped -- the app closed, the map
+    changed, a packet that arrives after the hold -- therefore cannot wake a
+    cabinet somebody deliberately paused. This control says where the needle is
+    and nothing about playback state.
+    """
+
+    STEP_S = 10.0
+    STEP_SHIFT_S = 30.0
+    STEP_CTRL_S = 60.0
+    #: A held arrow waits this long first, so a tap is one clean step, and then
+    #: skims at GLIDE_S_PER_S from where it began to be held.
+    GLIDE_AFTER_S = 0.35
+    GLIDE_S_PER_S = 40.0
+    #: How long the cabinet stays frozen after the last arrow. Long enough that a
+    #: hand moving between arrows never pays for the room going quiet again
+    #: (every press inside it is free), short enough that walking away from a
+    #: cabinet is a two-second pause rather than a silent map.
+    SCRUB_HOLD_S = 2.0
+    #: The hold keeps its own clock: a small tick pumps the held-arrow skim and
+    #: plays the song on once the hand has stopped. It is armed only while a
+    #: scrub is open, and the Server's own idle timer stays the backstop for a
+    #: client that never gets to close anything at all.
+    TICK_INTERVAL_S = 0.04
+    #: How often a skimming needle is read out, and how often the Server is told
+    #: where it is. The Server's copy only says what an abandoned scrub would
+    #: continue from (the closing packet carries the answer), so it can be far
+    #: coarser than what the scrubber hears.
+    ANNOUNCE_INTERVAL_S = 0.5
+    SEND_INTERVAL_S = 0.15
+    #: The song's own last two seconds stay behind the needle: landing there
+    #: would end the song on resume before anybody heard it (the same margin the
+    #: Server keeps).
+    END_MARGIN_S = 2.0
+
+    def __init__(self, game, gp, jukebox_id):
+        self.game = game
+        self.gp = gp
+        self.jukebox_id = jukebox_id
+        self.duration = 0.0
+        self.needle = 0.0
+        self._open = False
+        self._tick_id = None
+        self._held_direction = 0
+        self._held_step = self.STEP_S
+        self._held_since = 0.0
+        self._glide_from = 0.0
+        self._last_activity = 0.0
+        self._last_announce = 0.0
+        self._last_send = 0.0
+
+    # ─── the line ───
+
+    def label(self):
+        """What the line reads, its needle included.
+
+        While a scrub is open the needle is this control's own: the Server is
+        told about a move only now and then, so the cached state would still be
+        reading the number the freeze started at. Between scrubs it is asked
+        fresh, because then it is the playing song's own position.
+        """
+        if self._open:
+            return _scrub_menu_label(self.gp, self.jukebox_id,
+                                     spot=(self.needle, self.duration))
+        return _scrub_menu_label(self.gp, self.jukebox_id)
+
+    def __call__(self):
+        """Enter on the line: what it does, and where the needle is now."""
+        spot = _scrub_spot(self.gp, self.jukebox_id)
+        if spot is None:
+            speak("There is nothing to scrub at this cabinet.")
+            return
+        needle, duration = spot
+        speak(
+            f"Scrub playback. The song is at {_position_label(needle)} of "
+            f"{_position_label(duration)}. Left and Right move ten seconds, "
+            "with Shift thirty, with Control a minute. Hold an arrow to skim. "
+            "The cabinet plays on by itself once you stop."
+        )
+
+    def arrow(self, direction, mod):
+        """One Left or Right on the highlighted line.
+
+        ``menu.Menu`` hands an arrow to the line it is on when that line's own
+        action offers this, which is what makes the scrub a keystroke rather
+        than a menu to enter and leave.
+        """
+        if not self._open and not self._begin():
+            return
+        self._press(direction, mod)
+
+    def _begin(self):
+        """Freeze the cabinet and start the hold. False when this cabinet has
+        nothing to scrub at all."""
+        spot = _scrub_spot(self.gp, self.jukebox_id)
+        if spot is None:
+            speak("There is nothing to scrub at this cabinet.")
+            return False
+        self.needle, self.duration = spot
+        self.needle = self._clamp(self.needle)
+        self._open = True
+        now = time.monotonic()
+        self._last_activity = now
+        self._last_announce = 0.0
+        self._last_send = 0.0
+        self._send("jukebox_seek_start", {})
+        self._arm()
+        return True
+
+    # ─── needle ───
+
+    def _clamp(self, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = 0.0
+        return max(0.0, min(value, max(0.0, self.duration - self.END_MARGIN_S)))
+
+    def _step_for(self, mod):
+        if mod & pygame.KMOD_CTRL:
+            return self.STEP_CTRL_S
+        if mod & pygame.KMOD_SHIFT:
+            return self.STEP_SHIFT_S
+        return self.STEP_S
+
+    def _readout(self):
+        if self.needle <= 0.05:
+            return f"Start of the song, {_position_label(self.duration)} long"
+        return (f"{_position_label(self.needle)} of "
+                f"{_position_label(self.duration)}")
+
+    def _move(self, delta, force_announce=False):
+        now = time.monotonic()
+        before = self.needle
+        self.needle = self._clamp(self.needle + delta)
+        changed = self.needle != before
+        if changed and now - self._last_send >= self.SEND_INTERVAL_S:
+            self._last_send = now
+            self._send("jukebox_seek", {"position": round(self.needle, 2)})
+        # A press that changes nothing still answers -- at the very start or the
+        # very end of the song the key would otherwise read as broken.
+        if (force_announce or not changed
+                or now - self._last_announce >= self.ANNOUNCE_INTERVAL_S):
+            self._last_announce = now
+            speak(self._readout())
+
+    # ─── keys ───
+
+    def _press(self, direction, mod):
+        step = self._step_for(mod)
+        now = time.monotonic()
+        self._held_direction = direction
+        self._held_step = step
+        self._held_since = now
+        self._glide_from = 0.0
+        self._last_activity = now
+        self._move(direction * step, force_announce=True)
+
+    # ─── the hold ───
+
+    def _tick(self):
+        """One beat of the hold: skim if an arrow is still down, then either
+        keep the hold open or play the song on."""
+        self._tick_id = None
+        if not self._open:
+            return
+        now = time.monotonic()
+        if self._held_direction:
+            self._glide(now)
+            if self._held_direction:
+                # A held arrow is a hand still on the key, however long the
+                # skim runs: it keeps the hold open by itself.
+                self._last_activity = now
+        if now - self._last_activity >= self.SCRUB_HOLD_S:
+            self._end()
+            return
+        self._arm()
+
+    def _arm(self):
+        if self._tick_id is None:
+            self._tick_id = self.game.call_after(
+                int(self.TICK_INTERVAL_S * 1000), self._tick)
+
+    def _end(self):
+        """Let the song play on from where the needle stopped -- once, whoever
+        closes the scrub (the hold running out, a map change, a later menu)."""
+        if not self._open:
+            return
+        self._open = False
+        self._held_direction = 0
+        tick, self._tick_id = self._tick_id, None
+        if tick is not None:
+            try:
+                self.game.cancel_before(tick)
+            except Exception:
+                pass
+        self._send("jukebox_seek_end", {"position": round(self.needle, 2)})
+
+    def _glide(self, now):
+        """Keep moving while the arrow is still down.
+
+        Read straight off the keyboard rather than from key-repeat events: this
+        client never calls ``pygame.key.set_repeat``, so a held arrow produces
+        exactly one KEYDOWN and would otherwise skim nothing at all.
+        """
+        if not self._held_direction:
+            return
+        key = pygame.K_LEFT if self._held_direction < 0 else pygame.K_RIGHT
+        if not pygame.key.get_pressed()[key]:
+            self._held_direction = 0
+            self._glide_from = 0.0
+            return
+        if now - self._held_since < self.GLIDE_AFTER_S:
+            return
+        if self._glide_from <= 0.0:
+            # First beat past the delay: this only starts the clock, so how far
+            # the arrow has been held is measured between beats, never from the
+            # press (which would apply the whole hold in one jump).
+            self._glide_from = now
+            return
+        rate = self.GLIDE_S_PER_S * (self._held_step / self.STEP_S)
+        self._move(self._held_direction * rate * max(0.0, now - self._glide_from))
+        self._glide_from = now
+
+    # ─── the scrub's own packets ───
+
+    def _send(self, event, payload):
+        from . import consts
+        network = getattr(self.game, "network", None)
+        if network is None:
+            return
+        data = {"id": self.jukebox_id}
+        data.update(payload)
+        network.send(consts.CHANNEL_MISC, event, data)
 
 def _open_search_input(game, gp, jukebox_id):
     gp.add_substate(game.input.run(
@@ -3214,6 +3540,87 @@ def _toggle_pause(game, gp, jukebox_id):
     game.network.send(
         consts.CHANNEL_MISC, "jukebox_toggle_pause", {"id": jukebox_id}
     )
+
+
+def _position_label(seconds):
+    """A needle as ``m:ss`` for speech.
+
+    Imported inside the call rather than at module load: reaching into a
+    ``music_bot`` submodule executes its package ``__init__``, which imports the
+    controller -- and the controller imports this module.
+    """
+    from .music_bot.media import format_track_position
+    return format_track_position(seconds)
+
+
+def _playing_needle(gp, jukebox_id):
+    """Where the song is in *this* machine's ears, or None when this machine is
+    not the one playing it.
+
+    The arithmetic is the direct-fallback path's own anchor -- the position the
+    play event started from plus everything elapsed since it arrived -- because
+    that is the number a listener scrubbing is pointing at: the song as they
+    hear it, not as some other machine's clock counts it.
+    """
+    player = getattr(gp, "jukebox_player", None)
+    entries = getattr(player, "players", None)
+    entry = entries.get(jukebox_id) if isinstance(entries, dict) else None
+    params = (entry or {}).get("play_params") or {}
+    received_at = params.get("received_at")
+    if received_at is None:
+        return None
+    try:
+        return float(params.get("start_offset") or 0.0) + max(
+            0.0, time.monotonic() - float(received_at)
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _scrub_spot(gp, jukebox_id):
+    """What there is to scrub here: ``(needle, duration)``, or None.
+
+    Two numbers answer two different questions and both are needed. The length
+    comes from the cached song -- a cabinet with no length (a livestream) has
+    nothing to scrub at all. The needle is asked in this order: while the song
+    is playing here it is this machine's own audible position, and when it is
+    not (a cabinet this player joined while it was paused, or one somebody else
+    paused) it is the Server's own number, the one the pause packet and the map
+    state carry.
+    """
+    box = (_current_state(gp).get("jukeboxes", {}) or {}).get(jukebox_id) or {}
+    current = box.get("current") or {}
+    try:
+        duration = int(current.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    if duration <= 0:
+        return None
+    if not _is_jukebox_paused(gp, jukebox_id):
+        needle = _playing_needle(gp, jukebox_id)
+        if needle is not None:
+            return needle, duration
+    try:
+        return float(box.get("position") or 0.0), duration
+    except (TypeError, ValueError):
+        return 0.0, duration
+
+
+def _scrub_menu_label(gp, jukebox_id, spot=None):
+    """The Scrub line's label: the read-out of a needle at rest.
+
+    ``spot`` overrides the read for a control that is holding a scrub of its
+    own: while the room is frozen nothing else can know where the needle is --
+    the Server is told about a move only now and then -- so the line keeps
+    reading the number the arrows just changed.
+    """
+    if spot is None:
+        spot = _scrub_spot(gp, jukebox_id)
+    if spot is None:
+        return "Scrub playback"
+    needle, duration = spot
+    return (f"Scrub playback (now: {_position_label(needle)} of "
+            f"{_position_label(duration)})")
 
 
 def _get_repeat_mode(gp, jukebox_id):

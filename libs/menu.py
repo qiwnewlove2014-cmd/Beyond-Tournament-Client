@@ -546,6 +546,21 @@ class Menu(state.State):
                         self.speak_current_item()
                     continue
 
+                # A line may answer Left and Right itself, by putting an
+                # ``arrow(direction, mod)`` on the action it runs. It is how a
+                # line becomes a control rather than a list entry -- the
+                # jukebox's Scrub line moves its needle this way, so moving it
+                # is a keystroke instead of a menu to open and leave.
+                # The arrows have no other meaning inside a menu (the sound
+                # browser's own Left/Right pair is asked for below), and a line
+                # whose action offers nothing simply does not answer them.
+                if (key in (pg.K_LEFT, pg.K_RIGHT) and not self.sound_browse_mode
+                        and 0 <= self.pos < len(self.items)):
+                    arrow = getattr(self.items[self.pos][1], "arrow", None)
+                    if callable(arrow):
+                        arrow(-1 if key == pg.K_LEFT else 1, event.mod)
+                        continue
+
                 if self.up_down and key == pg.K_DOWN:
                     self.move_down()
 
