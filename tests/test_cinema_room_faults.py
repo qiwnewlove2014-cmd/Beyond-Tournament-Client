@@ -370,6 +370,36 @@ class OneSpeakerDriftsApartFromTheOthers(unittest.TestCase):
                         "it rejoined a queue's worth off the room's instant: "
                         f"{sorted(set(rig.steps('front_r')))}")
 
+    def test_a_speaker_that_runs_dry_comes_back_on_a_trim_that_does_not_divide(self):
+        """The remainder is what a fill must not pay twice.
+
+        A delay is ``_frames_behind`` whole frames **plus** the sample cut the
+        very same frames are shifted by (``_delay_samples``), so a fill aiming
+        at ``hold_frames`` -- which rounds *up*, because the start of a speaker
+        is a different question -- spends the remainder twice. Measured on the
+        harness (``tools/cinema_starve_trim_sim.py``), a 5, 10, 25 or 30 ms trim
+        rejoined a whole frame late (240 -> 1200, 480 -> 1440, 1200 -> 2160,
+        1440 -> 2400) and stayed there for the rest of the song, while the
+        trims the rest of this file dials in -- 20, 40 and 60 ms -- divide the
+        frame exactly and so were never moved. One speaker a frame out of step
+        with the others, from a stumble that happens every few minutes, is the
+        report this room has to answer: the delays coming and going on their
+        own.
+        """
+        for trim in (5.0, 10.0, 25.0, 30.0):
+            rig = RoomRig({"front_l": 0.0, "front_r": trim}).run(80)
+            wanted = samples_of(trim)
+            where = "%g ms trim" % trim
+            self.assertEqual(set(rig.lag("front_r", "front_l")[40:]),
+                             {wanted}, where)
+            rig.starve("front_r")
+            rig.run(160)
+            self.assertEqual(rig.silent_slots(), [], where)
+            self.assertEqual(set(rig.lag("front_r", "front_l")[80:]),
+                             {wanted},
+                             "%s: the delay moved when the speaker came back"
+                             % where)
+
     def test_a_speaker_that_stops_does_not_hold_the_whole_room(self):
         """A stopped speaker's empty queue is not the room running low.
 

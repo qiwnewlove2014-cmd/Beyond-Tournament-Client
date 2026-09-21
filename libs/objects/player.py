@@ -6,7 +6,12 @@ from ..logger import log
 
 
 class Player(Entity):
-    def __init__(self, game, map, x, y, z, hp=100, player=False):
+    # The pool the Server hands out, so the client's own arithmetic starts from
+    # the same figure the Server is counting: the Server does not announce a
+    # spawn's HP, and a client that began at 100 would work a fall or a drown
+    # out from a full pool it does not have -- the amount it sends back would
+    # land as a loss of a hundred the player never took.
+    def __init__(self, game, map, x, y, z, hp=200, player=False):
         super().__init__(game, map, x, y, z, hp, "player", player=player)
         self.locked = False
         self.dead=False
@@ -90,8 +95,10 @@ class Player(Entity):
         super().fall_stop()
         old_hp = self.hp
         self.hp = self.hp - (self.fall_distance / 2 + random(-3, 3))
-        if self.hp <= 0 or self.hp > 100:
-            self.hp = 100
+        # The pool is the Server's number, not a hundred: a fall that overshoots
+        # is put back to whatever this player can actually hold.
+        if self.hp <= 0 or self.hp > self.max_hp:
+            self.hp = self.max_hp
         log(f"[DEBUG.PLAYER.FALL] Calculated HP damage. HP before: {old_hp:.1f}, HP after: {self.hp:.1f}. Sending set_hp to server.")
         self.game.network.send(consts.CHANNEL_MISC, "set_hp", {"amount": self.hp})
         self.fall_distance = 0
@@ -105,4 +112,4 @@ class Player(Entity):
     @hp.setter
     def hp(self, value):
         if self.lock_weapon: return
-        self._hp = value if 0 <= value <= 100 else self._hp
+        self._hp = value if 0 <= value <= self.max_hp else self._hp

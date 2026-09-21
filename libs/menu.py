@@ -20,10 +20,17 @@ class Menu(state.State):
         left_right=False,
         autoclose=False,
         parrent=None,
+        intro="",
     ):
         super().__init__(game, parrent=parrent)
         self.direct_soundgroup = self.game.direct_soundgroup
         self.title = title
+        # One sentence this menu needs before its lines are read (see enter()),
+        # for a menu whose lines do not explain themselves: the speaker test
+        # makes no sound at all until Enter lands on a line, and somebody who
+        # does not know that reads the open menu as a broken one. Empty for
+        # every menu that does not ask for it, which is every other menu.
+        self.intro = intro
         self.autoclose = autoclose
         self.wrapping = wrapping
         self.up_down = up_down
@@ -324,7 +331,9 @@ class Menu(state.State):
 
     def enter(self):
         super().enter()
-        speech.speak(self.title, id="menu_title")
+        # The intro rides *with* the title, in one utterance: speak() interrupts
+        # by default, so a second call here would cut the title off mid-word.
+        speech.speak(f"{self.title} {self.intro}".strip(), id="menu_title")
         if self.open:
             self.direct_soundgroup.play(self.open, cat="ui")
 

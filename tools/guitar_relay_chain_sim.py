@@ -78,28 +78,35 @@ class FakeMusicBot:
 
 
 class FakeInstr:
-    """Minimal stand-in for InstrumentInput's capture loop body."""
+    """A stand-in device driving the REAL routing block.
+
+    ``InstrumentInput._emit_frame`` is the one home of "where does a guitar
+    frame go" (the monitor has its own boundary, 10 ms chunks assembled in
+    ``_stage``), so this drives it directly rather than keeping a second copy
+    of the routing that can drift. Only the things ``_emit_frame`` reaches for
+    the outside world -- the bot, the voice stream, the pitch tracker -- are
+    faked; whether the route happened is read off the bot's own queue.
+    """
+
     def __init__(self, game, bot):
         self.game = game
         self.bot = bot
         self.stereo = False
         self.recording = True
+        self._guitar_voice = None
+        self.tracker = types.SimpleNamespace(feed=lambda frame: None)
+        # The voice path is another sim's subject; the routing decision is not.
+        self._feed_guitar_voice = lambda raw, force_mega=False: None
 
     def _find_music_bot(self):
         return self.bot
 
     def run_frame(self, raw):
-        # ---- copy of InstrumentInput.run() routing block (mono path) ----
-        music_bot = self._find_music_bot()
-        route_to_bot = bool(music_bot and (
-            getattr(music_bot, "broadcast_enabled", False)
-            or getattr(music_bot, "broadcast_to_megaphone", False)
-        ))
-        if route_to_bot:
-            if not hasattr(music_bot, "guitar_pcm_queue"):
-                music_bot.guitar_pcm_queue = collections.deque(maxlen=10)
-            music_bot.guitar_pcm_queue.append(raw)
-        return route_to_bot
+        """Route one 20 ms frame through the shipping code."""
+        before = len(getattr(self.bot, "guitar_pcm_queue", ()))
+        ii.InstrumentInput._emit_frame(self, raw)
+        after = len(getattr(self.bot, "guitar_pcm_queue", ()))
+        return after > before
 
 
 def drive_live_relay(bot, chunks):

@@ -151,6 +151,9 @@ class AudioManager():
             "miscelaneous": [options.get("volume_miscelaneous", 100), weakref.WeakSet()]
         }
         self.unbound_sources = []
+        # The speaker test's own voice, kept so the next side (or Stop) can take
+        # the previous one off the air: two voices at once answer nothing.
+        self._headphone_test_sound = None
         self.buffers = weakref.WeakValueDictionary()
         self._preloaded_buffers = {}  # Strong references for preloaded sounds to prevent GC
         # Audio Inbox: worker threads (voice chat, megaphone playout, music
@@ -593,6 +596,108 @@ class AudioManager():
             gc.enable()
         return snd
 
+    # ─── The speaker / headphone test ───
+    # Where a mono test voice is placed: one unit to the listener's own left or
+    # right, or one unit straight ahead. The source is relative
+    # (AL_SOURCE_RELATIVE), so each one means *this* listener's own side wherever
+    # they happen to be standing. That is what lets the test live in a menu
+    # before a map exists -- there is no world point to compute "left of the
+    # player" from there -- and it also means the answer never depends on which
+    # way anybody is facing.
+    # OpenAL's own forward is -z, so straight ahead is (0, 0, -1): on headphones
+    # that is the phantom centre between the ears, and on a surround system the
+    # panner's own front-centre -- which is the channel a stereo pair cannot
+    # check. Distance attenuation is off (one unit, no rolloff), so the position
+    # decides the placement and nothing else: this is a pan, never a volume.
+    HEADPHONE_TEST_PLACEMENTS = {
+        "left": (-1.0, 0.0, 0.0),
+        "centre": (0.0, 0.0, -1.0),
+        "right": (1.0, 0.0, 0.0),
+    }
+
+    def play_headphone_test(self, path, placement, volume=100):
+        """Play a mono test sample hard-panned to one placement.
+
+        ``placement`` is a key of ``HEADPHONE_TEST_PLACEMENTS`` -- the listener's
+        own left, right, or straight ahead. Returns how long that placement will
+        sound, in seconds (0.0 when nothing was played at all), so a caller can
+        follow it with the next one without guessing at a gap. Whatever was
+        already sounding is stopped first: one placement at a time is the whole
+        point of the test.
+
+        Unlike ``play_unbound`` this takes no direct filter and no effects sends
+        on purpose -- what is being verified is the pan, and a wall or a hall
+        behind the voice would answer a different question.
+        """
+        self.stop_headphone_test()
+        if self.muted:
+            return 0.0
+        position = self.HEADPHONE_TEST_PLACEMENTS.get(placement)
+        if position is None:
+            return 0.0
+        cat = "ui"
+        if cat not in self.volume_categories or not self.volume_categories[cat]:
+            cat = "miscelaneous"
+        try:
+            buffer = self.load_buffer(path, as_mono=True)
+        except Exception:
+            buffer = None
+        if not buffer:
+            return 0.0
+        try:
+            source = self.context.gen_source(
+                relative=True,
+                spatialize=True,
+                direct_channels=False,
+                position=position,
+                gain=(volume / 100) * (self.volume_categories[cat][0] / 100),
+                pitch=1.0,
+                reference_distance=1.0,
+                rolloff_factor=0.0,
+            )
+            source.buffer = buffer
+        except Exception:
+            return 0.0
+        try:
+            seconds = max(0.0, float(buffer.sec_length or 0.0))
+        except Exception:
+            seconds = 0.0
+        snd = Sound(source, volume, False, cat=cat)
+        self.unbound_sources.append(snd)
+        self._headphone_test_sound = snd
+        try:
+            source.play()
+        except Exception:
+            with contextlib.suppress(Exception):
+                source.stop()
+        gc.disable()
+        try:
+            self.volume_categories["master"][1].add(snd)
+            self.volume_categories[cat][1].add(snd)
+        finally:
+            gc.enable()
+        return seconds
+
+    def stop_headphone_test(self):
+        """Take the speaker test's voice off the air, if one is sounding."""
+        snd = self._headphone_test_sound
+        self._headphone_test_sound = None
+        if snd is None:
+            return False
+        # The frame loop would get to it once the source reports STOPPED, but a
+        # menu is not the frame loop's business (and the main menu may never run
+        # one): the finished test is dropped here, so pressing a side a dozen
+        # times does not leave a dozen sources behind it.
+        try:
+            if snd in self.unbound_sources:
+                self.unbound_sources.remove(snd)
+        except Exception:
+            pass
+        try:
+            snd.destroy()
+        except Exception:
+            pass
+        return True
 
 
     def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0, as_mono=False, as_3d_stereo=False, occluded=False, direct_filter=None, stereo_provider=None, stereo_offset=2.5, stereo_reference_distance=6.0, stereo_rolloff=0.6, stereo_gain_l=1.15, stereo_gain_r=1.0):

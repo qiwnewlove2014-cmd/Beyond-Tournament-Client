@@ -187,6 +187,95 @@ def delete_account(game, username):
     speech.speak(f"Deleted account {username}.")
     accounts_menu(game)
 
+# The speaker test's samples -- one voice saying where it is, one per placement
+# -- played hard-panned to that placement by AudioManager.play_headphone_test
+# (see its HEADPHONE_TEST_PLACEMENTS: the listener's own left, right, or straight
+# ahead). They live with the other UI sounds, and the placement is decided by the
+# *name* here, so a sample that went missing would sound like a placement that
+# cannot be heard rather than like a test that did nothing.
+SPEAKER_TEST_SOUNDS = {
+    "left": "ui/speaker_test_left.ogg",
+    "centre": "ui/speaker_test_center.ogg",
+    "right": "ui/speaker_test_right.ogg",
+}
+
+# How long the walk waits after one sample before sounding the next: enough that
+# two voices never overlap, short enough to still read as one test.
+SPEAKER_TEST_GAP_MS = 250
+
+# Said once, as the menu opens, because the test is silent by design until Enter
+# lands on a line: nothing here plays when the menu opens, so a listener who
+# expects a sound on arrival would read the menu as a broken one. The arrows
+# choose a line, the one key the game calls Enter plays it, and the menu stays
+# open afterwards. Spoken together with the title in one utterance (`Menu.enter`
+# speaks both at once -- a second speak() call would cut the first off).
+SPEAKER_TEST_INTRO = (
+    "Up and Down move between the lines, and Enter plays the position the line names. "
+    "Nothing is heard until you press Enter, and the menu stays open so you can press "
+    "it again. Escape, or Back, leaves the test."
+)
+
+
+def speaker_test_menu(game):
+    """The speaker / headphone test: one placement at a time.
+
+    It sits beside Check for Updates because it answers the same kind of
+    question -- "is this machine set up right" -- from the main menu, before
+    anybody has logged in or walked into a map. Nothing about it asks a server.
+    """
+    m = menu.Menu(game, "Speaker test.", intro=SPEAKER_TEST_INTRO)
+    set_default_sounds(m)
+    # Enter must not add a click of its own: the centred UI select sound landing
+    # on top of a voice panned to one ear is exactly the thing this test exists
+    # to tell apart. Moving between lines and opening/closing keep their sounds.
+    m.enter_sound = ""
+
+    audio = game.audio_mngr
+    muted_message = "Audio is muted, so nothing will be heard. Turn the sound back on first."
+
+    def sound(placement):
+        """Play one placement; returns its length in seconds (0.0 if silent)."""
+        if getattr(audio, "muted", False):
+            speech.speak(muted_message)
+            return 0.0
+        seconds = audio.play_headphone_test(SPEAKER_TEST_SOUNDS[placement], placement)
+        if not seconds:
+            speech.speak("The speaker test could not be played.")
+        return seconds
+
+    def play(placement):
+        sound(placement)
+
+    def play_walk():
+        """Left, centre, then right -- each one starting on the sample before
+        it, measured rather than guessed."""
+        order = ("left", "centre", "right")
+
+        def step(index):
+            seconds = sound(order[index])
+            if seconds and index + 1 < len(order):
+                game.call_after(int(seconds * 1000) + SPEAKER_TEST_GAP_MS,
+                                lambda: step(index + 1))
+
+        step(0)
+
+    def stop():
+        # Silence is the answer when there was something to stop, so it only
+        # speaks when there was nothing.
+        if not audio.stop_headphone_test():
+            speech.speak("Nothing is playing.")
+
+    m.add_items([
+        ("Left speaker only", lambda: play("left")),
+        ("Centre speaker only", lambda: play("centre")),
+        ("Right speaker only", lambda: play("right")),
+        ("Left, centre, then right", play_walk),
+        ("Stop the test", stop),
+        ("Back", lambda: main_menu(game)),
+    ])
+    game.replace(m)
+
+
 def main_menu(game):
     """replace the current game state with the main menu."""
     if hasattr(game, 'instance_mngr'):
@@ -210,6 +299,11 @@ def main_menu(game):
             ("Create account", game.create_account),
             ("options", lambda: options_menu(game, lambda: main_menu(game))),
             ("Check for Updates", lambda: game.replace(updater.Updater(game))),
+            # Beside Check for Updates on purpose: both ask whether *this*
+            # machine is set up right, and both are reachable before an account
+            # exists -- which is when somebody wondering about their headphones
+            # is standing there.
+            ("Test Speakers and Headphones", lambda: speaker_test_menu(game)),
             ("Restart Client", game.ask_to_restart_client),
             # Esc on the root main menu reaches this item too (menu.py matches
             # the "exit" keyword) — fade the audio out smoothly before quitting.

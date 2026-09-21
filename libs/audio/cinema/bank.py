@@ -581,8 +581,85 @@ class CinemaSpeakerBank:
         if (self._plays_started and previous > 0
                 and abs(previous - measured) >= 0.01):
             self.frame_size_changes += 1
-            log_line(f"[Cinema] room frame size {previous:.0f} ms -> "
-                     f"{measured:.0f} ms")
+            # A change under a playing song is not a measurement to record: it
+            # is every trimmed speaker's delay moved by the difference, for the
+            # rest of the song (see ``_reform_on_new_frame_size``).
+            self._reform_on_new_frame_size(previous, measured)
+
+    def _reform_on_new_frame_size(self, previous, measured):
+        """Start a playing room again on the size of the frames it is fed now.
+
+        A speaker's delay trim is played as a count of queued frames plus a
+        sample cut (``hold_frames``, ``_delay_samples``), so the count is a
+        duration only while the frame size is known -- and the count is spent
+        when the room starts. A transport that changes size under a song (the
+        recovery watchdog handing a cabinet to the direct streamer, a room the
+        relay takes back over, a scrub) therefore leaves every trimmed speaker
+        playing the delay the *old* size put there for the rest of the song.
+        Measured on the harness (``tools/cinema_transport_change_sim.py``), a
+        20 ms trim heard as 960 samples reads 1920 after a room that started
+        on 20 ms frames is fed 40 ms ones, and 2880 the other way -- and stays
+        there.
+
+        Re-spelling the trims where they stand cannot undo it. The delay is
+        carried by how many frames *deeper* a trimmed speaker's queue sits
+        than an untrimmed one's -- a queue OpenAL only ever appends to, so the
+        depth can be given back but never corrected in place. What does land
+        every trim exactly is a room that *starts* on the new size, measured
+        exact for every trim at both sizes
+        (``tools/cinema_trim_frame_size_sim.py``): the frames already queued
+        are given back, and the room's own start
+        path rebuilds it -- ``realign`` fills each speaker from the frames the
+        room still holds, ``_watch_low_queue`` holds until the pre-buffer is
+        back, and ``_play_ready`` starts each speaker its own trim after the
+        room's clock (see ``_held``), which is the whole of the delay.
+
+        The history goes with the queues, and it has to: ``realign`` fills a
+        stopped speaker from the frames the room still holds, and a room whose
+        history outlives its queues is rebuilt *topped up* -- measured on the
+        harness, the trimmed speaker came back a frame or two deep, which is
+        the delay this is trying to undo (``tools/cinema_reform_watch_sim.py``).
+        Emptying both is what makes this the start it claims to be: every
+        speaker grows from nothing, together, exactly as this room's first
+        start did. The clock bookkeeping starts over with it (``_n_fed``, the
+        spot-clock epoch) because the queues it described are gone; the notes
+        waiting on it are *not* dropped -- they were played by a performer and
+        the song is not rewinding -- they re-project against the queue that
+        replaces it. What a listener hears is a room that ran dry for a
+        moment: a short hold and the song on the live edge, once, at the
+        transport change -- instead of a delay a frame wide for the rest of
+        the song, which is what it costs to leave it alone.
+
+        This is the recovery a room that ran dry already goes through, and it
+        is reported like one: a transport that changes size under a song is a
+        recovery, and a room that silently keeps a wrong delay is a room
+        nobody can diagnose from the sofa.
+        """
+        if not self._plays_started or not self.slot_sources:
+            return False
+        for slot in list(self.slot_sources):
+            if not self._queued_of(slot):
+                continue
+            if not self._empty_speaker(slot):
+                # A speaker that will not give its buffers back cannot be put
+                # on the new spelling without replaying audio it is holding:
+                # the room is left exactly as it is, one frame out at worst,
+                # rather than half re-formed around a speaker nobody can move.
+                log_line("[Cinema] room frame size %.0f ms -> %.0f ms: %s "
+                         "would not give its buffers back, leaving the room "
+                         "as it stands" % (previous, measured, slot))
+                return False
+        self._start_frame = None
+        self._plays_started = False
+        self._refill_hold = False
+        self._recent.clear()
+        self._crossover_streams.clear()
+        self._n_fed.clear()
+        self._spot_clock.forget()
+        log_line(f"[Cinema] room re-formed for a {measured:.0f} ms transport "
+                 f"(was {previous:.0f} ms): every speaker starts again on the "
+                 f"new frame size")
+        return True
 
     @property
     def awaiting_refill(self):
@@ -741,6 +818,40 @@ class CinemaSpeakerBank:
         # plays a shorter delay instead -- the one failure mode that is not
         # silence, which is what the room's pre-buffer leaves to play with.
         return min(held, max(0, self.buffers_per_slot - PREBUFFER_FRAMES - 1))
+
+    def _frames_behind(self, slot):
+        """How many frames deeper than an untrimmed speaker this one plays.
+
+        The delay this speaker hears is ``behind`` frames *plus* the cut
+        ``_delay_samples`` plays, and both parts are spent by the same trim --
+        so the count is the trim **floor**-divided by the frame, not
+        ``hold_frames``, which rounds *up* because it answers a different
+        question: how long the room waits before this speaker may start at all
+        (``_held``). Rounding the depth up as well pays the trim's remainder
+        twice.
+
+        That is what a fill has to aim at. ``realign`` puts a speaker that
+        stopped back on the room's instant by filling it from the frames the
+        room still holds, and each of those frames is handed to it cut back by
+        its own remainder -- measured on the harness
+        (``tools/cinema_starve_trim_sim.py``), a fill one frame too deep came
+        back as a delay a whole frame wide: a 5, 10, 25 or 30 ms trim heard at
+        240,
+        480, 1200 and 1440 samples rejoined at 1200, 1440, 2160 and 2400, and
+        stayed there for the rest of the song. A trim the frame divides exactly
+        (20, 40 and 60 ms) has no remainder and was never moved, which is
+        exactly why this survived: the trims this project's own tests dial in
+        are the ones that divide.
+
+        A trim deeper than the deepest queue the room can hold is still
+        clamped, as everywhere else: a shorter delay, never a dead speaker.
+        """
+        wanted = self._trim_samples(slot)
+        if wanted <= 0:
+            return 0
+        behind = wanted // self._frame_samples()
+        limit = max(0, self.buffers_per_slot - PREBUFFER_FRAMES - 1)
+        return min(behind, limit)
 
     def _delay_samples(self, slot):
         """The trim's sub-frame remainder: the cut only a sample can carry.
@@ -1265,9 +1376,11 @@ class CinemaSpeakerBank:
 
         Depths are compared *net of each speaker's own delay trim*: a trimmed
         speaker is meant to sit that many frames deeper than one that carries
-        none (see ``hold_frames``), so the raw depth of a trimmed speaker is
-        not the room's reference -- reading it as one would fill the untrimmed
-        speakers with old audio to catch up with a delay they never had.
+        none (see ``_frames_behind``, which is the trim in whole frames -- the
+        rest of it is the cut each filled frame already carries), so the raw
+        depth of a trimmed speaker is not the room's reference -- reading it as
+        one would fill the untrimmed speakers with old audio to catch up with a
+        delay they never had.
 
         Only a speaker that is *not playing* is filled. A playing speaker is
         at the live edge by construction -- it consumes one frame per frame
@@ -1293,8 +1406,13 @@ class CinemaSpeakerBank:
         if self._stopped or self._refill_hold or not self.slot_sources:
             return False
         counts = {slot: self._queued_of(slot) for slot in self.slot_sources}
-        holds = {slot: self.hold_frames(slot) for slot in self.slot_sources}
-        base = max((max(0, queued - holds[slot])
+        # Depths are compared net of each speaker's own delay trim, in the same
+        # frames the fill below aims at (``_frames_behind``): the trim a
+        # speaker plays is its depth *plus* its cut, and only the depth is
+        # comparable between two speakers.
+        behind = {slot: self._frames_behind(slot)
+                  for slot in self.slot_sources}
+        base = max((max(0, queued - behind[slot])
                     for slot, queued in counts.items()), default=0)
         if base <= 0:
             return False
@@ -1324,7 +1442,7 @@ class CinemaSpeakerBank:
                 if not self._empty_speaker(slot):
                     continue
                 queued = 0
-            target = base + holds[slot]
+            target = base + behind[slot]
             if target > len(stream):
                 target = len(stream)
             missing = target - queued

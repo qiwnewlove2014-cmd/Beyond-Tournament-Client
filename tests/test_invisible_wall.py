@@ -108,6 +108,10 @@ class _WalkProbe:
         self.on_move = None
         self.soundgroup = SimpleNamespace(position=None)
         self.played = []
+        # Nothing worn: the step path alone, which is what this file is about.
+        self.armor_sounds_path = None
+        self.armor_cloth_volume = 60
+        self._play_armor_cloth = Entity._play_armor_cloth.__get__(self)
         # The real step, which the walk branch calls once the tile is free.
         self.move = Entity.move.__get__(self)
 

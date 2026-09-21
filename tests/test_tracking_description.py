@@ -114,7 +114,7 @@ def gameplay_harness():
     gameplay = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Gameplay")
     names = {
         "get_relative_direction_string", "_format_target_location", "_beacon_pitch",
-        "open_tracking_menu", "_clean_name", "_get_target_label", "_gather_trackables",
+        "open_tracking_menu", "_clean_name", "_wallbuy_label", "_get_target_label", "_gather_trackables",
         "start_tracking", "stop_tracking", "_is_trackable_entity", "_validate_tracking_target",
     }
     methods = [node for node in gameplay.body if isinstance(node, ast.FunctionDef) and node.name in names]
@@ -245,6 +245,25 @@ class TrackingGameplayTests(unittest.TestCase):
         self.assertEqual(len(targets), 7)
         self.assertEqual({row[1] for row in targets}, {"Door", "MP7, 500 points", "jukebox", "Quick Revive", "Pong", "Stage", "remote"})
         self.assertTrue(all(row[2] == "straight in front (4 tiles away)" for row in targets))
+
+    def test_a_wall_that_sells_protection_is_named_not_spelled_out(self):
+        """A prefixed id is what the map stores, and it is not a thing to say.
+
+        Armor and shields are bought off a wall under ids like
+        ``armor:plate_armor``; the name beside the id is the one a person would
+        read, and a wall that predates it is read out of the id rather than
+        announced as "armor colon plate underscore armor".
+        """
+        gp, _ = gameplay_harness()
+        def box(**extra):
+            return SimpleNamespace(minx=0, maxx=0, miny=4, maxy=4, minz=0, maxz=0, **extra)
+        gp.map.wallbuy_list = [
+            box(weaponName="armor:plate_armor", displayName="Plate Armor", weaponCost=500),
+            box(weaponName="armor:cloth_armor", weaponCost=250),
+            box(weaponName="shield:iron_shield_1", weaponCost=750),
+        ]
+        labels = {row[1] for row in gp._gather_trackables()}
+        self.assertEqual(labels, {"Plate Armor, 500 points", "Cloth Armor, 250 points", "Iron Shield 1, 750 points"})
 
     def test_sort_stop_and_cancel_are_unchanged(self):
         gp, spoken = gameplay_harness()

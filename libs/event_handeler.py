@@ -1280,6 +1280,15 @@ class EventHandeler:
                 self._apply_vehicle_move(data)
                 return
             try:
+                # Armor is heard, and the piece to hear it from arrives with the
+                # step itself: set before the move, so the step that carries the
+                # cloth is the one it plays on. A step packet without the field
+                # (nothing worn, a piece that just broke, a walker gone hidden,
+                # or an older Server) clears it, so silence needs no state of
+                # its own to be kept in sync.
+                set_cloth = getattr(entity, "set_armor_cloth", None)
+                if callable(set_cloth):
+                    set_cloth(data.get("armor_cloth"), data.get("armor_cloth_volume"))
                 entity.move(
                     data.get("x"), data.get("y"), data.get("z"),
                     bool(data.get("play_sound", False)), data.get("mode", "walk")
@@ -1614,6 +1623,11 @@ class EventHandeler:
     def set_hp(self, data):
         if self.gameplay.player.lock_weapon:
             return
+        # The ceiling arrives with the number. The pool is the Server's to
+        # decide and it widens mid-match (a Juggernog bottle), so the client is
+        # told what it is rather than assuming the one it was built with.
+        if "maxHp" in data:
+            self.gameplay.player.max_hp = data["maxHp"]
         self.gameplay.player.hp = data["amount"]
 
     def open_door(self, data):
@@ -3639,6 +3653,18 @@ class EventHandeler:
         key = friendly_key_name(
             self.game.keyconfig.get("interact", pygame.K_f)
         ).upper()
+        # A cabinet is an appliance and the map's power is its supply, so a
+        # hint that invited the player to open a machine with none would be the
+        # one thing standing between them and the power switch. A Server from
+        # before the field says nothing about power, which reads exactly as it
+        # always did.
+        powered = data.get("powered") if isinstance(data, dict) else None
+        if powered is False:
+            speak(
+                "You are near a music jukebox, but it has no power. "
+                "Find the power switch and turn it on."
+            )
+            return
         speak(
             f"You are near a music jukebox. "
             f"Press {key} to open it and queue a song."
@@ -3779,6 +3805,8 @@ class EventHandeler:
                 )
                 if "hfacing" in p_data:
                     entity.face(p_data["hfacing"], p_data.get("vfacing", 0), 0)
+                if "maxHp" in p_data:
+                    entity.max_hp = p_data["maxHp"]
                 if "hp" in p_data:
                     entity.hp = p_data["hp"]
             except Exception as e:
@@ -3838,3 +3866,17 @@ class EventHandeler:
     def unequip_shield(self, data):
         if hasattr(self.gameplay, 'shield_mngr'):
             self.gameplay.shield_mngr.unequip_shield()
+
+    def equip_armor(self, data):
+        """The Server's word on what this player is wearing.
+
+        Sent when a wall sells a piece, when staff hand one over, and again on
+        every map entry -- a client that joined mid-song so to speak would
+        otherwise be walking in armor it cannot hear.
+        """
+        if hasattr(self.gameplay, 'armor_mngr'):
+            self.gameplay.armor_mngr.equip_armor(data)
+
+    def unequip_armor(self, data):
+        if hasattr(self.gameplay, 'armor_mngr'):
+            self.gameplay.armor_mngr.unequip_armor()

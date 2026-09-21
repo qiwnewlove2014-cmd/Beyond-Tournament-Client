@@ -17,6 +17,7 @@ from . import drum_keyconfig
 import pygame
 import pyogg
 from .shields import ShieldManager
+from .armor import ArmorManager
 from .piano_handler import PianoHandler
 from . import (
     audio_manager,
@@ -95,6 +96,7 @@ class Gameplay(state.State):
         self.can_run = True
         self.wmanager = weaponmanager.weaponManager(self.game, self.player)
         self.shield_mngr = ShieldManager(self)
+        self.armor_mngr = ArmorManager(self)
         self.parser = map.Map_parser(self.game, self.map)
         self.last_ping_time = time.time()
         self.pingging = False
@@ -1586,8 +1588,9 @@ class Gameplay(state.State):
         if target_type == "door":
             return "Door"
         if target_type == "wallbuy":
-            # weaponName is the real weapon name, e.g. "MP7"
-            return obj.weaponName or "Weapon Buy"
+            # weaponName is the real weapon name, e.g. "MP7", and a wall that
+            # sells protection says the name of the piece (see _wallbuy_label).
+            return self._wallbuy_label(obj)
         if target_type == "interactable":
             return getattr(obj, "label", None) or "Interactable"
         if target_type == "perkMachine":
@@ -1599,6 +1602,30 @@ class Gameplay(state.State):
         if target_type == "entity":
             return self._clean_name(obj.name)
         return "Object"
+
+    @staticmethod
+    def _wallbuy_label(obj):
+        """What a wall is called, never the id the map stores under it.
+
+        A shield or a piece of armor is stored as a prefixed id
+        (``armor:cloth_armor``), and read out loud that is "armor colon cloth
+        underscore armor". A wall written by the builder carries the name
+        beside the id, and one that predates that (or was hand-written) is read
+        out of the id here instead, so a player is never handed the raw one.
+        """
+        display = getattr(obj, "displayName", None)
+        if display:
+            return display
+        name = getattr(obj, "weaponName", "") or ""
+        for prefix in ("shield:", "armor:"):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                break
+        else:
+            return name or "Weapon Buy"
+        if not name:
+            return "Weapon Buy"
+        return name.replace("_", " ").strip().title()
 
     def _is_trackable_entity(self, obj):
         """Only current, non-destroyed object presentations; never player actors."""
@@ -1646,7 +1673,7 @@ class Gameplay(state.State):
             cz = (wb.minz + wb.maxz) / 2
             dist = math.floor(movement.get_3d_distance(self.player.x, self.player.y, self.player.z, cx, cy, cz))
             location_str = self._format_target_location(dist, cx, cy, cz)
-            label = f"{wb.weaponName}, {wb.weaponCost} points" if wb.weaponName else "Weapon Buy"
+            label = f"{self._wallbuy_label(wb)}, {wb.weaponCost} points"
             trackables.append((dist, label, location_str, ("wallbuy", wb, (cx, cy, cz))))
 
         # 3. Gather Interactables

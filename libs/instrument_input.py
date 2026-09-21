@@ -2,9 +2,18 @@
 
 Kept fully independent from the voice-chat microphone: it reads its own
 `audio_instrument_input_device` option and opens its own cyal capture
-device, so both can run at the same time. Captured 20 ms frames land in a
-bounded ring buffer that a future pitch detector / instrument session can
-consume.
+device, so both can run at the same time.
+
+Two chunk sizes live in here and they answer two different questions. What
+*leaves* the machine -- the voice channel, the megaphone, the music bot mix,
+the pitch tracker -- is a 20 ms frame (``FRAME_SAMPLES``), the chunk Opus and
+the voice path have always used. What the *player's own ear* gets is a 10 ms
+chunk (``MONITOR_CHUNK_SAMPLES``), because that is the size the capture device
+actually hands over (measured: 480 samples every 10 ms on a WASAPI shared-mode
+endpoint) and asking for two of those before anything moved cost the player
+about 15 ms they can hear when a string is struck. Everything read lands in
+bounded ring buffers: ``frames`` for the monitor, assembled 20 ms frames for
+everything that leaves.
 """
 import collections
 import contextlib
@@ -48,11 +57,32 @@ class GuitarLocalMonitor:
 
     Must be created and fed on the main thread only - the OpenAL context is
     only current there (same rule as remote piano notes).
+
+    A monitor is judged by *how soon* the player hears their own string, so the
+    audio handed over but not yet played is bounded. The capture arrives at
+    exactly the rate the source plays, which means a queue can only ever grow:
+    a stalled main thread (a map reload, a slow frame) leaves frames waiting
+    that are still heard the length of that stall later, for the rest of the
+    session -- nothing later in the song makes the ear catch up. Past
+    ``MONITOR_QUEUE_LIMIT_MS`` the wait is given up and the newest chunk is
+    played instead: a skip heard once, rather than a guitar that keeps drifting
+    away from the hand that plays it.
     """
+
+    # How far behind the ear the monitor may fall before the backlog is let go.
+    # The natural depth is one chunk (~10 ms), so this tolerates a couple of
+    # dropped frames and gives up on anything worse.
+    MONITOR_QUEUE_LIMIT_MS = 50
+    SKIP_LOG_INTERVAL_S = 5.0
 
     def __init__(self, audio_mngr):
         self.audio_mngr = audio_mngr
         self.source = None
+        self.queue_limit_samples = int(self.MONITOR_QUEUE_LIMIT_MS * 48000 // 1000)
+        self._waiting = collections.deque()  # samples handed over, oldest first
+        self._waiting_samples = 0
+        self.skips = 0
+        self._last_skip_log = 0.0
 
     def _ensure_source(self):
         if self.source is None:
@@ -65,35 +95,88 @@ class GuitarLocalMonitor:
                 self.source.position = (x, y, z)
 
     def feed(self, pcm):
-        """Queue one mono16 20 ms frame; keep the source drained."""
+        """Queue one mono16 chunk; keep the source drained."""
         if not pcm:
             return
         self._ensure_source()
         try:
+            self._release_played()
+            samples = len(pcm) // 2
+            if self._waiting_samples + samples > self.queue_limit_samples:
+                # The ear is already late for this audio: dropping the wait is
+                # the only way back to the hand (there is no way to hurry it).
+                self._let_backlog_go()
             buf = self.audio_mngr.context.gen_buffer()
             buf.set_data(pcm, sample_rate=48000,
                          format=cyal.BufferFormat.MONO16)
             self.source.queue_buffers(buf)
+            self._waiting.append(samples)
+            self._waiting_samples += samples
             if self.source.state in (cyal.SourceState.STOPPED,
                                      cyal.SourceState.INITIAL):
                 self.source.play()
-            while self.source.buffers_processed > 0:
-                self.source.unqueue_buffers()
         except Exception:
             pass
+
+    def _release_played(self):
+        """Let go of the chunks the ear has already been given.
+
+        The count is read *before* the release and the queue follows it: cyal's
+        ``unqueue_buffers()`` hands back every processed buffer in one call
+        (``max=INT_MAX``), so counting calls rather than buffers would leave
+        the bookkeeping holding chunks that are long gone -- and a backlog that
+        is really one chunk deep would look deeper than the limit forever.
+        """
+        played = self.source.buffers_processed
+        if played:
+            self.source.unqueue_buffers()
+        for _ in range(played):
+            if self._waiting:
+                self._waiting_samples -= self._waiting.popleft()
+        if self._waiting_samples < 0:
+            self._waiting_samples = 0
+
+    def _let_backlog_go(self):
+        """Play the newest audio instead of trailing behind the player.
+
+        ``stop()`` is what makes this possible: a queued buffer that has not
+        played is not releasable (OpenAL answers InvalidOperation), and a
+        stopped source has played everything, so its whole queue can be handed
+        back in one go.
+        """
+        waiting = len(self._waiting)
+        self._waiting.clear()
+        self._waiting_samples = 0
+        if not waiting:
+            return
+        self.source.stop()
+        for _ in range(waiting):
+            if self.source.buffers_queued <= 0:
+                break
+            self.source.unqueue_buffers()
+        self.skips += 1
+        now = time.monotonic()
+        if now - self._last_skip_log >= self.SKIP_LOG_INTERVAL_S:
+            self._last_skip_log = now
+            logger.log("[INSTRUMENT] monitor fell behind and dropped the "
+                       f"waiting audio to stay by the ear (skips: {self.skips})")
 
     def close(self):
         if self.source is not None:
             with contextlib.suppress(Exception):
                 self.source.stop()
             self.source = None
+        self._waiting.clear()
+        self._waiting_samples = 0
 
 
 class InstrumentInput(threading.Thread):
     """Owns one OpenAL capture device used as an instrument line-in."""
 
     FRAME_SAMPLES = 960          # 20 ms at 48 kHz, same chunk as voice chat
-    FRAME_BUFFER_FRAMES = 100    # ~2 s of 20 ms frames
+    MONITOR_CHUNK_SAMPLES = 480  # 10 ms: what the player's own ear is handed
+    MIN_READ_SAMPLES = 48        # 1 ms: never make the driver wait longer
+    FRAME_BUFFER_FRAMES = 200    # ~2 s of 10 ms monitor chunks
     NOTE_BUFFER_NOTES = 64
 
     def __init__(self, game):
@@ -104,6 +187,10 @@ class InstrumentInput(threading.Thread):
         self.stereo = False
         self._open(options.get("audio_instrument_input_device", "system default"))
         self.frames = collections.deque(maxlen=self.FRAME_BUFFER_FRAMES)
+        # Bytes read but not yet a full chunk/frame. Two boundaries over one
+        # stream: the monitor's 10 ms, the relay's 20 ms.
+        self._monitor_pending = bytearray()
+        self._relay_pending = bytearray()
         self.tracker = pitch.PitchTracker()
         self.notes = collections.deque(maxlen=self.NOTE_BUFFER_NOTES)
         # Raw guitar Opus streamed on the normal 3D voice channel (so chords
@@ -235,68 +322,98 @@ class InstrumentInput(threading.Thread):
                 # take_device_error).
                 self._device_died(exc, "capture")
                 continue
-            if ready >= self.FRAME_SAMPLES:
+            if ready >= self.MIN_READ_SAMPLES:
+                # One monitor chunk at most per read; a read that finds a
+                # backlog still hands it over 10 ms at a time and the rest is
+                # drained on the next pass, half a millisecond later. The ear
+                # wants the newest audio, never a large block of old audio.
                 # cyal counts frames for both formats: mono16 frames are 2
                 # bytes, stereo16 frames are 4 bytes (L+R pairs).
-                buf = bytearray(self.FRAME_SAMPLES * (4 if self.stereo else 2))
+                take = min(ready, self.MONITOR_CHUNK_SAMPLES)
+                buf = bytearray(take * (4 if self.stereo else 2))
                 try:
                     self.audio_input.capture_samples(buf)
                 except cyal.exceptions.CyalError as exc:
                     self._device_died(exc, "capture")
                     continue
                 if self.stereo:
-                    mono = _downmix_stereo(buf)
-                    raw = mono
-                    buf16 = bytearray(mono)
+                    raw = _downmix_stereo(buf)
                 else:
                     raw = bytes(buf)
-                    buf16 = buf
-                self.frames.append(raw)  # raw monitor stream (strums/chords)
-                
-                # Check for Megaphone routing
-                gp = None
-                if hasattr(self.game, 'stack'):
-                    for st in reversed(self.game.stack):
-                        if hasattr(st, 'player') and hasattr(st, 'megaphone'):
-                            gp = st
-                            break
-                voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
+                self._stage(raw)
 
-                # Route the raw guitar audio into the music bot broadcast. The
-                # guitar joins the mix when the music broadcast is enabled OR
-                # when the performer turned on "Broadcast to Megaphone" in the
-                # music bot menu - the megaphone routing is an independent
-                # toggle (same rule piano and drums follow), so the guitar
-                # reaches the PA speakers just like the other instruments.
-                music_bot = self._find_music_bot()
-                route_to_bot = bool(music_bot and (
-                    getattr(music_bot, "broadcast_enabled", False)
-                    or getattr(music_bot, "broadcast_to_megaphone", False)
-                ))
-                if route_to_bot:
-                    if not hasattr(music_bot, "guitar_pcm_queue"):
-                        music_bot.guitar_pcm_queue = collections.deque(maxlen=10)
-                    music_bot.guitar_pcm_queue.append(raw)
+    def _stage(self, raw):
+        """Sort one capture read into what the ear gets and what leaves.
 
-                # Feed the raw guitar into the local PA sidechain only when it is
-                # NOT being mixed into the music bot broadcast (the streamer feeds
-                # the full mix locally itself) - otherwise the guitarist hears
-                # their own strum twice through the speakers.
-                if voice_using_mega and gp and not route_to_bot:
-                    from . import voice_chat
-                    if hasattr(voice_chat, '_feed_local_megaphone_direct'):
-                        voice_chat._feed_local_megaphone_direct(gp, buf16, producer='guitar')
+        Both buffers hold the same bytes; only the boundary differs, and the
+        monitor's is the shorter one: it is handed a chunk the moment 10 ms of
+        audio exists, without waiting for the 20 ms frame that chunk is part
+        of -- the frame the voice channel, the megaphone, the music bot mix and
+        the pitch tracker have always been sent.
+        """
+        self._monitor_pending += raw
+        self._relay_pending += raw
+        chunk_bytes = self.MONITOR_CHUNK_SAMPLES * 2
+        while len(self._monitor_pending) >= chunk_bytes:
+            self.frames.append(bytes(self._monitor_pending[:chunk_bytes]))
+            del self._monitor_pending[:chunk_bytes]
+        frame_bytes = self.FRAME_SAMPLES * 2
+        while len(self._relay_pending) >= frame_bytes:
+            buf16 = bytes(self._relay_pending[:frame_bytes])
+            del self._relay_pending[:frame_bytes]
+            self._emit_frame(buf16)
 
-                # When the guitar rides the bot broadcast mix, let the streamer
-                # carry it (3D music bot channel or the megaphone/PA) - do NOT
-                # also stream it on the raw voice channel, otherwise nearby
-                # players and the PA would hear every strum twice.
-                if not route_to_bot:
-                    self._feed_guitar_voice(buf16, force_mega=voice_using_mega)
-                frame = np.frombuffer(buf16, dtype=np.int16).astype(np.float32) / 32768.0
-                result = self.tracker.feed(frame)
-                if result is not None:
-                    self.notes.append(result)
+    def _emit_frame(self, buf16):
+        """Send one full 20 ms frame on its way (the path that always existed).
+
+        The local monitor is deliberately not fed from here: it was already
+        handed the two 10 ms chunks this frame is made of, the moment each of
+        them existed (see :meth:`_stage`).
+        """
+        # Check for Megaphone routing
+        gp = None
+        if hasattr(self.game, 'stack'):
+            for st in reversed(self.game.stack):
+                if hasattr(st, 'player') and hasattr(st, 'megaphone'):
+                    gp = st
+                    break
+        voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
+
+        # Route the raw guitar audio into the music bot broadcast. The
+        # guitar joins the mix when the music broadcast is enabled OR
+        # when the performer turned on "Broadcast to Megaphone" in the
+        # music bot menu - the megaphone routing is an independent
+        # toggle (same rule piano and drums follow), so the guitar
+        # reaches the PA speakers just like the other instruments.
+        music_bot = self._find_music_bot()
+        route_to_bot = bool(music_bot and (
+            getattr(music_bot, "broadcast_enabled", False)
+            or getattr(music_bot, "broadcast_to_megaphone", False)
+        ))
+        if route_to_bot:
+            if not hasattr(music_bot, "guitar_pcm_queue"):
+                music_bot.guitar_pcm_queue = collections.deque(maxlen=10)
+            music_bot.guitar_pcm_queue.append(buf16)
+
+        # Feed the raw guitar into the local PA sidechain only when it is
+        # NOT being mixed into the music bot broadcast (the streamer feeds
+        # the full mix locally itself) - otherwise the guitarist hears
+        # their own strum twice through the speakers.
+        if voice_using_mega and gp and not route_to_bot:
+            from . import voice_chat
+            if hasattr(voice_chat, '_feed_local_megaphone_direct'):
+                voice_chat._feed_local_megaphone_direct(gp, buf16, producer='guitar')
+
+        # When the guitar rides the bot broadcast mix, let the streamer
+        # carry it (3D music bot channel or the megaphone/PA) - do NOT
+        # also stream it on the raw voice channel, otherwise nearby
+        # players and the PA would hear every strum twice.
+        if not route_to_bot:
+            self._feed_guitar_voice(buf16, force_mega=voice_using_mega)
+        frame = np.frombuffer(buf16, dtype=np.int16).astype(np.float32) / 32768.0
+        result = self.tracker.feed(frame)
+        if result is not None:
+            self.notes.append(result)
 
     def _feed_guitar_voice(self, raw, force_mega=False):
         """Stream the raw guitar audio out on the normal 3D voice channel.
@@ -327,7 +444,12 @@ class InstrumentInput(threading.Thread):
             self._guitar_voice.put(bytearray(raw))
 
     def drain_raw_frames(self):
-        """Pop and return all raw mono16 frames captured since last call."""
+        """Pop and return all raw mono16 chunks captured since last call.
+
+        These are the monitor's own chunks (``MONITOR_CHUNK_SAMPLES``, 10 ms),
+        not the 20 ms frames the voice channel sends: the performer's own ear is
+        the one consumer that cannot afford to wait for a whole frame to fill.
+        """
         frames = list(self.frames)
         self.frames.clear()
         return frames

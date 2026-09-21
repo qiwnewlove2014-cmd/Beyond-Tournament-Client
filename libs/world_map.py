@@ -606,11 +606,12 @@ class Map:
         weaponName="",
         weaponCost=0,
         ammoCost=0,
+        displayName="",
         **kwargs,
     ):
         """Spawns a wallbuy (weapon buy station). Uses id-based replace so it
         is rebuild-safe."""
-        wb = Wallbuy(id, minx, maxx, miny, maxy, minz, maxz, weaponName, weaponCost, ammoCost)
+        wb = Wallbuy(id, minx, maxx, miny, maxy, minz, maxz, weaponName, weaponCost, ammoCost, displayName)
         index = -1
         for i, element in enumerate(self.wallbuy_list):
             if element.id == id:
@@ -1238,11 +1239,16 @@ class Zone(BaseMapObj):
 class Wallbuy(BaseMapObj):
     """A wall-mounted weapon buy station. Mirrors server Wallbuy bounds (±1)."""
 
-    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, weaponName="", weaponCost=0, ammoCost=0):
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, weaponName="", weaponCost=0, ammoCost=0, displayName=""):
         super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "wallbuy")
         self.weaponName = weaponName
         self.weaponCost = weaponCost
         self.ammoCost = ammoCost
+        # What the wall is *called*. A shield or a piece of armor is stored as a
+        # prefixed id, and this is the name a person would say out loud (see
+        # Gameplay._wallbuy_label). Empty on a wall that has none, and on one a
+        # hand-written map placed before the builder started writing it.
+        self.displayName = displayName or ""
 
     def in_bound(self, x, y, z):
         # Match server: wallbuy is interactable from ±1 tile around its bounds
@@ -1419,11 +1425,16 @@ class Zone(BaseMapObj):
 class Wallbuy(BaseMapObj):
     """A wall-mounted weapon buy station. Mirrors server Wallbuy bounds (±1)."""
 
-    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, weaponName="", weaponCost=0, ammoCost=0):
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, weaponName="", weaponCost=0, ammoCost=0, displayName=""):
         super().__init__(id, minx, maxx, miny, maxy, minz, maxz, "wallbuy")
         self.weaponName = weaponName
         self.weaponCost = weaponCost
         self.ammoCost = ammoCost
+        # What the wall is *called*. A shield or a piece of armor is stored as a
+        # prefixed id, and this is the name a person would say out loud (see
+        # Gameplay._wallbuy_label). Empty on a wall that has none, and on one a
+        # hand-written map placed before the builder started writing it.
+        self.displayName = displayName or ""
 
     def in_bound(self, x, y, z):
         # Match server: wallbuy is interactable from ±1 tile around its bounds

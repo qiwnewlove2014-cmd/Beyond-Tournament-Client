@@ -62,6 +62,11 @@ class _SprintProbe:
         self.on_move = None
         self.soundgroup = SimpleNamespace(position=None)
         self.played = []
+        # Nothing worn: this probe is about the surface's own run/walk choice,
+        # and a step in armor is the surface step plus a cloth layer over it.
+        self.armor_sounds_path = None
+        self.armor_cloth_volume = 60
+        self._play_armor_cloth = Entity._play_armor_cloth.__get__(self)
 
     def sync_reverb(self):
         return True

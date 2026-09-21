@@ -8,12 +8,19 @@ from ..logger import log
 
 import cyal.exceptions
 
-from .. import movement, consts
+from .. import movement, consts, path_utils
 from .object import Object
 
 from ..audio import sound
 
 class Entity(Object):
+    # Armor a listener hears on this entity's steps. Locally it comes from the
+    # `equip_armor` packet, and for every *other* player it rides the step
+    # packet itself (see `set_armor_cloth`), so both sides read the same two
+    # fields and a piece that broke stops sounding on the very next step.
+    armor_sounds_path = None
+    armor_cloth_volume = 60
+
     def __init__(self, game, map, x, y, z, hp, name="None", player=False):
         super().__init__(game, map, x, y, z)
         self._player = player
@@ -279,6 +286,10 @@ class Entity(Object):
                 # (one folder holding one or more .ogg).  Asked as a folder
                 # on purpose: a compiled client resolves assets through the
                 # VFS pack, where a directory is the pack's own index entry.
+                # The run/walk of the surface is read before the downgrade, so
+                # armor cloth keeps the *step's* character even on a surface
+                # that has no run samples of its own.
+                running = mode == "run"
                 if mode == "run" and not os.path.isdir(
                     f"{consts.SOUNDPREPEND}/steps/{tile}/run"
                 ):
@@ -291,6 +302,55 @@ class Entity(Object):
                     rel_z=-1,
                     cat=cat
                 )
+                self._play_armor_cloth(cat, running=running)
+
+    def set_armor_cloth(self, sounds_path=None, volume=None):
+        """Remember the cloth the armor this entity wears makes on a step.
+
+        ``None`` for the path is "nothing worn, nothing heard", which is also
+        what a player whose piece just broke is sent on their next step -- the
+        state needs no clearing of its own for that reason.
+        """
+        self.armor_sounds_path = sounds_path or None
+        try:
+            self.armor_cloth_volume = 60 if volume is None else max(0, min(100, int(volume)))
+        except (TypeError, ValueError):
+            self.armor_cloth_volume = 60
+
+    def _play_armor_cloth(self, cat, running=False):
+        """Layer a worn piece's cloth over the step that was just played.
+
+        Over it, never instead of it: the surface still says what the walker is
+        walking on, and the cloth is added on top at its own quiet volume -- a
+        coat does not make gravel silent. That is also why the surface keeps
+        its own run/walk choice: only the pitch of the cloth answers a sprint.
+
+        The sample comes out of a shuffle bag per wearer, so no cloth sound
+        comes round again until the folder has dealt all of them -- random
+        without the stutter of a fresh pick every step. Nothing here may raise:
+        a piece with no folder simply has no cloth, and a step is never lost to
+        a missing sound.
+        """
+        path = self.armor_sounds_path
+        if not path or not self.armor_cloth_volume:
+            return
+        try:
+            cloth = path_utils.bag_item(
+                f"{consts.SOUNDPREPEND}{path}",
+                key=f"armor:{self.name}",
+                prefix="cloth",
+            )
+            if not cloth:
+                return
+            self.play_sound(
+                cloth,
+                rel_z=-1,
+                cat=cat,
+                volume=self.armor_cloth_volume,
+                pitch=1.06 if running else 1.0,
+            )
+        except Exception as e:
+            log(f"[ARMOR] cloth step skipped for {self.name!r}: {e}")
 
     def sync_network_position(self, x, y, z):
         """Update a high-rate network snapshot without touching OpenAL/EFX.
@@ -691,10 +751,16 @@ class Entity(Object):
     @property 
     def hp(self):
         return self._hp
+
+    # How much HP this entity can hold. The Server owns the number and sends it
+    # with every `set_hp` (`maxHp`), because a client that clamped HP at a
+    # figure of its own would ignore a heal above it -- and then send back the
+    # fall or the drowning it worked out from the wrong total.
+    max_hp = 100
     
     @hp.setter
     def hp(self, value):
-        self._hp = value if 0 <= value <= 100 else self._hp
+        self._hp = value if 0 <= value <= self.max_hp else self._hp
     
     def destroy(self):
         # Cancel any active water automation task
