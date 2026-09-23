@@ -1,11 +1,14 @@
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path
+import socket
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from urllib.parse import urlsplit
 import zipfile
 
 from libs import menus, options, server_config, vfs
@@ -157,6 +160,313 @@ class ServerConfigResolverTests(unittest.TestCase):
             options.prefs.update(old_prefs)
 
 
+class PublicResolverTests(unittest.TestCase):
+    """The second way to answer the one question a login cannot answer itself.
+
+    A machine whose own resolver will not answer for the server's *name* is the
+    player the whole fallback exists for, and an address embedded in the pack is
+    a snapshot of one. A public resolver over HTTPS is asked **by address**, so
+    the question needs no DNS of its own, and it is asked only after the local
+    resolver had nothing: a login that works today asks nobody.
+
+    Every test here hands the rig a fake HTTPS reply, so the suite never needs a
+    network -- the real call was measured on this project's machine (1.1.1.1 and
+    8.8.8.8 both answered the server's address in ~0.4 s, first call), and that
+    measurement is a fact about a machine, not something a test can rely on.
+    """
+
+    ANSWER = {
+        "Status": 0,
+        "Answer": [
+            {"name": "server.example", "type": 5, "data": "elsewhere.example"},
+            {"name": "server.example", "type": 1, "TTL": 300, "data": "103.30.126.64"},
+        ],
+    }
+
+    def reply(self, body=None, status=200):
+        return SimpleNamespace(status_code=status, json=lambda: self.ANSWER if body is None else body)
+
+    def test_the_endpoints_are_asked_by_address(self):
+        """The whole point: a name asked over HTTPS to an address needs no lookup
+        of its own, so this works on the very machine that cannot look names up.
+        """
+        self.assertTrue(server_config.DOH_QUERY_URLS)
+        for url in server_config.DOH_QUERY_URLS:
+            parsed = urlsplit(url)
+            self.assertEqual(parsed.scheme, "https", url)
+            self.assertEqual(
+                ipaddress.ip_address(parsed.hostname).version, 4,
+                f"{url} must be an address, not a name",
+            )
+
+    def test_a_name_the_machine_cannot_answer_is_put_to_a_public_resolver(self):
+        asked = []
+
+        def get(url, **kwargs):
+            asked.append((url, kwargs))
+            return self.reply()
+
+        with mock.patch.object(socket, "getaddrinfo", side_effect=OSError("no answer")), \
+                mock.patch("requests.get", get):
+            address, source = server_config.resolve_host_with_source(
+                "public-only.example"
+            )
+
+        self.assertEqual(address, "103.30.126.64")
+        self.assertEqual(source, "public")
+        self.assertEqual(asked[0][0], server_config.DOH_QUERY_URLS[0])
+        self.assertEqual(
+            asked[0][1]["params"], {"name": "public-only.example", "type": "A"}
+        )
+        self.assertEqual(asked[0][1]["headers"]["accept"], "application/dns-json")
+
+    def test_a_name_this_machine_can_answer_asks_nobody_else(self):
+        with mock.patch("requests.get") as get:
+            address, source = server_config.resolve_host_with_source("localhost")
+        self.assertEqual(address, "127.0.0.1")
+        self.assertEqual(source, "local")
+        get.assert_not_called()
+
+    def test_an_address_dialled_as_given_asks_nobody(self):
+        with mock.patch("requests.get") as get:
+            address, source = server_config.resolve_host_with_source("103.30.126.64")
+        self.assertEqual((address, source), ("103.30.126.64", "literal"))
+        get.assert_not_called()
+
+    def test_only_ipv4_is_an_answer(self):
+        """An AAAA and a CNAME chain are not addresses this transport can use,
+        and a name that only has them is a name with no address here."""
+        body = {
+            "Answer": [
+                {"type": 5, "data": "elsewhere.example"},
+                {"type": 28, "data": "2001:4860:4860::8888"},
+            ]
+        }
+        with mock.patch("requests.get", return_value=self.reply(body)):
+            self.assertIsNone(
+                server_config.resolve_host_via_doh("aaaa-only.example")
+            )
+
+    def test_the_second_endpoint_is_asked_when_the_first_cannot_answer(self):
+        tried = []
+
+        def get(url, **kwargs):
+            tried.append(url)
+            if len(tried) == 1:
+                raise OSError("blocked")
+            return self.reply()
+
+        with mock.patch("requests.get", get):
+            self.assertEqual(
+                server_config.resolve_host_via_doh("second-endpoint.example"),
+                "103.30.126.64",
+            )
+        self.assertEqual(list(tried), list(server_config.DOH_QUERY_URLS))
+
+    def test_a_broken_answer_is_no_answer_rather_than_a_crash(self):
+        """A login must survive every shape a blocked or captive network can
+        hand back: this is a convenience, and it never gets to break a game."""
+        for label, getter in (
+            ("refused", lambda url, **kw: self.reply(status=403)),
+            ("not json", lambda url, **kw: SimpleNamespace(
+                status_code=200, json=lambda: (_ for _ in ()).throw(ValueError("nope"))
+            )),
+            ("a landing page", lambda url, **kw: self.reply({"hello": "world"})),
+            ("no answer", lambda url, **kw: self.reply({"Status": 3, "Answer": []})),
+            ("an exception", lambda url, **kw: (_ for _ in ()).throw(OSError("tls"))),
+        ):
+            with self.subTest(label=label), mock.patch("requests.get", getter):
+                self.assertIsNone(
+                    server_config.resolve_host_via_doh(f"broken-{label}.example")
+                )
+
+    def test_an_answer_is_kept_and_a_failure_is_not(self):
+        """A login resolves the same name once per port it walks; a failure that
+        stuck would outlive the moment it happened on."""
+        now = [100.0]
+        answered = [False]
+        asked = []
+
+        def get(url, **kwargs):
+            asked.append(url)
+            if not answered[0]:
+                raise OSError("transient")
+            return self.reply()
+
+        name = "cached.example"
+        server_config._PUBLIC_LOOKUP_CACHE.pop(name, None)
+        try:
+            with mock.patch("requests.get", get):
+                # Every endpoint refused: no answer, and nothing kept.
+                self.assertIsNone(
+                    server_config.resolve_host_via_doh(name, clock=lambda: now[0])
+                )
+                asked_while_failing = len(asked)
+                self.assertEqual(asked_while_failing, len(server_config.DOH_QUERY_URLS))
+
+                answered[0] = True
+                self.assertEqual(
+                    server_config.resolve_host_via_doh(name, clock=lambda: now[0]),
+                    "103.30.126.64",
+                )
+                # Kept: no second question while the answer is fresh.
+                fetches = len(asked)
+                self.assertEqual(
+                    server_config.resolve_host_via_doh(name, clock=lambda: now[0]),
+                    "103.30.126.64",
+                )
+                self.assertEqual(len(asked), fetches)
+                # And asked again once it has gone stale.
+                now[0] += server_config.DOH_CACHE_TTL_S + 1
+                self.assertEqual(
+                    server_config.resolve_host_via_doh(name, clock=lambda: now[0]),
+                    "103.30.126.64",
+                )
+                self.assertGreater(len(asked), fetches)
+        finally:
+            server_config._PUBLIC_LOOKUP_CACHE.pop(name, None)
+
+    def test_a_build_without_requests_asks_nobody(self):
+        with mock.patch.object(
+            server_config, "public_lookup_enabled", return_value=False
+        ), mock.patch("requests.get") as get:
+            self.assertIsNone(
+                server_config.resolve_host_via_doh("no-requests.example")
+            )
+            with mock.patch.object(socket, "getaddrinfo", side_effect=OSError("no")):
+                self.assertEqual(
+                    server_config.resolve_host_with_source("no-requests.example"),
+                    (None, None),
+                )
+        get.assert_not_called()
+
+    def test_the_flag_that_says_nobody_may_be_asked(self):
+        """``public_resolver=False`` is what a caller that must not reach out
+        passes, and it is the whole old behaviour."""
+        with mock.patch("requests.get") as get, mock.patch.object(
+            socket, "getaddrinfo", side_effect=OSError("no answer")
+        ):
+            self.assertEqual(
+                server_config.resolve_host_with_source(
+                    "never-asked.example", public_resolver=False
+                ),
+                (None, None),
+            )
+        get.assert_not_called()
+
+
+class FallbackAddressTests(unittest.TestCase):
+    """One lookup place, and the addresses a release build may carry beside the
+    endpoint for the machine whose DNS answers every name but this one."""
+
+    def test_a_literal_is_returned_as_it_is_and_never_looked_up(self):
+        self.assertEqual(server_config.resolve_host("103.30.126.64"), "103.30.126.64")
+        self.assertEqual(server_config.resolve_host(" 103.30.126.64 "), "103.30.126.64")
+
+    def test_a_name_this_machine_cannot_answer_has_no_address(self):
+        """``public_resolver=False`` is the old contract, and the one a test can
+        assert without reaching for the internet: what the local resolver alone
+        can say."""
+        self.assertIsNone(
+            server_config.resolve_host(
+                "name-that-cannot-exist.invalid", public_resolver=False
+            )
+        )
+
+    def test_ipv6_is_no_address_for_this_transport(self):
+        """ENet here has no IPv6: an answer would only move the failure later."""
+        self.assertIsNone(server_config.resolve_host("::1"))
+        self.assertIsNone(server_config.resolve_host("[::1]"))
+
+    def test_production_reads_the_backups_from_the_pack(self):
+        with mock.patch.object(
+            server_config, "is_production_build", return_value=True
+        ), mock.patch.object(
+            vfs,
+            "get_embedded_server_config",
+            return_value={
+                "host": "official.example",
+                "port": 13000,
+                "addresses": ["103.30.126.64", "backup.example"],
+            },
+        ):
+            self.assertEqual(
+                server_config.get_fallback_addresses(),
+                ("103.30.126.64", "backup.example"),
+            )
+
+    def test_a_pack_without_backups_answers_nothing(self):
+        with mock.patch.object(
+            server_config, "is_production_build", return_value=True
+        ), mock.patch.object(
+            vfs,
+            "get_embedded_server_config",
+            return_value={"host": "official.example", "port": 13000},
+        ):
+            self.assertEqual(server_config.get_fallback_addresses(), ())
+
+    def test_a_backup_that_is_not_an_address_is_dropped_rather_than_raised(self):
+        """A backup may never break a login: the endpoint itself still fails
+        closed, but a bad *second* door is simply not a door."""
+        with mock.patch.object(
+            server_config, "is_production_build", return_value=True
+        ), mock.patch.object(
+            vfs,
+            "get_embedded_server_config",
+            return_value={
+                "addresses": [
+                    "103.30.126.64",
+                    "http://bad.example/x",
+                    "",
+                    7,
+                    "103.30.126.64",
+                    "backup.example",
+                ]
+            },
+        ):
+            self.assertEqual(
+                server_config.get_fallback_addresses(),
+                ("103.30.126.64", "backup.example"),
+            )
+
+    def test_a_source_build_may_name_backups_beside_host_and_port(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "dev_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "host": "config.example",
+                        "port": 14000,
+                        "addresses": ["10.0.0.5"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                server_config.get_fallback_addresses(dev_config_path=config_path),
+                ("10.0.0.5",),
+            )
+
+    def test_a_broken_dev_config_costs_the_backups_and_not_the_login(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "dev_config.json"
+            config_path.write_text("{not json", encoding="utf-8")
+            self.assertEqual(
+                server_config.get_fallback_addresses(dev_config_path=config_path), ()
+            )
+
+    def test_the_endpoint_and_a_backup_go_through_one_validator(self):
+        self.assertEqual(
+            server_config.validate_server_host("official.example"), "official.example"
+        )
+        self.assertEqual(
+            server_config.validate_server_endpoint("official.example", 13000),
+            ("official.example", 13000),
+        )
+        with self.assertRaises(server_config.ServerConfigError):
+            server_config.validate_server_host("https://official.example")
+
+
 class EndpointOptionsMenuTests(unittest.TestCase):
     class FakeOptionsMenu:
         last_instance = None
@@ -264,6 +574,48 @@ class ServerConfigPackagingTests(unittest.TestCase):
                 embedded, {"host": "official.example", "port": 13000}
             )
             self.assertFalse((data_dir / ".bt").exists())
+
+    def test_a_pack_s_backup_address_is_what_a_production_login_reads(self):
+        """The whole chain in one test: the packer writes the document, the VFS
+        mounts it, and a released build's login walks the address it carries."""
+        old_cwd = Path.cwd()
+        old_config = vfs.EMBEDDED_SERVER_CONFIG
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                try:
+                    root = Path(temp_dir)
+                    data_dir = root / "source_data"
+                    data_dir.mkdir()
+                    (data_dir / "test.txt").write_text("asset", encoding="utf-8")
+                    pack_data.pack_data(
+                        data_dir,
+                        root / "sounds.dat",
+                        "mongkol.ddns.net",
+                        13000,
+                        ["103.30.126.64"],
+                    )
+                    os.chdir(root)
+                    vfs._reset_for_tests()
+                    vfs.init_vfs()
+                    with mock.patch.object(
+                        server_config, "is_production_build", return_value=True
+                    ):
+                        self.assertEqual(
+                            server_config.get_server_endpoint(),
+                            ("mongkol.ddns.net", 13000),
+                        )
+                        self.assertEqual(
+                            server_config.get_fallback_addresses(),
+                            ("103.30.126.64",),
+                        )
+                finally:
+                    # The mount must be released before the folder that holds
+                    # the pack is removed (Windows holds the open file).
+                    os.chdir(old_cwd)
+                    vfs.cleanup_vfs()
+        finally:
+            os.chdir(old_cwd)
+            vfs.EMBEDDED_SERVER_CONFIG = old_config
 
     def test_vfs_keeps_embedded_endpoint_out_of_extracted_temp_files(self):
         # Lazy VFS: nothing lands on disk at mount time — not even the

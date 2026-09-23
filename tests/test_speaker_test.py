@@ -254,6 +254,70 @@ class EachLineAsksForItsOwnPlacementTests(unittest.TestCase):
         self.assertEqual(game.audio_mngr.stopped, 1)
 
 
+class OneWalkAtATimeTests(unittest.TestCase):
+    """Press the walk again and it starts over, instead of a second one running
+    behind the first.
+
+    Every step is a callback on the game clock and nothing took the steps of a
+    replaced walk back, so a second press left two chains stepping over each
+    other's voices -- each sample cut short by the other chain's next one, which
+    is heard as the test playing on top of itself rather than as one walk from
+    the left to the right.
+    """
+
+    def test_pressing_the_walk_again_starts_it_over_from_the_left(self):
+        game = FakeGame()
+        menu = open_test_menu(game)
+        press(menu, "Left, centre, then right")
+        press(menu, "Left, centre, then right")
+        self.assertEqual(
+            game.audio_mngr.played,
+            [(TEST_SOUNDS["left"], "left"), (TEST_SOUNDS["left"], "left")],
+            "the left side sounds again: the walk restarts rather than stacks",
+        )
+        self.assertEqual(len(game.delayed), 2, "each press owns one pending step")
+        game.run_delayed()
+        centres = [call for call in game.audio_mngr.played if call[1] == "centre"]
+        self.assertEqual(len(centres), 1, "the replaced walk must not sound too")
+        self.assertEqual(game.audio_mngr.played[-1], (TEST_SOUNDS["centre"], "centre"))
+        game.run_delayed()
+        rights = [call for call in game.audio_mngr.played if call[1] == "right"]
+        self.assertEqual(len(rights), 1, "one walk, one visit to each side")
+        self.assertEqual(game.delayed, [], "the surviving walk ends on the right")
+
+    def test_a_single_placement_ends_the_walk_still_stepping_behind_it(self):
+        game = FakeGame()
+        menu = open_test_menu(game)
+        press(menu, "Left, centre, then right")
+        press(menu, "Right speaker only")
+        game.run_delayed()
+        self.assertEqual(
+            game.audio_mngr.played,
+            [(TEST_SOUNDS["left"], "left"), (TEST_SOUNDS["right"], "right")],
+            "the walk's centre must not step over the side that was asked for",
+        )
+
+    def test_stopping_the_test_takes_the_pending_walk_with_it(self):
+        game = FakeGame()
+        menu = open_test_menu(game)
+        press(menu, "Left, centre, then right")
+        press(menu, "Stop the test")
+        game.run_delayed()
+        self.assertEqual(game.audio_mngr.played, [(TEST_SOUNDS["left"], "left")],
+                         "a walk that was stopped says nothing more")
+
+    def test_leaving_the_test_leaves_the_walk_and_the_voice_behind(self):
+        game = FakeGame()
+        menu = open_test_menu(game)
+        press(menu, "Left, centre, then right")
+        press(menu, "Back")
+        self.assertEqual(game.replaced.title, "Main menu.")
+        self.assertEqual(game.audio_mngr.stopped, 1, "the voice goes with the menu")
+        game.run_delayed()
+        self.assertEqual(game.audio_mngr.played, [(TEST_SOUNDS["left"], "left")],
+                         "no step of the walk sounds into the main menu")
+
+
 class ATestThatCannotBeHeardSaysWhyTests(unittest.TestCase):
     def test_a_muted_game_says_so_instead_of_playing_nothing(self):
         game = FakeGame(FakeAudioMngr(muted=True))

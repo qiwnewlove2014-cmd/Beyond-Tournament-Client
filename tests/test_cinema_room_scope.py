@@ -497,8 +497,9 @@ class TheCabinetsAroundACabinetTests(unittest.TestCase):
         game, _map = build(speakers=pair(10.0, 26.0))
         self.assertEqual(neighbour_note(game, "j1"), "")
         self.assertEqual(neighbour_line(game, "j1"), "")
-        self.assertEqual([line for line in self.labels(
-            self.menu_game(speakers=pair(10.0, 26.0))) if "cabinet" in line], [])
+        menu_game = self.menu_game(speakers=pair(10.0, 26.0))
+        menu_game.gameplay.is_staff = True      # the line is staff's to read
+        self.assertEqual([line for line in self.labels(menu_game) if "cabinet" in line], [])
 
     def test_a_distant_neighbour_is_named_with_its_distance(self):
         game, _map = build(cabinets=((10.0, 20.0), (150.0, 20.0)))
@@ -549,7 +550,10 @@ class TheCabinetsAroundACabinetTests(unittest.TestCase):
         self.assertNotIn("j3", neighbour_note(game, "j1"))
 
     def test_the_menu_carries_the_line_and_speaks_the_whole_answer(self):
+        # The line is a staff read-out (see the cabinet-title tests), so the
+        # menu that carries it is a staff member's.
         game = self.menu_game(cabinets=((10.0, 20.0), (50.0, 20.0)))
+        game.gameplay.is_staff = True
         label = "Another cabinet at 40 m (j2)"
         self.assertIn(label, self.labels(game))
         action = dict((label() if callable(label) else label, act)

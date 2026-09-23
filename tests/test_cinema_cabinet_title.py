@@ -16,9 +16,10 @@ belongs -- and it is the one line that costs nothing to check:
       descriptions of one cabinet read as two different settings;
     * the title says what the CABINET is and never what these particular ears
       do with it: a listener who switched rooms off still reads the cabinet's
-      own name, because the ``Cinema:`` line and the detail read-out are what
-      explain the listening, and two people standing at one cabinet must not
-      disagree about what it is.
+      own name, because the room's own lines explain the listening, and two
+      people standing at one cabinet must not disagree about what it is -- and
+      those lines are staff's (see the staff-only tests below), which is a
+      question about a line's audience and never about the title.
 """
 
 import os
@@ -30,6 +31,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import jukebox
+from libs.audio.cinema import neighbour_line
 from libs.audio.cinema.layout import CinemaLayout
 from libs.audio.cinema.profiles import get_profile, profile_names
 from test_cinema_room_scope import build
@@ -191,6 +193,7 @@ class TheMenuItselfTests(unittest.TestCase):
 
     def test_the_read_out_lines_are_unchanged_by_the_name(self):
         game = cabinet_game(speakers=FULL_ROOM, modes={"j1": "surround"})
+        game.gameplay.is_staff = True        # the read-out is staff's to read
         labels = open_cabinet_menu(game).labels()
         self.assertIn("Cinema: surround - that room shape, speakers or not", labels)
         self.assertIn("View queue", labels)
@@ -203,6 +206,49 @@ class TheMenuItselfTests(unittest.TestCase):
                         return_value=False):
             menu = open_cabinet_menu(game)
         self.assertEqual(menu.title, "Cinema Jukebox: theatre")
+
+
+class TheRoomsOwnLinesAreStaffOnlyTests(unittest.TestCase):
+    """The room's read-out and the cabinets near it are staff lines.
+
+    A room is *heard*: hearing it needs no account of the mode the cabinet was
+    set to, the area drawn around it, or which other cabinet's speakers overlap
+    these -- and the second line is the map said out loud twice over, naming
+    another element by its id. So a player's cabinet menu carries neither, while
+    the mode, reach and lock lines a staff member gets stay where they were.
+
+    The rule is the *menu's*, never the reading's: ``neighbour_line`` still
+    answers for anybody, because two people standing at one cabinet must not
+    disagree about the map under their feet.
+    """
+
+    def menu_labels(self, *, staff):
+        game, _map = build(cabinets=(CABINET, (50.0, 20.0)), speakers=FRONT_ROOM)
+        gp = game.gameplay
+        gp.player = SimpleNamespace(name="Kanya", x=CABINET[0], y=CABINET[1], z=0.0)
+        gp.substates = []
+        gp.add_substate = gp.substates.append
+        gp.pop_last_substate = lambda: None
+        gp.is_staff = staff
+        with mock.patch("libs.menu.Menu", FakeMenu), \
+                mock.patch("libs.menus.set_default_sounds"):
+            jukebox.open_jukebox_menu(game, gp)
+        return FakeMenu.last.labels()
+
+    def test_a_player_is_shown_neither_the_room_nor_the_cabinets_near_it(self):
+        labels = self.menu_labels(staff=False)
+        self.assertEqual([line for line in labels if line.startswith("Cinema:")], [])
+        self.assertEqual([line for line in labels if "cabinet" in line], [])
+
+    def test_staff_still_get_both_read_outs_and_the_controls(self):
+        labels = self.menu_labels(staff=True)
+        self.assertTrue([line for line in labels if line.startswith("Cinema:")], labels)
+        self.assertIn("Another cabinet at 40 m (j2)", labels)
+        self.assertTrue([line for line in labels if line.startswith("Set cinema")], labels)
+
+    def test_the_reading_itself_is_still_answered_for_anybody(self):
+        game, _map = build(cabinets=(CABINET, (50.0, 20.0)))
+        self.assertEqual(neighbour_line(game, "j1"), "Another cabinet at 40 m (j2)")
 
 
 if __name__ == "__main__":

@@ -211,19 +211,25 @@ class Game:
         """returns a tuple to toggle {key} with the title as {text}. the tuple is accepted by Menu as a menu item only."""
         return (lambda: self.toggle_state(text, key, default=default), lambda: self.toggle(key, default=default))
 
-    def _new_network_client(self, port=None):
-        """A fresh transport for one login attempt.
+    def _new_network_client(self, address=None):
+        """A fresh transport for one login candidate.
 
-        ``port`` overrides the endpoint's own port so a retry can be a new
-        socket on the same address (libs/login_attempts.py): a new local port
-        means a new NAT mapping, which is what a stale one needs. The
-        configured endpoint is what a login starts with.
+        ``address`` is the ``(host, port)`` one candidate names -- the
+        endpoint's own name, or a backup address a release build embedded beside
+        it (libs/login_attempts.py). The port travels with the address so a
+        retry can be a new socket on the same name: a new local port means a new
+        NAT mapping, which is what a stale one needs. Without an address the
+        configured endpoint is opened, which is what a caller that is not
+        walking a list gets.
         """
-        host, configured = server_config.get_server_endpoint()
+        if address is None:
+            host, port = server_config.get_server_endpoint()
+        else:
+            host, port = address
         return networking.Client(
             self,
             host,
-            configured if port is None else port,
+            port,
             event_handeler.EventHandeler,
         )
 
@@ -238,12 +244,19 @@ class Game:
         knows where it may go exactly as a fresh login does. Raises whatever
         stops the last candidate, which is what both callers already report.
         """
-        _, port = server_config.get_server_endpoint()
-        self._login_ports = login_attempts.candidate_ports(
-            port, preferred=options.get_login_port()
+        host, port = server_config.get_server_endpoint()
+        self._login_name = host
+        self._login_candidates = login_attempts.candidate_addresses(
+            host,
+            port,
+            server_config.get_fallback_addresses(),
+            preferred=options.get_login_port(),
         )
         self._login_port = None
-        if not self._login_ports:
+        # A fresh walk: nothing has been dialled, nothing is known to be
+        # unfindable, and no backup address has been reached yet.
+        self._login_facts = None
+        if not self._login_candidates:
             raise OSError("There is no login candidate to open.")
         if not self._open_candidate(0):
             raise self._last_open_error
@@ -251,38 +264,174 @@ class Game:
     def _open_candidate(self, index):
         """Open the first candidate at or after ``index``, and say which.
 
-        A port this machine will not open a socket for is walked past rather
-        than reported: two candidates exist because one may open where another
-        cannot, and the configured port is exactly where a filter shows up
-        first. The retry notice is spoken only for a *later* candidate, so a
-        login that opens where it always did stays as quiet as it always was.
+        A candidate this machine cannot use is walked past rather than reported:
+        a name that could not be looked up (the same name is not asked twice --
+        ``login_attempts.candidate_available``), a port this machine will not
+        open a socket for, and an address this login has already dialled under
+        another name. The configured port is exactly where a filter shows up
+        first, which is why the walk exists at all. The retry notice is spoken
+        only for a *later* candidate, so a login that opens where it always did
+        stays as quiet as it always was.
 
-        False means none of them would open; the error that stopped the last
-        one is kept for the caller to report.
+        False means none of them would open; the error that stopped the last one
+        is kept for the caller to report.
         """
-        ports = tuple(getattr(self, "_login_ports", ()))
+        candidates = tuple(getattr(self, "_login_candidates", ()))
+        facts = self._login_walk()
         last_error = None
-        while index < len(ports):
+        while index < len(candidates):
+            candidate = candidates[index]
+            if not login_attempts.candidate_available(
+                candidate, facts["unresolvable"], facts["doors"]
+            ):
+                index += 1
+                continue
             try:
-                self.network = self._new_network_client(ports[index])
+                self.network = self._new_network_client(candidate)
+            except server_config.NameLookupError as error:
+                # One answer for one name: every other candidate that shares it
+                # is retired, so a login with a backup address does not spend a
+                # silence window per port on a name that has no answer at all.
+                facts["unresolvable"].add(str(candidate[0]).lower())
+                facts["lookup_failed"] = True
+                self.network = None
+                last_error = error
+                index += 1
+                continue
             except (OSError, server_config.ServerConfigError) as error:
                 self.network = None
                 last_error = error
                 index += 1
                 continue
             self._login_try = index
-            self._login_port = ports[index]
-            if index > 0:
-                speak(login_attempts.retry_notice(index + 1, len(ports)), False)
+            self._login_port = candidate[1]
+            # The notice is spoken before this door joins the ones already
+            # dialled, so its count is the doors behind it plus the ones ahead.
+            # A first-door walk says nothing: a name with no answer was never a
+            # door, and "trying the connection again" over one this machine
+            # never reached is a retry the player did not have. When the login
+            # really has been through something, both numbers count doors, so
+            # what the player reads out to staff matches the log's tried= list.
+            attempt, total = login_attempts.retry_position(
+                candidates, index, facts["unresolvable"], facts["doors"]
+            )
+            if attempt > 1:
+                speak(login_attempts.retry_notice(attempt, total), False)
+            facts["dialled"].append(candidate)
+            facts["doors"].add((str(candidate[0]).lower(), candidate[1]))
+            resolved = getattr(self.network, "resolved_host", None)
+            if resolved:
+                # The door by address as well as by name: a backup that is what
+                # this name resolved to is recognised as the same door, while
+                # the port above it is still a door nothing has been sent to.
+                facts["doors"].add((str(resolved).lower(), candidate[1]))
+            # How this door's address was found -- a literal, this machine's
+            # resolver, or a public one. The login line reports it, because a
+            # player who only gets in through the public resolver has a DNS
+            # problem that nothing else in the game would ever say out loud.
+            facts["lookup"] = getattr(self.network, "resolved_via", None)
+            if login_attempts.is_backup(candidate, getattr(self, "_login_name", "")):
+                facts["backup"] = True
             return True
         self._login_try = index
         self._last_open_error = last_error
         return False
 
-    def _silence_report(self, ports):
+    def _silence_report(self):
         """The last word when every candidate was tried and stayed silent."""
+        facts = self._login_walk()
+        candidates = tuple(getattr(self, "_login_candidates", ()))
+        # The ports of what was really dialled, or -- for a walk that never got
+        # that far -- of what this login was going to try.
+        ports = [port for _, port in (facts["dialled"] or candidates)]
         return login_attempts.silence_message(
-            max(getattr(self, "_login_try", 0), 1), ports
+            max(len(facts["dialled"]), 1), ports, backup_tried=facts["backup"]
+        )
+
+    def _login_walk(self):
+        """The facts of the walk this login is on, created on first use.
+
+        One dictionary rather than five attributes on the Game: what happened is
+        one thing, and a hand-built Game -- a test, a reconnect that never opened
+        anything -- has none of it.
+        """
+        facts = getattr(self, "_login_facts", None)
+        if facts is None:
+            facts = {
+                "unresolvable": set(),  # names this machine could not look up
+                "dialled": [],  # every (host, port) really dialled
+                "doors": set(),  # those doors as (host-or-address, port) pairs
+                "lookup_failed": False,  # a name was asked for and had no answer
+                "lookup": None,  # how the opened door's address was found
+                "backup": False,  # a candidate that was not the endpoint's name
+            }
+            self._login_facts = facts
+        return facts
+
+    def _login_failure_words(self, error=None):
+        """What the player hears about the login that just failed, from the facts.
+
+        Most specific first: a name that could not be looked up is a different
+        failure from a server that never answered, and it is the one the player
+        can act on (a mobile hotspot, a different DNS) and the one the Server can
+        never see. Anything else keeps the line it always had.
+        """
+        facts = self._login_walk()
+        if facts["lookup_failed"]:
+            # A name this machine cannot answer has already been put to a public
+            # resolver before we get here (server_config.resolve_host), when the
+            # build has one -- so the sentence may say so, and says nothing when
+            # it does not.
+            return login_attempts.resolution_message(
+                backup_tried=facts["backup"],
+                public_resolver_tried=server_config.public_lookup_enabled(),
+            )
+        if error is not None:
+            return self._connection_failure_message(error)
+        return self._silence_report()
+
+    def _report_login_failure(self, error=None):
+        """Say why the login failed, and write the one line that records it.
+
+        The Server only ever records the attempts that *arrived*, and the failure
+        this exists for is the one where nothing arrived at all: the player is
+        told to ask staff to read the connection log, and the log has nothing to
+        read. This machine is the only witness, so it keeps one line whatever the
+        outcome (``login_attempts.attempt_report``) -- and the sentence the
+        player hears is built from those same facts.
+        """
+        facts = self._login_walk()
+        log(
+            login_attempts.attempt_report(
+                getattr(self, "_login_name", None),
+                facts["dialled"],
+                lookup_failed=facts["lookup_failed"],
+                lookup="none",
+                backup_tried=facts["backup"],
+                error=error,
+            )
+        )
+        return self._login_failure_words(error)
+
+    def _report_login_reached(self):
+        """One line for the login that *did* open: which door let this machine in.
+
+        The half of the record the Server cannot give. A player whose login only
+        works through a backup address has a name their resolver will not answer,
+        and nothing else in the game would ever say so -- the login simply works,
+        a few seconds slower -- so this line is where that machine's DNS problem
+        is known first.
+        """
+        facts = self._login_walk()
+        log(
+            login_attempts.attempt_report(
+                getattr(self, "_login_name", None),
+                facts["dialled"],
+                resolved=getattr(self.network, "resolved_host", None),
+                answered=facts["dialled"][-1] if facts["dialled"] else None,
+                lookup=facts["lookup"],
+                backup_tried=facts["backup"],
+            )
         )
 
     def _connection_failure_message(self, error):
@@ -313,18 +462,24 @@ class Game:
         # gave up used to leave its socket open and unserviced). Release it
         # before a new one takes its place, or the two talk to one account.
         self._close_network()
+        # Said before the walk, not after it: opening the first candidate is
+        # where a retry notice can be spoken (a configured port this machine
+        # will not open, a name that had to be fallen back from), and "trying
+        # the connection again" before "connecting to the server" reads as a
+        # retry that never happened. The sentence is the same either way; only
+        # its place in the order changed.
+        speak("Connecting to the server. Please wait...")
         try:
             self._open_first_login_attempt()
         except (OSError, server_config.ServerConfigError) as e:
             self.pop()
             menus.main_menu(self)
-            speak(self._connection_failure_message(e))
+            speak(self._report_login_failure(e))
             return
-        speak("Connecting to the server. Please wait...")
         self.replace(self.login2)
 
     def _retry_login(self):
-        """Walk to the next port, or report that none of them answered.
+        """Walk to the next candidate, or report that none of them answered.
 
         Only ever reached from ``login2``, where the wait is for the
         *handshake*: nothing the server said has been answered, so this is a
@@ -333,22 +488,18 @@ class Game:
         ``Client.loop``'s watchdog, which owns that window and never retries it
         -- one rule, one owner, and a struggling server is not hammered.
 
-        Walking is ``_open_candidate``: a port this machine will not even open a
-        socket for is a reason to try the next candidate, not to report, and
-        only a list that is spent is worth reporting. What is reported then is
-        the most specific thing known -- the error that stopped the last
-        candidate if there was one, otherwise the silence that covered them
-        all.
+        Walking is ``_open_candidate``: a candidate this machine cannot use is a
+        reason to try the next one, not to report, and only a walk that is spent
+        is worth reporting. What is reported then -- by word and by log line --
+        is the most specific thing known (``_report_login_failure``): a name that
+        could not be looked up, else the error that stopped the last candidate,
+        else the silence that covered them all.
         """
         self._close_network()
-        ports = tuple(getattr(self, "_login_ports", ()))
         if not self._open_candidate(getattr(self, "_login_try", 0) + 1):
-            last_error = getattr(self, "_last_open_error", None)
-            if last_error is not None:
-                return self.connection_error(
-                    self._connection_failure_message(last_error)
-                )
-            return self.connection_error(self._silence_report(ports))
+            return self.connection_error(
+                self._report_login_failure(getattr(self, "_last_open_error", None))
+            )
         return self.replace(self.login2)
 
     def _remember_login_port(self):
@@ -383,6 +534,9 @@ class Game:
             self.network.note_handshake()
             # The port answered, so this machine starts with it next time.
             self._remember_login_port()
+            # ... and which door it was is the half of the record the Server
+            # cannot keep (a login that only works through a backup address).
+            self._report_login_reached()
             speak("Logging in. Please wait...")
             self.network.send(
                 consts.CHANNEL_MISC,

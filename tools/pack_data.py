@@ -1,4 +1,5 @@
 import argparse
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,13 @@ CLIENT_ROOT = Path(__file__).resolve().parents[1]
 if str(CLIENT_ROOT) not in sys.path:
     sys.path.insert(0, str(CLIENT_ROOT))
 
-from libs.server_config import ServerConfigError, validate_server_endpoint
+from libs.server_config import (
+    FALLBACK_ADDRESS_KEY,
+    ServerConfigError,
+    resolve_host,
+    validate_server_endpoint,
+    validate_server_host,
+)
 from libs.vfs import (
     PACK_META_MEMBER,
     SERVER_CONFIG_MEMBER,
@@ -32,17 +39,74 @@ def iter_build_assets(source_root: Path):
                 yield Path(directory) / name
 
 
+def _as_ipv4_literal(address: str) -> bool | None:
+    """True/False for a literal address, None when it is a name."""
+    try:
+        return ipaddress.ip_address(address).version == 4
+    except ValueError:
+        return None
+
+
+def backup_addresses_for(host: str, addresses=()) -> tuple[str, ...]:
+    """The backup addresses a pack carries beside the endpoint.
+
+    A released build is one name and, until now, nothing else: a player whose
+    resolver refuses that name could not get in at all, and no amount of
+    retrying changes it (``libs/login_attempts.py``). The address this machine
+    resolves the name to is embedded beside it, so that login has a door with no
+    DNS in front of it.
+
+    Named addresses win, and are an operator's override -- packing from inside
+    the server's own network, or from a machine whose DNS is the very thing that
+    cannot be trusted. Otherwise this machine is asked, and only a *global* IPv4
+    is taken: a private, loopback or VPN answer is the packer's own network, and
+    embedding it would send players somewhere they can never reach. A backup can
+    be a name as well as an address, but a literal must be IPv4 -- the transport
+    has no IPv6, so embedding one would only move the failure somewhere later.
+    """
+    chosen: list[str] = []
+    seen: set[str] = set()
+    for entry in addresses:
+        # A named backup is an instruction: a bad one is an error, not a shrug.
+        address = validate_server_host(entry)
+        if _as_ipv4_literal(address) is False:
+            raise ServerConfigError(
+                "A backup address must be an IPv4 address or a hostname."
+            )
+        if address.lower() in seen:
+            continue
+        seen.add(address.lower())
+        chosen.append(address)
+    if chosen:
+        return tuple(chosen)
+
+    resolved = resolve_host(host)
+    if not resolved or resolved == host:
+        return ()
+    try:
+        is_global = ipaddress.ip_address(resolved).is_global
+    except ValueError:
+        is_global = False
+    return (resolved,) if is_global else ()
+
+
 def pack_data(
     data_dir: os.PathLike[str] | str,
     output_path: os.PathLike[str] | str,
     server_host: object,
     server_port: object,
+    addresses=None,
 ) -> Path:
     """Create an encrypted VFS archive without writing config into source data.
 
     Every member is encrypted independently with XChaCha20-Poly1305 and a
     fresh random nonce (see ``vfs.btx_encrypt``), so the client can decrypt
     single sounds on demand instead of unpacking the whole archive.
+
+    ``addresses`` is what travels beside the endpoint as a login's backup
+    (``backup_addresses_for``): a sequence to name them, and None -- the
+    default, which is what every caller wants -- to ask this machine for the
+    endpoint's own address.
     """
 
     source_root = Path(data_dir).resolve()
@@ -53,6 +117,11 @@ def pack_data(
         raise ValueError("The encrypted output must be outside the source data folder.")
 
     host, port = validate_server_endpoint(server_host, server_port)
+    backups = (
+        backup_addresses_for(host)
+        if addresses is None
+        else tuple(validate_server_host(entry) for entry in addresses)
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     temporary_zip_path = None
@@ -81,11 +150,14 @@ def pack_data(
                         btx_encrypt(source_path.read_bytes()),
                     )
                     member_count += 1
+            embedded = {"host": host, "port": port}
+            if backups:
+                embedded[FALLBACK_ADDRESS_KEY] = list(backups)
             archive.writestr(
                 SERVER_CONFIG_MEMBER,
                 btx_encrypt(
                     json.dumps(
-                        {"host": host, "port": port},
+                        embedded,
                         ensure_ascii=True,
                         separators=(",", ":"),
                         sort_keys=True,
@@ -125,6 +197,15 @@ def _parse_args(argv=None):
     parser.add_argument("--server-config", default=DEFAULT_BUILD_CONFIG)
     parser.add_argument("--server-host")
     parser.add_argument("--server-port")
+    parser.add_argument(
+        "--server-address",
+        action="append",
+        dest="server_addresses",
+        help=(
+            "a backup address to embed beside the server name (repeatable); "
+            "otherwise the name is resolved on this machine"
+        ),
+    )
     args = parser.parse_args(argv)
 
     file_config = {}
@@ -157,17 +238,43 @@ def _parse_args(argv=None):
         )
     except ServerConfigError as error:
         parser.error(str(error))
+
+    # CLI, then environment, then the build config -- the same precedence the
+    # endpoint itself has, because they are two halves of one document.
+    named = list(args.server_addresses or ())
+    environment = os.environ.get("BT_SERVER_ADDRESS") or ""
+    if environment and not named:
+        named = [part for part in environment.split(",") if part.strip()]
+    if not named:
+        file_addresses = file_config.get("addresses") or []
+        if not isinstance(file_addresses, (list, tuple)):
+            parser.error(f"{config_path.name}'s addresses must be a list")
+        named = list(file_addresses)
+    try:
+        args.server_addresses = [validate_server_host(entry) for entry in named]
+    except ServerConfigError as error:
+        parser.error(str(error))
     return args
 
 
 def main(argv=None):
     args = _parse_args(argv)
     print("Packing and encrypting client data...")
+    addresses = backup_addresses_for(args.server_host, args.server_addresses)
+    if addresses:
+        print("Embedding backup address(es): " + ", ".join(addresses))
+    else:
+        print(
+            "No backup address embedded: "
+            f"{args.server_host} did not resolve to a public IPv4 address on this "
+            "machine. Pass --server-address or set BT_SERVER_ADDRESS to embed one."
+        )
     output = pack_data(
         args.data_dir,
         args.output,
         args.server_host,
         args.server_port,
+        addresses,
     )
     print(f"Data packed and encrypted to {output.name} successfully.")
 

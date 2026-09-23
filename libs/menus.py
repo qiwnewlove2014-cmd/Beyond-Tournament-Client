@@ -233,6 +233,22 @@ def speaker_test_menu(game):
     audio = game.audio_mngr
     muted_message = "Audio is muted, so nothing will be heard. Turn the sound back on first."
 
+    # One walk at a time, and every step knows which walk it belongs to. The
+    # steps are scheduled on the game clock and nothing else takes them back, so
+    # a second press while the first walk was still stepping left two sequences
+    # running over each other -- each voice cut short by the other chain's next
+    # sample, which is heard as the test playing on top of itself instead of one
+    # walk from the left to the right. A press now *restarts* the walk from the
+    # left, and a step whose walk has been superseded does nothing when its
+    # moment comes. Stop, one of the single placements and leaving the menu all
+    # spend the token as well: a step that outlived its test must never speak
+    # into whatever the listener opened next.
+    walk = {"token": 0}
+
+    def end_walk():
+        """Retire the walk that is running, if one is: its steps go quiet."""
+        walk["token"] += 1
+
     def sound(placement):
         """Play one placement; returns its length in seconds (0.0 if silent)."""
         if getattr(audio, "muted", False):
@@ -244,14 +260,21 @@ def speaker_test_menu(game):
         return seconds
 
     def play(placement):
+        # One placement is a test of its own: a walk still stepping behind it
+        # would cut into it a moment later.
+        end_walk()
         sound(placement)
 
     def play_walk():
-        """Left, centre, then right -- each one starting on the sample before
-        it, measured rather than guessed."""
+        """Left, centre, then right -- always from the left, each one starting
+        on the sample before it, measured rather than guessed."""
         order = ("left", "centre", "right")
+        end_walk()
+        token = walk["token"]
 
         def step(index):
+            if token != walk["token"]:
+                return
             seconds = sound(order[index])
             if seconds and index + 1 < len(order):
                 game.call_after(int(seconds * 1000) + SPEAKER_TEST_GAP_MS,
@@ -261,9 +284,19 @@ def speaker_test_menu(game):
 
     def stop():
         # Silence is the answer when there was something to stop, so it only
-        # speaks when there was nothing.
+        # speaks when there was nothing. A walk waiting on the clock is
+        # something to stop as well, or its next step would sound into a test
+        # the listener had just ended.
+        end_walk()
         if not audio.stop_headphone_test():
             speech.speak("Nothing is playing.")
+
+    def back():
+        """Leaving the test takes the walk and the voice with it: a step that
+        outlived its menu would speak into whatever opened next."""
+        end_walk()
+        audio.stop_headphone_test()
+        main_menu(game)
 
     m.add_items([
         ("Left speaker only", lambda: play("left")),
@@ -271,7 +304,7 @@ def speaker_test_menu(game):
         ("Right speaker only", lambda: play("right")),
         ("Left, centre, then right", play_walk),
         ("Stop the test", stop),
-        ("Back", lambda: main_menu(game)),
+        ("Back", back),
     ])
     game.replace(m)
 

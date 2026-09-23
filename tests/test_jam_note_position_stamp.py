@@ -26,10 +26,18 @@ import sys
 import time
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from libs.audio_diagnostics import probe as audio_probe
 from libs.event_handeler import EventHandeler
+from libs.gameplay import Gameplay
+from libs.jukebox import JukeboxPlayer, JukeboxRelayReceiver
+
+
+class _FakeSrc:
+    """An OpenAL source name is all ``play()`` does with one."""
 
 
 def handler_for(entry, *, buffer_kind="relay"):
@@ -138,6 +146,178 @@ class WhereThisMachinesEarsAreTests(unittest.TestCase):
         # The listener trails 160 ms further behind the song, so the beat the
         # performer played is that much *later* in the listener's own music.
         self.assertAlmostEqual(performer_position - listener_position, 160.0, delta=20.0)
+
+
+class TheSongPositionMustBeOnTheEntryTests(unittest.TestCase):
+    """The real player must record it, or none of the above ever runs.
+
+    Every check in ``WhereThisMachinesEarsAreTests`` builds the entry by hand,
+    and that hand-built entry is exactly how this feature stayed unreachable in
+    the shipped game: ``JukeboxPlayer.play()`` put the position the Server named
+    into ``play_params`` (for its own replay path) and never onto the *entry*
+    -- the one object ``EventHandeler._active_jukebox_buffer_ms`` leaves behind
+    for a note's own scheduler. So ``_audible_song_position_ms`` answered
+    ``None`` on every live server, no note was ever stamped, and every jam note
+    rode the wall clock; the whole machinery was pinned by tests that supplied
+    the two keys themselves. These checks drive the real ``play()`` and the real
+    reader together, so the fixture cannot drift away from the code again.
+    """
+
+    def _game(self):
+        return SimpleNamespace(
+            audio_mngr=SimpleNamespace(
+                context=SimpleNamespace(gen_source=lambda: _FakeSrc()),
+                filter=[None], position=None, efx=None,
+                volume_categories={"jukebox": [100]}),
+            gameplay=None,
+        )
+
+    def _play(self, player, **kwargs):
+        """Run the REAL ``play()`` with a fake OpenAL under it."""
+        captured = {}
+        real_call = audio_probe.call
+
+        def fake_call(name, *args, **kw):
+            if name in ("jukebox.direct_create", "jukebox.receiver_create"):
+                captured["kwargs"] = kw
+                return SimpleNamespace(
+                    main_thread_audio=False,
+                    running=False,
+                    start=lambda: None,
+                    set_cabinet_volume=lambda value: None,
+                    ready_event=SimpleNamespace(is_set=lambda: False),
+                )
+            if name == "jukebox.gen_source":
+                return _FakeSrc()
+            if name == "jukebox.thread_start":
+                return None
+            return real_call(name, *args, **kw)
+
+        with mock.patch.object(audio_probe, "call", side_effect=fake_call):
+            player.play("box", 1.0, 2.0, 0.0, "Song", "https://youtu.be/abc",
+                        210, playback_id=7, **kwargs)
+        return player.players["box"], captured
+
+    def _assert_answers_the_song(self, entry, start_ms, received_ago_ms, buffer_ms):
+        """The reader a note's scheduler uses, over the entry the player wrote."""
+        position = handler_for(entry)._audible_song_position_ms(
+            buffer_ms=float(buffer_ms))
+        self.assertIsNotNone(
+            position,
+            "a playback the player itself started must be able to say where in "
+            "the song this machine's ears are")
+        self.assertAlmostEqual(position, start_ms + received_ago_ms - buffer_ms,
+                               delta=60.0)
+
+    def test_a_direct_play_records_the_songs_position(self):
+        player = JukeboxPlayer(self._game())
+        arrival = time.monotonic() - 2.5
+        entry, captured = self._play(player, transport="direct",
+                                     start_offset=42.0, received_at=arrival)
+        self.assertEqual(entry["start_offset"], 42.0)
+        # The NETWORK arrival instant, not the deferred main-thread time: the
+        # song is anchored where its play event reached this machine, and the
+        # streamer the same call built is anchored on the same number.
+        self.assertAlmostEqual(entry["start_offset_received_at"], arrival,
+                               places=6)
+        self.assertAlmostEqual(captured["kwargs"]["start_offset_received_at"],
+                               arrival, places=6)
+        self._assert_answers_the_song(entry, 42000.0, 2500.0, 200.0)
+
+    def test_a_relay_play_records_it_too(self):
+        # The relay has no lead-in and no decoder of its own, but the song is
+        # the same song: one rule for every transport, or a map that switches
+        # transport loses the beat at the switch.
+        player = JukeboxPlayer(self._game())
+        arrival = time.monotonic() - 1.0
+        entry, _ = self._play(player, transport="relay", relay_id=1,
+                              stream_epoch=2, start_offset=17.0,
+                              received_at=arrival)
+        self.assertEqual(entry["start_offset"], 17.0)
+        self.assertAlmostEqual(entry["start_offset_received_at"], arrival,
+                               places=6)
+        self._assert_answers_the_song(entry, 17000.0, 1000.0, 320.0)
+
+    def test_a_play_with_no_arrival_stamp_still_anchors(self):
+        # Callers that pass none (a test harness, an older caller) get the
+        # moment itself rather than no anchor at all.
+        player = JukeboxPlayer(self._game())
+        entry, captured = self._play(player, transport="direct",
+                                     start_offset=5.0)
+        self.assertIsNotNone(entry["start_offset_received_at"])
+        self.assertIsNotNone(captured["kwargs"]["start_offset_received_at"])
+        self._assert_answers_the_song(entry, 5000.0, 0.0, 20.0)
+
+    def test_a_seamless_re_offer_does_not_move_the_anchor(self):
+        # A re-offer of the same song and transport is continuity, not a new
+        # playback: re-stamping it would make the song's own position jump by
+        # however long the busy frame that delivered the re-offer took.
+        player = JukeboxPlayer(self._game())
+        arrival = time.monotonic() - 3.0
+        first, _ = self._play(player, transport="direct", start_offset=0.0,
+                              received_at=arrival)
+        anchor = first["start_offset_received_at"]
+        second, _ = self._play(player, transport="direct", start_offset=0.0,
+                               received_at=time.monotonic())
+        self.assertIs(second, first)
+        self.assertAlmostEqual(second["start_offset_received_at"], anchor,
+                               places=6)
+
+    def test_a_room_listener_knows_where_it_is_in_the_song_as_well(self):
+        """A cabinet heard through a room is the same song, so the entry comes
+        with the measurement -- a room replaces the pair, not the song."""
+        receiver = type("FakeReceiver", (JukeboxRelayReceiver,), {})
+        streamer = receiver.__new__(receiver)
+        streamer.running = True
+        streamer._play_started = True
+        streamer.source_l = SimpleNamespace(buffers_queued=2)
+        streamer.source_r = SimpleNamespace(buffers_queued=2)
+        streamer.cinema = SimpleNamespace(
+            sources=[object()],
+            buffered_ms=lambda: 320.0,
+            extra_latency_ms=lambda: 0.0)
+        entry = {"streamer": streamer, "start_offset": 12.0,
+                 "start_offset_received_at": time.monotonic() - 0.5}
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.gameplay = SimpleNamespace(
+            jukebox_player=SimpleNamespace(players={"box": entry}))
+        buffer_ms = handler._active_jukebox_buffer_ms(cabinet="box")
+        self.assertEqual(buffer_ms, 320.0)
+        self.assertIs(handler._jam_entry, entry)
+        self._assert_answers_the_song(entry, 12000.0, 500.0, 320.0)
+
+    def test_the_performer_stamps_where_their_own_ears_are(self):
+        """The other half: the packet carries the position, not just a lag.
+
+        ``_attach_jukebox_sender_lag`` is what the performer's client sends,
+        and it can only stamp a note when the entry can answer -- so a dead
+        entry is not one broken feature, it is both ends of every note falling
+        back to two wall clocks that never had to agree.
+        """
+        streamer = SimpleNamespace(
+            running=True, _direct_anchor=True, direct_late_s=0.0, cinema=None,
+            ready_event=SimpleNamespace(is_set=lambda: True),
+            spatial_src_l=SimpleNamespace(buffers_queued=4),
+            source=SimpleNamespace(buffers_queued=4))
+        entry = {"streamer": streamer, "transport": "direct",
+                 "start_offset": 30.0,
+                 "start_offset_received_at": time.monotonic() - 1.0}
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.gameplay = SimpleNamespace(
+            jukebox_player=SimpleNamespace(players={"box": entry}))
+        handler._note_song_cabinet = lambda position, peer=None: "box"
+        gameplay = SimpleNamespace(
+            player=SimpleNamespace(name="Ann", x=1.0, y=2.0, z=0.0),
+            game=SimpleNamespace(network=SimpleNamespace(
+                event_handeler=handler)))
+        packet = Gameplay._attach_jukebox_sender_lag(gameplay,
+                                                     {"server_time": 1})
+        self.assertEqual(packet.get("sender_lag_ms"), 80)   # 4 buffers * 20 ms
+        self.assertIsNotNone(
+            packet.get("sender_position_ms"),
+            "a performer who can measure their own trail can say where in the "
+            "song they are, and the listener's whole job is easier when they do")
+        self.assertAlmostEqual(packet["sender_position_ms"], 30920.0, delta=60.0)
 
 
 if __name__ == "__main__":

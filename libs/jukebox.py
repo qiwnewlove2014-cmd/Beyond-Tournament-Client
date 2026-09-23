@@ -970,6 +970,14 @@ class JukeboxPlayer:
 
         effective_volume = self.volume if volume is None else volume
         playback_key = ("id", int(playback_id)) if playback_id is not None else ("url", url)
+        # The one instant this playback is anchored on: the play event's
+        # arrival on the network thread when the caller has it (``jukebox_play``
+        # stamps it there because the ``play()`` call itself is deferred to the
+        # main thread), else the moment this call runs. The streamer's anchor,
+        # the entry's and the replay path's must all be the same number -- a
+        # busy main thread must not be read as the song being that much further
+        # along.
+        anchor_at = float(received_at) if received_at is not None else time.monotonic()
         # Kept so the emergency direct fallback can re-start this exact song
         # from its current wall-clock position without another server event.
         play_params = {
@@ -984,7 +992,7 @@ class JukeboxPlayer:
             # AudioStreamer.canonical_url), and that is the difference between a
             # direct listener resuming and a direct listener going silent.
             "canonical_url": canonical_url,
-            "received_at": time.monotonic(),
+            "received_at": anchor_at,
         }
 
         # A re-offer that carries a different cinema mode is not a new
@@ -1110,6 +1118,11 @@ class JukeboxPlayer:
                     "title": title, "url": url, "transport": transport,
                     "playback_key": playback_key,
                     "play_params": play_params,
+                    # The song's own position (see
+                    # ``_song_position_keys``): a ``relay_pending`` entry has no
+                    # streamer yet, and it still has to know where the song is
+                    # the moment a note is played along to it.
+                    **self._song_position_keys(start_offset, anchor_at),
                     # Without a timestamp the update() watchdog computed this
                     # placeholder's age as 0 on every frame, so a placeholder
                     # whose follow-up relay event never landed waited silently
@@ -1255,7 +1268,7 @@ class JukeboxPlayer:
                     spatial_pair=None if bank is not None else (src_l, src_r, ref, maxd),
                     cinema=bank,
                     start_offset=start_offset,
-                    start_offset_received_at=received_at or time.monotonic(),
+                    start_offset_received_at=anchor_at,
                     http_headers=http_headers,
                     canonical_url=canonical_url,
                     timeline_anchor=play_params["duration"] > 0,
@@ -1298,6 +1311,10 @@ class JukeboxPlayer:
                 "relay_key": (int(relay_id), int(stream_epoch)) if transport == "relay" else None,
                 "created_at": time.monotonic(),
                 "play_params": play_params,
+                # The song's own position, on the entry rather than on the
+                # streamer: a streamer is replaced mid-song and the song's
+                # position does not move with it (see ``_song_position_keys``).
+                **self._song_position_keys(start_offset, anchor_at),
             }
             if transport == "relay":
                 self.relay_routes[(int(relay_id), int(stream_epoch))] = streamer
@@ -1314,6 +1331,34 @@ class JukeboxPlayer:
             f"playback={playback_id!r} relay={relay_id!r}/{stream_epoch!r} "
             f"at ({x}, {y}, {z}) offset={start_offset:.1f}s url={url[:60]!r}"
         )
+
+    @staticmethod
+    def _song_position_keys(start_offset, anchor_at):
+        """The song's own position, as the two entry keys that carry it.
+
+        ``start_offset`` is the position the Server named when it built the
+        play event and ``anchor_at`` is the monotonic instant that event reached
+        this machine, so the position here at any later moment is the offset
+        plus the time since: a clock for the song that needs no wall clock of
+        either machine to be true.
+
+        Both ends of a live note are aimed with it
+        (``EventHandeler._audible_song_position_ms`` reads exactly these two
+        keys; ``Gameplay._attach_jukebox_sender_lag`` stamps the answer on every
+        note this client sends). They belong on the playback ENTRY rather than
+        on the streamer because a streamer is replaced mid-song -- a transport
+        change, a room re-tune, a resync -- while the song's position does not
+        move with it, and because one transport has no streamer at all yet (a
+        ``relay_pending`` entry waits for one) while notes can already be played
+        along to the song it is waiting for.
+
+        ``anchor_at`` must be the play event's ARRIVAL (``jukebox_play`` takes
+        it on the network thread), never the instant the deferred ``play()``
+        call runs: a busy main thread would otherwise be read as the song being
+        that much further along.
+        """
+        return {"start_offset": float(start_offset or 0.0),
+                "start_offset_received_at": anchor_at}
 
     def _fade_out_sources(self, sources, streamer=None, duration=0.5, cleanup=None):
         """Fade active OpenAL sources to 0 gain, then clean them up.
@@ -3006,19 +3051,23 @@ def open_jukebox_menu(game, gp):
     if is_staff:
         menu_items.append((_eq_label, go_eq))
         menu_items.append(("Clear queue and stop (Staff only)", go_clear_all))
-
-    # What this cabinet plays through, said at the cabinet itself: the one
-    # place a person is standing when the question comes up. It is read-only
-    # for everybody -- it answers "am I hearing the room or the box" -- and a
-    # staff member gets the mode menu underneath it.
-    menu_items.append((f"Cinema: {_cinema_mode_label(mode_now)}", go_cinema_status))
-    # The cabinets around this one, read where a person is standing: two
-    # cabinets close enough to share the speakers between them are the one
-    # thing a map does not show by itself, and the line speaks the whole
-    # answer (which rooms are whose) rather than only the distance.
-    if nearby:
-        menu_items.append((nearby, lambda: speak(neighbour_note(game, jukebox_id))))
-    if is_staff:
+        # What this cabinet plays through, said at the cabinet itself: the one
+        # place a person is standing when the question comes up -- and a
+        # *staff* read-out, like the lines under it. A room is heard, and
+        # hearing it needs no account of the mode it was set to, the area drawn
+        # around the cabinet, or which other cabinet's speakers overlap these,
+        # so a player walking up to a cabinet is told nothing about the room's
+        # plumbing: neither line is one they are offered, let alone one they
+        # can find.
+        menu_items.append((f"Cinema: {_cinema_mode_label(mode_now)}", go_cinema_status))
+        # The cabinets around this one, read where a person is standing: two
+        # cabinets close enough to share the speakers between them are the one
+        # thing a map does not show by itself, and the line speaks the whole
+        # answer (which rooms are whose) rather than only the distance. It is
+        # the map said out loud twice over -- it names another element by its
+        # id -- which is the rest of why it is staff's.
+        if nearby:
+            menu_items.append((nearby, lambda: speak(neighbour_note(game, jukebox_id))))
         menu_items.append((f"Set cinema mode (now: {mode_now})", go_cinema_mode))
         # How big this room is. It sits under the mode because it answers the
         # next question a staff member asks at a cabinet: the room is on, but

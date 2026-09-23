@@ -216,7 +216,10 @@ class CabinetMenuTests(unittest.TestCase):
             self.assertTrue([l for l in labels if l.startswith("Cinema: ")])
             self.assertIn("Set cinema mode (now: auto)", labels)
 
-    def test_a_player_who_is_not_staff_sees_no_mode_line(self):
+    def test_a_player_who_is_not_staff_sees_no_room_lines(self):
+        # A lock is the one room line everybody is meant to read: it says who
+        # to ask. The mode it holds, and the read-out that describes the room
+        # itself, are staff's -- a player is told nothing about the plumbing.
         game = make_game(state_with({"owner": "stone", "coded": True}))
         game.gameplay.is_staff = False
         game.gameplay.is_builder = False
@@ -224,7 +227,9 @@ class CabinetMenuTests(unittest.TestCase):
         labels = self.labels(game)
         self.assertIn("Cinema mode is locked by stone (the code opens one change)",
                       labels)
-        self.assertIn("Cinema: Auto - the speakers around it, if any", labels)
+        self.assertEqual([l for l in labels if l.startswith("Cinema:")], [],
+                         "the room's read-out is a staff line")
+        self.assertEqual([l for l in labels if l.startswith("Set cinema")], [])
 
 
 class LockRequestTests(unittest.TestCase):

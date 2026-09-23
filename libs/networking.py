@@ -8,6 +8,7 @@ import enet
 
 from .consts import TIMEOUT
 from . import consts
+from . import server_config
 
 class Client(threading.Thread):
     def __init__(self, game, host, port, event_handeler):
@@ -19,7 +20,26 @@ class Client(threading.Thread):
         self.queue = queue.SimpleQueue()
         self.get = self.queue.get_nowait
         self.event_handeler = event_handeler(self, self.game)
-        self.address = enet.Address(host.encode(), port)
+        # One lookup, here, and the answer is what the transport is built on: a
+        # name with no answer is a NameLookupError -- an OSError, so every
+        # "this attempt did not open" path still catches it -- instead of a bare
+        # resolution failure at the menu that nobody could classify. A literal
+        # is not looked up at all, and a name this machine's own resolver cannot
+        # answer is put to a public resolver over HTTPS before it is given up on
+        # (server_config.resolve_host_with_source).
+        resolved, via = server_config.resolve_host_with_source(host)
+        if resolved is None:
+            raise server_config.NameLookupError(
+                f"The server's name could not be looked up: {host}"
+            )
+        # The address this transport really went to, which is what a login may
+        # never dial twice (game._open_candidate) and what a log line reports.
+        self.resolved_host = resolved
+        # How that address was found -- a literal, this machine's resolver, or a
+        # public one. A player who only gets in through the public resolver has
+        # a DNS problem, and this is the fact that says so.
+        self.resolved_via = via
+        self.address = enet.Address(resolved.encode(), port)
         self.net = enet.Host(None, 1, 256, 0, 0)
         self.peer = self.net.connect(self.address, 256)
         # The server accepted the transport (ENet connect event).

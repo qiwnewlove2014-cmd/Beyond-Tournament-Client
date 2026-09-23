@@ -391,7 +391,8 @@ class LoginFlowTests(unittest.TestCase):
         game = self.make_game()
         network = FakeLoginClient(enet.EVENT_TYPE_NONE, timed_out=True)
         game.network = network
-        game._login_ports = (consts.DEFAULT_PORT,)
+        game._login_name = "example.invalid"
+        game._login_candidates = (("example.invalid", consts.DEFAULT_PORT),)
         game._login_try = 0
         game._close_network = lambda: None
         calls = []

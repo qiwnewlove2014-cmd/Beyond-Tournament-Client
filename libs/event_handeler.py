@@ -1925,6 +1925,12 @@ class EventHandeler:
                         # at its own speaker, so adding the deepest trim here
                         # delayed every speaker, the untrimmed ones included.
                         self._jam_buffer_kind = "room"
+                        # The queue below is this listener's trail and the entry
+                        # is where the song's own position lives: a note aimed
+                        # at the *song* needs both, and a room is no exception
+                        # to that (``_audible_song_position_ms`` reads the entry
+                        # the measurement recorded here).
+                        self._jam_entry = entry
                         spawn = self._room_note_spawn_ms(room)
                         self._jam_buffer_detail = (
                             f"room queue={room.buffered_ms()}ms"
@@ -1968,6 +1974,11 @@ class EventHandeler:
                         # The trims are the room's own, played per speaker when
                         # the note is spawned (see the relay branch above).
                         self._jam_buffer_kind = "room"
+                        # The room's queue is the trail and the entry is where
+                        # the song's own position lives: a note aimed at the
+                        # *song* needs both, and a room is no exception (see the
+                        # relay branch above).
+                        self._jam_entry = entry
                         self._jam_buffer_detail = (
                             f"room queue={room.buffered_ms()}ms"
                             f" trims={room.extra_latency_ms()}ms late={late_ms}ms")
@@ -2120,6 +2131,7 @@ class EventHandeler:
         cabinet = self._note_song_cabinet(
             (data.get("x"), data.get("y"), data.get("z")),
             peer=data.get("peer_id"))
+        self._jam_aim = None
         buffer_ms = self._active_jukebox_buffer_ms(cabinet=cabinet)
         if (buffer_ms is None or not self.SYNC_JAM_NOTES_WITH_JUKEBOX
                 or self._clock_offset_samples < 3):
@@ -2170,9 +2182,22 @@ class EventHandeler:
             buffer_ms=buffer_ms, cabinet=cabinet)
             if position_stamp is not None else None)
         if position_stamp is not None and my_position is not None:
+            # Both ends of the note answered where they are in the song, so
+            # this is the path that needs no clock of either machine -- and it
+            # is the one a live session has to be able to prove it took, which
+            # is what ``_jam_aim`` is read out as.
+            self._jam_aim = "stamp"
             delay = (position_stamp - my_position) - self.JAM_NOTE_ADVANCE_MS
             target_local = time.time() * 1000 + delay
         else:
+            # Two different failures wear the same clock: a packet that
+            # carried no position at all (an older build, or a Server that
+            # strips the field) and a packet that carried one this machine
+            # cannot answer for itself (no song of its own playing here, or an
+            # entry with no position base). They are told apart in the log
+            # because only the second is this client's own doing.
+            self._jam_aim = ("clock" if position_stamp is None
+                             else "clock-nopos")
             target_local = (
                 server_time - self._clock_offset_ms + buffer_ms
                 - sender_lag_ms - self.JAM_NOTE_ADVANCE_MS
@@ -2367,6 +2392,17 @@ class EventHandeler:
         because that cannot be told apart from "this machine's song is behind"
         or "the performer is reporting no lag" without them.
 
+        ``aim=`` names the rule the note was actually placed by, because the
+        two of them can look identical from the outside and only one is the
+        good one: ``stamp`` is the position in the song (both ends of the note
+        answered where their own ears were), ``clock`` is the fallback to the
+        Server's clock because the packet carried no position (an older build,
+        or a Server that strips the field), and ``clock-nopos`` is a packet
+        that *did* carry one which this machine could not answer for itself --
+        no song of its own playing here, or an entry with no position base --
+        so a session that keeps sliding is one log line away from saying which
+        of the three it was.
+
         Once per five seconds: a drum roll is twenty notes a second and every
         one of them answers the same.
         """
@@ -2387,7 +2423,8 @@ class EventHandeler:
             f"{'[Cinema]' if kind == 'room' else '[Jam]'} "
             f"a live note is heard {int(heard_ms)}ms after it was "
             f"struck: {getattr(self, '_jam_buffer_detail', None)}"
-            f" - sender_lag={int(sender_lag_ms)}ms hold={int(max(delay, 0.0))}ms")
+            f" - sender_lag={int(sender_lag_ms)}ms hold={int(max(delay, 0.0))}ms"
+            f" aim={getattr(self, '_jam_aim', None) or 'none'}")
 
     def _report_timeline_note_latency(self, data, compression, arrived_ms):
         """Say how late a note scheduled on a room-fed song comes out.
@@ -2437,7 +2474,8 @@ class EventHandeler:
         log(
             f"[JAM.SYNC] long hold {int(delay)}ms: buffer={int(buffer_ms)}ms "
             f"offset={int(self._clock_offset_ms)}ms "
-            f"samples={self._clock_offset_samples}"
+            f"samples={self._clock_offset_samples} "
+            f"aim={getattr(self, '_jam_aim', None) or 'none'}"
         )
 
     def _schedule_music_synced(self, data, callback):
