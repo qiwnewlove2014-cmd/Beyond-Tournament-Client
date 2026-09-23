@@ -87,8 +87,28 @@ class AudioStreamer(threading.Thread):
                                    # seeks (network download to the keyframe) inside
                                    # the slack at the cost of skipping ~3s more of the
                                    # song for joiners/resumes.
-    DIRECT_MAX_ALIGN_WAIT_S = DIRECT_LEAD_IN_S + DIRECT_STARTUP_EST_S + 1.0  # clock safety valve
+    # The alignment a mid-song join has to fit its own resolve and startup
+    # into (LEAD_IN + EST after the broadcast) -- and the ceiling on what the
+    # one re-aim below is allowed to cost.
+    DIRECT_ALIGN_SLACK_S = DIRECT_LEAD_IN_S + DIRECT_STARTUP_EST_S
+    DIRECT_MAX_ALIGN_WAIT_S = DIRECT_ALIGN_SLACK_S + 1.0  # clock safety valve
     DIRECT_LATE_TOLERANCE_S = 0.75 # best-effort: log joins later than this
+    # A machine whose own resolve+startup outran the shared deadline becomes
+    # audible late and plays the WHOLE song that far behind the room
+    # (``direct_late_s``), so a note played on it lands behind the beat for
+    # everybody, with nothing on the listening side able to pull it back.
+    # Such a machine is re-aimed ONCE, at the room's position, and the frames
+    # it decoded behind the room are dropped rather than played.
+    #
+    # What that costs a listener is silence -- the second launch's own startup
+    # -- so the price is the gate (``direct_catch_up_aim_s``): past the
+    # alignment slack the cure is more expensive than the drift it removes,
+    # and the machine keeps the old behavior of trailing the room and saying
+    # so. DIRECT_CATCH_UP_MIN_S is the other end: below it nobody hears the
+    # drift, and a restart would be noise rather than a fix.
+    DIRECT_CATCH_UP_MAX = 1
+    DIRECT_CATCH_UP_MIN_S = DIRECT_LATE_TOLERANCE_S
+    DIRECT_CATCH_UP_MARGIN_S = 0.5
 
     def __init__(self, game, audio_url, source, volume=50, bot=None, channels=2,
                  spatial_pair=None, start_offset=0.0, http_headers=None,
@@ -150,6 +170,14 @@ class AudioStreamer(threading.Thread):
         # (slow yt-dlp resolve / ffmpeg startup). Jam-note scheduling reads
         # this so remote notes wait out a local stream that trails the room.
         self.direct_late_s = 0.0
+        # The one re-aim a late audible start is allowed (see
+        # ``direct_catch_up_aim_s``): whether it has been spent, the room
+        # instant it targeted, and the launch instant the aim was measured
+        # from.
+        self._catch_up_used = False
+        self._join_aim_ahead_s = None
+        self._attempt_started_at = None
+        self.direct_catch_up_s = 0.0
         self.http_headers = dict(http_headers or {})
         # Spatial stereo pair (jukeboxes): two MONO sources placed at the same
         # spot minus/plus a small offset, fed with the LEFT and RIGHT channels
@@ -1384,17 +1412,143 @@ class AudioStreamer(threading.Thread):
         return t_zero + lead_in + seek_to
 
     @staticmethod
-    def direct_seek_seconds(start_offset, received_at, now):
+    def direct_seek_seconds(start_offset, received_at, now, aim_ahead_s=None, lead_in=None):
         """Input seek for an anchored mid-song join, aimed PAST the position
         projected at audible start.
 
         Arriving early is corrected by an exact hold at prebuffer-complete;
         arriving late never recovers, because under '-re' pacing skipping
         PCM costs the same wall time as the lateness itself.
+
+        ``aim_ahead_s`` is the room instant this seek targets, measured from
+        ``now``: how far ahead of now this machine expects to *become
+        audible*. Its default is the alignment slack (lead-in + startup
+        estimate) -- the number a join aims with when nothing about this
+        machine has been measured yet. A flight that has just watched itself
+        start late replaces that estimate with its own measured startup, and
+        the content named is the same either way: the deadline adds the room's
+        own lead-in, so the seek only has to answer what the room will be
+        playing at that instant -- which is why an aim shorter than the room's
+        lead-in is a real, exact answer here rather than clamped to it (a
+        quick machine catching up its own drift is not made to wait out the
+        room's intro a second time).
         """
         if received_at is None or start_offset <= 0.0:
             return start_offset
-        return start_offset + max(0.0, now - received_at) + AudioStreamer.DIRECT_STARTUP_EST_S
+        if lead_in is None:
+            lead_in = AudioStreamer.DIRECT_LEAD_IN_S
+        if aim_ahead_s is None:
+            aim_ahead_s = lead_in + AudioStreamer.DIRECT_STARTUP_EST_S
+        return (start_offset + max(0.0, now - received_at)
+                + (aim_ahead_s - lead_in))
+
+    # ---- What a late start is allowed to do about it ----
+
+    @classmethod
+    def catch_up_aim_seconds(cls, late_s, startup_s):
+        """The room instant a flight that started ``startup_s`` ago aims at, or None.
+
+        The one home of the re-aim's arithmetic, so a rig measuring this
+        behavior can ask for it instead of modelling it (and cannot then
+        disagree with the shipped stream): the aim is the *measured* startup of
+        the flight that just failed, plus the margin that keeps the error on
+        the early side. ``None`` is the two ends of the rule -- a lateness
+        nobody hears (``DIRECT_CATCH_UP_MIN_S``) and a machine whose restart
+        would cost more silence than the drift it removes
+        (``DIRECT_ALIGN_SLACK_S``).
+        """
+        if float(late_s or 0.0) < cls.DIRECT_CATCH_UP_MIN_S:
+            return None
+        startup = max(0.0, float(startup_s or 0.0))
+        if startup > cls.DIRECT_ALIGN_SLACK_S:
+            return None
+        return startup + cls.DIRECT_CATCH_UP_MARGIN_S
+
+    def direct_catch_up_aim_s(self):
+        """The room instant this flight should be re-aimed at, or None.
+
+        A late audible start is not a listening problem that scheduling can
+        compensate for: this machine's ear holds an older piece of music, so
+        a note played here reaches every other machine after the beat. The
+        one cure is to start the decode somewhere else, which is what this
+        answers -- the room instant to aim at -- and the flight loop spends
+        it once.
+
+        The aim is this machine's own *measured* startup (see
+        ``catch_up_aim_seconds``): the flight that just failed took that long
+        to produce its pre-buffer, and the next one repeats that work with the
+        media already resolved and the same signed URL. Projecting that
+        measurement keeps the error on the early side, where the pre-buffer
+        hold turns it into a wait, rather than on the late side, where
+        nothing can -- and what it costs is that projection in silence, which
+        is why a machine that takes longer than the whole alignment slack to
+        start is refused it: on a mid-song join, whose own startup already IS
+        the slack plus its drift, the price would be several times the error
+        it removes.
+        """
+        if not self._direct_anchor or self._catch_up_used:
+            return None
+        if self.cinema is not None:
+            # A room is fed frame by frame and cannot be emptied and refilled
+            # the way a plain pair can (``CinemaSpeakerBank.stop`` is its
+            # teardown), so a decode that jumped would hand it frames from two
+            # places in the song at once.
+            return None
+        if self.start_offset_received_at is None or self._attempt_started_at is None:
+            return None
+        return self.catch_up_aim_seconds(
+            self.direct_late_s, time.monotonic() - self._attempt_started_at)
+
+    def _reaim_at_the_room(self, aim_ahead_s):
+        """Spend the one re-aim: arm the next flight, then drop this one.
+
+        The broadcast this stream is anchored to does not change -- t_zero,
+        the offset and the room's lead-in are the same numbers -- so the next
+        flight is simply this stream *joining* the room at the position the
+        room will have reached by then.
+        """
+        self._catch_up_used = True
+        self.direct_catch_up_s = max(0.0, float(aim_ahead_s))
+        self._join_playing_room = True
+        self._join_aim_ahead_s = self.direct_catch_up_s
+        logger.log(
+            "[AudioStreamer] direct sync: audible start "
+            f"{float(self.direct_late_s or 0.0):.2f}s past the shared deadline "
+            "(slow resolve/startup) — re-aiming at the room's position, "
+            f"~{self.direct_catch_up_s:.2f}s ahead (one restart; the frames "
+            "decoded behind the room are dropped)"
+        )
+        self._discard_flight()
+
+    def _discard_flight(self):
+        """Drop the flight that started late, and every frame it produced.
+
+        Nothing has been heard yet: what is queued is the pre-buffer, the
+        output has not been started, and no note has been placed on the
+        frames. Buffers go back to their pool (a stopped source reports
+        everything it holds as processed, which is why the reclaim comes
+        after the stop) and the pair's clock starts over, because the queue
+        it was counting is gone.
+        """
+        process = self.process
+        if process is not None:
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except Exception:
+                pass
+        self.process = None
+        for src in self._all_sources():
+            try:
+                src.stop()
+            except Exception:
+                pass
+        self._reclaim_processed()
+        self._pause_buffer.clear()
+        with self._ring_lock:
+            self._fed_ring.clear()
+        self._fed_content_seconds = 0.0
+        self._pair_clock_reset()
 
     def run(self):
         if not FFMPEG_PATH:
@@ -1482,14 +1636,17 @@ class AudioStreamer(threading.Thread):
             # workers (personal music bot, livestreams) keep legacy behavior.
             if self.start_offset_received_at is not None:
                 if self._join_playing_room:
-                    # Joining a room that is already playing (per-listener
-                    # direct fallback into a relay room): always seek — the
-                    # seek formula cancels the offset entirely and lands this
-                    # machine on the room's clock (position = room position +
-                    # startup estimate at the audible start).
+                    # Joining a room that is already playing -- the per-listener
+                    # direct fallback into a relay room, or this stream's own
+                    # one catch-up after a late start: always seek. The seek
+                    # formula cancels the offset entirely and lands this
+                    # machine on the room's clock (position = where the room is
+                    # at the instant this machine expects to be audible).
                     effective_offset = max(0.001, effective_offset)
                     effective_offset = self.direct_seek_seconds(
-                        effective_offset, self.start_offset_received_at, time.monotonic())
+                        effective_offset, self.start_offset_received_at, time.monotonic(),
+                        aim_ahead_s=self._join_aim_ahead_s,
+                        lead_in=self.room_lead_in_s)
                 elif effective_offset > 0.0:
                     if self._direct_anchor and effective_offset <= self.DIRECT_FRESH_MAX_S:
                         effective_offset = 0.0
@@ -1544,93 +1701,129 @@ class AudioStreamer(threading.Thread):
         # with a freshly RE-RESOLVED URL (a stale signed URL 403s forever no
         # matter how many times the identical command is retried). All work stays
         # on this worker thread.
+        # A flight is one ffmpeg launch, its pre-buffer and its hold. A
+        # machine whose own resolve+startup outran the shared deadline
+        # becomes audible late and would play the WHOLE song that far
+        # behind the room, so a note played on it lands off the beat for
+        # everybody; the flight loop below therefore re-aims it once, at
+        # the room's position, instead (``direct_catch_up_aim_s``).
+        catch_up_attempts = 0
         pre_buffered = 0
         _pre_leftover = b''
-        error_detail = ""
-        for attempt in range(4):
-            stalled = False
-            if not self.running:
-                break
-            try:
-                self.process = self._diagnostic_startup_call("direct.launch", subprocess.Popen,
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-                )
-            except Exception as ex:
-                logger.log_exception(ex, "AudioStreamer.run Popen")
-                self.failure_reason = "playback launch error"
-                break
-
-            pre_buffered, _pre_leftover = self._diagnostic_startup_call("direct.prebuffer", self._read_prebuffer)
-            if pre_buffered > 0 or not self.running:
-                break
-
-            try:
-                if self.process.poll() is not None:
-                    error_detail = self.process.stderr.read(4096).decode(
-                        'utf-8', 'replace'
-                    ).strip()
-                else:
-                    # Alive and silent after the whole pre-buffer window: ffmpeg
-                    # is inside its own reconnect attempt (nothing is logged at
-                    # `-loglevel error` until it gives up) against a host that
-                    # is not answering. There is no 403 to match on, but
-                    # repeating this URL is exactly what it has been doing for
-                    # twelve seconds, so this counts as a failed link -- a
-                    # freshly resolved one points at another CDN edge.
-                    stalled = True
-            except Exception:
-                error_detail = ""
-
-            try:
-                self.process.kill()
-                self.process.wait(timeout=2)
-            except Exception:
-                pass
-            self.process = None
-
-            if not self.running:
-                break
-            cached_attempt = self._media_cache_entry is not None
-            self._invalidate_cached_media()
-            if cached_attempt and attempt < 3:
-                # A cached URL may have expired or become IP-bound. Never
-                # repeat it or sleep before requesting a fresh local URL.
-                # This consumes the existing retry budget, not an extra loop.
-                fresh = self._resolve_playback_info(canonical_url)
+        while True:
+            pre_buffered = 0
+            _pre_leftover = b''
+            error_detail = ""
+            for attempt in range(4):
+                stalled = False
                 if not self.running:
                     break
-                if not fresh:
-                    self.failure_reason = "audio link resolution failed"
+                try:
+                    self._attempt_started_at = time.monotonic()
+                    self.process = self._diagnostic_startup_call("direct.launch", subprocess.Popen,
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                    )
+                except Exception as ex:
+                    logger.log_exception(ex, "AudioStreamer.run Popen")
+                    self.failure_reason = "playback launch error"
                     break
-                target_url = fresh['url']
-                input_headers = fresh.get('http_headers') or {}
-                cmd = _build_cmd()
-                continue
 
-            retryable = stalled or any(tok in error_detail for tok in ("403", "429", "503", "connection", "timeout", "reset"))
-            if not retryable or attempt >= 3:
-                break
-            # A stall is refreshed on the FIRST attempt too (the retry budget
-            # otherwise spends itself re-running the command the stalled host
-            # already ignored for twelve seconds).
-            if (stalled or attempt >= 1) and canonical_url \
-                    and ("youtube.com" in canonical_url or "youtu.be" in canonical_url):
-                # The exact URL+headers already failed once — grab a fresh
-                # signed stream URL instead of re-running the same command.
-                fresh = self._resolve_playback_info(canonical_url)
+                pre_buffered, _pre_leftover = self._diagnostic_startup_call("direct.prebuffer", self._read_prebuffer)
+                if pre_buffered > 0 or not self.running:
+                    break
+
+                try:
+                    if self.process.poll() is not None:
+                        error_detail = self.process.stderr.read(4096).decode(
+                            'utf-8', 'replace'
+                        ).strip()
+                    else:
+                        # Alive and silent after the whole pre-buffer window: ffmpeg
+                        # is inside its own reconnect attempt (nothing is logged at
+                        # `-loglevel error` until it gives up) against a host that
+                        # is not answering. There is no 403 to match on, but
+                        # repeating this URL is exactly what it has been doing for
+                        # twelve seconds, so this counts as a failed link -- a
+                        # freshly resolved one points at another CDN edge.
+                        stalled = True
+                except Exception:
+                    error_detail = ""
+
+                try:
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+                except Exception:
+                    pass
+                self.process = None
+
                 if not self.running:
                     break
-                if fresh and fresh.get('url'):
+                cached_attempt = self._media_cache_entry is not None
+                self._invalidate_cached_media()
+                if cached_attempt and attempt < 3:
+                    # A cached URL may have expired or become IP-bound. Never
+                    # repeat it or sleep before requesting a fresh local URL.
+                    # This consumes the existing retry budget, not an extra loop.
+                    fresh = self._resolve_playback_info(canonical_url)
+                    if not self.running:
+                        break
+                    if not fresh:
+                        self.failure_reason = "audio link resolution failed"
+                        break
                     target_url = fresh['url']
                     input_headers = fresh.get('http_headers') or {}
+                    cmd = _build_cmd()
+                    continue
+
+                retryable = stalled or any(tok in error_detail for tok in ("403", "429", "503", "connection", "timeout", "reset"))
+                if not retryable or attempt >= 3:
+                    break
+                # A stall is refreshed on the FIRST attempt too (the retry budget
+                # otherwise spends itself re-running the command the stalled host
+                # already ignored for twelve seconds).
+                if (stalled or attempt >= 1) and canonical_url \
+                        and ("youtube.com" in canonical_url or "youtu.be" in canonical_url):
+                    # The exact URL+headers already failed once — grab a fresh
+                    # signed stream URL instead of re-running the same command.
+                    fresh = self._resolve_playback_info(canonical_url)
+                    if not self.running:
+                        break
+                    if fresh and fresh.get('url'):
+                        target_url = fresh['url']
+                        input_headers = fresh.get('http_headers') or {}
+                        try:
+                            cmd = _build_cmd()
+                        except Exception:
+                            pass
+                time.sleep(1.0 + attempt)
+
+            if not self.running or pre_buffered == 0:
+                break
+            if self._direct_anchor:
+                # Shared-timeline hold: every listener becomes audible at
+                # the same wall-clock instant regardless of how long its
+                # own resolve and startup took.
+                _pre_leftover = self._hold_direct_start(_pre_leftover)
+                if not self.running:
+                    break
+                aim = None
+                if catch_up_attempts < self.DIRECT_CATCH_UP_MAX:
+                    aim = self.direct_catch_up_aim_s()
+                if aim is not None:
+                    # This flight is behind the room: drop it and start
+                    # again aimed at where the room is by then.
+                    catch_up_attempts += 1
+                    self._reaim_at_the_room(aim)
                     try:
                         cmd = _build_cmd()
-                    except Exception:
-                        pass
-            time.sleep(1.0 + attempt)
+                    except Exception as ex:
+                        logger.log_exception(ex, "AudioStreamer.run catch-up")
+                        break
+                    continue
+            break
 
         if not self.running:
             # Intentional cancellation (map change, newer playback generation,
@@ -1667,13 +1860,9 @@ class AudioStreamer(threading.Thread):
             if not self.running:
                 self._cleanup()
                 return
-            if self._direct_anchor:
-                # Shared-timeline hold: every listener becomes audible at the
-                # same wall-clock instant regardless of resolve/startup time.
-                _pre_leftover = self._hold_direct_start(_pre_leftover)
-                if not self.running:
-                    self._cleanup()
-                    return
+            # The shared-timeline hold, and the one re-aim a late start may
+            # take, both belong to the flight loop above: either one can end
+            # the decode that is running and start another.
             if not self.paused:
                 if self.spatial_active:
                     self._diagnostic_startup_call("direct.spatial", self._update_spatial_gain)

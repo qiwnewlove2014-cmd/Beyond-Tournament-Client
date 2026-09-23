@@ -359,18 +359,30 @@ class TestAudioStreamerNetworkGuard(unittest.TestCase):
                 return 1, b""
             return _read()
 
-        # Fresh song: start_offset=0 -> no -ss at all.
+        # Fresh song, on time: start_offset=0 and the audible start landed on
+        # the shared deadline -> no -ss at all. (A fresh song whose own start
+        # ran PAST that deadline is the one case that may seek, and it is the
+        # streamer's own re-aim -- see test_jukebox_catch_up.py.)
         fresh = mb.AudioStreamer(
             FakeGameNetwork(), "https://example.com/audio.mp3", Source(),
             bot=None, channels=2, start_offset=0.0,
             start_offset_received_at=__import__("time").monotonic() - 5.0,
         )
+
+        def on_time_hold(leftover):
+            # The real hold reads the wall clock back out of
+            # ``_hold_direct_start``; here the flight simply arrived on time.
+            fresh.direct_late_s = 0.0
+            return leftover
+
         with mock.patch.object(fresh, "_init_buffer_pool"), \
                 mock.patch.object(fresh, "_read_prebuffer", side_effect=lambda: fake_prebuffer(fresh)), \
+                mock.patch.object(fresh, "_hold_direct_start", on_time_hold), \
                 mock.patch("libs.music_bot.streaming.subprocess.Popen", side_effect=fake_popen):
             fresh.run()
         self.assertFalse(any("-ss" in c for c in captured_cmds),
                          "fresh song must not seek: %s" % captured_cmds)
+        self.assertFalse(fresh._catch_up_used)
 
         # Resume mid-song: start_offset=5 -> -ss present (5 + resolve delay).
         captured_cmds.clear()

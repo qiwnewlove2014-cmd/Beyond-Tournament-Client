@@ -60,11 +60,23 @@ class MockDirectClient:
     _build_cmd apply them.
     """
 
-    def __init__(self, *, latency=0.05, resolve=2.0, startup=0.8, anchored=True):
+    def __init__(self, *, latency=0.05, resolve=2.0, startup=0.8, anchored=True,
+                 re_aim=True, second_startup=None):
         self.latency = latency
         self.resolve = resolve
         self.startup = startup
         self.anchored = anchored
+        # The streamer's one re-aim after a late audible start: the flight
+        # that ran past the deadline is dropped and the next one joins the
+        # room at its position. False is a build/room that gets none.
+        self.re_aim = bool(re_aim)
+        # The second launch skips the resolve (the media is resolved already)
+        # and pays only ffmpeg's own startup.
+        self.second_startup = (startup if second_startup is None
+                               else second_startup)
+        self.catch_up_s = 0.0
+        self.skipped = 0.0
+        self.late = 0.0
 
     def receive(self, server, start_offset):
         self.received_at = server.now + self.latency
@@ -92,9 +104,52 @@ class MockDirectClient:
             hold = 0.0
         self.audible_at = ready_at + hold
         self.audible_position = self.seek_to
+        self.late = max(0.0, self.audible_at - deadline) if self.anchored else 0.0
+        aim = self.maybe_aim_seconds()
+        if aim is not None:
+            self._re_aim(self.received_at, self.start_offset, aim)
         # Wall instant this client hears content position 0. Two clients
         # are synchronized with each other iff these agree.
         self.zero_heard_at = self.audible_at - self.audible_position
+        return self
+
+    def maybe_aim_seconds(self):
+        """The room instant the build would re-aim this client at, or None.
+
+        The rule is not restated here: ``catch_up_aim_seconds`` is the
+        shipping streamer's own answer, asked with this client's numbers, so a
+        build that stops re-aiming (or re-aims at something else) fails these
+        tests instead of being modelled by them. ``self.re_aim`` models this
+        client: a build or a room that gets none.
+        """
+        if not self.anchored or not self.re_aim:
+            return None
+        if AudioStreamer.DIRECT_CATCH_UP_MAX < 1:
+            return None
+        return AudioStreamer.catch_up_aim_seconds(self.late, self.startup)
+
+    def _re_aim(self, received_at, start_offset, aim):
+        """The streamer's flight loop, in one step: drop it and aim higher.
+
+        The decision is taken as the late flight's pre-buffer completes (its
+        hold waits nothing), so the aim is that flight's own startup, and the
+        seek names the room's position at the instant this machine expects to
+        become audible. Nothing the room is anchored to changes.
+        """
+        rebuild_at = self.audible_at
+        seek = AudioStreamer.direct_seek_seconds(
+            max(0.001, start_offset), received_at, rebuild_at,
+            aim_ahead_s=aim)
+        deadline = AudioStreamer.direct_start_deadline(
+            start_offset, received_at, seek)
+        ready_at = rebuild_at + self.second_startup
+        hold = min(AudioStreamer.DIRECT_MAX_ALIGN_WAIT_S,
+                   max(0.0, deadline - ready_at))
+        self.catch_up_s = aim
+        self.skipped = max(0.0, seek - self.audible_position)
+        self.audible_at = ready_at + hold
+        self.audible_position = seek
+        self.late = max(0.0, self.audible_at - deadline)
         return self
 
 
@@ -176,19 +231,122 @@ class TestMidSongJoin(unittest.TestCase):
         for joiner in joiners:
             self.assertGreaterEqual(joiner.audible_position, 200.0)
 
-    def test_slow_client_joins_late_but_deterministically(self):
-        """A client slower than the lead-in cannot catch the deadline (PCM
-        skipping costs real time under '-re'), but its lateness is exact
-        and bounded — it joins the shared timeline content-consistently."""
+    def test_a_client_that_cannot_re_aim_joins_late_but_deterministically(self):
+        """A client slower than the lead-in, with no re-aim left to spend (a
+        cinema room, a build that predates it, a machine slower than a restart
+        can cure): PCM skipping costs real time under '-re', so it cannot
+        catch the deadline by playing on — but its lateness is exact and
+        bounded, and it joins the shared timeline content-consistently."""
         server = MockJukeboxServer()
         start_offset = server.broadcast_play()
-        client = MockDirectClient(latency=0.05, resolve=8.0, startup=1.5).receive(server, start_offset)
+        client = MockDirectClient(latency=0.05, resolve=8.0, startup=1.5,
+                                  re_aim=False).receive(server, start_offset)
         expected_late = (client.latency + client.resolve + client.startup
                          - AudioStreamer.DIRECT_LEAD_IN_S)
         late = client.audible_at - (server.audio_started_at + AudioStreamer.DIRECT_LEAD_IN_S)
         self.assertAlmostEqual(late, expected_late, places=6)
         self.assertGreater(late, 0.0)
         self.assertEqual(client.audible_position, 0.0)
+        self.assertEqual(client.catch_up_s, 0.0)
+
+
+class TestALateStartPutsItselfBackOnTheClock(unittest.TestCase):
+    """The cure, in the room: one re-aim, and the room agrees again.
+
+    What this fixes is the shape the two-machine rig measured: a machine whose
+    own resolve+startup outran the deadline plays the WHOLE song that far
+    behind the room, so a note played on it lands behind the beat for
+    everybody. Starting the decode again further into the song costs silence
+    once; trailing costs every note.
+    """
+
+    def test_a_client_slower_than_the_lead_in_rejoins_the_room(self):
+        server = MockJukeboxServer()
+        start_offset = server.broadcast_play()
+        room = MockDirectClient(latency=0.05, resolve=2.0,
+                                startup=0.8).receive(server, start_offset)
+        slow = MockDirectClient(latency=0.05, resolve=8.0,
+                                startup=1.5).receive(server, start_offset)
+        self.assertLessEqual(_spread([room.zero_heard_at, slow.zero_heard_at]),
+                             0.25)
+        self.assertGreater(slow.catch_up_s, 0.0)
+        self.assertEqual(slow.late, 0.0)
+
+    def test_without_the_re_aim_the_same_client_trails_the_whole_song(self):
+        server = MockJukeboxServer()
+        start_offset = server.broadcast_play()
+        room = MockDirectClient(latency=0.05, resolve=2.0,
+                                startup=0.8).receive(server, start_offset)
+        slow = MockDirectClient(latency=0.05, resolve=8.0, startup=1.5,
+                                re_aim=False).receive(server, start_offset)
+        self.assertGreater(
+            _spread([room.zero_heard_at, slow.zero_heard_at]), 4.0)
+
+    def test_the_machine_that_was_slow_is_the_one_that_paid(self):
+        server = MockJukeboxServer()
+        start_offset = server.broadcast_play()
+        quick = MockDirectClient(latency=0.05, resolve=2.0,
+                                 startup=0.8).receive(server, start_offset)
+        slow = MockDirectClient(latency=0.05, resolve=8.0,
+                                startup=1.5).receive(server, start_offset)
+        self.assertEqual(quick.catch_up_s, 0.0)
+        self.assertEqual(quick.skipped, 0.0)
+        # It starts where the room is -- not at position 0 -- and that skip is
+        # what the silence bought.
+        self.assertGreater(slow.skipped, 4.0)
+        self.assertGreater(slow.audible_position, slow.skipped - 1.0)
+
+    def test_a_room_of_joiners_agrees_and_none_of_them_pays_for_it(self):
+        # A mid-song join's own startup IS the join's slack plus whatever it
+        # is late by, so a re-aim there would cost several times the error it
+        # removes: the room agrees without one, and nobody skips any song.
+        server = MockJukeboxServer()
+        server.broadcast_play()
+        server.advance(120.0)
+        offset = server.broadcast_play(resumed_offset=120.0)
+        clients = [
+            MockDirectClient(latency=0.04, resolve=1.2, startup=0.5),
+            MockDirectClient(latency=0.09, resolve=3.0, startup=1.0),
+            MockDirectClient(latency=0.07, resolve=9.0, startup=1.4),
+            MockDirectClient(latency=0.11, resolve=2.2, startup=0.7),
+        ]
+        for client in clients:
+            client.receive(server, offset)
+        self.assertLessEqual(_spread(c.zero_heard_at for c in clients), 0.25)
+        for client in clients:
+            self.assertEqual(client.catch_up_s, 0.0)
+            self.assertEqual(client.skipped, 0.0)
+            # Nobody rewinds behind the room's position, and nobody is late.
+            self.assertGreaterEqual(client.audible_position, 120.0)
+            self.assertEqual(client.late, 0.0)
+
+    def test_a_slow_resolve_is_cured_because_the_restart_skips_it(self):
+        # The machine that is behind because yt-dlp took its time is the cheap
+        # one to fix: the second launch resolves nothing again, so the price
+        # is one ffmpeg startup however far behind the machine is.
+        server = MockJukeboxServer()
+        start_offset = server.broadcast_play()
+        slow = MockDirectClient(latency=0.05, resolve=16.0, startup=2.0)
+        slow.receive(server, start_offset)
+        overrun = (slow.latency + slow.resolve + slow.startup
+                   - AudioStreamer.DIRECT_LEAD_IN_S)
+        self.assertGreater(overrun, 10.0)
+        self.assertGreater(slow.catch_up_s, 0.0)
+        self.assertLess(slow.catch_up_s, overrun)
+        self.assertEqual(slow.late, 0.0)
+
+    def test_a_launch_slower_than_the_slack_is_left_to_trail_the_room(self):
+        # Its own startup is longer than the whole alignment slack, so the
+        # restart would buy more silence than the drift it removes: the
+        # machine keeps the old, honest behavior, and ``direct_late_s``
+        # remains the number every note played on it is scheduled by.
+        server = MockJukeboxServer()
+        start_offset = server.broadcast_play()
+        slow = MockDirectClient(latency=0.05, resolve=2.0, startup=12.0)
+        slow.receive(server, start_offset)
+        self.assertEqual(slow.catch_up_s, 0.0)
+        self.assertGreater(slow.startup, AudioStreamer.DIRECT_ALIGN_SLACK_S)
+        self.assertGreater(slow.late, 0.0)
 
 
 class TestEmergencySwitchMath(unittest.TestCase):
