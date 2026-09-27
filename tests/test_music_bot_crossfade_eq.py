@@ -26,6 +26,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs.music_bot import controller as bot_module
+from libs.music_bot import subtitles
 from libs.music_bot import MapMusicBot
 from libs.music_bot import streaming as stream_mod
 
@@ -128,6 +129,13 @@ def make_bot(**overrides):
     bot.volume = 50
     bot._stream_announced = False
     bot._current_reverb_slot = None
+    bot.subtitles_enabled = False
+    bot.subtitle_language = subtitles.DEFAULT_LANGUAGE_PREFERENCE
+    bot.subtitle_offset = 0
+    bot.subtitle_reader = subtitles.SubtitleReader()
+    bot._caption_fetcher = subtitles.CaptionFetcher()
+    bot._subtitle_generation = 0
+    bot._subtitle_page = ""
     bot.feed_tracks = []
     bot.play_queue = []
     bot.play_queue_index = -1

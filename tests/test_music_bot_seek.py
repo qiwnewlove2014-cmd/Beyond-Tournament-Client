@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pygame
 
 from libs import music_bot
+from libs.music_bot import subtitles
 from libs.music_bot import (
     AudioStreamer,
     MapMusicBot,
@@ -118,6 +119,13 @@ def make_bot(**overrides):
     bot.mode = "youtube"
     bot._stream_announced = False
     bot._current_reverb_slot = None
+    bot.subtitles_enabled = False
+    bot.subtitle_language = subtitles.DEFAULT_LANGUAGE_PREFERENCE
+    bot.subtitle_offset = 0
+    bot.subtitle_reader = subtitles.SubtitleReader()
+    bot._caption_fetcher = subtitles.CaptionFetcher()
+    bot._subtitle_generation = 0
+    bot._subtitle_page = ""
     bot.eq_profile = "normal"
     bot.eq_values = {"bass": 50, "mid": 50, "treble": 50}
     bot._eq_slots = {}

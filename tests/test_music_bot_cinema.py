@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs import jukebox
 from libs.audio.cinema import CinemaSpeakerBank, host_for, set_enabled
 from libs.music_bot import MapMusicBot
+from libs.music_bot import subtitles
 from libs.world_map import Map
 
 ANCHOR = (10.0, 20.0, 0.0)
@@ -145,6 +146,15 @@ def make_bot(game, **attributes):
     bot._playback_generation = 0
     bot._stream_announced = False
     bot._current_reverb_slot = None
+    # Spoken subtitles: a stopped bot forgets the track it was reading, so
+    # every harness that calls stop() needs the state __init__ would set.
+    bot.subtitles_enabled = False
+    bot.subtitle_language = subtitles.DEFAULT_LANGUAGE_PREFERENCE
+    bot.subtitle_offset = 0
+    bot.subtitle_reader = subtitles.SubtitleReader()
+    bot._caption_fetcher = subtitles.CaptionFetcher()
+    bot._subtitle_generation = 0
+    bot._subtitle_page = ""
     bot.broadcast_enabled = False
     bot.broadcast_to_megaphone = False
     bot.live_relay_streamer = None

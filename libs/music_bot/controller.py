@@ -33,6 +33,7 @@ from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
 from ..string_utils import friendly_key_name
 from . import song_requests
+from . import subtitles
 from .media import (FFMPEG_PATH, DEFAULT_MAP_MUSIC, FALLBACK_PLAYLIST,
                     clamp_seek_position, format_track_position, YouTubeSearcher)
 from .streaming import AudioStreamer, LiveRelayStreamer
@@ -250,6 +251,23 @@ class MapMusicBot:
         self.current_duration = None       # seconds, when known (None = no crossfade)
         self._known_durations = {}         # youtube page URL -> duration seconds
         self._crossfade = None             # active roll/fade state (see _update_crossfade)
+
+        # Spoken subtitles (the video's own YouTube captions, read out loud by
+        # this machine's screen reader -- libs/music_bot/subtitles.py). The
+        # switch, the language order and the sync offset are the listener's and
+        # persist across restarts; the cues themselves are per track.
+        self.subtitles_enabled = bool(options.get("music_bot_subtitles", False))
+        self.subtitle_language = subtitles.normalize_preference(
+            options.get("music_bot_subtitle_language"))
+        self.subtitle_offset = subtitles.normalize_offset(
+            options.get("music_bot_subtitle_offset"))
+        self.subtitle_reader = subtitles.SubtitleReader()
+        self._caption_fetcher = subtitles.CaptionFetcher()
+        # Which stream a fetch belongs to: a caption track that arrives after
+        # the player skipped on is dropped, and the fetch itself is cancelled
+        # between its two network steps.
+        self._subtitle_generation = 0
+        self._subtitle_page = ""
 
     def toggle_broadcast(self):
         """Toggle network broadcasting on/off."""
@@ -1142,6 +1160,7 @@ class MapMusicBot:
         items.extend([
             (get_queue_mode_label, toggle_queue_mode),
             (get_queue_count_label, go_queue),
+            (self.subtitle_label, self._open_subtitle_menu),
             ("Music Bot Settings", go_settings),
             ("Help", go_help),
             ("Cancel", lambda: gp.pop_last_substate())
@@ -2732,6 +2751,233 @@ class MapMusicBot:
             else:
                 del src.direct_filter
 
+    # === Spoken subtitles (YouTube captions) ===
+    # A blind player cannot read a caption on the screen, so the Music Bot
+    # reads the video's own caption track out loud while the audio keeps
+    # playing (libs/music_bot/subtitles.py). It is per listener and per
+    # machine: the track comes from the page this bot is already playing from,
+    # and every cue is aimed at this machine's own audible position.
+
+    def subtitle_label(self):
+        if not getattr(self, "subtitles_enabled", False):
+            return "Subtitles: OFF"
+        return f"Subtitles: {subtitles.preference_label(self.subtitle_language)}"
+
+    def toggle_subtitles(self):
+        self.subtitles_enabled = not getattr(self, "subtitles_enabled", False)
+        options.set("music_bot_subtitles", self.subtitles_enabled)
+        if not self.subtitles_enabled:
+            self._stop_subtitles()
+            speak("Subtitles off. Songs and videos play without them.")
+            return
+        speak("Subtitles on. Captions are read aloud while the song or video "
+              "plays.")
+        # A track already playing gets its captions now instead of at the next
+        # one: the page is the one this bot is playing from.
+        self._begin_subtitles(self._caption_page())
+
+    def _caption_page(self):
+        """The YouTube page this bot is playing from, when there is one."""
+        target = self.current_target if self.mode == "youtube" else ""
+        return target if subtitles.is_caption_page(target) else ""
+
+    def _begin_subtitles(self, page_url):
+        """Start reading one page's captions, or leave the reader empty.
+
+        Called whenever a stream starts (a fresh song, a replayed one, and a
+        seek's restart alike), so the reader is always aimed at the track that
+        is really playing. The fetch runs on its own thread: the yt-dlp import
+        behind it is ~700 ms and ~24 MB, and it must never sit in the frame
+        loop or the audio pump.
+        """
+        self._subtitle_generation += 1
+        generation = self._subtitle_generation
+        self.subtitle_reader.clear()
+        self._subtitle_page = page_url or ""
+        if not getattr(self, "subtitles_enabled", False) or not self._subtitle_page:
+            return
+        languages = subtitles.languages_for(self.subtitle_language)
+
+        def load():
+            result = self._caption_fetcher.fetch(
+                self._subtitle_page, languages,
+                cancelled=lambda: generation != self._subtitle_generation)
+            self.game.put(lambda: self._on_subtitles_loaded(generation, result))
+
+        threading.Thread(target=load, daemon=True).start()
+
+    def _on_subtitles_loaded(self, generation, load):
+        """Main thread: a caption answer for the track that asked for it."""
+        if generation != self._subtitle_generation:
+            return
+        if not getattr(self, "subtitles_enabled", False):
+            return
+        if load.reason == subtitles.REASON_CANCELLED:
+            return
+        if not load.cues:
+            # Silence here is indistinguishable from a broken feature, so a
+            # track that could not be read says so (once per track).
+            speak(subtitles.reason_sentence(load.reason))
+            return
+        self.subtitle_reader.load(load.cues, load.language, load.automatic)
+        kind = "automatic captions" if load.automatic else "captions"
+        speak(f"{subtitles.language_label(load.language)} {kind} for this "
+              f"track. {len(load.cues)} lines.")
+
+    def _stop_subtitles(self):
+        """Forget the track being read and any fetch still running for it."""
+        self._subtitle_generation += 1
+        self._subtitle_page = ""
+        self.subtitle_reader.clear()
+
+    def _pump_subtitles(self):
+        """Read whatever the song has reached (called every playing frame)."""
+        if not getattr(self, "subtitles_enabled", False):
+            return
+        reader = self.subtitle_reader
+        if not reader.ready:
+            return
+        position = self.track_position()
+        if position is None:
+            return
+        # Queued, never interrupting: a caption must not cut off the menu or a
+        # game announcement, and the reader's own bound is what keeps the queue
+        # from growing (subtitles.SubtitleReader.pump).
+        for line in reader.pump(position * 1000.0,
+                                offset_ms=self.subtitle_offset):
+            speak(line, interupt=False)
+
+    def _open_subtitle_menu(self):
+        """Everything about spoken subtitles, behind one line of the menu."""
+        from .. import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._show_mode_menu()
+
+        def go_language():
+            gp.pop_last_substate()
+            self._open_subtitle_language_menu()
+
+        def go_timing():
+            gp.pop_last_substate()
+            self._open_subtitle_timing_menu()
+
+        def read_status():
+            speak(self.subtitle_reader.status() +
+                  " Subtitles come from the video on YouTube: the uploader's "
+                  "own track when there is one, otherwise the automatic "
+                  "captions. Songs often have none, because the words of a "
+                  "song are rarely a caption track.")
+
+        m = menu_mod.Menu(self.game, "Subtitles", parrent=gp)
+        m.add_items([
+            (self.subtitle_label, self.toggle_subtitles),
+            (self.subtitle_language_label, go_language),
+            (self.subtitle_timing_label, go_timing),
+            (lambda: self.subtitle_reader.status(), read_status),
+            ("Back", go_back),
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def subtitle_language_label(self):
+        return ("Language: "
+                + subtitles.preference_label(self.subtitle_language))
+
+    def subtitle_timing_label(self):
+        return subtitles.offset_label(self.subtitle_offset)
+
+    def _open_subtitle_language_menu(self):
+        """The order YouTube is asked for a language in."""
+        from .. import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_subtitle_menu()
+
+        def make_label(key, label):
+            def label_fn():
+                current = getattr(self, "subtitle_language", None)
+                return f"{label} (current)" if current == key else label
+            return label_fn
+
+        def make_pick(key, label):
+            def pick():
+                self.subtitle_language = subtitles.normalize_preference(key)
+                options.set("music_bot_subtitle_language",
+                            self.subtitle_language)
+                speak(f"Subtitle language: {label}.")
+                # A track already playing is read again in the new order (the
+                # track itself is cached, so only a language change costs a
+                # fetch).
+                self.subtitle_reader.clear()
+                self._begin_subtitles(self._caption_page())
+                m.speak_current_item()
+            return pick
+
+        m = menu_mod.Menu(self.game, "Subtitle Language", parrent=gp)
+        items = [(make_label(key, label), make_pick(key, label))
+                 for key, label, _languages in subtitles.LANGUAGE_PREFERENCES]
+        items.append(("Back", go_back))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_subtitle_timing_menu(self):
+        """Shift the captions against the audio, half a second a press.
+
+        Reading a caption takes the reader its own time and the reader's rate
+        is the player's setting, so the line the player hears starts where the
+        reader starts. Nothing can measure that from here; the player can.
+        """
+        from .. import menu as menu_mod, menus
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_subtitle_menu()
+
+        def speak_timing():
+            speak(subtitles.offset_label(self.subtitle_offset))
+
+        def shift(delta):
+            def move():
+                self.subtitle_offset = subtitles.normalize_offset(
+                    self.subtitle_offset + delta)
+                options.set("music_bot_subtitle_offset", self.subtitle_offset)
+                speak_timing()
+                m.speak_current_item()
+            return move
+
+        def reset():
+            self.subtitle_offset = 0
+            options.set("music_bot_subtitle_offset", 0)
+            speak_timing()
+            m.speak_current_item()
+
+        step = subtitles.OFFSET_STEP_MS / 1000.0
+        m = menu_mod.Menu(self.game, "Subtitle Timing", parrent=gp)
+        m.add_items([
+            (self.subtitle_timing_label, speak_timing),
+            (f"Speak {step:.1f} seconds earlier",
+             shift(subtitles.OFFSET_STEP_MS)),
+            (f"Speak {step:.1f} seconds later",
+             shift(-subtitles.OFFSET_STEP_MS)),
+            ("Reset timing", reset),
+            ("Back", go_back),
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
     # === Equalizer (personal Music Bot) ===
     # Same OpenAL EQUALIZER approach as the jukebox: preset slots are cached
     # per profile, the custom profile owns one slot that is mutated in place
@@ -3327,6 +3573,11 @@ class MapMusicBot:
         # silent and only becomes audible when the bot is resumed.
         self.paused = bool(start_paused)
         self.current_title = title
+        # Captions for the page this stream came from. A seek restarts the same
+        # track through here, and that is on purpose: the cues are unchanged
+        # and the pump reads the new stream's own position, so a seek needs no
+        # caption bookkeeping at all.
+        self._begin_subtitles(canonical_url)
         self._stream_announced = False
 
     # === Seeking (fast-forward / rewind) ===
@@ -3553,6 +3804,10 @@ class MapMusicBot:
         self.mode = "idle"
         self._stream_announced = False
         self._current_reverb_slot = None
+        # A track this bot was reading captions for is over: the lines and any
+        # fetch still running for them stop here, rather than speak into
+        # whatever plays next.
+        self._stop_subtitles()
         if clear_queue:
             self._clear_track_queue()
             self._clear_next_up_queue()
@@ -3719,6 +3974,10 @@ class MapMusicBot:
         # Crossfade state machine: pre-roll and overlap the next queued track
         # when the current one is about to end.
         self._update_crossfade()
+
+        # Spoken subtitles: read whatever position this machine's ears have
+        # reached (nothing to do unless the player asked for them).
+        self._pump_subtitles()
 
         # Announce playback only after ffmpeg produced PCM and OpenAL accepted
         # the pre-buffer. This prevents the misleading sequence

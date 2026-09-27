@@ -1263,7 +1263,44 @@ class AudioManager():
                      "kind": kind or str(type).lower()}
             self._effect_leases[key] = lease
         lease["holders"][label] = self._owner_ref(ref)
+        # Keep the slot's bookkeeping pointed at a holder that is still here.
+        # ``gen_effect`` records the *first* holder of a shared slot, and that
+        # holder is often replaced while its twins stay (an element re-saved in
+        # place in the Builder, a new map's room joining the room of the map
+        # that just went away); the map-load sweep reads this ref.
+        self._refresh_lease_hold(lease)
         return lease["slot"]
+
+    def _refresh_lease_hold(self, lease):
+        """Point a leased slot's recorded holder at somebody still alive.
+
+        The holder table is the truth about who owns a shared slot; the
+        ``_slot_hold`` entry is a summary the pool report and the sweep read.
+        A holder whose ref is ``None`` cannot be seen through a weakref and
+        means "the lease itself owns this" -- recorded as such, it is left
+        exactly where it is rather than reclaimed on a guess.
+        """
+        slot = lease.get("slot")
+        if slot is None:
+            return
+        kind = lease.get("kind") or "slot"
+        holders = lease.get("holders", {})
+        seen = []
+        for label, ref in holders.items():
+            if ref is None:
+                seen.append((label, None))
+                continue
+            holder = ref()
+            if holder is not None:
+                self.hold_slot(slot, kind, label, holder)
+                return
+        if seen:
+            self.hold_slot(slot, kind, seen[0][0], None)
+
+    def _slot_is_leased(self, slot):
+        """True while a shared lease (a room, a PA speaker) still holds the slot."""
+        return any(lease.get("slot") is slot
+                   for lease in self._effect_leases.values())
 
     def release_effect_lease(self, type, params, label):
         """Give up one holder's claim; the last one returns the slot.
@@ -1278,6 +1315,9 @@ class AudioManager():
             return False
         lease["holders"].pop(label, None)
         if lease["holders"]:
+            # The departing holder may be the one this slot's bookkeeping was
+            # pointing at; name a surviving holder instead.
+            self._refresh_lease_hold(lease)
             return False
         self._effect_leases.pop(key, None)
         slot = lease.get("slot")
@@ -1348,6 +1388,17 @@ class AudioManager():
         for slot, hold in list(self._slot_hold.items()):
             ref = hold[2] if len(hold) > 2 else None
             if ref is None or ref() is not None:
+                continue
+            # A slot a live lease still holds is never the sweep's to take,
+            # however dead the holder recorded here looks: that ref is the
+            # first holder of a shared slot, and a shared slot outlives it
+            # (a re-saved zone, a new map joining an identical room). Freeing
+            # it detaches sends that are still listening and hands the slot to
+            # the next borrower, whose effect those sends then play through --
+            # a room that comes back "wrong" or buzzing instead of the room
+            # the player is standing in. The holders that write the summary
+            # keep it pointed at somebody alive; this is the rule itself.
+            if self._slot_is_leased(slot):
                 continue
             self._detach_slot_from_long_lived_sources(slot)
             self.release_effect_slot(slot)
