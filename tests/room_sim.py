@@ -61,7 +61,8 @@ Two of those were found by this harness and fixed in ``bank.py``: a routine
 ``reclaim`` reading a **stopped** source (its finished count is the device
 lying -- see the device notes, and ``_readable``/``drain_stopped``), and the
 room's low-queue hold measuring a stopped speaker's empty queue. Both are
-pinned in ``test_cinema_room_faults`` and recorded in ``AGENTS.md``.
+pinned in ``test_cinema_room_faults`` and recorded in the
+``cinema_speaker_system`` skill.
 
 Usage::
 

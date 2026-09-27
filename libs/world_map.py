@@ -26,6 +26,32 @@ def _map_loop_pending(audio, path):
     return cache is not None and cache.status(path) in ("cold", "pending")
 
 
+def _wall_occlusion_percent(value):
+    """A wall's own sound filter, in percent, or None for "standard".
+
+    The Builder writes it on a wall as ``occlusion`` -- ``<platform
+    type="wallbrick" occlusion="100">`` -- and it means how much of the sound
+    crossing that wall is stopped: 100 is a full wall however thinly it is
+    drawn, 0 lets the sound through as if the wall were not standing there at
+    all, and anything between is that much of it.
+
+    A map that sets nothing -- which is every map written before this --
+    answers None, and that wall is judged by its thickness exactly as it
+    always was. A hand-written value that is not a number (blank, a word, a
+    NaN) is treated the same way rather than being allowed to poison the
+    arithmetic for every sound that crosses that wall.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return None
+    if percent != percent or percent in (float("inf"), float("-inf")):
+        return None
+    return max(0.0, min(100.0, percent))
+
+
 class Map:
     def __init__(self, game, minx=0, miny=0, minz=0, maxx=0, maxy=0, maxz=0):
         """Constructs a basic map:
@@ -117,6 +143,14 @@ class Map:
             2 tiles                             -> ~0.67 : medium muffling
             >= max_thickness tiles (long wall)  -> 1.0  : full standard occlusion
 
+        A wall may carry a sound filter of its own instead -- set in the
+        Builder, written as ``occlusion`` (0-100) in the map -- and that number
+        is what the wall is worth on its own: 100 crosses the ray as a full
+        wall however thin it is drawn, 0 lets the sound through as if the wall
+        were not there. A wall that sets none is worth exactly what it was
+        before this existed (one tile of thickness each), so a map that sets
+        no filter reads identically to every build that came before it.
+
         A path through water yields at least 0.5 (the partial occlusion
         valid_straight_path used to signal by returning None).
         Returns a float in [0.0, 1.0].
@@ -124,15 +158,15 @@ class Map:
         x1, y1, z1 = trunc(position1[0]), trunc(position1[1]), trunc(position1[2])
         x2, y2, z2 = trunc(position2[0]), trunc(position2[1]), trunc(position2[2])
         dist = round(sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)) + 1
-        wall_hits = 0
+        absorbed = 0.0
         underwater = False
         for n in range(0, dist):
-            tile = self.get_tile_at(x1, y1, z1)
-            if tile.startswith("wall"):
-                wall_hits += 1
-                if max_thickness > 0 and wall_hits >= max_thickness:
+            name = self.get_tile_at(x1, y1, z1)
+            if name.startswith("wall"):
+                absorbed += self._wall_worth_at(x1, y1, z1, max_thickness)
+                if max_thickness > 0 and absorbed >= 1.0:
                     return 1.0
-            elif tile == "underwater":
+            elif name == "underwater":
                 underwater = True
             if x1 == x2 and y1 == y2 and z1 == z2:
                 break
@@ -148,10 +182,7 @@ class Map:
                 z1 += 1
             elif z1 > z2:
                 z1 -= 1
-        if max_thickness <= 0:
-            ratio = 1.0 if wall_hits else 0.0
-        else:
-            ratio = min(wall_hits / float(max_thickness), 1.0)
+        ratio = min(absorbed, 1.0)
         if underwater:
             ratio = max(ratio, 0.5)
         return ratio
@@ -311,11 +342,48 @@ class Map:
         Return Value:
         A blank string if a tile wasn't found or a tiletype which is within the x, y, and z coordinate
         """
-        found_responses = ""
+        tile = self._tile_object_at(x, y, z)
+        return tile.tiletype if tile is not None else ""
+
+    def _wall_worth_at(self, x, y, z, max_thickness):
+        """What the wall standing at one point of the ray is worth.
+
+        A wall that carries a sound filter of its own (set in the Builder,
+        written as ``occlusion``, 0-100) is worth exactly what it says; one
+        that carries none is worth one tile of thickness, which is the rule
+        every map was written under -- ``max_thickness`` tiles of wall are a
+        full wall, so one tile of a three-tile wall is a third of it.
+
+        The name of the thing standing here is asked of `get_tile_at` and this
+        asks the *region* for its number, so a caller that supplies the names
+        (a harness, a map script) still gets the walls it describes, and a map
+        that sets no filter anywhere answers with the thickness rule it always
+        did. The number is read through `_wall_occlusion_percent` here as well
+        as where a tile is built, because this is the only place it is ever
+        *used*: a map is a text file somebody can hand-edit, and a value that
+        is not a percentage must read as "standard" rather than as an amount of
+        sound.
+        """
+        tile = self._tile_object_at(x, y, z)
+        percent = _wall_occlusion_percent(getattr(tile, "occlusion", None))
+        if percent is not None:
+            return percent / 100.0
+        return 1.0 / max_thickness if max_thickness > 0 else 1.0
+
+    def _tile_object_at(self, x, y, z):
+        """The tile object at a coordinate, or None.
+
+        The same region `get_tile_at` reads the name off, chosen the same way
+        (the last region that covers the point wins, exactly as it always
+        has), so the two can never disagree about which tile owns a point.
+        A caller that needs more than the name asks for the object: a wall's
+        own sound filter is a property of the region, not of the word.
+        """
+        found = None
         for i in self.tile_list:
             if i.in_bound(x, y, z):
-                found_responses = i.tiletype
-        return found_responses
+                found = i
+        return found
 
     def get_zone_at(self, x, y, z):
         """Same as get_tile_at, except deals with zones.
@@ -547,7 +615,7 @@ class Map:
             self.zone_list.append(zone)
 
     def spawn_platform(
-        self, minx=0, maxx=0, miny=0, maxy=0, minz=0, maxz=0, type="", id="", **kwargs
+        self, minx=0, maxx=0, miny=0, maxy=0, minz=0, maxz=0, type="", id="", occlusion=None, **kwargs
     ):
         """Spawns a platform
         Params:
@@ -556,8 +624,12 @@ class Map:
         miny (int): The minimum y of the tile
         maxy (int): The maximum y of the tile
         minz (int): The minimum z of the tile
-        maxz (int): The maximum z of the tile"""
-        tile = Tile(id, minx, maxx, miny, maxy, minz, maxz, type)
+        maxz (int): The maximum z of the tile
+        occlusion (int): How much of the sound crossing this wall it stops, in
+        percent (0 = it lets sound through, 100 = it stops all of it). A wall
+        that sets none is judged by its thickness, which is what every map
+        written before this does."""
+        tile = Tile(id, minx, maxx, miny, maxy, minz, maxz, type, occlusion)
         index = -1
         for i, element in enumerate(self.tile_list):
             if element.id == id:
@@ -1218,9 +1290,13 @@ class Ambience(BaseMapObj):
 class Tile(BaseMapObj):
     """An internal tile class. You do not need to create any objects with this type externally"""
 
-    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, type):
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, type, occlusion=None):
         super(Tile, self).__init__(id, minx, maxx, miny, maxy, minz, maxz, "tile")
         self.tiletype = type
+        # The wall's own sound filter, in percent (`_wall_occlusion_percent`),
+        # or None for "standard": judged by how many tiles deep the sound ray
+        # crosses it.
+        self.occlusion = _wall_occlusion_percent(occlusion)
 
 
 class Door(BaseMapObj):
@@ -1404,9 +1480,13 @@ class Ambience(BaseMapObj):
 class Tile(BaseMapObj):
     """An internal tile class. You do not need to create any objects with this type externally"""
 
-    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, type):
+    def __init__(self, id, minx, maxx, miny, maxy, minz, maxz, type, occlusion=None):
         super(Tile, self).__init__(id, minx, maxx, miny, maxy, minz, maxz, "tile")
         self.tiletype = type
+        # The wall's own sound filter, in percent (`_wall_occlusion_percent`),
+        # or None for "standard": judged by how many tiles deep the sound ray
+        # crosses it.
+        self.occlusion = _wall_occlusion_percent(occlusion)
 
 
 class Door(BaseMapObj):
