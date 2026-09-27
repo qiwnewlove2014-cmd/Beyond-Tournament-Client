@@ -1,3 +1,4 @@
+import contextlib
 import os
 import random
 from .. import consts, path_utils
@@ -46,9 +47,10 @@ class ShieldManager:
         if self.is_raising:
             return
         self.is_raising = True
-        
+
         sound_path = self.get_sound_path("raise.ogg")
-        self.game.audio_mngr.play_unbound(sound_path, 0, 0, 0, direct=True)
+        self._apply_room_reverb(
+            self.game.audio_mngr.play_unbound(sound_path, 0, 0, 0, direct=True))
 
     def lower_shield(self):
         """Play lower sound and deactivate raising stance."""
@@ -57,7 +59,40 @@ class ShieldManager:
         self.is_raising = False
 
         sound_path = self.get_sound_path("lower.ogg")
-        self.game.audio_mngr.play_unbound(sound_path, 0, 0, 0, direct=True)
+        self._apply_room_reverb(
+            self.game.audio_mngr.play_unbound(sound_path, 0, 0, 0, direct=True))
+
+    def _apply_room_reverb(self, snd):
+        """Blend the player's own shield sound with the acoustics of the room
+        their ears are standing in (the typing-sound rule): reverby inside a
+        reverb zone, dry outside of it, read fresh on every raise and lower.
+
+        The sound itself is deliberately direct 2D at the player's own ears --
+        the Server's raise/lower relay excludes the raiser, so this local copy
+        is the only one they hear and there is no positional double.
+        """
+        if snd is None or getattr(snd, "source", None) is None:
+            return
+        gameplay = self.gameplay
+        listener_getter = getattr(gameplay, "listener_object", None)
+        listener = (listener_getter() if callable(listener_getter)
+                    else getattr(gameplay, "player", None))
+        map_obj = getattr(gameplay, "map", None)
+        if listener is None or map_obj is None:
+            return
+        reverb = map_obj.get_reverb_at(listener.x, listener.y, listener.z)
+        if reverb is None:
+            return
+        slot = reverb.reverb
+        if slot is None and hasattr(reverb, "ensure_slot"):
+            # A zone whose pool slot was momentarily exhausted retries on its
+            # own cooldown, so the room recovers its echo instead of staying
+            # dry (the same retry the camera's listener state makes).
+            slot = reverb.ensure_slot()
+        if slot is None:
+            return
+        with contextlib.suppress(Exception):
+            self.game.audio_mngr.efx.send(snd.source, 0, slot)
 
     def play_impact_sound(self, x=None, y=None, z=None, is_local=True):
         """Play impact sound (impact1.ogg - impact3.ogg) when shield takes hit."""
