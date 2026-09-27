@@ -1,18 +1,11 @@
 """Music Jukebox — a map element that plays a shared song queue.
 
-Architecture
-------------
-The queue lives on the SERVER (per map), so playback keeps going no matter
-which player queued the songs or leaves the map. The server broadcasts
-``jukebox_play`` / ``jukebox_stop`` / ``jukebox_queue_update`` / ``jukebox_state``
-events. New clients receive one server-owned live Opus stream per active
-cabinet; decoding, distance attenuation, reverb, and local volume stay on the
-client. If the optional server worker is unavailable, playback falls back to
-the direct ffmpeg path used by the personal Music Bot.
+The queue lives on the SERVER (per map): jukebox_play / jukebox_stop / jukebox_queue_update
+/ jukebox_state, and one server-owned live Opus stream per active cabinet. Decoding,
+distance attenuation, reverb and local volume stay on the client, and an unavailable server
+worker falls back to the direct ffmpeg path the Music Bot uses.
 
-The jukebox menu deliberately has NO broadcast/megaphone buttons — it supports
-searching YouTube, direct YouTube URL input, viewing the queue, removing own
-queued songs, skipping songs, adjusting volume, and staff queue clearance.
+The rules, the watchdogs and every measured timeout: .agents/skills/jukebox-system/.
 """
 
 import contextlib
@@ -32,10 +25,10 @@ from .deferred_log import log_deferred as log_line
 from .jukebox_relay import JukeboxRelayReceiver
 from .jukebox_media_cache import JukeboxMediaCache
 from .audio_diagnostics import probe as audio_probe
-# The cabinet's cinema room: a processing layer that spreads its song across
-# the speakers a builder placed around it. What a cabinet plays through is the
-# map's decision (the element's ``cinema_mode``: auto / off / a profile), so a
-# cabinet with no room around it is the two-source playback below, untouched.
+# The cabinet's cinema room: a processing layer that spreads its song across the
+# speakers a builder placed around it. What a cabinet plays through is the map's
+# decision (the element's cinema_mode: auto / off / a profile), so a cabinet with
+# no room around it is the two-source playback below, untouched.
 from .audio.cinema import (CINEMA_AUTO, CINEMA_OFF, ROOM_MAX_DISTANCE,
                            ROOM_REFERENCE_DISTANCE, acquire_bank, cabinet_anchor,
                            cabinet_area, cabinet_reach, cinema_room,
@@ -57,12 +50,9 @@ OCCLUSION_CLEAR, OCCLUSION_LIGHT, OCCLUSION_FULL = 0, 1, 2
 
 
 def wall_occlusion_tier(cur_map, src_pos, listener):
-    """Classify wall thickness between two points for discrete-filter sites.
-
-    Wraps map.occlusion_tier() (which counts wall tiles along the ray so a
-    single pillar only lightly muffles) with a legacy boolean fallback for
-    stub/foreign map objects.
-    """
+    # Classify wall thickness between two points for discrete-filter sites: wraps
+    # map.occlusion_tier() (which counts wall tiles along the ray, so a single pillar
+    # only lightly muffles) with a legacy boolean fallback for stub/foreign maps.
     if cur_map is None or src_pos is None or listener is None:
         return OCCLUSION_CLEAR
     tfn = getattr(cur_map, "occlusion_tier", None)
@@ -80,10 +70,8 @@ def wall_occlusion_tier(cur_map, src_pos, listener):
 
 
 class JukeboxPlayer:
-    """Plays one song per jukebox, anchored at the jukebox's 3D position.
-
-    Each jukebox id gets its own OpenAL source + ffmpeg streamer thread.
-    """
+    # Plays one song per jukebox, anchored at the jukebox's 3D position: each jukebox id
+    # gets its own OpenAL source + ffmpeg streamer thread.
 
     def __init__(self, game):
         self.game = game
@@ -94,15 +82,15 @@ class JukeboxPlayer:
         self.volume = 65
         self._lock = threading.Lock()
         self.relay_routes = {}
-        # Clocks whose output was replaced while a jam note was still waiting on
-        # it (see ``_keep_waiting_notes``): ``update`` pumps only the entry's
-        # *current* streamer, so these are pumped here until they have nothing
-        # left, and dropped when a map change takes the song with it.
+        # Clocks whose output was replaced while a jam note was still waiting on it (see
+        # _keep_waiting_notes): update pumps only the entry's *current* streamer, so these
+        # are pumped here until they have nothing left, and dropped when a map change takes
+        # the song with it.
         self._orphan_clocks = []
-        # Frames buffered for relay routes whose jukebox_play event is still
-        # sitting on the deferred game queue (see pend_relay_route) — this is
-        # what keeps the first fraction of a song (its intro) from being
-        # dropped between the network thread and the main loop.
+        # Frames buffered for relay routes whose jukebox_play event is still sitting on the
+        # deferred game queue (see pend_relay_route): this is what keeps the first fraction
+        # of a song -- its intro -- from being dropped between the network thread and the
+        # main loop.
         self._relay_pending = {}
         self._control_serial = 0
         # Jukebox ids awaiting a post-reload play confirmation (see
@@ -111,10 +99,10 @@ class JukeboxPlayer:
         self._pending_map_change = set()
         self._pending_map_change_serial = None
         self._last_recovery_request_at = 0.0
-        # Consecutive relay recovery failures per jukebox + sticky
-        # direct-playback deadlines (see update() — the cure for "sound dies
-        # until a full relogin": map changes keep the same ENet peer, only a
-        # fresh connection or local direct playback restores audio).
+        # Consecutive relay recovery failures per jukebox + sticky direct-playback deadlines
+        # (see update() -- the cure for "sound dies until a full relogin": map changes keep
+        # the same ENet peer, so only a fresh connection or local direct playback restores
+        # audio).
         self._relay_fail_counts = {}
         self._direct_fallback_until = {}
         self._stall_unsticks = {}
@@ -127,10 +115,10 @@ class JukeboxPlayer:
         # diagnostics. The *authority* on what a cabinet should play is the
         # server's own hint (below) plus the map's speakers.
         self.cinema_profiles = {}
-        # The mode the map has for each cabinet (auto / off / a profile id), as
-        # last told by the server. Kept locally because a mid-song map refresh
-        # re-resolves the room without a fresh play event, and because the
-        # cabinet menu has to answer before another song starts.
+        # The mode the map has for each cabinet (auto / off / a profile id), as last told by
+        # the server. Kept locally because a mid-song map refresh re-resolves the room
+        # without a fresh play event, and because the cabinet menu has to answer before
+        # another song starts.
         self._cinema_modes = {}
         # Each cabinet's own reach, in metres (``cinema_radius``): how far its
         # room takes speakers in and how far from a listener it is heard. One
@@ -154,11 +142,9 @@ class JukeboxPlayer:
         self._retiring_direct = []
 
     def occlusion_tier(self, box_pos, listener, max_distance=40.0):
-        """Skip inaudible rays and briefly reuse exact tile-ray results.
-
-        Main relay pump and legacy direct worker may query this; only the
-        small cache is locked, never the map scan or any audio operation.
-        """
+        # Skip inaudible rays and briefly reuse exact tile-ray results. The main relay pump
+        # and the legacy direct worker may both query this; only the small cache is locked,
+        # never the map scan or any audio operation.
         if listener is None or box_pos is None:
             return OCCLUSION_CLEAR
         if sum((listener[i] - box_pos[i]) ** 2 for i in range(3)) >= (max_distance + 2.5) ** 2:
@@ -203,12 +189,9 @@ class JukeboxPlayer:
         return self._occlusion_filter
 
     def get_light_occlusion_filter(self):
-        """Lazy-create a gentle Lowpass for PARTIALLY occluded playback.
-
-        A thin obstacle (a lone pillar tile between cabinet and listener)
-        should only slightly dull the song — unlike the heavy full-wall
-        filter above.
-        """
+        # Lazy-create a gentle Lowpass for PARTIALLY occluded playback: a thin obstacle (a
+        # lone pillar tile between cabinet and listener) should only slightly dull the song,
+        # unlike the heavy full-wall filter above.
         if self._light_occlusion_filter is None:
             audio = getattr(self.game, "audio_mngr", None)
             if audio is not None and hasattr(audio, "gen_filter"):
@@ -246,13 +229,10 @@ class JukeboxPlayer:
 
     @classmethod
     def _custom_eq_parameters(cls, values):
-        """Map accessible 0-100 sliders to safe OpenAL EQUALIZER gains.
-
-        50 is unity/flat. The exponential curve gives equal perceptual room
-        above and below unity while staying inside the EFX 0.126-7.943 range.
-        Both mid filters move together so the single Mid slider covers vocals
-        and instruments instead of only one narrow center frequency.
-        """
+        # Map accessible 0-100 sliders to safe OpenAL EQUALIZER gains. 50 is unity/flat; the
+        # exponential curve gives equal perceptual room above and below unity while staying
+        # inside the EFX 0.126-7.943 range. Both mid filters move together so the single Mid
+        # slider covers vocals and instruments instead of one narrow centre frequency.
         values = cls._normalize_eq_values(values)
 
         def gain(value):
@@ -274,12 +254,9 @@ class JukeboxPlayer:
 
     @audio_probe.measured("jukebox.eq")
     def _get_eq_slot(self, profile, jukebox_id=None, eq_values=None):
-        """Get or update an OpenAL Hardware Equalizer slot.
-
-        Presets share a cached slot. A custom profile owns one slot per active
-        cabinet and mutates its effect in place on every slider tick, avoiding
-        EFX slot leaks and keeping changes audible in real time.
-        """
+        # Get or update an OpenAL Hardware Equalizer slot. Presets share a cached slot; a
+        # custom profile owns one slot per active cabinet and mutates its effect in place on
+        # every slider tick, avoiding EFX slot leaks and keeping changes audible in real time.
         profile = str(profile or "normal").lower()
         if profile != "custom" and profile not in self.EQ_PRESETS:
             return None
@@ -419,50 +396,38 @@ class JukeboxPlayer:
     # long -> full rebuild (dead sources / lost context after an audio device
     # switch — the packet-based stall check can never see this state).
     RELAY_AUDIO_STALL_TIMEOUT = 10.0
-    # Playback started but the speakers stopped CONSUMING buffers for this
-    # long -> the stream is slowly starving (underrunning): frames arrive
-    # just often enough to dodge the packet stall check and buffers still
-    # queue, yet the listener hears silence or a stutter loop. Only real
-    # output consumption proves otherwise.
+    # Playback started but the speakers stopped CONSUMING buffers for this long -> the
+    # stream is slowly starving (underrunning): frames arrive just often enough to dodge
+    # the packet stall check and buffers still queue, yet the listener hears silence or a
+    # stutter loop. Only real output consumption proves otherwise.
     RELAY_OUTPUT_STALL_TIMEOUT = 8.0
-    # Direct playback has no server relay to announce a mid-song death, and
-    # ffmpeg can hang without exiting (frozen CDN read, dead OpenAL sink).
-    # When the speakers consume no buffer for this long while the stream
-    # thread is alive and playing, rebuild — a silent-but-alive direct
-    # stream is the one stall the thread-death check can never see.
+    # Direct playback has no relay to announce a mid-song death and ffmpeg can hang without
+    # exiting, so DIRECT_OUTPUT_STALL_TIMEOUT = 8.0 s of no buffer consumed while the thread is
+    # alive and playing means rebuild.
     DIRECT_OUTPUT_STALL_TIMEOUT = 8.0
-    # Frame-rate starvation: a trickling channel (a few frames every few
-    # seconds) passes every liveness check above — packets arrive, buffers
-    # queue, speakers consume the tiny bursts — while the listener hears a
-    # sped-up stutter that fades to silence. A healthy relay delivers 25
-    # frames/second; below half of that over a 10s window the channel is
-    # starving and the rebuild ladder (ending in direct TCP playback) must
-    # kick in MID-SONG instead of waiting for the next song.
+    # Frame-rate starvation: a trickling channel passes every liveness check while the listener
+    # hears a sped-up stutter. A healthy relay delivers 25 frames/s, so below half of that over
+    # RELAY_STARVE_WINDOW = 10.0 s the rebuild ladder (ending in direct TCP) starts mid-song.
     RELAY_STARVE_WINDOW = 10.0
     RELAY_STARVE_MIN_FPS = 12.5
     # A relay_pending placeholder whose follow-up play event never landed
     # (server worker died mid-retry) asks for a resync after this long.
     RELAY_PENDING_TIMEOUT = 15.0
     RECOVERY_COOLDOWN = 5.0
-    # A stall normally recovers via resync + warm-up replay. If this many
-    # consecutive un-stick attempts fail to hold, rebuild immediately instead
-    # of waiting for the hard-stall timeout (observed after map reloads: the
-    # warm-up blip plays but live frames never follow — only a fresh
-    # receiver fixes that, so get there in ~10s instead of 15).
+    # RELAY_UNSTICK_TRIES = 2: this many failed resync + warm-up un-sticks rebuild immediately
+    # instead of waiting for the hard-stall timeout (observed after map reloads).
     RELAY_UNSTICK_TRIES = 2
-    # When relay recovery fails this many times in a row for one jukebox, the
-    # client plays that song directly over HTTP/ffmpeg (TCP) instead. Chronic
-    # loss of the unreliable relay channel on one player's ENet peer can never
-    # be fixed by resyncing — the warm-up frames use the same lost channel —
-    # and used to leave that player silent until a full relogin.
+    # RELAY_DIRECT_FALLBACK_AFTER = 3 consecutive relay-recovery failures: play this song
+    # directly over HTTP/ffmpeg. Chronic loss of one peer's unreliable relay channel is never
+    # fixed by resyncing - the warm-up frames use the same lost channel.
     RELAY_DIRECT_FALLBACK_AFTER = 3
     # Direct stays sticky for this long (or until a map change) so later songs
     # don't re-pay the failing-relay window; relay is then tried again.
     DIRECT_FALLBACK_TTL = 10 * 60.0
-    # Anchored direct playback runs one AudioStreamer.DIRECT_LEAD_IN_S behind
-    # the server's audioStartedAt, so the next song's jukebox_play lands while
-    # the old song still has its final seconds queued locally. A retired tail
-    # may run at most the lead-in plus this margin before the sweep stops it.
+    # Anchored direct playback runs one AudioStreamer.DIRECT_LEAD_IN_S behind the
+    # server's audioStartedAt, so the next song's jukebox_play lands while the old song
+    # still has its final seconds queued locally. A retired tail may run at most the
+    # lead-in plus this margin before the sweep stops it.
     DIRECT_RETIRE_TAIL_MARGIN_S = 5.0
     # Full parse_map reloads can cross the ordered map channel and the misc
     # response channel.  The observed state reply can arrive just over two
@@ -490,24 +455,14 @@ class JukeboxPlayer:
                     bank.set_volume(self.volume)
 
     def _acquire_cinema(self, jukebox_id, x, y, z, volume, kwargs, keep=None):
-        """Build this cabinet's cinema room, or None to play the plain pair.
-
-        The profile comes from the server's per-cabinet decision, and the
-        speakers from the map's own cinema elements; a cabinet with neither
-        stays a plain jukebox. Every failure path here (feature off, no room
-        possible, a device that refuses the extra sources) returns None so
-        the caller falls back to two-source playback instead of going silent.
-
-        ``keep`` is the room that is already audible, when a playing room is
-        being re-resolved. Re-acquiring a room passes its trims through
-        rather than the defaults, or every refresh would reset the cabinet's
-        own volume to 100 and drop the reverb and EQ the song started with.
-        """
+        # Build this cabinet's cinema room, or None to play the plain pair. Every failure path
+        # (feature off, no room possible, refused sources) returns None. ``keep`` is the room already
+        # audible: re-acquiring one passes its trims through, or every refresh would reset the
+        # cabinet's volume to 100 and drop the reverb and EQ the song started with.
         try:
-            # The map may mark a cabinet (an enforced profile) or surround it
-            # with speakers. Either alone is enough to make a room, an explicit
-            # "off" refuses one, and with none of them this returns None so the
-            # plain two-source playback below runs exactly as it always has.
+            # The map may mark a cabinet (an enforced profile) or surround it with speakers.
+            # Either alone is enough to make a room, an explicit "off" refuses one, and with none
+            # of them this returns None so the plain two-source playback below runs as it always has.
             mode = self._cinema_mode(jukebox_id, kwargs)
             if mode == CINEMA_OFF:
                 return None
@@ -540,12 +495,8 @@ class JukeboxPlayer:
                 volume=volume,
                 cabinet_volume=(keep.cabinet_volume * 100.0 if keep is not None
                                 else self.cabinet_volumes.get(jukebox_id, 100)),
-                # The ROOM's own scale, not the plain pair's 8/40: a room is
-                # heard from the back row, while the two-source playback this
-                # replaces keeps its falloff exactly as it shipped. The reach
-                # is the cabinet's own -- the very number its speakers were
-                # claimed with -- so a hall that takes speakers in at 90 m is
-                # heard to 90 m instead of fading out at the room's default.
+                # The ROOM's own scale, not the plain pair's 8/40: a room is heard from the back row. The
+                # reach is the cabinet's own - the very number its speakers were claimed with.
                 reference_distance=ROOM_REFERENCE_DISTANCE,
                 max_distance=plan.reach,
                 occlusion_provider=self.occlusion_tier,
@@ -568,50 +519,31 @@ class JukeboxPlayer:
         return self._cinema_modes.get(jukebox_id, CINEMA_AUTO)
 
     def set_local_cinema_mode(self, jukebox_id, mode):
-        """Echo a mode change locally so the cabinet menu answers immediately.
-
-        The server owns this setting -- it is written into the map and sent to
-        everybody -- so this is only what *this* client will do. It is not
-        what makes a playing song change output: the server writing the mode
-        re-offers the song (``jukeboxRestoreStates``), and that re-offer
-        carries a different mode, which is what tells ``play`` to re-tune
-        instead of taking the seamless-continuity shortcut.
-        """
+        # Echo a mode change locally so the cabinet menu answers immediately; the Server owns the
+        # setting. What makes a PLAYING song change output is the server's re-offer.
         self._cinema_modes[jukebox_id] = str(mode or "").strip().lower() or CINEMA_AUTO
 
     def cinema_reach(self, jukebox_id):
-        """This cabinet's own reach in metres, or None when the map has none.
-
-        None is a real answer -- "the map never said", so the room's own
-        default is used -- which is why it is not folded into a number here:
-        the reader that needs the number (``plugin.cabinet_reach``) is the one
-        that knows what the default is, and it also knows to look at the
-        cached server state for a client whose player has not been built yet.
-        """
+        # This cabinet's own reach in metres, or None when the map has none. None is a real answer
+        # ("the map never said"), so the default belongs to the reader (plugin.cabinet_reach).
         value = self._cinema_reaches.get(jukebox_id)
         return None if value is None else float(value)
 
     def set_local_cinema_reach(self, jukebox_id, reach):
-        """Echo a reach change locally so the cabinet menu answers immediately.
-
-        Same rule as the mode: the Server owns the number (it is written into
-        the map and sent to everybody), and the re-offer that follows a change
-        is what re-shapes a playing room. This only makes the menu behind the
-        prompt read the value that was just typed.
-        """
+        # Echo a reach change locally so the cabinet menu answers immediately. Same rule as
+        # the mode: the Server owns the number (written into the map and sent to everybody)
+        # and the re-offer that follows a change is what re-shapes a playing room; this only
+        # makes the menu behind the prompt read the value that was just typed.
         try:
             self._cinema_reaches[jukebox_id] = float(reach)
         except (TypeError, ValueError):
             self._cinema_reaches.pop(jukebox_id, None)
 
     def _cinema_reach(self, jukebox_id, kwargs=None):
-        """The reach the map gives this cabinet, cached from what arrived.
-
-        It travels with every play event and with the cabinet state, exactly
-        as the mode does. A value that is not a number is not a reach: it is
-        forgotten rather than obeyed, so a bad packet cannot stretch a room
-        across the map -- and a map that says nothing keeps the default.
-        """
+        # The reach the map gives this cabinet, cached from what arrived. It travels with
+        # every play event and with the cabinet state, exactly as the mode does. A value that
+        # is not a number is not a reach: it is forgotten rather than obeyed, so a bad packet
+        # cannot stretch a room across the map -- and a map that says nothing keeps the default.
         kwargs = kwargs or {}
         if "cinema_reach" not in kwargs and "cinema_radius" not in kwargs:
             return self.cinema_reach(jukebox_id)
@@ -628,13 +560,10 @@ class JukeboxPlayer:
         return reach
 
     def _cinema_mode(self, jukebox_id, kwargs=None):
-        """What the map says this cabinet plays through, right now.
-
-        The mode arrives with every play event (and with the cabinet state, so
-        a menu can read it with nothing playing). An unrecognised value reads
-        as ``auto`` rather than as a profile: a cabinet whose mode nobody
-        understands must behave like every other cabinet, not go quiet.
-        """
+        # What the map says this cabinet plays through, right now. The mode arrives with every
+        # play event (and with the cabinet state, so a menu can read it with nothing playing).
+        # An unrecognised value reads as ``auto`` rather than as a profile: a cabinet whose
+        # mode nobody understands must behave like every other cabinet, not go quiet.
         kwargs = kwargs or {}
         raw = kwargs.get("cinema_mode")
         if raw is None:
@@ -648,17 +577,9 @@ class JukeboxPlayer:
         return mode
 
     def refresh_cinema_rooms(self, now=None):
-        """Let every playing room follow the map under it.
-
-        Adding or deleting a speaker used to need the whole feature toggled
-        off and on, which stops and restarts the song. Instead the room is
-        re-resolved at most once a second and its bank is re-shaped IN PLACE
-        (``CinemaSpeakerBank.reconfigure``): the speakers that did not change
-        keep playing what they hold, a speaker that just appeared joins on the
-        current beat, and a speaker that was deleted stops. A map edit that
-        removes the room entirely never yanks the audio out from under a song
-        -- the room that is audible stays audible until the next track.
-        """
+        # Let every playing room follow the map under it: re-resolved at most once a second and
+        # re-shaped IN PLACE (CinemaSpeakerBank.reconfigure), so untouched speakers keep playing. A
+        # map edit that removes the room never yanks the audio out from under a song.
         now = time.monotonic() if now is None else now
         if now - self._cinema_refresh_at < self.CINEMA_REFRESH_INTERVAL:
             return 0
@@ -675,17 +596,9 @@ class JukeboxPlayer:
             if anchor is None:
                 continue
             try:
-                # Re-resolved exactly as the play did, minus the fallback to
-                # the profile the map happened to resolve last time: a server
-                # hint still applies, but a cabinet that only ever had a map
-                # room must not be handed a synthetic ring just because its
-                # speakers were deleted while the song played.
-                #
-                # The mode is the one this output was *built* with, never a
-                # newer pick: a mode change is applied by the server's
-                # re-offer (which rebuilds the output), and reshaping the
-                # running room to a shape it is about to be replaced with
-                # churned the speakers in the window between the two.
+                # Re-resolved exactly as the play did, minus the fallback to the profile the map resolved
+                # last time: a cabinet that only ever had a map room must not be handed a synthetic ring
+                # because its speakers were deleted mid-song. The mode is the one this output was BUILT with.
                 options = {"cinema_mode": running_mode or self.cinema_mode(jukebox_id),
                            "cinema_reach": self.cinema_reach(jukebox_id)}
                 bank = self._acquire_cinema(
@@ -702,38 +615,24 @@ class JukeboxPlayer:
                 # the song off mid-verse.
                 continue
             if bank is not expected:
-                # The room that was playing no longer exists (its bank was
-                # stopped), so the stream holding it is already silent: the
-                # stall watchdog owns that rebuild. Never swap a bank out from
-                # under a live stream -- the bank is what the transport feeds.
+                # The room that was playing no longer exists (its bank was stopped), so the stream
+                # holding it is already silent: the stall watchdog owns that rebuild. Never swap a
+                # bank out from under a live stream -- the bank is what the transport feeds.
                 log_line(f"[Jukebox] cinema room {jukebox_id} was lost; awaiting recovery")
                 continue
             refreshed += 1
         return refreshed
 
-    # How long a room asked for while a song plays is given to take it over
-    # before it is handed back: a stream that never feeds a frame (a paused
-    # song, a dead decode) must not hold a room's speakers and effect slots
-    # forever (see ``_sweep_cinema_swaps``).
+    # How long a room asked for while a song plays is given to take it over before it is
+    # handed back: a stream that never feeds a frame (a paused song, a dead decode) must
+    # not hold a room's speakers and effect slots forever (see _sweep_cinema_swaps).
     CINEMA_SWAP_TIMEOUT = 10.0
 
     def _retune_output(self, entry, jukebox_id, x, y, z, title, kwargs, volume):
-        """Apply a cabinet's new cinema mode to a song that is already playing.
-
-        A mode change is a change of *output*, and every output a cabinet can
-        have is reachable from the one that is playing: a room is re-shaped in
-        place (the bank a stream holds is the same object, and
-        ``CinemaSpeakerBank.reconfigure`` moves the speakers that changed
-        without touching the ones that did not), a room hands its own front
-        pair over to become the cabinet's plain pair, and a plain pair asks a
-        room to take over and waits for its pre-buffer. What this replaces is
-        a full rebuild -- a new decode (or relay receiver) and the buffer
-        refill that comes with it -- which is the loading pause a mode pick
-        used to cost the whole room.
-
-        Returns False when the change could not be made in place; the caller
-        then rebuilds exactly as it always did.
-        """
+        # Apply a cabinet's new cinema mode to a song that is already playing: a room is re-shaped in
+        # place, a room hands its front pair over to become the plain pair, and a plain pair asks a
+        # room to take over and waits for its pre-buffer - no new decode and no refill, which is the
+        # pause a mode pick used to cost. False when it cannot be done in place.
         streamer = entry.get("streamer")
         if streamer is None:
             return False
@@ -760,10 +659,9 @@ class JukeboxPlayer:
                 keep = running
             reshaped = self._acquire_cinema(jukebox_id, x, y, z, volume, kwargs, keep=keep)
             if reshaped is None:
-                # The mode names a room and the map no longer resolves one.
-                # A room that is playing is not yanked out from under the song
-                # for that: the cabinet keeps what it has (its mode still
-                # applies from the next song).
+                # The mode names a room and the map no longer resolves one. A room that is playing is
+                # not yanked out from under the song for that: the cabinet keeps what it has (its mode
+                # still applies from the next song).
                 if running is None:
                     with self._lock:
                         entry["cinema_mode"] = mode
@@ -791,15 +689,9 @@ class JukeboxPlayer:
             return False
 
     def _hand_song_to_pair(self, entry, streamer, jukebox_id, x, y, z, mode, volume):
-        """Hand the playing song from its room to the cabinet's own pair.
-
-        The room's front pair *is* the plain cabinet's pair: the two sources
-        come out of the room (``detach_primary_pair``) with the frames the
-        room was about to play still queued on them, so the song keeps its
-        content instant and the room's other speakers simply stop where they
-        stand. A front pair a builder crossed or trimmed is refused there, and
-        then this returns False so the caller rebuilds instead.
-        """
+        # Hand the playing song from its room to the cabinet's own pair: the room's front pair IS the
+        # plain pair and comes out with the frames the room was about to play still queued, so the
+        # song keeps its content instant. A crossed or trimmed front pair is refused -> False.
         bank = entry.get("cinema")
         if bank is None:
             return False
@@ -830,28 +722,19 @@ class JukeboxPlayer:
         return True
 
     def _retire_room(self, jukebox_id, bank):
-        """Stop a room that is no longer this song's output and give it back.
-
-        Its speakers stop where they stand (the pair that took over already
-        holds the frames the room was about to play), and the room goes back
-        to the host so its effect slots are free for whatever comes next.
-        """
+        # Stop a room that is no longer this song's output and give it back. Its speakers stop
+        # where they stand (the pair that took over already holds the frames the room was
+        # about to play), and the room goes back to the host so its effect slots are free for
+        # whatever comes next.
         with contextlib.suppress(Exception):
             bank.stop()
         self._release_sources(list(bank.sources))
         self._release_cinema(jukebox_id, {"cinema": bank})
 
     def _hand_song_to_room(self, entry, streamer, jukebox_id, x, y, z, mode, kwargs, volume):
-        """Ask a room to take over a song that is playing plainly.
-
-        The room cannot start on the spot: it needs its pre-buffer, and the
-        frames it is handed have to be the ones the pair is about to play. So
-        it is *requested* -- the streamer commits it on the frame it can (see
-        ``AudioStreamer.request_room``) and the jukebox finishes the
-        bookkeeping in ``_sweep_cinema_swaps``. A stream that cannot make that
-        window hands the room back and the song plays plainly until the next
-        one; nothing is rebuilt either way.
-        """
+        # Ask a room to take over a song that is playing plainly: it needs its pre-buffer and the
+        # frames the pair is about to play, so it is *requested* and the streamer commits it on the
+        # frame it can (AudioStreamer.request_room); _sweep_cinema_swaps finishes the bookkeeping.
         request = getattr(streamer, "request_room", None)
         if not callable(request):
             return False
@@ -879,16 +762,9 @@ class JukeboxPlayer:
         self._retire_room(jukebox_id, bank)
 
     def _sweep_cinema_swaps(self, now):
-        """Finish or give back a room that was asked for while a song plays.
-
-        A room taking a playing stream over is primed by the streamer on the
-        frame it can do it (the pair's queue has to come down to what a room
-        can hold), so the jukebox learns about it here: the entry's room
-        becomes the one that is playing and the plain pair's sources are
-        deleted -- or a room that never got its window is handed back, and the
-        song keeps playing plainly (its mode still applies from the next
-        song).
-        """
+        # Finish or give back a room that was asked for while a song plays: the entry's room becomes
+        # the one that is playing and the plain pair's sources are deleted - or a room that never got
+        # its window is handed back and the song plays plainly (its mode still applies next song).
         with self._lock:
             pending = [(jukebox_id, entry) for jukebox_id, entry in self.players.items()
                        if entry.get("cinema_pending") is not None]
@@ -931,20 +807,17 @@ class JukeboxPlayer:
              playback_id=None, transport="direct", relay_id=None, stream_epoch=None,
              http_headers=None, room_lead_in_s=None, join_playing_room=False,
              received_at=None, canonical_url=None, **_kwargs):
-        """Start (or seamlessly continue) the song for one jukebox at (x, y, z).
-
-        Stereo-spatial like piano/drums: the STEREO stream is split into two
-        MONO sources placed just left/right of the jukebox, so you hear a real
-        stereo image up close that collapses to mono and fades with distance.
-        """
+        # Start (or seamlessly continue) the song for one jukebox at (x, y, z).
+        # Stereo-spatial like piano/drums: the STEREO stream is split into two MONO sources
+        # placed just left/right of the jukebox, so you hear a real stereo image up close that
+        # collapses to mono and fades with distance.
         if not url and transport == "direct":
             log_line(f"[Jukebox] play({jukebox_id}) skipped: no url")
             return
 
-        # Emergency direct fallback: when this connection chronically loses
-        # the unreliable relay channel, play locally over HTTP instead of
-        # waiting for relay frames that never arrive. Sticky until the
-        # deadline (or a map change) so later songs stay audible too.
+        # Emergency direct fallback: when this connection chronically loses the unreliable
+        # relay channel, play locally over HTTP instead of waiting for relay frames that never
+        # arrive. Sticky until the deadline (or a map change) so later songs stay audible too.
         if transport in ("relay", "relay_pending"):
             deadline = self._direct_fallback_until.get(jukebox_id)
             if deadline is not None and time.monotonic() < deadline:
@@ -955,28 +828,17 @@ class JukeboxPlayer:
                     except (TypeError, ValueError):
                         pass
                 transport = "direct"
-                # This machine plays direct ONLY because its own relay
-                # channel is chronically lost; the rest of the room still
-                # hears the server relay. The relay room holds no lead-in,
-                # so anchoring with the full DIRECT_LEAD_IN_S hold would
-                # leave this machine exactly one lead-in behind the room for
-                # the whole song — its jam notes land ~3.5s off the beat
-                # with no lag report to fix it (its own anchor says it
-                # started on time). Anchor with zero lead-in and JOIN the
-                # already-playing room at its current position (seek past
-                # the projected audible start) instead of starting at 0.
+                # This machine plays direct ONLY because its own relay channel is chronically lost, while the
+                # room still hears the server relay: anchor with zero lead-in and JOIN the playing room at its
+                # position, or its jam notes land ~3.5 s off the beat with no lag report to fix it.
                 room_lead_in_s = 0.0
                 join_playing_room = True
 
         effective_volume = self.volume if volume is None else volume
         playback_key = ("id", int(playback_id)) if playback_id is not None else ("url", url)
-        # The one instant this playback is anchored on: the play event's
-        # arrival on the network thread when the caller has it (``jukebox_play``
-        # stamps it there because the ``play()`` call itself is deferred to the
-        # main thread), else the moment this call runs. The streamer's anchor,
-        # the entry's and the replay path's must all be the same number -- a
-        # busy main thread must not be read as the song being that much further
-        # along.
+        # The one instant this playback is anchored on: the play event's ARRIVAL on the network thread
+        # (jukebox_play stamps it there because play() itself is deferred to the main thread), else
+        # now. The streamer's, entry's and replay path's anchors must all be that same number.
         anchor_at = float(received_at) if received_at is not None else time.monotonic()
         # Kept so the emergency direct fallback can re-start this exact song
         # from its current wall-clock position without another server event.
@@ -985,21 +847,17 @@ class JukeboxPlayer:
             "title": title, "url": url, "duration": int(duration or 0),
             "start_offset": float(start_offset or 0.0),
             "http_headers": http_headers,
-            # The page this song IS, sent beside the signed stream URL: direct
-            # playback rebuilds its own stream on every resume and seek, and the
-            # signed URL it was handed can have expired by then. Retrying a
-            # stale URL never helps; re-resolving the page does (see
-            # AudioStreamer.canonical_url), and that is the difference between a
-            # direct listener resuming and a direct listener going silent.
+            # The page this song IS, sent beside the signed URL: direct playback rebuilds its own stream
+            # on every resume and seek, and the signed URL it was handed can have expired by then.
+            # Retrying a stale URL never helps; re-resolving the page does (AudioStreamer.canonical_url).
             "canonical_url": canonical_url,
             "received_at": anchor_at,
         }
 
-        # A re-offer that carries a different cinema mode is not a new
-        # playback: the song, its transport and its position are all the same
-        # and only the *output* changed. It is applied to the playing output
-        # below (outside this lock: resolving a room reads the map) instead of
-        # tearing a decode down.
+        # A re-offer that carries a different cinema mode is not a new playback: the song, its
+        # transport and its position are all the same and only the *output* changed. It is
+        # applied to the playing output below (outside this lock: resolving a room reads the
+        # map) instead of tearing a decode down.
         retune = None
         with self._lock:
             self._control_serial += 1
@@ -1015,18 +873,14 @@ class JukeboxPlayer:
                     if relay_id is not None and stream_epoch is not None
                     else None
                 )
-                # If the server restarted the relay worker (new identity, same
-                # song/playback), the old receiver must be torn down and the
-                # new route registered — otherwise every frame from the new
-                # worker is dropped and the song goes silent for clients that
-                # were already connected. Fresh clients register the new route
-                # on join, which is why only "old" clients lose the audio.
+                # A server restart of the relay worker (new identity, same song/playback) needs the old
+                # receiver torn down and the new route registered, or every frame from the new worker is
+                # dropped and only clients that were already connected go silent.
                 same_relay_identity = existing.get("relay_key") == incoming_key
-            # A change of cinema mode is a change of *output*, and the server
-            # re-offers this same song when the map it wrote is reloaded. That
-            # re-offer is not continuity -- treating it as continuity was why
-            # picking a mode from the cabinet menu appeared to do nothing: the
-            # song kept playing through the old output until the next track.
+            # A change of cinema mode is a change of *output*, and the server re-offers this same
+            # song when the map it wrote is reloaded. That re-offer is not continuity -- treating it
+            # as continuity was why picking a mode from the cabinet menu appeared to do nothing:
+            # the song kept playing through the old output until the next track.
             mode_changed = (
                 existing is not None
                 and existing.get("cinema_mode")
@@ -1068,16 +922,10 @@ class JukeboxPlayer:
                 retune, jukebox_id, x, y, z, title, _kwargs, effective_volume):
             return
 
-        # Make-before-break: a relay_pending event must not kill a working
-        # stream for the same song. Map reloads re-offer the relay
-        # ("wait for it") while the listener is happily playing direct —
-        # stopping that stream made ~10s of silence until the relay actually
-        # became ready. The same applies to a LIVE relay receiver when the
-        # server's retry notice races in: the worker may still be streaming
-        # (frames keep arriving), and tearing the receiver down would cut the
-        # song for no reason. Keep the live stream running; the ready relay
-        # event (or the stall watchdogs / direct fallback) switches streams on
-        # its own.
+        # Make-before-break: a relay_pending event must not kill a working stream for the same song.
+        # Map reloads re-offer the relay while the listener is playing direct happily - stopping that
+        # stream made ~10 s of silence until the relay was ready - and a live receiver whose retry
+        # notice races in may still be streaming. The ready event or the watchdogs switch it over.
         if transport == "relay_pending":
             with self._lock:
                 existing_entry = self.players.get(jukebox_id)
@@ -1118,15 +966,13 @@ class JukeboxPlayer:
                     "title": title, "url": url, "transport": transport,
                     "playback_key": playback_key,
                     "play_params": play_params,
-                    # The song's own position (see
-                    # ``_song_position_keys``): a ``relay_pending`` entry has no
-                    # streamer yet, and it still has to know where the song is
-                    # the moment a note is played along to it.
+                    # The song's own position (see _song_position_keys): a relay_pending entry has no
+                    # streamer yet, and it still has to know where the song is the moment a note is played
+                    # along to it.
                     **self._song_position_keys(start_offset, anchor_at),
-                    # Without a timestamp the update() watchdog computed this
-                    # placeholder's age as 0 on every frame, so a placeholder
-                    # whose follow-up relay event never landed waited silently
-                    # forever (the "must relog after a map reload" bug).
+                    # Without a timestamp the update() watchdog computed this placeholder's age as 0 on
+                    # every frame, so a placeholder whose follow-up relay event never landed waited
+                    # silently forever (the "must relog after a map reload" bug).
                     "created_at": time.monotonic(),
                 }
             log_line(
@@ -1318,10 +1164,9 @@ class JukeboxPlayer:
             }
             if transport == "relay":
                 self.relay_routes[(int(relay_id), int(stream_epoch))] = streamer
-                # Take over any frames buffered while this receiver was being
-                # created and flush them UNDER THE SAME LOCK: a live frame on
-                # the network thread must not slip in first and make the
-                # sequence gate reject the buffered intro frames.
+                # Take over any frames buffered while this receiver was being created and flush them
+                # UNDER THE SAME LOCK: a live frame on the network thread must not slip in first and
+                # make the sequence gate reject the buffered intro frames.
                 pending = self._relay_pending.pop((int(relay_id), int(stream_epoch)), None)
                 if pending is not None:
                     for seq, payload, flags in pending["frames"]:
@@ -1334,42 +1179,22 @@ class JukeboxPlayer:
 
     @staticmethod
     def _song_position_keys(start_offset, anchor_at):
-        """The song's own position, as the two entry keys that carry it.
-
-        ``start_offset`` is the position the Server named when it built the
-        play event and ``anchor_at`` is the monotonic instant that event reached
-        this machine, so the position here at any later moment is the offset
-        plus the time since: a clock for the song that needs no wall clock of
-        either machine to be true.
-
-        Both ends of a live note are aimed with it
-        (``EventHandeler._audible_song_position_ms`` reads exactly these two
-        keys; ``Gameplay._attach_jukebox_sender_lag`` stamps the answer on every
-        note this client sends). They belong on the playback ENTRY rather than
-        on the streamer because a streamer is replaced mid-song -- a transport
-        change, a room re-tune, a resync -- while the song's position does not
-        move with it, and because one transport has no streamer at all yet (a
-        ``relay_pending`` entry waits for one) while notes can already be played
-        along to the song it is waiting for.
-
-        ``anchor_at`` must be the play event's ARRIVAL (``jukebox_play`` takes
-        it on the network thread), never the instant the deferred ``play()``
-        call runs: a busy main thread would otherwise be read as the song being
-        that much further along.
-        """
+        # The song's own position, as the two entry keys that carry it: start_offset (the position the
+        # Server named) and anchor_at (the monotonic instant that event reached this machine), so the
+        # position at any later moment needs no wall clock of either machine to be true. Both ends of
+        # a live note are aimed with it (EventHandeler._audible_song_position_ms reads exactly these;
+        # Gameplay._attach_jukebox_sender_lag stamps the answer on every note). They belong on the
+        # playback ENTRY, not the streamer: a streamer is replaced mid-song while the position does
+        # not move with it, and a relay_pending entry has no streamer yet while notes can already be
+        # played along. anchor_at MUST be the arrival (taken on the network thread), never play().
         return {"start_offset": float(start_offset or 0.0),
                 "start_offset_received_at": anchor_at}
 
     def _fade_out_sources(self, sources, streamer=None, duration=0.5, cleanup=None):
-        """Fade active OpenAL sources to 0 gain, then clean them up.
-
-        ``cleanup`` runs exactly once, after the sources are gone. A cinema
-        room's sources are deleted here rather than by ``stop()``, so this is
-        the only place that can hand the room back to the host -- a fade that
-        skipped it left the host holding a bank whose every OpenAL source had
-        been deleted, and the *next* song was handed those dead names: the
-        room went silent and the stream stuttered over the failures.
-        """
+        # Fade active sources to 0 gain, then clean them up; ``cleanup`` runs exactly once, after the
+        # sources are gone. A cinema room's sources are deleted HERE rather than by stop(), so this is
+        # the only place that can hand the room back - a skipped hand-back left the host holding a
+        # bank with every source deleted, and the NEXT song was handed those dead names.
         def finished():
             if callable(cleanup):
                 try:
@@ -1498,11 +1323,9 @@ class JukeboxPlayer:
                 if source is not None]
 
     def _release_cinema(self, jukebox_id, entry):
-        """Drop a cabinet's cinema room once its sources were deleted.
-
-        Released after the sources so the bank can never keep a deleted
-        OpenAL name, and its per-speaker buffers are returned with it.
-        """
+        # Drop a cabinet's cinema room once its sources were deleted. Released after the
+        # sources so the bank can never keep a deleted OpenAL name, and its per-speaker
+        # buffers are returned with it.
         banks = [bank for bank in ((entry or {}).get("cinema"),
                                    (entry or {}).get("cinema_pending"))
                  if bank is not None]
@@ -1541,20 +1364,15 @@ class JukeboxPlayer:
         if fade:
             bank = player.get("cinema")
             if bank is not None:
-                # The direct fade worker writes source gains that the room's
-                # own frame-by-frame refresh would immediately overwrite, so
-                # the room fades itself over the same duration instead. A relay
-                # room fades on the receiver's own pump, but it is marked as
-                # leaving either way: without that the replacement song was
-                # handed the very room being torn down, and the receiver's
-                # cleanup then stopped and unregistered the room the new song
-                # was playing through (the never-ending "cinema room was lost").
+                # The direct fade worker writes source gains the room's own frame-by-frame refresh would
+                # overwrite, so the room fades itself over the same duration instead. Either way it is marked
+                # as leaving, or the replacement song was handed the room being torn down ("cinema room lost").
                 bank.retire(duration=0.5,
                             ramp=getattr(streamer, "main_thread_audio", False) is not True)
-            # The fade worker deletes the room's sources, so it is also what
-            # has to give the room back: releasing it here would strand the
-            # sources it has not deleted yet, and releasing it never left the
-            # host handing the recycled bank's dead sources to the next song.
+            # The fade worker deletes the room's sources, so it is also what has to give the room
+            # back: releasing it here would strand the sources it has not deleted yet, and
+            # releasing it never left the host handing the recycled bank's dead sources to the
+            # next song.
             self._fade_out_sources(self._entry_sources(player), streamer=streamer,
                                    duration=0.5,
                                    cleanup=lambda: self._release_cinema(jukebox_id, player))
@@ -1604,28 +1422,24 @@ class JukeboxPlayer:
         return True
 
     def stop_all(self):
-        """Stop every jukebox (map change / disconnect).
-
-        Clears the pending map-change marks too, so any in-flight sweep from an
-        earlier reload can never act on a jukebox created after this teardown.
-        """
+        # Stop every jukebox (map change / disconnect). Clears the pending map-change marks
+        # too, so any in-flight sweep from an earlier reload can never act on a jukebox
+        # created after this teardown.
         with self._lock:
             self._pending_map_change = set()
             self._pending_map_change_serial = None
-            # The mode and the reach are properties of a cabinet *on a map*.
-            # Element ids are strings written into the map file, so a copy of
-            # a map carries the same ids: left behind, a stale entry would
-            # answer for the wrong hall on the next map until a play event
-            # corrected it.
+            # The mode and the reach are properties of a cabinet *on a map*. Element ids are
+            # strings written into the map file, so a copy of a map carries the same ids: left
+            # behind, a stale entry would answer for the wrong hall on the next map until a play
+            # event corrected it.
             self._cinema_modes.clear()
             self._cinema_reaches.clear()
             ids = list(self.players.keys())
         for jukebox_id in ids:
             self.stop(jukebox_id)
-        # A map change takes the songs with it: a note waiting on a replaced
-        # output belongs to a beat that is not on this map any more, so it is
-        # dropped rather than fired into the next one -- the same choice a
-        # cinema room makes for what it is holding when it goes away.
+        # A map change takes the songs with it: a note waiting on a replaced output belongs to
+        # a beat that is not on this map any more, so it is dropped rather than fired into the
+        # next one -- the same choice a cinema room makes for what it is holding when it goes away.
         self._drop_orphan_clocks()
         for receiver in list(self._retired_relays):
             self._drop_waiting_notes(receiver)
@@ -1646,24 +1460,11 @@ class JukeboxPlayer:
                         pass
 
     def _keep_waiting_notes(self, streamer):
-        """Remember an output's clock if a jam note is still waiting on it.
-
-        A live note waits on the clock of the output that *measured* it
-        (``libs/jukebox_clock.py``), and the only pump of a pair's clock is
-        this player's own frame, which pumps the entry's current streamer. So
-        a streamer replaced under a waiting note -- the relay going away for
-        direct playback, a song advancing, a rebuild -- left a note that
-        nothing ever fired and nothing ever dropped: not late, simply not
-        heard. A cinema room drops what it holds when it goes
-        (``CinemaSpeakerBank._drop_waits``); a pair had no equivalent, and the
-        clock's own promise is the opposite -- an output that is not playing
-        any more is not a clock, and the note keeps the instant it was given.
-
-        So the clock is kept here and pumped by ``update`` until it has
-        nothing left. ``stop_all`` drops them instead (a map change is not a
-        hiccup), and a clock that was never asked for a wait is not kept at
-        all: ``pair_clock`` is made on first use.
-        """
+        # Remember an output's clock if a jam note is still waiting on it: a note waits on the clock
+        # of the output that measured it, and a streamer replaced under it left a note nothing ever
+        # fired or dropped - not late, simply not heard. Kept here and pumped by update until empty;
+        # stop_all drops them instead (a map change is not a hiccup), and a clock that was never asked
+        # for a wait is not kept at all (pair_clock is made on first use).
         clock = getattr(streamer, "pair_clock", None)
         if clock is None:
             return False
@@ -1702,12 +1503,9 @@ class JukeboxPlayer:
                 pass
 
     def _pump_orphan_clocks(self):
-        """Fire the notes a replaced output was still holding (one frame).
-
-        Pumped next to the entries' own clocks, on the game thread, because
-        firing a note can spawn sources. A clock with nothing left to fire is
-        forgotten.
-        """
+        # Fire the notes a replaced output was still holding (one frame). Pumped next to the
+        # entries' own clocks, on the game thread, because firing a note can spawn sources. A
+        # clock with nothing left to fire is forgotten.
         with self._lock:
             clocks = list(self._orphan_clocks)
         keep = []
@@ -1722,16 +1520,9 @@ class JukeboxPlayer:
             self._orphan_clocks[:] = keep
 
     def _retire_or_stop(self, jukebox_id):
-        """Song advance: let a nearly-finished direct song play out its tail.
-
-        Anchored direct playback runs one lead-in behind the server's
-        audioStartedAt, so the next jukebox_play lands while the old song
-        still has its final seconds queued locally. Stopping on the packet
-        (the old behavior) cut every song's ending short; retiring keeps
-        the tail audible while the new song resolves and holds for its own
-        lead-in. Anything but a short remaining tail falls back to the
-        normal faded stop.
-        """
+        # Song advance: let a nearly-finished direct song play out its tail. Anchored playback runs one
+        # lead-in behind the server's audioStartedAt, so the next jukebox_play lands while the old song
+        # still has its final seconds queued; stopping on the packet cut every song's ending short.
         from . import music_bot as mb
         budget = mb.AudioStreamer.DIRECT_LEAD_IN_S + self.DIRECT_RETIRE_TAIL_MARGIN_S
         with self._lock:
@@ -1824,24 +1615,11 @@ class JukeboxPlayer:
             self._release_cinema(entry.get("id"), entry)
 
     def update(self):
-        """Recover a jukebox stream that stopped without a stop packet.
-
-        Relay frames are intentionally unreliable.  A temporary loss should
-        normally be hidden by the receiver's buffer, but a dead receiver or a
-        route that no longer receives frames used to leave an existing client
-        permanently silent until reconnect.  The server's ``jukebox_resync``
-        reply includes both the authoritative play state and relay warm-up
-        frames, so it is the safe recovery authority.
-
-        Recovery is layered so every failure mode ends in a full rebuild
-        instead of an infinite silent wait:
-        * frames stopped arriving -> resync + warm-up un-stick (5s), escalating
-          to a full rebuild if the stall survives to 12s;
-        * frames keep arriving but OpenAL makes no audible progress -> full
-          rebuild after 10s;
-        * a relay_pending placeholder whose follow-up play event never lands
-          -> resync after 15s.
-        """
+        # Recover a stream that stopped without a stop packet; the server's jukebox_resync reply is the
+        # authoritative play state plus warm-up frames. The ladder, so every failure ends in a rebuild
+        # rather than an infinite silent wait: frames stopped arriving -> resync + warm-up un-stick
+        # (5 s), escalating to a full rebuild at 12 s; frames arriving but no audible progress -> full
+        # rebuild at 10 s; a relay_pending placeholder whose follow-up never lands -> resync at 15 s.
         now = time.monotonic()
         self._sweep_retiring_direct()
         # A speaker placed or deleted while a song plays joins (or leaves) the
@@ -1856,12 +1634,9 @@ class JukeboxPlayer:
             self._sweep_cinema_swaps(now)
         except Exception:
             pass
-        # A live note waits on the clock of whatever the listener is actually
-        # hearing (``libs/jukebox_clock.py``), and this is the thread it has to
-        # fire on: a room's queue, or a plain cabinet's stereo pair. Both are
-        # pumped here, once per gameplay frame, rather than from the audio
-        # owner -- firing a note can spawn sources, and that belongs to the
-        # game thread.
+        # A live note waits on the clock of what the listener is actually hearing (jukebox_clock.py)
+        # and this is the thread it has to fire on - a room's queue or a plain pair, both pumped here
+        # once per gameplay frame, because firing a note can spawn sources.
         try:
             for entry in list(self.players.values()):
                 if not isinstance(entry, dict):
@@ -1915,10 +1690,9 @@ class JukeboxPlayer:
                             and getattr(streamer, "failure_reason", None)
                             and age >= self.RELAY_AUDIO_STALL_TIMEOUT):
                         stuck_audio = True
-                    # Underrun watchdog: frames may arrive and buffers may
-                    # queue, but if the speakers have not consumed anything
-                    # for a while the listener is hearing silence/stutter
-                    # that every packet-based check calls "healthy".
+                    # Underrun watchdog: frames may arrive and buffers may queue, but if the speakers have
+                    # not consumed anything for a while the listener is hearing silence/stutter that every
+                    # packet-based check calls "healthy".
                     last_output = getattr(streamer, "last_output_at", None)
                     starved_output = bool(
                         alive
@@ -1930,10 +1704,9 @@ class JukeboxPlayer:
                         no_packets and stall_age is not None
                         and stall_age >= self.RELAY_HARD_STALL_TIMEOUT
                     )
-                    # Frame-rate starvation: everything above can look green
-                    # while the listener hears a sped-up stutter fading to
-                    # silence. Only the arrival RATE over a window exposes
-                    # the trickling channel (healthy = 25 fps).
+                    # Frame-rate starvation: everything above can look green while the listener hears a
+                    # sped-up stutter fading to silence. Only the arrival RATE over a window exposes the
+                    # trickling channel (healthy = 25 fps).
                     starved_rate = False
                     if (alive and not no_packets and not stuck_audio
                             and not starved_output
@@ -1951,13 +1724,10 @@ class JukeboxPlayer:
                                 rebuilds.append(
                                     (jukebox_id, f"frame starvation ({fps:.1f} fps)")
                                 )
-                    # A room that ran low holds every speaker on purpose while
-                    # it rebuilds its depth (see CinemaSpeakerBank), which looks
-                    # exactly like "sources stopped with queued audio" from
-                    # here. It is not a dead room: the packet and output watches
-                    # below still own a room that never refills, so leave this
-                    # one alone rather than rebuilding a room that is
-                    # recovering (a rebuild would drop the audio it is holding).
+                    # A room that ran low holds every speaker on purpose while it rebuilds its depth
+                    # (CinemaSpeakerBank), which looks exactly like "sources stopped with queued audio" from here.
+                    # Leave it alone: the packet and output watches still own a room that never refills, and a
+                    # rebuild would drop the audio it is holding.
                     room_refilling = bool(getattr(entry.get("cinema"),
                                                    "awaiting_refill", False))
                     stopped_sources = False
@@ -2006,24 +1776,16 @@ class JukeboxPlayer:
                         needs_resync = True
                 elif transport == "direct" and streamer is not None:
                     alive = streamer.is_alive() if hasattr(streamer, "is_alive") else True
-                    # Direct fallback has no server relay to signal a mid-song
-                    # decoder failure.  Restart only an explicit failure; a
-                    # normally completed stream is allowed to await the server's
-                    # next-song timer.
+                    # Direct fallback has no server relay to signal a mid-song decoder failure. Restart
+                    # only an explicit failure; a normally completed stream is allowed to await the
+                    # server's next-song timer.
                     if (not alive
                             and getattr(streamer, "failure_reason", None)):
                         rebuilds.append((jukebox_id, "direct streamer failed"))
                     else:
-                        # Output-stall watchdog: the thread can stay alive
-                        # while OpenAL stops consuming (dead audio sink,
-                        # ffmpeg hang that never exits). ready_event means
-                        # local playback began; last_output_at only advances
-                        # when the speakers actually finish a buffer, so a
-                        # stream that has made no audible progress for the
-                        # timeout is rebuilt even though every packet-style
-                        # liveness check would call it healthy. A naturally
-                        # finished stream exits its thread within a second of
-                        # its last output, so this never fires on a clean end.
+                        # Output-stall watchdog: the thread can stay alive while OpenAL stops consuming (a dead sink,
+                        # an ffmpeg hang that never exits). last_output_at only advances when the speakers finish a
+                        # buffer, so a stream with no audible progress is rebuilt; a clean end exits within a second.
                         has_started = bool(
                             getattr(streamer, "ready_event", None)
                             and streamer.ready_event.is_set())
@@ -2045,12 +1807,10 @@ class JukeboxPlayer:
             if not self.request_resync("relay recovery"):
                 rebuilds = []
             else:
-                # The resync just went out: every still-stalled relay that is
-                # NOT being rebuilt now owes its recovery to the warm-up
-                # replay. Count these un-stick attempts — when they repeat
-                # without holding (observed after map reloads: the warm-up
-                # blip plays but live frames never follow), rebuild right
-                # away instead of waiting out the hard-stall timeout.
+                # The resync just went out: every still-stalled relay that is NOT being rebuilt now owes
+                # its recovery to the warm-up replay. Count these un-stick attempts -- when they repeat
+                # without holding (observed after map reloads: the warm-up blip plays but live frames
+                # never follow), rebuild right away instead of waiting out the hard-stall timeout.
                 for jukebox_id in stalled_ids:
                     if any(jid == jukebox_id for jid, _ in rebuilds):
                         continue
@@ -2058,11 +1818,10 @@ class JukeboxPlayer:
                     self._stall_unsticks[jukebox_id] = unsticks
                     if unsticks >= self.RELAY_UNSTICK_TRIES:
                         rebuilds.append((jukebox_id, "warm-up un-stick did not hold"))
-                # A dead receiver must be removed before the matching
-                # ``jukebox_play`` arrives; otherwise idempotent same-identity
-                # handling would retain it.  The resync reply rebuilds it with
-                # fresh sources, and the buffered pending-route frames plus
-                # the server's warm-up replay bridge the gap seamlessly.
+                # A dead receiver must be removed before the matching jukebox_play arrives; otherwise
+                # idempotent same-identity handling would retain it. The resync reply rebuilds it with
+                # fresh sources, and the buffered pending-route frames plus the server's warm-up replay
+                # bridge the gap seamlessly.
                 direct_switches = []
                 for jukebox_id, reason in rebuilds:
                     log_line(f"[Jukebox] auto-recovery: rebuilding {jukebox_id} ({reason})")
@@ -2087,14 +1846,10 @@ class JukeboxPlayer:
                     self._switch_to_direct(jukebox_id, params)
 
     def _switch_to_direct(self, jukebox_id, params):
-        """Emergency: play the current song locally over HTTP when the relay
-        channel is chronically unusable on this connection.
-
-        Direct playback does not depend on the unreliable relay channel at
-        all, so it survives exactly the cases resyncing cannot fix — chronic
-        per-peer loss of the relay channel, where even the warm-up frames
-        die and only a full relogin used to restore audio. Other listeners
-        keep hearing the server relay unaffected."""
+        # Emergency: play the current song locally over HTTP when the relay channel is chronically
+        # unusable on this connection - direct playback does not depend on it at all, so it survives
+        # exactly the cases resyncing cannot fix (where even the warm-up frames die). Other listeners
+        # keep hearing the server relay unaffected.
         params = dict(params or {})
         self._direct_fallback_until[jukebox_id] = time.monotonic() + self.DIRECT_FALLBACK_TTL
         if not params.get("url"):
@@ -2112,26 +1867,18 @@ class JukeboxPlayer:
             transport="direct", start_offset=offset,
             http_headers=params.get("http_headers"),
             canonical_url=params.get("canonical_url"),
-            # This machine fell back while the rest of the room still hears
-            # the server relay. The relay room holds no lead-in, so the
-            # direct anchor must not hold one either — otherwise this
-            # machine trails the room by exactly DIRECT_LEAD_IN_S for the
-            # whole song and its jam notes land seconds off the beat with no
-            # sender-lag report to compensate (its own anchor says it
-            # started on time). It must also JOIN the playing room at its
-            # current position (seek), never start from 0. Any residual
-            # resolve/startup overrun is reported through direct_late_s.
+            # This machine fell back while the rest of the room still hears the relay: no lead-in, or it
+            # trails by exactly DIRECT_LEAD_IN_S for the whole song with no sender-lag report to compensate
+            # (its own anchor says it started on time), and it must JOIN the playing room at its position,
+            # never start from 0. Residual resolve/startup overrun is reported through direct_late_s.
             room_lead_in_s=0.0,
             join_playing_room=True,
         )
 
     def request_resync(self, reason="manual recovery", *, raise_errors=False):
-        """Ask the server for current jukebox routes and relay warm-up frames.
-
-        This is safe after a UI transition: the server remains the playback
-        authority, and the cooldown prevents repeated requests from creating
-        needless traffic.
-        """
+        # Ask the server for current jukebox routes and relay warm-up frames. This is safe after
+        # a UI transition: the server remains the playback authority, and the cooldown prevents
+        # repeated requests from creating needless traffic.
         now = time.monotonic()
         with self._lock:
             # A UI close needs no server round-trip when this map has no
@@ -2160,15 +1907,10 @@ class JukeboxPlayer:
         return unchanged
 
     def mark_pending_map_change(self, serial):
-        """Mark every active player as awaiting a post-reload play event.
-
-        After a map reload the server re-broadcasts jukebox_play for songs
-        that are still playing.  Those events clear the mark (via play()) so
-        the receiver keeps streaming with zero interruption.  Any player still
-        unconfirmed after a short grace period is a song that truly ended or a
-        jukebox that no longer exists on this map — stop it so no ghost audio
-        lingers.
-        """
+        # Mark every active player as awaiting a post-reload play event: the server re-broadcasts
+        # jukebox_play for songs still playing and those clear the mark via play(). Any player still
+        # unconfirmed after a short grace period is a song that truly ended or a jukebox gone from the
+        # map - stop it so no ghost audio lingers.
         import threading as _threading
         with self._lock:
             # This mark is queued from CHANNEL_MAP. A newer jukebox_play may
@@ -2217,14 +1959,9 @@ class JukeboxPlayer:
         return True
 
     def pend_relay_route(self, relay_id, stream_epoch):
-        """Reserve a relay route BEFORE play() registers the real receiver.
-
-        Relay frames are processed synchronously on the network thread, while
-        jukebox_play playback setup is deferred to the main game loop. Without
-        a pending buffer every frame in that gap — the song's first few 40 ms
-        slices — was dropped, so songs started a fraction of a second in.
-        Called from the jukebox_play network handler, so it only touches a dict.
-        """
+        # Reserve a relay route BEFORE play() registers the real receiver: relay frames are processed
+        # on the network thread while jukebox_play setup is deferred to the main loop, so without a
+        # pending buffer the song's first few 40 ms slices were dropped and songs started mid-way.
         if relay_id is None or stream_epoch is None:
             return
         try:
@@ -2379,13 +2116,10 @@ def _current_state(gp):
 
 
 def _cabinet_cinema_lock(gp, jukebox_id):
-    """The lock on a cabinet's cinema mode, from the cached server state.
-
-    ``(owner, coded)`` or None. The Server never sends the code itself -- only
-    who holds the lock and whether a code exists -- so nothing here can leak
-    one; the cabinet menu uses it to say who to ask and to warn that a pick
-    will need the code before it is applied.
-    """
+    # The lock on a cabinet's cinema mode, from the cached server state: (owner, coded) or
+    # None. The Server never sends the code itself -- only who holds the lock and whether a
+    # code exists -- so nothing here can leak one. The cabinet menu uses it to say who to
+    # ask and to warn that a pick will need the code before it is applied.
     box = (_current_state(gp).get("jukeboxes", {}) or {}).get(jukebox_id) or {}
     lock = box.get("cinema_lock")
     if not isinstance(lock, dict):
@@ -2397,35 +2131,24 @@ def _cabinet_cinema_lock(gp, jukebox_id):
 
 
 def _may_lock_cinema_mode(gp):
-    """Whether this account may lock a cabinet's mode (the Server's own rank).
-
-    Read from the login/permission snapshot (``can_lock_cinema_mode``) rather
-    than guessed from a staff flag: the Creator/Contributor rule is one the
-    Server owns, and a menu line that exists must be one that works. The Server
-    answers the same rank again when the request comes back, so this only
-    decides whether the line is offered at all.
-    """
+    # Whether this account may lock a cabinet's mode: read from the login/permission snapshot
+    # (can_lock_cinema_mode), never guessed from a staff flag - a menu line that exists must work.
     return bool(getattr(gp, "can_lock_cinema_mode", False))
 
 
 def _own_name(gp):
-    """This client's own player name, or "" when login has not set it yet.
-
-    The lock's owner is a *name*, so the one client that may manage it without
-    asking its own permission is the one whose name matches -- an empty name
-    matches nobody, which is the honest answer before login.
-    """
+    # This client's own player name, or "" when login has not set it yet. The lock's owner
+    # is a *name*, so the one client that may manage it without asking its own permission is
+    # the one whose name matches -- an empty name matches nobody, which is the honest answer
+    # before login.
     player = getattr(gp, "player", None)
     return str(getattr(player, "name", "") or "")
 
 
 def _cabinet_cinema_mode(gp, jukebox_id):
-    """The mode the map has for a cabinet, from the cached server state.
-
-    An unknown value reads as ``auto``, the same rule the playing path uses:
-    a cabinet whose mode nobody recognises must behave like every other
-    cabinet rather than go silent.
-    """
+    # The mode the map has for a cabinet, from the cached server state. An unknown value
+    # reads as ``auto``, the same rule the playing path uses: a cabinet whose mode nobody
+    # recognises must behave like every other cabinet rather than go silent.
     state = _current_state(gp)
     box = (state.get("jukeboxes", {}) or {}).get(jukebox_id) or {}
     raw = str(box.get("cinema_mode") or box.get("cinema_profile") or "").strip().lower()
@@ -2436,11 +2159,9 @@ def _cabinet_cinema_mode(gp, jukebox_id):
     return CINEMA_AUTO
 
 
-# How far a cabinet's room reaches, offered as short choices rather than a
-# number to type. The number is what the map stores (``cinema_radius``), but
-# somebody picking one is answering "how big is this venue" -- and 90 typed
-# into a box is one keystroke away from 900. The bounds of what the Server
-# will accept are ``layout.MIN_ROOM_REACH``/``MAX_ROOM_REACH``.
+# How far a cabinet's room reaches, offered as short choices rather than a number to type (90
+# is one keystroke from 900). The bounds the Server accepts are
+# layout.MIN_ROOM_REACH/MAX_ROOM_REACH.
 CINEMA_REACHES = (
     (20, "Booth or small room"),
     (60, "Room - the default every room has had"),
@@ -2459,15 +2180,8 @@ def _cinema_reach_label(reach):
 
 
 def _cabinet_cinema_reach(gp, jukebox_id):
-    """The reach the map has for a cabinet, asked of the one reader.
-
-    Deliberately not a copy of the rule: the live path builds a cabinet's room
-    with ``plugin.cabinet_reach``, so a menu that read the state itself could
-    say 60 m while the room was really built at 90 -- the drift this feature
-    exists to remove. A play event updates the player's own cache and a join
-    payload updates the state, and both are the same question, so the reader
-    that answers for the room answers for the menu.
-    """
+    # The reach the map has for a cabinet, asked of the one reader (plugin.cabinet_reach): a menu
+    # that read the state itself could say 60 m while the room was really built at 90 m.
     return cabinet_reach(gp, jukebox_id, default=float(ROOM_MAX_DISTANCE))
 
 
@@ -2481,32 +2195,13 @@ def _cinema_mode_label(mode):
 
 
 def _cabinet_title(game, gp, jukebox_id, mode=None):
-    """The cabinet's own name: a plain jukebox, or the mode it is playing.
-
-    A menu title is the first thing a person hears when they walk up to a
-    cabinet, and "Music Jukebox" is the wrong sentence for one the map has
-    given a room: the same key opens both, so this line is the only thing that
-    tells them apart. The room is *previewed* with the very resolver the
-    read-out and the playback use (``room_plan``), so the name can never
-    promise a room that would not play -- a cabinet the map set to ``off``, one
-    with no speakers around it, and one whose position is not known yet all
-    keep the plain name they always had.
-
-    The tail is the **mode itself** -- the same token the mode picker offers
-    and the map stores (``front_only``, ``theatre``, ``auto``), never a
-    description of the speakers it feeds. The line right underneath says "Set
-    cinema mode (now: front_only)", and a title answering "Front speakers
-    only" would have the cabinet and its own mode line name one thing two
-    ways, which reads as two different settings to whoever is standing there.
-    Auto says ``auto`` for the same reason: it is not a shape of its own, and
-    neither the mode nor the title may claim the profile it resolved to.
-
-    The listener's own ``Cinema rooms:`` switch is deliberately not part of
-    this. The title says what the *cabinet* is, which is the same thing its
-    ``Cinema:`` line says; what these particular ears do with it is that line's
-    and the detail read-out's job to explain, and a title that followed a local
-    option would have two people reading the same cabinet disagree about it.
-    """
+    # The cabinet's own name: a plain jukebox, or the mode it is playing. "Music Jukebox" is the
+    # wrong sentence for a cabinet the map has given a room, and this line is the only thing that
+    # tells them apart in a menu. The room is *previewed* with the same resolver the read-out and
+    # the playback use (room_plan), so the name can never promise a room that would not play. The
+    # tail is the mode token itself (front_only, theatre, auto), never a description of the
+    # speakers - a title answering "Front speakers only" would name one thing two ways beside its
+    # own "Set cinema mode" line. The listener's own ``Cinema rooms:`` switch is not part of it.
     mode = mode or _cabinet_cinema_mode(gp, jukebox_id)
     if mode == CINEMA_OFF:
         return "Music Jukebox"
@@ -2525,15 +2220,10 @@ def _cabinet_title(game, gp, jukebox_id, mode=None):
 
 
 def _cinema_detail(game, gp, jukebox_id, mode=None):
-    """The full answer to "what is this cabinet playing through", and why.
-
-    The room is *previewed*, never acquired: saying out loud what the map
-    could do must not create a speaker or change how anything plays. What
-    stands *around* the cabinet is part of the same answer -- two cabinets
-    close enough to share the speakers between them is exactly why a speaker
-    here can be somebody else's -- so the sentence ends with the neighbours
-    (nothing at all when this is the only cabinet on the map).
-    """
+    # The full answer to "what is this cabinet playing through", and why. The room is *previewed*,
+    # never acquired: saying what the map could do must not create a speaker or change playback.
+    # It ends with the neighbours - two cabinets close enough to share speakers is exactly why a
+    # speaker here can be somebody else's.
     return (_cinema_room_sentence(game, gp, jukebox_id, mode)
             + neighbour_note(game, jukebox_id))
 
@@ -2571,17 +2261,10 @@ def _cinema_room_sentence(game, gp, jukebox_id, mode=None):
 
 
 def _cinema_reach_note(game, gp, jukebox_id):
-    """The cabinet's reach and area, said where the room is described.
-
-    Two answers to "which speakers are mine": the reach is one number under
-    two names (how far a speaker may stand from the cabinet and still belong
-    to its room, and how far from a listener that speaker is still heard), and
-    the area is the map zone the cabinet stands in -- on a wide map with
-    several halls it is the area, not the distance, that stops two venues
-    claiming each other's speakers (see ``audio.cinema.plugin.cabinet_area``).
-    A cabinet the map draws no zone around says only the distance, which is
-    what every map did before this existed.
-    """
+    # The cabinet's reach and area, said where the room is described. Two answers to "which
+    # speakers are mine": the reach is one number under two names, and the area is the map zone
+    # the cabinet stands in - on a wide map with several halls it is the area, not the distance,
+    # that stops two venues claiming each other's speakers. No zone = the distance alone.
     reach = _cabinet_cinema_reach(gp, jukebox_id)
     sentence = (f" Its reach is {reach:.0f} m: a speaker further than that belongs"
                 f" to another room, and nothing here is heard past it either.")
@@ -2601,12 +2284,10 @@ def _cinema_reach_note(game, gp, jukebox_id):
 
 
 def _room_extent(game, jukebox_id):
-    """This cabinet's geometry, or None when its position is not known.
-
-    ``room_extent`` is a read-out that takes an anchor, and both callers here
-    hold the cabinet's own anchor already; None keeps a cabinet the map has
-    not placed yet from answering with a room measured from nowhere.
-    """
+    # This cabinet's geometry, or None when its position is not known. room_extent is a
+    # read-out that takes an anchor, and both callers here hold the cabinet's own anchor
+    # already; None keeps a cabinet the map has not placed yet from answering with a room
+    # measured from nowhere.
     anchor = cabinet_anchor(game, jukebox_id) if game is not None else None
     if anchor is None:
         return None
@@ -2617,17 +2298,10 @@ def _room_extent(game, jukebox_id):
 
 
 def _silent_speaker_note(silent, plan=None):
-    """Name the speakers a room does not use, or say nothing when it uses all.
-
-    A requested shape names a fixed set of slots, so a speaker somebody placed
-    on a slot that shape does not have is silent -- and "silent with nothing on
-    any screen that says so" is indistinguishable from a broken room. One
-    sentence, in the shape's own words, is the whole fix (see
-    ``cinema_plugin.room_plan``). A shape with no room on the map at all is a
-    different sentence: the ring behind the cabinet is playing, so *every*
-    speaker placed here goes unread (a crossover, a tone, a level, a delay)
-    and saying "this shape does not use them" would hide exactly that.
-    """
+    # Name the speakers a room does not use, or say nothing when it uses all: a requested shape
+    # names a fixed set of slots, so a speaker on a slot that shape does not have is silent with
+    # nothing on any screen saying so. A shape with no room on the map at all is a different
+    # sentence - the ring behind the cabinet is playing, so every speaker placed here goes unread.
     if not silent:
         return ""
     names = ", ".join(str(name or slot) for name, slot in silent)
@@ -2659,22 +2333,11 @@ def _kept_span(mark):
 
 
 def _missing_spans(marks):
-    """The spans of the range *no* speaker of this room keeps.
-
-    Nothing else in the game looks at a room's crossovers together, and that is
-    the whole reason a room can sound broken while every value on screen looks
-    deliberate: a sub below 120 and a tweeter above 1.5 kHz between them keep
-    no middle, and a three-way room whose edges do not line up loses exactly
-    the same octave (a sub that stops at 120 beside a mid that starts at 200).
-    One full-range speaker in the room keeps everything, so the answer is empty
-    and the room says nothing -- which is every map that has no crossover at
-    all. Only the gaps *between* the bands are reported: what a room keeps at
-    the very bottom and the very top is the room's own business (a room of two
-    mids keeps no sub and no air, and saying so every time would be noise on a
-    read-out nobody asked to be lectured by), while a hole *between* two bands
-    is a seam that was meant to meet. Returns ``[(low, high), ...]``, in Hz and
-    in order.
-    """
+    # The spans of the range *no* speaker of this room keeps. Nothing else in the game looks at a
+    # room's crossovers together, which is why a room can sound broken while every value on screen
+    # looks deliberate: a sub below 120 and a tweeter above 1.5 kHz between them keep no middle.
+    # One full-range speaker keeps everything, so the answer is empty (every map with no
+    # crossover), and only the gaps BETWEEN the bands are reported. Returns [(low, high), ...] in Hz.
     spans = [_kept_span(mark) for mark in marks]
     if any(span is None for span in spans):
         return []
@@ -2700,20 +2363,10 @@ def _missing_bands_note(marks):
 
 
 def _cinema_band_note(plan):
-    """What each speaker this room feeds keeps: the bottom, the middle, the top, or all.
-
-    A crossover is silent about itself, and a room whose fed speakers are one
-    sub and one tweeter keeps no middle at all -- heard as a broken room, with
-    every value on screen looking deliberate. Saying the band each fed speaker
-    keeps, next to the room that feeds it, is the whole fix; a room of
-    full-range speakers (every map with no crossover anywhere) says nothing at
-    all, so nothing about it changes.
-
-    The bands are then read *together* (``_missing_spans``), because the list
-    alone still leaves the hole to be worked out in somebody's head -- and the
-    hole is the thing that is heard. A room that keeps everything says nothing
-    extra, so no map without a gap changes by a word.
-    """
+    # What each speaker this room feeds keeps: the bottom, the middle, the top, or all. A room
+    # whose fed speakers are one sub and one tweeter keeps no middle at all - heard as a broken
+    # room with every value on screen looking deliberate. A room of full-range speakers says
+    # nothing; the bands are read together (_missing_spans) because the hole is what is heard.
     placement = getattr(plan, "placement", None)
     if placement is None:
         return ""
@@ -2734,13 +2387,10 @@ def _cinema_band_note(plan):
 
 
 def _cinema_mode_choices(game, gp, jukebox_id):
-    """The mode menu's lines, each already saying what it would leave out.
-
-    The warning belongs where the mistake is made: a shape is chosen once and
-    heard for every song after it, so a mode that would leave one of the
-    speakers placed here silent says so next to its own name rather than in a
-    log nobody reads.
-    """
+    # The mode menu's lines, each already saying what it would leave out. The warning belongs
+    # where the mistake is made: a shape is chosen once and heard for every song after it, so
+    # a mode that would leave one of the speakers placed here silent says so next to its own
+    # name rather than in a log nobody reads.
     current = _cabinet_cinema_mode(gp, jukebox_id)
     anchor = cabinet_anchor(game, jukebox_id) if game is not None else None
 
@@ -2769,12 +2419,9 @@ def _cinema_mode_choices(game, gp, jukebox_id):
 
 
 def _open_cinema_mode_menu(game, gp, jukebox_id):
-    """Staff menu: what this cabinet should play through.
-
-    The server writes the answer into the map and every client hears it from
-    the next song on, so nothing here has to be remembered locally -- the
-    local echo below only makes the menu answer immediately.
-    """
+    # Staff menu: what this cabinet should play through. The server writes the answer into
+    # the map and every client hears it from the next song on, so nothing here has to be
+    # remembered locally -- the local echo below only makes the menu answer immediately.
     from . import menu as menu_mod, menus
 
     current, choices = _cinema_mode_choices(game, gp, jukebox_id)
@@ -2793,15 +2440,10 @@ def _open_cinema_mode_menu(game, gp, jukebox_id):
 
 
 def _open_cinema_reach_menu(game, gp, jukebox_id):
-    """Staff menu: how big this cabinet's room is.
-
-    The reach is the same number under two names -- how far a speaker may
-    stand from the cabinet to belong to its room, and how far from a listener
-    it is still heard -- so widening it both takes in a hall's back wall and
-    makes that wall audible. It is chosen here, at the cabinet, because it is
-    a property of *this room*: on a wide map with several venues, the cabinet
-    you are standing at is the one whose reach you mean.
-    """
+    # Staff menu: how big this cabinet's room is. The reach is the same number under two names -
+    # how far a speaker may stand to belong to the room, and how far from a listener it is still
+    # heard - so widening it both takes in a hall's back wall and makes that wall audible. It is a
+    # property of *this room*, so it is chosen at the cabinet.
     from . import menu as menu_mod, menus
 
     current = _cabinet_cinema_reach(gp, jukebox_id)
@@ -2810,10 +2452,10 @@ def _open_cinema_reach_menu(game, gp, jukebox_id):
         and lock[0] != _own_name(gp)
     code_note = f" - needs {lock[0]}'s code" if needs_code else ""
 
-    # What each choice would do to *this* room, one line each: a reach is a
-    # number, and the two things it is measured against (the speakers placed
-    # here and the edge of the zone the map drew) are the reason a small one
-    # goes unheard at the back. A choice that covers the room stays short.
+    # What each choice would do to *this* room, one line each: a reach is a number, and the two
+    # things it is measured against (the speakers placed here and the edge of the zone the map
+    # drew) are the reason a small one goes unheard at the back. A choice that covers the room
+    # stays short.
     extent = _room_extent(game, jukebox_id)
     items = []
     for value, description in CINEMA_REACHES:
@@ -2852,14 +2494,8 @@ def _apply_cinema_reach(game, gp, jukebox_id, reach):
 
 
 def _open_cinema_lock_menu(game, gp, jukebox_id):
-    """Ask the Server for one cabinet's lock controls.
-
-    The Server owns the lock (it writes the code's hash into the map), so the
-    menu is the Server's too: this sends the question and whatever comes back
-    is the same server menu every lock on the server is managed through. A
-    refusal -- an account without the rank, or a cabinet somebody else locked
-    -- arrives as the Server's own words.
-    """
+    # Ask the Server for one cabinet's lock controls: the Server owns the lock (it writes the
+    # code's hash into the map), so the menu is the Server's too, and a refusal arrives in its words.
     from . import consts
 
     game.network.send(consts.CHANNEL_MENUS, "builder_cinema_mode_lock",
@@ -3026,14 +2662,10 @@ def open_jukebox_menu(game, gp):
         (lambda: _pause_menu_label(gp, jukebox_id), go_pause),
     ]
 
-    # The scrub sits directly under Pause/Resume because that is what it is
-    # built on: reaching for an arrow pauses the cabinet for the room, lets the
-    # needle move while nothing is sounding (which is the only way a move costs
-    # nothing), and plays on by itself once the hand stops. The line *is* the
-    # control -- Left and Right work on it without opening anything (Menu hands
-    # an arrow to a line whose action offers one) -- and it is offered only when
-    # there is a needle to move: no song, or a livestream with no length, has
-    # nothing to scrub and does not pretend to.
+    # The scrub sits under Pause/Resume because that is what it is built on: reaching for an arrow
+    # pauses the cabinet for the room, the needle moves while nothing is sounding (the only way a
+    # move costs nothing), and it plays on by itself once the hand stops. The line IS the control,
+    # and it is offered only when there is a needle to move.
     if _scrub_spot(gp, jukebox_id) is not None:
         scrub = _JukeboxScrubControl(game, gp, jukebox_id)
         menu_items.append((scrub.label, scrub))
@@ -3051,21 +2683,12 @@ def open_jukebox_menu(game, gp):
     if is_staff:
         menu_items.append((_eq_label, go_eq))
         menu_items.append(("Clear queue and stop (Staff only)", go_clear_all))
-        # What this cabinet plays through, said at the cabinet itself: the one
-        # place a person is standing when the question comes up -- and a
-        # *staff* read-out, like the lines under it. A room is heard, and
-        # hearing it needs no account of the mode it was set to, the area drawn
-        # around the cabinet, or which other cabinet's speakers overlap these,
-        # so a player walking up to a cabinet is told nothing about the room's
-        # plumbing: neither line is one they are offered, let alone one they
-        # can find.
+        # What this cabinet plays through, said at the cabinet itself - a *staff* read-out, like the
+        # lines under it. A room is heard, and hearing it needs no account of its mode or plumbing.
         menu_items.append((f"Cinema: {_cinema_mode_label(mode_now)}", go_cinema_status))
-        # The cabinets around this one, read where a person is standing: two
-        # cabinets close enough to share the speakers between them are the one
-        # thing a map does not show by itself, and the line speaks the whole
-        # answer (which rooms are whose) rather than only the distance. It is
-        # the map said out loud twice over -- it names another element by its
-        # id -- which is the rest of why it is staff's.
+        # The cabinets around this one, read where a person is standing: two cabinets close enough to
+        # share the speakers between them is the one thing a map does not show by itself. Staff's
+        # because it names another element by its id.
         if nearby:
             menu_items.append((nearby, lambda: speak(neighbour_note(game, jukebox_id))))
         menu_items.append((f"Set cinema mode (now: {mode_now})", go_cinema_mode))
@@ -3208,30 +2831,12 @@ def _open_eq_menu(game, gp, jukebox_id):
 
 
 class _JukeboxScrubControl:
-    """The cabinet's Scrub line: Left and Right move its needle.
-
-    The line *is* the control. Enter says what it does, and the arrow keys work
-    on the line itself with nothing to open first, because a scrub you had to
-    enter and leave again would be a menu wrapped around a keystroke.
-
-    The first arrow freezes the cabinet for the room -- reusing the pause, so
-    the packet every listener already understands is the one that tells them why
-    it went quiet -- and moves the needle. Every press inside SCRUB_HOLD_S is
-    free, instant and silent, because nothing is sounding while the needle moves:
-    that is the whole reason a scrub costs one audio interruption rather than one
-    per arrow. Nobody touching it for that long plays on from where the needle
-    stopped, and a held arrow skims at speed (this client never calls
-    ``pygame.key.set_repeat``, so a held key would otherwise produce exactly one
-    step).
-
-    Whether the room hears the song again is the *Server's* answer, never this
-    machine's guess: the session a scrub opens remembers whether it found the
-    cabinet playing, and only that session may play it on (see
-    ``jukeboxSeekEnd``). A scrub whose client escaped -- the app closed, the map
-    changed, a packet that arrives after the hold -- therefore cannot wake a
-    cabinet somebody deliberately paused. This control says where the needle is
-    and nothing about playback state.
-    """
+    # The cabinet's Scrub line: Left and Right move its needle. The line IS the control - Enter
+    # says what it does and the arrow keys work on it with nothing to open first. The first arrow
+    # freezes the cabinet for the room (reusing the pause every listener already understands) and
+    # every press inside SCRUB_HOLD_S is free, instant and silent, because nothing is sounding
+    # while the needle moves. A held arrow skims (this client never calls pygame.key.set_repeat).
+    # Whether the room hears the song again is the *Server's* answer, never this machine's guess.
 
     STEP_S = 10.0
     STEP_SHIFT_S = 30.0
@@ -3240,20 +2845,18 @@ class _JukeboxScrubControl:
     #: skims at GLIDE_S_PER_S from where it began to be held.
     GLIDE_AFTER_S = 0.35
     GLIDE_S_PER_S = 40.0
-    #: How long the cabinet stays frozen after the last arrow. Long enough that a
-    #: hand moving between arrows never pays for the room going quiet again
-    #: (every press inside it is free), short enough that walking away from a
-    #: cabinet is a two-second pause rather than a silent map.
+    # : How long the cabinet stays frozen after the last arrow. Long enough that a hand moving
+    # : between arrows never pays for the room going quiet again (every press inside it is
+    # : free), short enough that walking away from a cabinet is a two-second pause rather than
+    # : a silent map.
     SCRUB_HOLD_S = 2.0
-    #: The hold keeps its own clock: a small tick pumps the held-arrow skim and
-    #: plays the song on once the hand has stopped. It is armed only while a
-    #: scrub is open, and the Server's own idle timer stays the backstop for a
-    #: client that never gets to close anything at all.
+    # : The hold keeps its own clock: a small tick pumps the held-arrow skim and plays the song
+    # : on once the hand has stopped. It is armed only while a scrub is open, and the Server's
+    # : own idle timer stays the backstop for a client that never gets to close anything at all.
     TICK_INTERVAL_S = 0.04
-    #: How often a skimming needle is read out, and how often the Server is told
-    #: where it is. The Server's copy only says what an abandoned scrub would
-    #: continue from (the closing packet carries the answer), so it can be far
-    #: coarser than what the scrubber hears.
+    # : How often a skimming needle is read out, and how often the Server is told where it is.
+    # : The Server's copy only says what an abandoned scrub would continue from (the closing
+    # : packet carries the answer), so it can be far coarser than what the scrubber hears.
     ANNOUNCE_INTERVAL_S = 0.5
     SEND_INTERVAL_S = 0.15
     #: The song's own last two seconds stay behind the needle: landing there
@@ -3280,13 +2883,10 @@ class _JukeboxScrubControl:
     # ─── the line ───
 
     def label(self):
-        """What the line reads, its needle included.
-
-        While a scrub is open the needle is this control's own: the Server is
-        told about a move only now and then, so the cached state would still be
-        reading the number the freeze started at. Between scrubs it is asked
-        fresh, because then it is the playing song's own position.
-        """
+        # What the line reads, its needle included. While a scrub is open the needle is this
+        # control's own: the Server is told about a move only now and then, so the cached state
+        # would still be reading the number the freeze started at. Between scrubs it is asked
+        # fresh, because then it is the playing song's own position.
         if self._open:
             return _scrub_menu_label(self.gp, self.jukebox_id,
                                      spot=(self.needle, self.duration))
@@ -3307,12 +2907,9 @@ class _JukeboxScrubControl:
         )
 
     def arrow(self, direction, mod):
-        """One Left or Right on the highlighted line.
-
-        ``menu.Menu`` hands an arrow to the line it is on when that line's own
-        action offers this, which is what makes the scrub a keystroke rather
-        than a menu to enter and leave.
-        """
+        # One Left or Right on the highlighted line. menu.Menu hands an arrow to the line it is on
+        # when that line's own action offers this, which is what makes the scrub a keystroke
+        # rather than a menu to enter and leave.
         if not self._open and not self._begin():
             return
         self._press(direction, mod)
@@ -3425,12 +3022,9 @@ class _JukeboxScrubControl:
         self._send("jukebox_seek_end", {"position": round(self.needle, 2)})
 
     def _glide(self, now):
-        """Keep moving while the arrow is still down.
-
-        Read straight off the keyboard rather than from key-repeat events: this
-        client never calls ``pygame.key.set_repeat``, so a held arrow produces
-        exactly one KEYDOWN and would otherwise skim nothing at all.
-        """
+        # Keep moving while the arrow is still down. Read straight off the keyboard rather than
+        # from key-repeat events: this client never calls pygame.key.set_repeat, so a held arrow
+        # produces exactly one KEYDOWN and would otherwise skim nothing at all.
         if not self._held_direction:
             return
         key = pygame.K_LEFT if self._held_direction < 0 else pygame.K_RIGHT
@@ -3496,10 +3090,9 @@ def _on_url_submit(game, gp, jukebox_id, raw_url):
     if not url:
         speak("Cancelled.")
         return
-    # The jukebox streams through the server's YouTube relay, so only YouTube
-    # links are supported. Other yt-dlp sites would resolve here and then be
-    # mangled into a bogus youtube.com/watch?v=<foreign-id> queue entry that
-    # can never play.
+    # The jukebox streams through the server's YouTube relay, so only YouTube links are
+    # supported. Other yt-dlp sites would resolve here and then be mangled into a bogus
+    # youtube.com/watch?v=<foreign-id> queue entry that can never play.
     if url and not url.startswith(("http://", "https://")):
         # Be kind to links pasted without a scheme.
         url = "https://" + url
@@ -3592,25 +3185,17 @@ def _toggle_pause(game, gp, jukebox_id):
 
 
 def _position_label(seconds):
-    """A needle as ``m:ss`` for speech.
-
-    Imported inside the call rather than at module load: reaching into a
-    ``music_bot`` submodule executes its package ``__init__``, which imports the
-    controller -- and the controller imports this module.
-    """
+    # A needle as m:ss for speech. Imported inside the call rather than at module load:
+    # reaching into a music_bot submodule executes its package __init__, which imports the
+    # controller -- and the controller imports this module.
     from .music_bot.media import format_track_position
     return format_track_position(seconds)
 
 
 def _playing_needle(gp, jukebox_id):
-    """Where the song is in *this* machine's ears, or None when this machine is
-    not the one playing it.
-
-    The arithmetic is the direct-fallback path's own anchor -- the position the
-    play event started from plus everything elapsed since it arrived -- because
-    that is the number a listener scrubbing is pointing at: the song as they
-    hear it, not as some other machine's clock counts it.
-    """
+    # Where the song is in *this* machine's ears, or None when this machine is not the one playing
+    # it: the direct-fallback anchor (position plus elapsed) is the number a scrubbing listener
+    # points at - the song as they hear it, not as another machine's clock counts it.
     player = getattr(gp, "jukebox_player", None)
     entries = getattr(player, "players", None)
     entry = entries.get(jukebox_id) if isinstance(entries, dict) else None
@@ -3627,16 +3212,9 @@ def _playing_needle(gp, jukebox_id):
 
 
 def _scrub_spot(gp, jukebox_id):
-    """What there is to scrub here: ``(needle, duration)``, or None.
-
-    Two numbers answer two different questions and both are needed. The length
-    comes from the cached song -- a cabinet with no length (a livestream) has
-    nothing to scrub at all. The needle is asked in this order: while the song
-    is playing here it is this machine's own audible position, and when it is
-    not (a cabinet this player joined while it was paused, or one somebody else
-    paused) it is the Server's own number, the one the pause packet and the map
-    state carry.
-    """
+    # What there is to scrub here: (needle, duration), or None. The length comes from the cached
+    # song (no length = a livestream, nothing to scrub); the needle is this machine's own audible
+    # position while it plays here, else the Server's own number from the pause packet/map state.
     box = (_current_state(gp).get("jukeboxes", {}) or {}).get(jukebox_id) or {}
     current = box.get("current") or {}
     try:
@@ -3656,13 +3234,10 @@ def _scrub_spot(gp, jukebox_id):
 
 
 def _scrub_menu_label(gp, jukebox_id, spot=None):
-    """The Scrub line's label: the read-out of a needle at rest.
-
-    ``spot`` overrides the read for a control that is holding a scrub of its
-    own: while the room is frozen nothing else can know where the needle is --
-    the Server is told about a move only now and then -- so the line keeps
-    reading the number the arrows just changed.
-    """
+    # The Scrub line's label: the read-out of a needle at rest. ``spot`` overrides the read for
+    # a control that is holding a scrub of its own: while the room is frozen nothing else can
+    # know where the needle is -- the Server is told about a move only now and then -- so the
+    # line keeps reading the number the arrows just changed.
     if spot is None:
         spot = _scrub_spot(gp, jukebox_id)
     if spot is None:
@@ -3883,10 +3458,10 @@ def _pick_song(game, gp, jukebox_id, result):
     duration = int(result.get("duration") or 0)
     if duration < 5:
         duration = 300
-    # Keep the canonical webpage URL in the server-owned queue.  yt-dlp search
-    # results also contain a signed googlevideo URL, but that URL expires and
-    # may be bound to the requesting client.  Every listener (including a
-    # player returning from a match later) must resolve a fresh stream URL.
+    # Keep the canonical webpage URL in the server-owned queue. yt-dlp search results also
+    # contain a signed googlevideo URL, but that URL expires and may be bound to the
+    # requesting client. Every listener (including a player returning from a match later) must
+    # resolve a fresh stream URL.
     url = result.get("webpage_url") or ""
     if not url and result.get("id"):
         url = f"https://www.youtube.com/watch?v={result['id']}"

@@ -23,15 +23,13 @@ from .media import FFMPEG_PATH, YouTubeSearcher
 
 
 class AudioStreamer(threading.Thread):
-    """Background thread: ffmpeg decodes audio URL → raw PCM mono → queued to OpenAL source.
-    
-    Audio pipeline:
-      YouTube URL → ffmpeg (decode to s16le mono 48kHz) → PCM chunks → OpenAL buffer queue
-                                                        → Opus encode → Network broadcast (rate-limited)
-    
-    Network streaming uses real-time rate limiting (one 20ms frame per ~20ms) to prevent
-    packet bursting which causes stuttering on receivers.
-    """
+    """Background thread: ffmpeg decodes audio URL -> raw PCM -> queued to OpenAL.
+
+                YouTube URL -> ffmpeg (s16le mono 48 kHz) -> OpenAL buffer queue, and the same PCM ->
+                Opus -> network broadcast rate-limited to real time (one 20 ms frame per ~20 ms) so
+                receivers are not bursted. Rules: .agents/skills/music_bot_integration/ and
+                .agents/skills/jukebox-system/.
+                """
 
     # Hand-built instances (tests, diagnostics tools) bypass __init__, so both
     # mode flags need class defaults for the shared playback paths to work.
@@ -57,18 +55,13 @@ class AudioStreamer(threading.Thread):
     # has waited longer than any refill and the room is left for the next song.
     SWAP_DRAIN_MAX_FRAMES = 64
     PRE_BUFFER_COUNT = 5  # Buffers to fill before starting local playback
-                          # (100ms delay line; was 10/200ms — lowered together
-                          # with MusicCompression.PRE_BUFFER_FRAMES so live
-                          # music streams stay low-latency on both ends)
-    # Direct-transport jukebox timeline alignment. In direct mode every
-    # listener resolves and starts its own ffmpeg, so without a shared
-    # anchor each machine began the same song seconds apart. All clients
-    # derive ONE wall-clock deadline from the server's jukebox_play
-    # broadcast (arrival instant minus start_offset) and hold the
-    # prebuffered audio until that deadline: resolve variance becomes
-    # wait time, never audible skew. Personal music bots (bot set) and
-    # livestreams (timeline_anchor=False, no stable content position)
-    # never anchor.
+                          # 100 ms delay line (was 10/200 ms, lowered together with MusicCompression.PRE_BUFFER_FRAMES so
+                          # live music streams stay low-latency on both ends).
+                          #
+                          # Direct-transport jukebox timeline alignment: in direct mode every listener resolves and starts
+                          # its own ffmpeg, so all clients derive ONE wall-clock deadline from the server's jukebox_play
+                          # broadcast (arrival instant minus start_offset) and hold the prebuffered audio until then -
+                          # resolve variance becomes wait time, never audible skew. Bots and livestreams never anchor.
     DIRECT_LEAD_IN_S = 3.5         # fresh song: hold the intro this long after the broadcast
                                    # (matches the server's end-of-song grace; machines slower
                                    # than this join late and trail the room for the song)
@@ -77,35 +70,20 @@ class AudioStreamer(threading.Thread):
                                    # reload re-broadcasts whose intro the room already heard —
                                    # they must seek, never replay.
     DIRECT_STARTUP_EST_S = 4.5     # mid-song: aim -ss past the projected audible start;
-                                   # arriving early is correctable by an exact wait,
-                                   # arriving late never recovers under '-re' pacing.
-                                   # This estimate IS the alignment slack (LEAD_IN +
-                                   # EST after resolve): a machine whose seek+
-                                   # prebuffer outruns it starts late and trails the
-                                   # room for the whole song — its jam notes then land
-                                   # off the beat for everyone. 4.5s keeps typical
-                                   # seeks (network download to the keyframe) inside
-                                   # the slack at the cost of skipping ~3s more of the
-                                   # song for joiners/resumes.
-    # The alignment a mid-song join has to fit its own resolve and startup
-    # into (LEAD_IN + EST after the broadcast) -- and the ceiling on what the
-    # one re-aim below is allowed to cost.
+                                   # Arriving early is correctable by an exact wait, arriving late never recovers under '-re'
+                                   # pacing. This estimate IS the alignment slack (LEAD_IN + EST after resolve): a machine whose
+                                   # seek+prebuffer outruns it starts late and trails the room for the whole song, so its jam notes
+                                   # land off the beat. 4.5 s keeps typical seeks inside the slack at the cost of skipping ~3 s more
+                                   # of the song for joiners/resumes.
     DIRECT_ALIGN_SLACK_S = DIRECT_LEAD_IN_S + DIRECT_STARTUP_EST_S
     DIRECT_MAX_ALIGN_WAIT_S = DIRECT_ALIGN_SLACK_S + 1.0  # clock safety valve
     DIRECT_LATE_TOLERANCE_S = 0.75 # best-effort: log joins later than this
-    # A machine whose own resolve+startup outran the shared deadline becomes
-    # audible late and plays the WHOLE song that far behind the room
-    # (``direct_late_s``), so a note played on it lands behind the beat for
-    # everybody, with nothing on the listening side able to pull it back.
-    # Such a machine is re-aimed ONCE, at the room's position, and the frames
-    # it decoded behind the room are dropped rather than played.
-    #
-    # What that costs a listener is silence -- the second launch's own startup
-    # -- so the price is the gate (``direct_catch_up_aim_s``): past the
-    # alignment slack the cure is more expensive than the drift it removes,
-    # and the machine keeps the old behavior of trailing the room and saying
-    # so. DIRECT_CATCH_UP_MIN_S is the other end: below it nobody hears the
-    # drift, and a restart would be noise rather than a fix.
+    # A machine whose own resolve+startup outran the shared deadline becomes audible late and plays
+    # the WHOLE song that far behind the room (``direct_late_s``), so its notes land behind the beat
+    # for everybody. It is re-aimed ONCE, at the room's position, and the frames it decoded behind
+    # the room are dropped rather than played. The price is silence - the second launch's startup -
+    # so the gate is ``direct_catch_up_aim_s``: past the alignment slack the cure costs more than the
+    # drift, and below DIRECT_CATCH_UP_MIN_S nobody hears it.
     DIRECT_CATCH_UP_MAX = 1
     DIRECT_CATCH_UP_MIN_S = DIRECT_LATE_TOLERANCE_S
     DIRECT_CATCH_UP_MARGIN_S = 0.5
@@ -144,25 +122,18 @@ class AudioStreamer(threading.Thread):
             and start_offset_received_at is not None
             and timeline_anchor
         )
-        # Lead-in the ROOM holds before a fresh song becomes audible. Every
-        # machine that anchors to the same broadcast holds the same lead-in,
-        # so it cancels out of note timing. A machine that plays direct
-        # while the rest of the room hears the server RELAY must anchor with
-        # 0.0 instead: the relay room holds no lead-in, and holding one
-        # leaves that machine exactly DIRECT_LEAD_IN_S behind the room for
-        # the whole song (its jam notes then land ~3.5s off the beat for
-        # everyone, with no lag report to fix it — its own anchor says it
-        # started on time).
+        # Lead-in the ROOM holds before a fresh song becomes audible. Every machine anchored to the same
+        # broadcast holds it, so it cancels out of note timing. A machine playing direct while the rest
+        # of the room hears the server RELAY must anchor with 0.0 instead: the relay room holds no
+        # lead-in, and holding one leaves it exactly DIRECT_LEAD_IN_S behind for the whole song.
         self.room_lead_in_s = (
             AudioStreamer.DIRECT_LEAD_IN_S if room_lead_in_s is None
             else float(room_lead_in_s)
         )
-        # Per-listener direct fallback into a room that is ALREADY playing
-        # (server relay). The song position advances from the broadcast
-        # instant, so even a zero-offset event must seek PAST the projected
-        # audible start — starting at position 0 would trail the room by
-        # this machine's whole resolve+startup (seconds off the beat for
-        # everyone, with no lag report to fix it).
+        # Per-listener direct fallback into a room that is ALREADY playing (server relay):
+        # the song position advances from the broadcast instant, so even a zero-offset
+        # event must seek PAST the projected audible start - starting at 0 would trail the
+        # room by this machine's whole resolve+startup.
         self._join_playing_room = bool(join_playing_room)
         self._direct_seek_to = 0.0        # content position the decode head starts from
         self._fed_content_seconds = 0.0   # content seconds queued to OpenAL since the seek
@@ -179,17 +150,12 @@ class AudioStreamer(threading.Thread):
         self._attempt_started_at = None
         self.direct_catch_up_s = 0.0
         self.http_headers = dict(http_headers or {})
-        # Spatial stereo pair (jukeboxes): two MONO sources placed at the same
-        # spot minus/plus a small offset, fed with the LEFT and RIGHT channels
-        # of a STEREO decode. Two positioned mono sources produce a real stereo
-        # image when you stand close, which naturally collapses toward mono at
-        # distance — exactly how piano/drum sounds are anchored in the world.
-        # `spatial_pair` is (src_l, src_r, reference_distance, max_distance).
-        # A cinema room (CinemaSpeakerBank) REPLACES the stereo pair rather
-        # than joining it: both cannot play, or the room would hear the song
-        # twice and comb filter it. The same interleaved stereo decode is
-        # simply handed to the bank, which owns one positioned source per
-        # speaker, so nothing else about this stream changes.
+        # Spatial stereo pair (jukeboxes): two MONO sources at the same spot minus/plus a small offset,
+        # fed with the LEFT and RIGHT channels of a STEREO decode, so they give a real stereo image up
+        # close that collapses toward mono at distance. `spatial_pair` is (src_l, src_r,
+        # reference_distance, max_distance). A cinema room REPLACES the pair rather than joining it -
+        # both cannot play or the room hears the song twice and combs it - and the same interleaved
+        # decode is handed to the bank.
         self.cinema = cinema
         if self.cinema is not None:
             spatial_pair = None
@@ -246,11 +212,9 @@ class AudioStreamer(threading.Thread):
         # frames with the partner's (fade-out / fade-in) so broadcast and PA
         # listeners hear the same overlap as the local performer.
         self._network_mix = None
-        # Monotonic instant the speakers last consumed an OpenAL buffer
-        # (jukebox direct streams only — see _reclaim_processed). The
-        # jukebox watchdog rebuilds a stream whose OUTPUT stalls even
-        # though its thread is alive, since direct playback has no server
-        # relay to announce a mid-song death.
+        # Monotonic instant the speakers last consumed an OpenAL buffer (jukebox direct only - see
+        # _reclaim_processed). The jukebox watchdog rebuilds a stream whose OUTPUT stalls even though its
+        # thread is alive, since direct playback has no server relay to announce a mid-song death.
         self.last_output_at = None
         self.process = None
         self._buffer_pool = []       # Reusable buffer objects
@@ -314,12 +278,11 @@ class AudioStreamer(threading.Thread):
     def _start_output_playing(self):
         """Start whichever sources are not playing yet, as one output.
 
-        In a cinema room the bank owns that decision, because starting a
-        speaker on its own is what makes one of them permanently miss the
-        room's beat: the bank puts a speaker that fell behind back on the
-        room's content instant first (see ``CinemaSpeakerBank.realign``) and
-        then starts the room together.
-        """
+                                In a cinema room the bank owns that decision, because starting a speaker on its own
+                                is what makes one of them permanently miss the room's beat: the bank puts a speaker
+                                that fell behind back on the room's content instant first
+                                (``CinemaSpeakerBank.realign``) and then starts the room together.
+                                """
         if self.cinema is not None:
             try:
                 self.cinema.start_playback()
@@ -501,18 +464,16 @@ class AudioStreamer(threading.Thread):
     def _get_buffer(self):
         """Get a reclaimed buffer without growing the OpenAL pool.
 
-        Streaming must apply backpressure when every pre-allocated buffer is in
-        flight.  Allocating another hardware buffer here lets a fast decoder
-        queue an entire song and can exhaust the shared audio device.
-        """
+                                Streaming must apply backpressure when every pre-allocated buffer is in flight;
+                                allocating another hardware buffer here lets a fast decoder queue an entire song
+                                and can exhaust the shared audio device.
+                                """
         self._reclaim_processed()
 
         if not self._buffer_pool and self._pool_swap_armed:
-            # A stream handed from a room to the plain pair never built a
-            # pool of its own (a room allocates per speaker), and it is being
-            # fed again before the pair's own queued frames have recycled a
-            # buffer. Build the pool here, on the thread that already owns
-            # this stream's buffers, instead of queueing nothing forever.
+            # A stream handed from a room to the plain pair never built a pool of its own (a room allocates
+            # per speaker), and it is being fed again before the pair's queued frames have recycled a
+            # buffer. Build the pool here, on the thread that already owns this stream's buffers.
             self._pool_swap_armed = False
             self._init_buffer_pool()
         if self._buffer_pool:
@@ -521,10 +482,10 @@ class AudioStreamer(threading.Thread):
 
     def _reclaim_processed(self):
         """Return processed buffers to pool for reuse.
-        
-        CRITICAL: cyal's unqueue_buffers() returns a SINGLE Buffer object by default,
-        not a list. Handle both cases robustly. Spatial pairs drain both sources.
-        """
+
+                    CRITICAL: cyal's unqueue_buffers() returns a SINGLE Buffer object by default, not a list -
+                    handle both cases robustly. Spatial pairs drain both sources.
+                    """
         if self.cinema is not None:
             # The speaker bank owns its per-speaker pools, so it owns the
             # reclamation too -- but the watchdog's audible-progress stamp is
@@ -594,10 +555,10 @@ class AudioStreamer(threading.Thread):
     def _route_aligned_network_frame(self, decoded_frame=None):
         """Advance the normal-broadcast delay line by one media frame.
 
-        Normal Music Broadcast sends the oldest pre-buffered frame, matching
-        the performer's OpenAL playhead. Megaphone keeps sending the current
-        decoded frame so the just-verified PA transport remains untouched.
-        """
+                                Normal Music Broadcast sends the oldest pre-buffered frame, matching the
+                                performer's OpenAL playhead; megaphone keeps sending the current decoded frame so
+                                the verified PA transport stays untouched.
+                                """
         if not self.bot:
             return
         if decoded_frame is not None:
@@ -614,20 +575,18 @@ class AudioStreamer(threading.Thread):
     def begin_network_crossfade(self, partner, seconds):
         """Blend this stream's network leg with `partner`'s for `seconds`.
 
-        Each outgoing frame is mixed with the partner's frame (this stream
-        fading out, the partner fading in) so broadcast / PA listeners hear
-        the same crossfade the local performer hears. When the window
-        elapses this stream retires its network leg (network_muted) and the
-        partner's own leg takes over.
-        """
+                                Each outgoing frame is mixed with the partner's (this stream fading out, the partner
+                                in) so broadcast/PA listeners hear the same crossfade the performer hears; when the
+                                window elapses this leg retires and the partner's takes over.
+                                """
         self._network_mix = (partner, time.monotonic(), max(0.1, float(seconds)))
 
     def _mix_network_frames(self, own, partner, own_gain, partner_gain):
         """Convex blend of two stereo int16 PCM frames (gains sum to ~1).
 
-        A convex combination can never exceed the loudest input sample, so
-        the blend cannot clip; audioop clips to int16 anyway as a backstop.
-        """
+                    A convex combination can never exceed the loudest input sample, so the blend cannot clip;
+                    audioop clips to int16 anyway as a backstop.
+                    """
         try:
             import audioop
             own_gain = max(0.0, min(1.0, own_gain))
@@ -741,11 +700,9 @@ class AudioStreamer(threading.Thread):
             if data is None:
                 continue
 
-            # High-resolution, deadline-based pacing. Advancing the ideal
-            # deadline by exactly 20 ms prevents normal scheduler overshoot
-            # (typically 0.2-0.8 ms/frame on Windows) from accumulating into a
-            # steadily growing network queue. A large stall starts a fresh
-            # cadence rather than bursting old audio to catch up.
+            # High-resolution, deadline-based pacing. Advancing the ideal deadline by exactly 20 ms prevents
+            # normal scheduler overshoot (typically 0.2-0.8 ms/frame on Windows) from accumulating into a
+            # steadily growing network queue; a large stall starts a fresh cadence rather than bursting.
             now = time.perf_counter()
             target_interval = 0.020  # 20ms per buffer
             if self.last_send_time is None or now - self.last_send_time > 0.100:
@@ -776,24 +733,17 @@ class AudioStreamer(threading.Thread):
             if not self.game or not self.game.network:
                 return
                 
-            # Check if the stream is being broadcast: the music bot broadcast
-            # is on, OR the performer enabled "Broadcast to Megaphone" (the
-            # PA/megaphone routing is an independent toggle - exactly like
-            # piano/drums, so guitar and music reach the PA on their own), OR
-            # the player hosts an active Party Sync session (private upload;
-            # the server relays only to session guests). A stream WITHOUT a
-            # bot (jukebox playback, bot=None) NEVER sends: otherwise the
-            # jukebox audio would be re-broadcast to the whole map as the
-            # player's own music bot stream (double audio everywhere).
+            # Broadcast? The bot broadcast is on, OR the performer enabled "Broadcast to Megaphone" (an
+            # independent toggle, exactly like piano/drums), OR the player hosts an active Party Sync session
+            # (private upload). A stream WITHOUT a bot (jukebox playback) NEVER sends, or the jukebox audio
+            # would be re-broadcast to the whole map as this player's own music bot stream (double audio).
             if not self.bot or not (
                 self.bot.broadcast_enabled
                 or self.bot.broadcast_to_megaphone
                 or getattr(self.bot, "party_sync_force_upload", False)
-                # A song routed into a cabinet's room is uploaded whatever the
-                # Broadcast switch says: the room is a place other people
-                # stand in, and the frames are the only way it reaches them
-                # (see libs/audio/cinema/peer.py). The switch itself is
-                # untouched and comes back the moment the routing goes off.
+                # A song routed into a cabinet's room is uploaded whatever the Broadcast switch says: the room is
+                # a place other people stand in and the frames are the only way it reaches them (see
+                # libs/audio/cinema/peer.py). The switch itself is untouched and comes back when routing goes off.
                 or getattr(self.bot, "cinema_force_upload", False)
             ):
                 return
@@ -859,11 +809,9 @@ class AudioStreamer(threading.Thread):
                 except Exception:
                     pass
 
-            # When routing through the megaphone, feed the mixed stream into the
-            # local PA sidechain (main thread) so the broadcaster hears their own
-            # music/instruments through the speakers with zero latency - the server
-            # no longer echoes the broadcast back to the sender. Skipped while a
-            # Party Sync session is active (that leg is private-to-guests).
+            # When routing through the megaphone, feed the mixed stream into the local PA sidechain (main
+            # thread) so the broadcaster hears their own music/instruments with zero latency - the server no
+            # longer echoes the broadcast back to the sender. Skipped while a Party Sync session is active.
             if (self.bot and self.bot.broadcast_to_megaphone
                     and not getattr(self.bot, "party_sync_force_upload", False)):
                 try:
@@ -959,18 +907,16 @@ class AudioStreamer(threading.Thread):
     def _queue_local_cinema(self, data):
         """Hand one interleaved stereo frame to the room's speaker bank.
 
-        The bank renders it into one MONO feed per speaker and queues each
-        into that speaker's own pool, so this stream never touches a buffer
-        or a source directly in cinema mode.
+                                The bank renders it into one MONO feed per speaker and queues each into that
+                                speaker's own pool, so this stream never touches a buffer or a source directly in
+                                cinema mode.
 
-        A frame the room accepted still counts as played content, exactly as
-        it does on a plain source: ``content_position()`` is what the Music
-        Bot's seek and the Jukebox's end-of-song hand-over are measured from,
-        and a room is the one output whose frames never pass through
-        ``_queue_local``'s own sources. Crediting it per ACCEPTED frame (not
-        per decoded one) keeps that position honest while the pre-buffer
-        retries a frame the room has no buffer for yet.
-        """
+                                A frame the room accepted still counts as played content exactly as on a plain
+                                source: ``content_position()`` measures the Music Bot's seek and the Jukebox's
+                                end-of-song hand-over, and a room is the one output whose frames never pass
+                                through ``_queue_local``. Crediting per ACCEPTED frame keeps that honest while the
+                                pre-buffer retries a frame the room has no buffer for yet.
+                                """
         try:
             left, right = self._split_stereo_16(data)
         except Exception:
@@ -1012,13 +958,10 @@ class AudioStreamer(threading.Thread):
             return False
 
     # -------------------------------------------------- output handed over
-    #
-    # A cabinet's cinema mode can be changed while its song plays, and the
-    # change is a change of *output*, not of song: nothing here decodes
-    # anything or seeks anything. A room reshapes in place on its own (the
-    # bank a stream holds is the same object, see ``CinemaSpeakerBank``), so
-    # the two methods below are only for the crossings between a room and the
-    # plain stereo pair.
+    # A cabinet's cinema mode can be changed while its song plays, and that is a change of *output*,
+    # not of song: nothing here decodes anything or seeks anything. A room reshapes in place on its
+    # own (the bank a stream holds is the same object), so the two methods below are only for the
+    # crossings between a room and the plain stereo pair.
 
     def _remember_frame(self, left, right):
         with self._ring_lock:
@@ -1039,14 +982,11 @@ class AudioStreamer(threading.Thread):
             return 0
 
     # ------------------------------------------- a live note's own clock
-    #
-    # A note played along to this cabinet waits on the frames the pair has
-    # *played*, re-projected every frame, instead of on a queue depth measured
-    # once when the note arrived: the queue drains and refills, and a hold that
-    # does not follow it walks away from the song -- differently on each
-    # machine. The rule lives in one place (``libs/jukebox_clock.py``), shared
-    # with a cinema room's bank; what is the streamer's own is the counter and
-    # the frame's measured size.
+    # A note waits on the frames the pair has *played*, re-projected every frame, instead of a queue
+    # depth measured once when the note arrived: the queue drains and refills, and a hold that does
+    # not follow it walks away from the song, differently on each machine. The rule lives in one
+    # place (``libs/jukebox_clock.py``); what is the streamer's own is the counter and the frame's
+    # measured size.
 
     def _note_pair_fed(self, mono_pcm):
         """Record one frame handed to the plain pair (its own clock's input)."""
@@ -1058,10 +998,9 @@ class AudioStreamer(threading.Thread):
     def _pair_clock_reset(self):
         """Start the pair's clock over (new sources, or a queue that was cut).
 
-        The epochs are forgotten rather than the waits dropped: a note already
-        waiting here keeps the instant it was going to sound at, which is what
-        a note lost to a hiccup would not have.
-        """
+                                The epochs are forgotten rather than the waits dropped: a note already waiting keeps
+                                the instant it was going to sound at.
+                                """
         self.pair_frames_fed = 0
         self._pair_frame_ms = 0.0
         clock = getattr(self, "_pair_spot_clock", None)
@@ -1071,32 +1010,28 @@ class AudioStreamer(threading.Thread):
     def pair_frame_ms(self):
         """How long one pair frame is here, measured from the audio (ms).
 
-        Latched from the frames actually handed over, because the transports do
-        not agree (this streamer decodes 20 ms; the relay is sent 40 ms), and a
-        note's wait is counted in those frames.
-        """
+                                Latched from the frames actually handed over, because the transports do not agree
+                                (this streamer decodes 20 ms, the relay is sent 40 ms).
+                                """
         measured = float(getattr(self, "_pair_frame_ms", 0.0) or 0.0)
         return measured if measured > 0.0 else self.SAMPLES_PER_BUFFER / 48.0
 
     def pair_played_frames(self):
         """Frames the plain pair has already played: fed minus still queued.
 
-        ``pair_queued_frames`` is what OpenAL reports as still ahead of the
-        listener and the fed counter is this stream's own, so the difference is
-        the content instant the pair is playing right now -- what a live note's
-        wait is measured against, every frame.
-        """
+                                ``pair_queued_frames`` is what OpenAL reports ahead of the listener, so the
+                                difference is the content instant the pair is playing right now.
+                                """
         fed = int(getattr(self, "pair_frames_fed", 0) or 0)
         return max(0, fed - int(self.pair_queued_frames()))
 
     def pair_is_playing(self):
         """True while the plain pair is this stream's output, and playing.
 
-        A stream that handed its output to a cinema room has no pair to
-        measure, and a pair whose sources are not playing reports everything it
-        holds as finished -- neither is a clock for a live note (see
-        ``libs/jukebox_clock.py``).
-        """
+                                A stream that handed its output to a cinema room has no pair to measure, and a pair
+                                whose sources are not playing reports everything it holds as finished - neither is a
+                                clock for a live note (see ``libs/jukebox_clock.py``).
+                                """
         if self.cinema is not None or not self.spatial_pair:
             return False
         if not self.running or self.paused:
@@ -1110,9 +1045,9 @@ class AudioStreamer(threading.Thread):
     def pair_clock(self):
         """The plain pair's own clock, made on first use.
 
-        Hand-built instances (tests) bypass ``__init__``, so nothing here is
-        assumed to exist before the first call.
-        """
+                    Hand-built instances (tests) bypass ``__init__``, so nothing here is assumed to exist before
+                    the first call.
+                    """
         clock = getattr(self, "_pair_spot_clock", None)
         if clock is None:
             clock = SpotClock(
@@ -1128,17 +1063,14 @@ class AudioStreamer(threading.Thread):
     def request_room(self, bank):
         """Ask this stream to play through ``bank`` instead of the plain pair.
 
-        A room cannot take over in one step: it is handed one frame per
-        speaker, starts only once its pre-buffer is in, and the frames it
-        must be given are the ones the pair is *about to* play -- prime it
-        from the live edge instead and the room starts a whole queue behind
-        the song (heard as the song stepping back the moment a mode is
-        picked). So the room is remembered here and committed from the frame
-        path (``_commit_room_swap``), where the ring and the pair's own queue
-        depth are both known, and the song keeps playing out of the pair
-        until then. A stream that cannot make that window refuses the room
-        (``swap_room_failed``) and the caller leaves it for the next song.
-        """
+                                A room cannot take over in one step: it is handed one frame per speaker, starts only
+                                once its pre-buffer is in, and the frames it must be given are the ones the pair is
+                                *about to* play - priming it from the live edge makes the room start a whole queue
+                                behind the song (heard as the song stepping back). So the room is remembered here and
+                                committed from the frame path (``_commit_room_swap``), where the ring and the pair's
+                                queue depth are both known. A stream that cannot make that window refuses the room
+                                (``swap_room_failed``).
+                                """
         self._pending_room = bank
         self._swap_hold_frames = 0
         self.swap_room_failed = False
@@ -1153,15 +1085,12 @@ class AudioStreamer(threading.Thread):
     def switch_to_pair(self, pair):
         """Play this stream through the plain stereo pair from now on.
 
-        ``pair`` is ``(src_l, src_r, reference_distance, max_distance)`` and
-        normally comes out of the room that was playing
-        (``CinemaSpeakerBank.detach_primary_pair``): its sources already hold
-        the frames the room was about to play, so the song keeps its content
-        instant and only its shape changes -- the room's other speakers stop
-        where they stand, and the two that remain carry the cabinet's own
-        stereo. Never refuses: the pair is what plays when a room cannot be
-        resolved at all.
-        """
+                                ``pair`` is ``(src_l, src_r, reference_distance, max_distance)`` and normally comes out
+                                of the room that was playing (``CinemaSpeakerBank.detach_primary_pair``): its sources
+                                already hold the frames the room was about to play, so the song keeps its content
+                                instant and only its shape changes. Never refuses - the pair is what plays when a
+                                room cannot be resolved at all.
+                                """
         src_l, src_r, ref, maxd = pair
         self.spatial_src_l, self.spatial_src_r = src_l, src_r
         self.spatial_ref, self.spatial_max = float(ref), float(maxd)
@@ -1179,12 +1108,10 @@ class AudioStreamer(threading.Thread):
     def _pair_credit_from_room(self):
         """Start the pair's clock level with the queue it arrived holding.
 
-        A pair taken out of a room keeps the frames the room was about to
-        play, so that queue is not a standing debt: the fed counter starts
-        level with it and ``pair_played_frames`` begins at zero *played*
-        rather than reading the whole queue as still to come (which would
-        hold every note at its wall-clock instant for the queue's length).
-        """
+                                A pair taken out of a room keeps the frames the room was about to play, so that queue is
+                                not a standing debt: the fed counter starts level with it and ``pair_played_frames``
+                                begins at zero *played* rather than reading the whole queue as still to come.
+                                """
         self.pair_frames_fed = int(self.pair_queued_frames())
         self._pair_frame_ms = 0.0
         clock = getattr(self, "_pair_spot_clock", None)
@@ -1223,12 +1150,11 @@ class AudioStreamer(threading.Thread):
     def _commit_room_swap(self):
         """Hand this stream's output to a requested room, if it can be primed.
 
-        Returns False only while the pair's queue is still draining (the
-        frame is held and retried -- nothing is dropped). Anything that makes
-        the swap impossible refuses it instead: a ring shorter than the room
-        wants, a room whose pools refuse the frames, a room that will not
-        start.
-        """
+                                Returns False only while the pair's queue is still draining (the frame is held and
+                                retried - nothing is dropped). Anything that makes the swap impossible refuses it
+                                instead: a ring shorter than the room wants, pools that refuse the frames, a room that
+                                will not start.
+                                """
         bank = self._pending_room
         if bank is None:
             return True
@@ -1345,11 +1271,10 @@ class AudioStreamer(threading.Thread):
     def _hold_direct_start(self, leftover):
         """Hold the prebuffered head until the shared wall-clock deadline.
 
-        Drains ffmpeg while waiting ('-re' keeps producing at media rate, so
-        a blocked pipe would stall the decoder and the CDN read behind it)
-        into the normal OpenAL staging deque. Returns the partial chunk so
-        run()'s streaming loop keeps its leftover contract.
-        """
+                                Drains ffmpeg while waiting ('-re' keeps producing at media rate, so a blocked pipe would
+                                stall the decoder and the CDN read behind it) into the normal OpenAL staging deque,
+                                returning the partial chunk so run()'s streaming loop keeps its leftover contract.
+                                """
         deadline = self.direct_start_deadline(
             self.start_offset, self.start_offset_received_at,
             self._direct_seek_to, self.room_lead_in_s)
@@ -1391,21 +1316,16 @@ class AudioStreamer(threading.Thread):
 
     @staticmethod
     def direct_start_deadline(start_offset, received_at, seek_to, lead_in=None):
-        """Wall-clock instant (received_at's monotonic domain) when the
-        prebuffered head should become audible.
+        """Wall-clock instant (received_at's monotonic domain) when the head plays.
 
-        Every listener derives the same value from the same jukebox_play
-        broadcast: t_zero — when the room's song position was 0 — is the
-        arrival instant minus start_offset, and the room's clock runs one
-        lead-in behind the server's audioStartedAt (the price of hearing
-        the full intro). Fresh songs and mid-song joins must share that
-        shift, otherwise a joiner lands a whole lead-in ahead of the room.
+                                Every listener derives the same value from the same jukebox_play broadcast: t_zero - when
+                                the room's song position was 0 - is the arrival instant minus start_offset, and the room's
+                                clock runs one lead-in behind the server's audioStartedAt. Fresh songs and mid-song joins
+                                must share that shift, or a joiner lands a whole lead-in ahead of the room.
 
-        ``lead_in`` overrides the room's shared lead-in hold. A machine
-        that switched itself to direct playback while the room still hears
-        the server relay must pass 0.0: the relay room holds no lead-in, so
-        holding one would leave it a full lead-in behind the room.
-        """
+                                ``lead_in`` overrides the room's shared hold: a machine that switched itself to direct
+                                playback while the room still hears the relay must pass 0.0.
+                                """
         if lead_in is None:
             lead_in = AudioStreamer.DIRECT_LEAD_IN_S
         t_zero = received_at - start_offset
@@ -1413,26 +1333,18 @@ class AudioStreamer(threading.Thread):
 
     @staticmethod
     def direct_seek_seconds(start_offset, received_at, now, aim_ahead_s=None, lead_in=None):
-        """Input seek for an anchored mid-song join, aimed PAST the position
-        projected at audible start.
+        """Input seek for an anchored mid-song join, aimed PAST the projected audible start.
 
-        Arriving early is corrected by an exact hold at prebuffer-complete;
-        arriving late never recovers, because under '-re' pacing skipping
-        PCM costs the same wall time as the lateness itself.
+                                Arriving early is corrected by an exact hold at prebuffer-complete; arriving late never
+                                recovers, because under '-re' pacing skipping PCM costs the same wall time as the
+                                lateness itself.
 
-        ``aim_ahead_s`` is the room instant this seek targets, measured from
-        ``now``: how far ahead of now this machine expects to *become
-        audible*. Its default is the alignment slack (lead-in + startup
-        estimate) -- the number a join aims with when nothing about this
-        machine has been measured yet. A flight that has just watched itself
-        start late replaces that estimate with its own measured startup, and
-        the content named is the same either way: the deadline adds the room's
-        own lead-in, so the seek only has to answer what the room will be
-        playing at that instant -- which is why an aim shorter than the room's
-        lead-in is a real, exact answer here rather than clamped to it (a
-        quick machine catching up its own drift is not made to wait out the
-        room's intro a second time).
-        """
+                                ``aim_ahead_s`` is the room instant this seek targets, measured from ``now``: how far
+                                ahead of now this machine expects to *become audible*. Default is the alignment slack
+                                (lead-in + startup estimate); a flight that has just watched itself start late replaces
+                                it with its own measured startup. The content named is the same either way, because the
+                                deadline adds the room's own lead-in.
+                                """
         if received_at is None or start_offset <= 0.0:
             return start_offset
         if lead_in is None:
@@ -1448,15 +1360,12 @@ class AudioStreamer(threading.Thread):
     def catch_up_aim_seconds(cls, late_s, startup_s):
         """The room instant a flight that started ``startup_s`` ago aims at, or None.
 
-        The one home of the re-aim's arithmetic, so a rig measuring this
-        behavior can ask for it instead of modelling it (and cannot then
-        disagree with the shipped stream): the aim is the *measured* startup of
-        the flight that just failed, plus the margin that keeps the error on
-        the early side. ``None`` is the two ends of the rule -- a lateness
-        nobody hears (``DIRECT_CATCH_UP_MIN_S``) and a machine whose restart
-        would cost more silence than the drift it removes
-        (``DIRECT_ALIGN_SLACK_S``).
-        """
+                                The one home of the re-aim's arithmetic, so a rig can ask for it instead of modelling it:
+                                the aim is the *measured* startup of the flight that just failed, plus the margin that
+                                keeps the error on the early side. ``None`` is the two ends of the rule - a lateness
+                                nobody hears (``DIRECT_CATCH_UP_MIN_S``) and a restart that would cost more silence
+                                than the drift it removes.
+                                """
         if float(late_s or 0.0) < cls.DIRECT_CATCH_UP_MIN_S:
             return None
         startup = max(0.0, float(startup_s or 0.0))
@@ -1467,25 +1376,16 @@ class AudioStreamer(threading.Thread):
     def direct_catch_up_aim_s(self):
         """The room instant this flight should be re-aimed at, or None.
 
-        A late audible start is not a listening problem that scheduling can
-        compensate for: this machine's ear holds an older piece of music, so
-        a note played here reaches every other machine after the beat. The
-        one cure is to start the decode somewhere else, which is what this
-        answers -- the room instant to aim at -- and the flight loop spends
-        it once.
+                                A late audible start is not a listening problem that scheduling can compensate for: this
+                                machine's ear holds an older piece of music, so a note played here reaches every other
+                                machine after the beat. The one cure is to start the decode somewhere else, and the flight
+                                loop spends this once.
 
-        The aim is this machine's own *measured* startup (see
-        ``catch_up_aim_seconds``): the flight that just failed took that long
-        to produce its pre-buffer, and the next one repeats that work with the
-        media already resolved and the same signed URL. Projecting that
-        measurement keeps the error on the early side, where the pre-buffer
-        hold turns it into a wait, rather than on the late side, where
-        nothing can -- and what it costs is that projection in silence, which
-        is why a machine that takes longer than the whole alignment slack to
-        start is refused it: on a mid-song join, whose own startup already IS
-        the slack plus its drift, the price would be several times the error
-        it removes.
-        """
+                                The aim is this machine's own *measured* startup (``catch_up_aim_seconds``): projecting
+                                that keeps the error on the early side, where the pre-buffer hold turns it into a wait,
+                                rather than on the late side where nothing can. Its cost is that projection in silence,
+                                so a machine slower than the whole alignment slack is refused it.
+                                """
         if not self._direct_anchor or self._catch_up_used:
             return None
         if self.cinema is not None:
@@ -1502,11 +1402,10 @@ class AudioStreamer(threading.Thread):
     def _reaim_at_the_room(self, aim_ahead_s):
         """Spend the one re-aim: arm the next flight, then drop this one.
 
-        The broadcast this stream is anchored to does not change -- t_zero,
-        the offset and the room's lead-in are the same numbers -- so the next
-        flight is simply this stream *joining* the room at the position the
-        room will have reached by then.
-        """
+                                The broadcast this stream is anchored to does not change (t_zero, the offset and the room's
+                                lead-in are the same numbers), so the next flight is simply this stream *joining* the room
+                                at the position the room will have reached.
+                                """
         self._catch_up_used = True
         self.direct_catch_up_s = max(0.0, float(aim_ahead_s))
         self._join_playing_room = True
@@ -1523,13 +1422,11 @@ class AudioStreamer(threading.Thread):
     def _discard_flight(self):
         """Drop the flight that started late, and every frame it produced.
 
-        Nothing has been heard yet: what is queued is the pre-buffer, the
-        output has not been started, and no note has been placed on the
-        frames. Buffers go back to their pool (a stopped source reports
-        everything it holds as processed, which is why the reclaim comes
-        after the stop) and the pair's clock starts over, because the queue
-        it was counting is gone.
-        """
+                                Nothing has been heard yet: what is queued is the pre-buffer, the output has not been
+                                started, and no note has been placed on the frames. Buffers go back to their pool (a
+                                stopped source reports everything it holds as processed, which is why the reclaim comes
+                                after the stop) and the pair's clock starts over, because the queue it was counting is gone.
+                                """
         process = self.process
         if process is not None:
             try:
@@ -1584,15 +1481,10 @@ class AudioStreamer(threading.Thread):
         def _build_cmd():
             cmd = [FFMPEG_PATH]
             if target_url.startswith(("http://", "https://")):
-                # Reconnect on mid-stream drops for EVERY network source,
-                # including googlevideo. A CDN connection close near the end
-                # of a song used to kill ffmpeg outright (no reconnect flags)
-                # and the song ended early — verified locally: ffmpeg exits
-                # with an I/O error on a dropped connection, but with
-                # reconnect flags it reconnects at the last byte offset
-                # (range requests) and the full song plays out. YouTube's
-                # signed URLs remain valid for this machine, so reconnecting
-                # with the same URL + yt-dlp headers works.
+                # Reconnect on mid-stream drops for EVERY network source, including googlevideo: a CDN connection
+                # close near the end of a song used to kill ffmpeg outright (no reconnect flags) and the song ended
+                # early - verified locally: ffmpeg exits with an I/O error on a dropped connection, but with
+                # reconnect flags it reconnects at the last byte offset (range requests) and the full song plays out.
                 if "googlevideo.com" in target_url.lower():
                     # Shorter budget: the startup 403 path (stale signed URL)
                     # must re-resolve a fresh URL quickly instead of burning
@@ -1628,20 +1520,15 @@ class AudioStreamer(threading.Thread):
             if header_block:
                 cmd.extend(['-headers', header_block])
             effective_offset = getattr(self, "start_offset", 0.0)
-            # Timeline anchoring (jukebox direct only): a fresh song keeps
-            # position 0 and waits out the shared lead-in below (adding
-            # resolve time here is what used to skip the intro), while a
-            # mid-song join seeks PAST the projected audible start and
-            # waits the exact residual at prebuffer-complete. Non-anchored
-            # workers (personal music bot, livestreams) keep legacy behavior.
+            # Timeline anchoring (jukebox direct only): a fresh song keeps position 0 and waits out
+            # the shared lead-in (adding resolve time here is what used to skip the intro), while a
+            # mid-song join seeks PAST the projected audible start and waits the exact residual at
+            # prebuffer-complete. Non-anchored workers (personal music bot, livestreams) keep legacy.
             if self.start_offset_received_at is not None:
                 if self._join_playing_room:
-                    # Joining a room that is already playing -- the per-listener
-                    # direct fallback into a relay room, or this stream's own
-                    # one catch-up after a late start: always seek. The seek
-                    # formula cancels the offset entirely and lands this
-                    # machine on the room's clock (position = where the room is
-                    # at the instant this machine expects to be audible).
+                    # Joining a room that is already playing (the per-listener direct fallback, or this
+                    # stream's own one catch-up after a late start): always seek. The seek formula cancels
+                    # the offset entirely and lands this machine on the room's clock.
                     effective_offset = max(0.001, effective_offset)
                     effective_offset = self.direct_seek_seconds(
                         effective_offset, self.start_offset_received_at, time.monotonic(),
@@ -1696,17 +1583,12 @@ class AudioStreamer(threading.Thread):
             self.sender_thread.start()
 
         # === Pre-buffer phase: fill LOCAL buffers before starting playback ===
-        # Some fresh googlevideo URLs briefly return 403 while their CDN edge
-        # authorization propagates. Retry — first with the same URL+headers, then
-        # with a freshly RE-RESOLVED URL (a stale signed URL 403s forever no
-        # matter how many times the identical command is retried). All work stays
-        # on this worker thread.
-        # A flight is one ffmpeg launch, its pre-buffer and its hold. A
-        # machine whose own resolve+startup outran the shared deadline
-        # becomes audible late and would play the WHOLE song that far
-        # behind the room, so a note played on it lands off the beat for
-        # everybody; the flight loop below therefore re-aims it once, at
-        # the room's position, instead (``direct_catch_up_aim_s``).
+        # Some fresh googlevideo URLs briefly return 403 while their CDN edge authorization propagates:
+        # retry, first with the same URL+headers, then with a freshly RE-RESOLVED URL (a stale signed URL
+        # 403s forever). All work stays on this worker thread.
+        #
+        # A flight is one ffmpeg launch, its pre-buffer and its hold; the loop below re-aims a machine whose
+        # own resolve+startup outran the shared deadline once, at the room's position.
         catch_up_attempts = 0
         pre_buffered = 0
         _pre_leftover = b''
@@ -1741,13 +1623,10 @@ class AudioStreamer(threading.Thread):
                             'utf-8', 'replace'
                         ).strip()
                     else:
-                        # Alive and silent after the whole pre-buffer window: ffmpeg
-                        # is inside its own reconnect attempt (nothing is logged at
-                        # `-loglevel error` until it gives up) against a host that
-                        # is not answering. There is no 403 to match on, but
-                        # repeating this URL is exactly what it has been doing for
-                        # twelve seconds, so this counts as a failed link -- a
-                        # freshly resolved one points at another CDN edge.
+                        # Alive and silent after the whole pre-buffer window: ffmpeg is inside its own reconnect attempt
+                        # (nothing is logged at `-loglevel error` until it gives up) against a host that is not answering.
+                        # There is no 403 to match on, but repeating this URL is exactly what it has been doing for twelve
+                        # seconds, so this counts as a failed link - a freshly resolved one points at another CDN edge.
                         stalled = True
                 except Exception:
                     error_detail = ""
@@ -1976,12 +1855,10 @@ class AudioStreamer(threading.Thread):
                 pass
 
         if self.running:
-            # Distinguish a natural song end from a mid-song ffmpeg death (403
-            # on a CDN reconnect, connection reset, ...). ffmpeg exits 0 on a
-            # clean EOF; any other exit code after audio already started means
-            # the stream died EARLY. Mark it a failure so the jukebox recovery
-            # watchdog rebuilds with a fresh resolve instead of treating the
-            # silence as a finished song ("music disappears before the end").
+            # Distinguish a natural song end from a mid-song ffmpeg death (403 on a CDN reconnect, connection
+            # reset, ...): ffmpeg exits 0 on a clean EOF, so any other exit code after audio already started
+            # means the stream died EARLY. Mark it a failure so the jukebox recovery watchdog rebuilds with a
+            # fresh resolve instead of treating the silence as a finished song.
             exit_code = None
             try:
                 if self.process is not None:
@@ -2044,10 +1921,10 @@ class AudioStreamer(threading.Thread):
     def resume_output_if_buffered(self):
         """Restart a stopped OpenAL output without replacing this stream.
 
-        This is intentionally limited to already queued frames.  Starting a
-        fresh stream here would lose timing and can duplicate a broadcast;
-        the decoder thread remains the owner of buffering new audio.
-        """
+                                Intentionally limited to already queued frames: starting a fresh stream here would lose
+                                timing and can duplicate a broadcast, and the decoder thread remains the owner of
+                                buffering new audio.
+                                """
         with self._lock:
             if not self.running or self.paused or self._buffers_queued() <= 0:
                 return False
@@ -2070,13 +1947,9 @@ class AudioStreamer(threading.Thread):
         with self._lock:
             try:
                 if self.cinema is not None:
-                    # A cinema room is N speakers, and pausing only the one this
-                    # stream was handed leaves the rest of them playing their
-                    # queues -- and then replaying from the front of those
-                    # queues on resume, which is heard as speakers that never
-                    # line up again after a pause. The bank holds them all,
-                    # and puts a speaker that ran dry during the hold back on
-                    # the room's content instant before resuming.
+                    # A cinema room is N speakers, and pausing only the one this stream was handed leaves the rest
+                    # playing their queues - and then replaying from the front of those queues on resume, which is heard
+                    # as speakers that never line up again after a pause. The bank holds them all.
                     self.cinema.set_paused(paused)
                     if not paused:
                         self.ready_event.set()

@@ -1,36 +1,15 @@
-# Party Sync — client helpers for private "listen together" sessions.
-#
-# The server (libs/party_sync.ts) is authoritative: it runs the session
-# state machine, re-validates every invite/accept/decline step and gates the
-# host's music relay so only session guests receive it. This module only
-# parses the server's S2C payloads into validated client state, decides
-# whether the local music bot must upload its stream (host in a session) and
-# provides role helpers for the menus/prompts. It is deliberately free of
-# pygame/game imports so the parsing and broadcast rules are unit-testable.
-#
-# C2S events the client may send:
-#   party_sync_start / party_sync_end          (host, no data)
-#   party_sync_invite {name} / party_sync_kick {name}
-#   party_sync_accept / party_sync_decline     (invitee)
-#   party_sync_leave / party_sync_list         (member / host)
-#   party_sync_song_request {query}            (guest: /m <song> asks the host)
-#   party_sync_song_requests {open}            (host: the request switch)
-#   party_sync_song_result {to, request_id, ok, title|reason, waiting}
-#                                              (host: what happened to one ask)
-#   party_sync_song_choices {to, request_id, query, items:[{title, duration}]}
-#                                        (host: the results, for the asker to
-#                                         choose one of -- names only)
-#   party_sync_song_pick {request_id, index}
-#                               (asker: which result to queue, or -1 to
-#                                withdraw; resolved against the host's own list)
-#   party_sync_queue {now_playing, items:[{title, by}]}
-#                               (host: relays its play queue to the session)
-# S2C events this module parses (arrive on CHANNEL_MISC):
-#   party_sync_invite_request, party_sync_state, party_sync_joined,
-#   party_sync_kicked, party_sync_ended, party_sync_roster_change,
-#   party_sync_player_list, party_sync_song_request (to the host),
-#   party_sync_song_choices (to the asker), party_sync_song_pick (to the host),
-#   party_sync_queue (to every listener; also carried on the state)
+"""Party Sync — client helpers for private "listen together" sessions.
+
+The server (libs/party_sync.ts) is authoritative: it runs the session state
+machine, re-validates every invite/accept/decline and narrows the host's music
+relay so only session guests receive it. This module only parses the server's
+S2C payloads into validated client state, decides whether the local music bot
+must upload its stream, and answers the menus' role questions. It is
+deliberately free of pygame/game imports so the rules stay unit-testable.
+
+The event list, the wire contract and the reasons behind every rule live in
+.agents/skills/party-sync-system/.
+"""
 
 import time
 
@@ -45,11 +24,10 @@ MAX_REQUEST_ID_LEN = 32
 MAX_QUEUE_ITEMS = 12
 #: Longest shared queue title (the play-head title and every waiting one).
 MAX_QUEUE_TITLE_LEN = 120
-#: The slash forms a Party Sync room reads as "ask the host for this song".
-#: `/m` is the one the menus and the notes tell players to type; `/p` (the
-#: first spelling) and `/play` stay: a command this client once advertised must
-#: keep working -- an alias nobody honours is worse than a long one, because an
-#: unrecognized slash line is not refused, it is SAID IN THE ROOM as chat.
+# The slash forms a Party Sync room reads as "ask the host for this song". `/m` is
+# the one the menus and the notes tell players to type; `/p` (the first spelling)
+# and `/play` stay, because a command this client once advertised must keep
+# working -- an unrecognized slash line is not refused, it is SAID in the room.
 SONG_REQUEST_COMMANDS = ("/m", "/p", "/play")
 #: How many candidates a picker may show (the host's search offers 5).
 MAX_CHOICES = 8
@@ -69,12 +47,9 @@ def _text(value, limit=MAX_NAME_LEN):
 
 
 def _one_line(value, limit):
-    """One line of host text, collapsed and capped.
-
-    A shared queue is drawn in somebody else's menu: a title pasted with
-    newlines in it must not be able to make that menu look like several
-    entries, so this is the only shape a shared title takes.
-    """
+    # One line of host text, collapsed and capped: a shared queue is drawn in somebody
+    # else's menu, so a title pasted with newlines in it must not be able to look like
+    # several entries.
     if not isinstance(value, str):
         return ""
     return " ".join(value.split())[:limit]
@@ -123,12 +98,9 @@ def parse_session_event(data):
 
 
 def parse_state(data):
-    """party_sync_state payload -> normalized dict or None.
-
-    Host/guest names are usernames (server-side identity). Only members
-    receive state, so the client derives its role by comparing the host name
-    with its own account name.
-    """
+    # party_sync_state payload -> normalized dict or None. Host/guest names are
+    # usernames (server-side identity); only members receive state, so the client
+    # derives its own role by comparing the host name with its own account name.
     if not isinstance(data, dict):
         return None
     if data.get("status") not in (None, "active"):
@@ -192,13 +164,10 @@ def _parse_queue_items(raw):
 
 
 def parse_queue(data):
-    """party_sync_queue payload -> `{now_playing, items:[{title, by}]}`.
-
-    Read-only data on its way to a listener's menu, so everything is bounded
-    and one line. A malformed payload reads as an empty queue rather than as
-    somebody else's queue, which is the only safe direction: the next push
-    (the host repeats while the queue has anything in it) corrects it.
-    """
+    # party_sync_queue payload -> {now_playing, items:[{title, by}]}. Read-only data on
+    # its way to a listener's menu, so everything is bounded and one line, and a
+    # malformed payload reads as an empty queue rather than as somebody else's -- the
+    # host repeats the push while the queue has anything in it, so it corrects itself.
     if not isinstance(data, dict):
         return {"now_playing": "", "items": []}
     return {
@@ -208,30 +177,20 @@ def parse_queue(data):
 
 
 def clean_song_query(text):
-    """Normalize a song request: one line, trimmed, capped.
-
-    Collapses whitespace (a pasted YouTube title arrives with newlines and runs
-    of spaces, which only make the search worse) and returns "" when nothing is
-    left to search for. The server cleans the query the same way, so a client
-    and the server can never disagree about what was asked for.
-    """
+    # Normalize a song request: one line, trimmed, capped. Collapses whitespace (a
+    # pasted YouTube title arrives with newlines and runs of spaces) and returns "" when
+    # nothing is left to search for. The server cleans the query the same way, so the
+    # two can never disagree about what was asked for.
     if not isinstance(text, str):
         return ""
     return " ".join(text.split())[:MAX_SONG_QUERY_LEN].strip()
 
 
 def parse_chat_request(message):
-    """The song asked for on a party chat line, or None.
-
-    `/p` and `/play` (case-insensitive) are read as a request *inside a Party
-    Sync room only*: party chat is plain text and never fires a server command,
-    so this is the one place a slash means something (see
-    Gameplay.party_sync_chat2). Returns:
-
-      * a string -> the query to request
-      * ""       -> the command with nothing after it (usage hint)
-      * None     -> an ordinary chat message, leave it alone
-    """
+    # The song asked for on a party chat line, or None. Read inside a Party Sync room
+    # only: party chat is plain text and never fires a server command, so this is the one
+    # place a slash means something (see Gameplay.party_sync_chat2). Returns the query, ""
+    # for the bare command (usage hint), or None for an ordinary message.
     if not isinstance(message, str):
         return None
     text = message.strip()
@@ -287,17 +246,11 @@ def _collapse_runs(word):
 
 
 def near_song_command(message):
-    """A hint when a party chat line looks like a mistyped request, or None.
-
-    A slash line this room does not understand is **said in the room as chat**
-    (party chat is plain text and never fires a server command), so a typo is
-    not a missing feature -- it is the request announced to everybody as
-    somebody's message. Only a line one edit away from a request command earns
-    a hint (plus a held key: `/mm`), and it is spoken instead of the line, so
-    nothing reaches the room. Everything else -- `/help`, `/who`, any real
-    slash line somebody means to say -- stays ordinary chat: guessing at a
-    message is worse than sending it, and only the request is a command here.
-    """
+    # A hint when a party chat line looks like a mistyped request, or None. A slash line
+    # this room does not understand is SAID IN THE ROOM as chat, so a typo is not a missing
+    # feature -- only a line one edit away from a request command (or a held key: `/mm`)
+    # earns a hint, and it is spoken instead of the line so nothing reaches the room.
+    # Everything else stays ordinary chat: guessing at a message is worse than sending it.
     if not isinstance(message, str):
         return None
     text = message.strip()
@@ -315,12 +268,9 @@ def near_song_command(message):
 
 
 def parse_song_request(data):
-    """party_sync_song_request (relayed TO THE HOST) -> dict or None.
-
-    `from` is the requester's name as the server knows it (never taken from a
-    client) and `request_id` is what the host echoes back with the result, so
-    {from, query, request_id} is the whole contract.
-    """
+    # party_sync_song_request (relayed TO THE HOST) -> dict or None. `from` is the
+    # requester's name as the server knows it (never taken from a client) and
+    # `request_id` is what the host echoes back with the result.
     if not isinstance(data, dict):
         return None
     sender = _text(data.get("from"))
@@ -332,12 +282,9 @@ def parse_song_request(data):
 
 
 def parse_song_choices(data):
-    """party_sync_song_choices (relayed TO THE ASKER) -> dict or None.
-
-    The host's search results, as names to choose from: `{request_id, query,
-    items:[{title, duration}]}`. Only the asker ever sees this, and only names
-    and durations travel -- the URLs stay on the host that will play them.
-    """
+    # party_sync_song_choices (relayed TO THE ASKER) -> dict or None: the host's search
+    # results, as names to choose from. Only the asker ever sees this, and only names and
+    # durations travel -- the URLs stay on the host that will play them.
     if not isinstance(data, dict):
         return None
     request_id = _text(data.get("request_id"), MAX_REQUEST_ID_LEN)
@@ -364,14 +311,10 @@ def parse_song_choices(data):
 
 
 def parse_song_pick(data):
-    """party_sync_song_pick (relayed TO THE HOST) -> dict or None.
-
-    `from` is the picker's name as the server knows it, and `index` is the
-    place in the list the host itself offered -- `-1` means "nothing, thanks".
-    A pick never carries a title or a URL: the host resolves the index against
-    its own results, so the only thing a client can choose is one of the songs
-    that were actually offered.
-    """
+    # party_sync_song_pick (relayed TO THE HOST) -> dict or None. `index` is the place in
+    # the list the host itself offered (-1 means "nothing, thanks"); a pick never carries a
+    # title or a URL, so the only thing a client can choose is one of the songs that were
+    # actually offered.
     if not isinstance(data, dict):
         return None
     sender = _text(data.get("from"))
@@ -386,16 +329,11 @@ def parse_song_pick(data):
 
 
 def parse_player_list_entries(data):
-    """party_sync_player_list payload -> [{"name", "near"}].
-
-    A Party Sync session is not map-scoped, so the invite menu lists every
-    player online, the host's own map first. `near` is the server's own answer
-    to "are they standing on this map", carried here so the menu can say which
-    is which — two names from different maps are otherwise identical lines.
-    Deduplicated and capped exactly like the old name-only list, and a payload
-    that predates the field reads as `near` (the same map), which is what it
-    was.
-    """
+    # party_sync_player_list payload -> [{"name", "near"}]. A session is not map-scoped, so
+    # the invite menu lists every player online, the host's own map first; `near` is the
+    # server's answer to "are they standing on this map", carried here so the menu can say
+    # which is which. Deduplicated and capped; a payload that predates the field reads as
+    # `near`, which is what it was.
     if not isinstance(data, dict):
         return []
     raw = data.get("players")
@@ -421,12 +359,9 @@ def parse_player_list(data):
 
 
 def upload_should_send(bot):
-    """Whether the music bot stream must be uploaded right now.
-
-    True when the user enabled public broadcast, routes to the megaphone, OR
-    hosts an active Party Sync session (the server then narrows recipients to
-    the session guests, so this upload is private by construction).
-    """
+    # Whether the music bot stream must be uploaded right now: public broadcast OR routing
+    # to the megaphone OR hosting an active Party Sync session (the server then narrows the
+    # recipients to the session guests, so this upload is private by construction).
     if bot is None:
         return False
     return bool(
@@ -437,13 +372,9 @@ def upload_should_send(bot):
 
 
 def stereo_upload_eligible(bot, channels=2, live_input_pending=False):
-    """Whether the music-bot upload may carry true stereo this frame.
-
-    Only the private Party Sync leg is allowed to send stereo: the host
-    uploads while its session is active, never through the (mono) PA
-    megaphone path, the decode must actually be two channels, and no
-    live-input (mic/guitar) mix is waiting (that mix is built in mono).
-    """
+    # Whether the music-bot upload may carry true stereo this frame: only the private Party
+    # Sync leg may, never through the (mono) PA megaphone path, and only when the decode
+    # really is two channels and no live-input (mic/guitar) mono mix is pending.
     if bot is None:
         return False
     return bool(
@@ -455,14 +386,11 @@ def stereo_upload_eligible(bot, channels=2, live_input_pending=False):
 
 
 def set_direct_mode(entity, gain=None):
-    """Turn an entity's music source into a direct (non-positional) feed.
-
-    Used on the Party Sync GUEST side: the host's stream must reach the
-    guest as clear "headphones" audio at any distance instead of a 3D
-    boombox placed at the host's position. Only touches the music source;
-    the voice source stays fully positional. Returns False when the entity
-    has no music source yet (retry on the next state refresh).
-    """
+    # Turn an entity's music source into a direct (non-positional) feed, for the Party Sync
+    # guest side: the host's stream must reach the guest as clear "headphones" audio at any
+    # distance instead of a 3D boombox at the host's position. Only the music source is
+    # touched. Returns False when there is no music source yet (retry on the next state
+    # refresh).
     src = getattr(entity, "music_source", None)
     if src is None:
         return False
@@ -479,11 +407,10 @@ def set_direct_mode(entity, gain=None):
     except Exception:
         entity._party_sync_direct_restore = None
     # Mirror the host's own Music Bot source exactly (see
-    # MapMusicBot._create_stream_source: direct_channels + spatialize off):
-    # the guest must hear the same clean two-channel feed, not a source that
-    # still passes through HRTF/panning and therefore sounds placed "in front"
-    # or off to one side. Each property applies on its own so one unsupported
-    # extension cannot leave the source half-configured.
+    # MapMusicBot._create_stream_source: direct_channels + spatialize off), so the guest
+    # hears the same clean two-channel feed instead of one still passing through HRTF or
+    # panning. Each property is applied on its own, so one unsupported extension cannot
+    # leave the source half-configured.
     for apply_ in (
         lambda: setattr(src, "spatialize", False),
         lambda: setattr(src, "relative", True),
@@ -520,12 +447,9 @@ def clear_direct_mode(entity):
 
 
 def clear_all_party_direct(gameplay):
-    """Restore every direct-to-ear source (music + voice) on all entities.
-
-    Used when a session ends locally through a menu/key path that does not
-    wait for a server state refresh (host ending from the Music Bot menu,
-    a guest pressing the leave key). Safe to call any time.
-    """
+    # Restore every direct-to-ear source (music + voice) on all entities, for a session that
+    # ends locally through a path that does not wait for a server state refresh (the host
+    # ending from the Music Bot menu, a guest pressing the leave key). Safe to call anytime.
     vc = getattr(gameplay, "voice_channels", None) or {}
     for e in vc.values():
         if getattr(e, "_party_sync_direct", False):
@@ -535,12 +459,9 @@ def clear_all_party_direct(gameplay):
 
 
 def party_member_channels(state):
-    """Set of voice-channel ids of every session member (host + guests).
-
-    Channel ids are the exact keys the client's `voice_channels` map uses,
-    so enabling direct mode by channel is exact — no display-name matching.
-    Empty when no session / no members yet.
-    """
+    # Voice-channel ids of every session member (host + guests). These are the exact keys
+    # the client's `voice_channels` map uses, so enabling direct mode by channel is exact --
+    # no display-name matching. Empty when there is no session or no members yet.
     chans = set()
     if state is None:
         return chans
@@ -564,15 +485,10 @@ def party_member_channels(state):
 
 
 def set_voice_direct_mode(entity, gain=None):
-    """Turn an entity's VOICE source into a direct (non-positional) feed.
-
-    Party Sync "team talk": while a session is active each member's voice
-    chat is delivered straight into the other members' ears (like the music
-    direct feed) instead of as a 3D world voice that fades with distance.
-    Uses the same source flags as the music direct mode; the music source is
-    untouched. Returns False when the entity has no vc_source yet (caller
-    retries on the next sync / incoming frame).
-    """
+    # Turn an entity's VOICE source into a direct (non-positional) feed: "team talk", each
+    # member's voice straight into the other members' ears instead of a 3D world voice that
+    # fades with distance. Same source flags as the music direct mode; the music source is
+    # untouched. Returns False when there is no vc_source yet (the caller retries).
     src = getattr(entity, "vc_source", None)
     if src is None:
         return False
@@ -704,12 +620,9 @@ class PartySyncState:
 
 
 def session_roster(state):
-    """[(name, role)] of everyone in the session: host first, then guests.
-
-    Used by the quick leave menu (Ctrl+F8) so the player sees who is
-    listening before deciding to leave/end. Invalid entries are skipped;
-    an empty list means the session has no usable roster.
-    """
+    # [(name, role)] of everyone in the session: host first, then guests. Used by the quick
+    # leave menu (Ctrl+F8) so a player sees who is listening before leaving or ending.
+    # Invalid entries are skipped.
     roster = []
     host = _text(getattr(state, "host_name", "") or "")
     if host:

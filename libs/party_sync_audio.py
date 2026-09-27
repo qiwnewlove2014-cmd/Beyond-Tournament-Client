@@ -1,37 +1,23 @@
-# Party Sync — map-independent audio sinks for session members.
-#
-# A Party Sync session follows its members across maps (server libs/party_sync.ts
-# addresses every leg to a player, and `voice_channel` is assigned once per
-# login). Every receive leg in the client, however, is entity-bound:
-# event_handeler.process_music_data / process_voice_data look the sender's
-# voice_channel up in `gameplay.voice_channels`, a dict filled from THIS map's
-# spawn packets and cleared on every parse_map. A guest who walked to another
-# map therefore had no entity to play through, and their frames were dropped
-# silently; a host who travelled ended the session server-side.
-#
-# This module is the missing half: one small sink per session member, created
-# from the SERVER's session state (channel ids, never display names), holding
-# exactly the four things an entity holds for audio —
-#   vc_source / radio_source / music_source + a voice and a music compression —
-# kept OUT of `voice_channels` (half the client walks that dict expecting real
-# map entities, and the map load clears it), and used only when no local entity
-# owns the channel. When the member is standing here after all, the entity
-# wins and the sink is released, so one member never plays twice.
-#
-# Rules kept here (each one is a bug that was paid for elsewhere):
-#   * Sources and every OpenAL call happen on the MAIN thread only (see the
-#     audio-manager note about cross-thread AL usage). `sync`, `tick` and
-#     `release_all` are main-thread; the packet paths only READ this table.
-#   * A map load must not release anything — that is the entire point — and
-#     nothing here is tied to a map: the sink has no position, no soundgroup
-#     and no EFX send. It plays the session's own bytes where the listener
-#     stands (direct-to-ear), exactly as it would for a member on this map.
-#   * Same source flags as the entity path (`party_sync.set_direct_mode` /
-#     `set_voice_direct_mode`): spatialize off, relative, direct_channels on.
-#   * The music volume is the listener's own Volume Mixer "music" slider, read
-#     every frame, exactly like `Entity._party_sync_direct_volume`.
-#   * A room is never involved: a sink has no map, so the cinema routing in
-#     `_route_music_to_room` is skipped (it already refuses a direct leg).
+"""Party Sync — map-independent audio sinks for session members.
+
+A session follows its members across maps (the server addresses every leg to a
+player, and `voice_channel` is assigned once per login), but every receive leg in
+the client is entity-bound: process_music_data / process_voice_data look the
+sender's voice_channel up in `gameplay.voice_channels`, which is filled from THIS
+map's spawn packets and cleared on every parse_map. A guest who walked to another
+map therefore had no entity to play through and their frames were dropped
+silently.
+
+This module is the missing half: one sink per session member, built from the
+SERVER's session state (channel ids, never display names), holding the four things
+an entity holds for audio (vc_source / radio_source / music_source + a voice and a
+music compression) and kept OUT of `voice_channels`, because half the client walks
+that dict expecting real map entities. A sink is used only when no local entity
+owns the channel -- an entity always wins, so one member never plays twice.
+
+The rules, the two seams and the pitfalls are recorded in
+.agents/skills/party-sync-system/.
+"""
 
 import contextlib
 
@@ -40,13 +26,10 @@ from .party_sync import party_member_channels
 
 
 def _music_slider(audio):
-    """The listener's own "music" slider as a 0..1 gain, or None.
-
-    One reader for the whole session's music: the sink plays at this gain
-    every frame, and the same number is what an entity needs when it takes a
-    sink's place (`take_over_from_entity`), so a member cannot sound louder on
-    one side of the seam than on the other.
-    """
+    # The listener's own "music" slider as a 0..1 gain, or None. One reader for the whole
+    # session's music: the sink plays at this gain every frame, and the entity that takes a
+    # sink's place uses the same number, so a member cannot sound louder on one side of the
+    # seam than on the other.
     try:
         return max(0.0, float(
             audio.volume_categories.get("music", [100])[0]
@@ -56,12 +39,9 @@ def _music_slider(audio):
 
 
 def state_members(state):
-    """Every member of `state` as ``{channel_id: {"name", "host"}}``.
-
-    Built from the server's own state (channel ids from the host/guest
-    entries), so the sink table is keyed exactly the way the packet paths are.
-    Empty without a session.
-    """
+    # Every member of `state` as {channel_id: {"name", "host"}}, built from the server's own
+    # state so the sink table is keyed exactly the way the packet paths are. Empty without a
+    # session.
     members = {}
     if state is None or not getattr(state, "session_id", ""):
         return members
@@ -86,12 +66,9 @@ def state_members(state):
 
 
 class PartyMemberSink:
-    """One session member's private audio leg, alive without a map entity.
-
-    Only ever plays one member's channel; the routing in event_handeler asks
-    for this object only after `gameplay.voice_channels` had no entity for
-    that channel, so an entity always wins and nothing is ever played twice.
-    """
+    # One session member's private audio leg, alive without a map entity. It only ever plays
+    # one member's channel, and event_handeler asks for it only after
+    # `gameplay.voice_channels` had no entity for that channel.
 
     def __init__(self, game, channel, name="", is_host=False):
         self.game = game
@@ -154,13 +131,10 @@ class PartyMemberSink:
         return self.music_source is not None
 
     def apply_gains(self):
-        """Re-read the listener's own sliders (main thread, every frame).
-
-        The music leg answers to the "music" category (the same slider the
-        entity path uses for a party feed, so the volume the listener set is
-        the volume they get) and the voice leg stays flat: a session voice is
-        not a world position, so nothing may attenuate it by distance.
-        """
+        # Re-read the listener's own sliders (main thread, every frame): the music leg answers to
+        # the "music" category (the same slider the entity path uses for a party feed, so the
+        # volume the listener set is the volume they get) and the voice leg stays flat, because a
+        # session voice is not a world position and nothing may attenuate it by distance.
         if self.music_source is not None:
             with contextlib.suppress(Exception):
                 self.music_source.gain = self.music_gain()
@@ -234,13 +208,10 @@ class PartySinkSet:
     # ── lifecycle (main thread) ─────────────────────────────────────────
 
     def sync(self, gameplay, state=None):
-        """Reconcile the sinks with the session and this map's entities.
-
-        Called on every session change and on every map load. A member needs a
-        sink exactly while we are in a session with them and they have no
-        entity here; the local player never needs one (a client is never sent
-        its own voice, and its own music is local).
-        """
+        # Reconcile the sinks with the session and this map's entities, on every session change
+        # and every map load. A member needs a sink exactly while we are in a session with them
+        # and they have no entity here; the local player never needs one (a client is never sent
+        # its own voice, and its own music is local).
         if gameplay is None:
             return
         if state is None:
@@ -269,15 +240,11 @@ class PartySinkSet:
             sink.ensure_sources()
 
     def ensure_sink(self, gameplay, channel, name="", is_host=False):
-        """The sink for `channel`, created NOW if it does not exist.
-
-        MAIN THREAD ONLY (it creates OpenAL sources). The per-frame reconcile
-        only ever runs a frame later, and at a seam that frame is the whole
-        difference: a member walking to another map still holds their queue in
-        their entity, and it can only be carried into a sink that exists.
-        Returns None for this client's own channel (a client never holds a sink
-        for itself) or a channel that cannot be read.
-        """
+        # The sink for `channel`, created NOW if it does not exist. MAIN THREAD ONLY (it creates
+        # OpenAL sources), because the per-frame reconcile runs a frame later and at a seam that
+        # frame is the whole difference: a member walking to another map still holds their queue
+        # in their entity, and it can only be carried into a sink that exists. None for this
+        # client's own channel, or a channel that cannot be read.
         try:
             channel = int(channel)
         except (TypeError, ValueError):
@@ -306,26 +273,18 @@ class PartySinkSet:
         return sink
 
     def keep_across_map_load(self, gameplay, state=None):
-        """A map load must not end the session or drop a member's sink.
-
-        The sinks have no position, no soundgroup and no EFX send, so the map
-        rebuild cannot invalidate them; this re-runs the reconcile (so a member
-        who IS standing on the new map hands over to their entity) and leaves
-        every other sink exactly as it is. Called from the map-load path in
-        place of the old "sessions are map-scoped, so end it" rule.
-        """
+        # A map load must not end the session or drop a member's sink. The sinks have no position,
+        # no soundgroup and no EFX send, so the map rebuild cannot invalidate them; this re-runs
+        # the reconcile (so a member who IS standing on the new map hands over to their entity)
+        # and leaves every other sink exactly as it is.
         self.sync(gameplay, state)
 
     def tick(self, gameplay=None):
-        """Per-frame reconcile + gain maintenance (main thread).
-
-        Reconciles rather than only tuning gains because a member can change
-        sides of the session without any packet: a host who walks to another
-        map has their entity removed here (their frames would otherwise have
-        nothing to play through until the next session event), and a member
-        who walks onto this map gains one and must stop playing through their
-        sink. Both hand-overs happen on the next frame.
-        """
+        # Per-frame reconcile + gain maintenance (main thread). It reconciles rather than only
+        # tuning gains because a member can change sides of the session without any packet: a host
+        # who walks to another map has their entity removed here (their frames would otherwise
+        # have nothing to play through until the next session event), and a member who walks onto
+        # this map gains one and must stop playing through their sink. Both take the next frame.
         if gameplay is not None:
             self.sync(gameplay, getattr(gameplay, "party_sync", None))
         elif not self._sinks:
@@ -347,12 +306,8 @@ class PartySinkSet:
 
 
 def sinks_for(gameplay, game=None):
-    """The sink table belonging to `gameplay`, created on first use.
-
-    Kept on the gameplay object because it is per-session state of that map
-    view, and reachable from both the packet paths (which only read it) and
-    the per-frame tick.
-    """
+    # The sink table belonging to `gameplay`, created on first use: per-session state of that
+    # map view, reachable from the packet paths (which only read it) and the per-frame tick.
     if gameplay is None:
         return None
     sinks = getattr(gameplay, "_party_sync_sinks", None)
@@ -365,18 +320,12 @@ def sinks_for(gameplay, game=None):
 
 
 def receiver_for(gameplay, game, channel_id):
-    """Who plays one member's audio on this client (entity here, else sink).
-
-    THE one reader of the rule: this map's entity for that voice channel when
-    the member is standing here, otherwise the sink kept for them while they are
-    on another map. An entity always wins -- it is the real body, with a
-    position, a reverb zone and the map's own shaping -- and the sink exists only
-    for the case no entity can serve.
-
-    Read-only by design: the packet paths run on the receive thread and must
-    never create an OpenAL source, so a missing sink means "not ours" rather
-    than "make one".
-    """
+    # Who plays one member's audio on this client: this map's entity for that voice channel
+    # when the member is standing here, otherwise the sink kept for them. THE one reader of
+    # the rule -- an entity always wins, because it is the real body, with a position, a
+    # reverb zone and the map's own shaping -- and the sink exists only for the case no entity
+    # can serve. Read-only by design: the packet paths run on the receive thread and must never
+    # create an OpenAL source, so a missing sink means "not ours" rather than "make one".
     entity = (getattr(gameplay, "voice_channels", None) or {}).get(channel_id)
     if entity is not None:
         return entity
@@ -385,17 +334,11 @@ def receiver_for(gameplay, game, channel_id):
 
 
 def session_music_leg(gameplay, game=None):
-    """The session leg this client is *hearing* a song through, or None.
-
-    Host first, then the guests: a session plays one song for everybody, and the
-    leg that is playing it is the one this machine hears. A leg that is not
-    playing, or whose output holds nothing, is not a song -- so it answers None
-    and a note keeps the timing it always had (the same rule a jukebox follows).
-
-    The channels are the session state's own (`state_members`), never a guess:
-    only a member's channel can be carrying the session's music, and only a
-    non-local member has a sink at all. Read-only (see `receiver_for`).
-    """
+    # The session leg this client is *hearing* a song through, or None. Host first, then the
+    # guests: a session plays one song for everybody, and the leg playing it is the one this
+    # machine hears. A leg that is not playing, or whose output holds nothing, is not a song --
+    # so it answers None and a note keeps the timing it always had (the same rule a jukebox
+    # follows). The channels are the session state's own, never a guess. Read-only.
     members = state_members(getattr(gameplay, "party_sync", None))
     if not members:
         return None
@@ -414,19 +357,12 @@ def session_music_leg(gameplay, game=None):
 
 
 def pump_jam_clocks(gameplay, game=None):
-    """Fire the notes waiting on the session's song (game thread, once a frame).
-
-    A note held on a session leg has to be fired on the thread that can spawn
-    sources, and its wait has to be re-projected every frame -- so this rides the
-    per-frame party tick rather than the receive path.
-
-    **Every** member's leg is pumped, not only the one playing right now: a wait
-    registered on a leg whose song stopped (a paused host, an underrun) must
-    still reach its own instant instead of hanging until the song comes back.
-    Deciding what a stopped output means is the clock's own rule (``SpotClock``:
-    it keeps that wait on the wall clock), and a rule nobody pumps can never be
-    applied -- the cabinet's pump is unconditional for the same reason.
-    """
+    # Fire the notes waiting on the session's song (game thread, once a frame): a note held on
+    # a leg has to be fired on the thread that can spawn sources, and its wait has to be
+    # re-projected every frame, so this rides the per-frame party tick rather than the receive
+    # path. EVERY member's leg is pumped, not only the one playing right now -- a wait
+    # registered on a leg whose song stopped (a paused host, an underrun) must still reach its
+    # own instant, and deciding what a stopped output means is the clock's own rule.
     members = state_members(getattr(gameplay, "party_sync", None))
     if not members:
         return 0
@@ -444,25 +380,19 @@ def pump_jam_clocks(gameplay, game=None):
 
 
 # ── the two seams (main thread) ────────────────────────────────────────
-#
-# One member, two possible outputs. Crossing between them must not restart the
-# song: the frames keep arriving on the same voice channel whichever leg is
-# current, so the only thing that has to travel is what the old leg holds.
+# One member, two possible outputs: crossing between them must not restart the song. The
+# frames keep arriving on the same voice channel whichever leg is current, so the only
+# thing that has to travel is what the old leg holds.
 
 def hand_over(old_leg, new_leg, game=None):
-    """MAIN THREAD ONLY: continue `old_leg`'s audio on `new_leg`.
-
-    Both legs are read exactly the way `EventHandeler._party_audio_receiver`
-    reads them -- `vc_source`, `music_source`, `music_compression` -- so an
-    entity and a sink are the same thing here. A voice leg has no continuity
-    state to carry (its frames play as they arrive and its jitter estimate is
-    keyed by channel in voice_chat), so only its queue moves; the music leg
-    also adopts the song's clock, which is what keeps remote jam notes on the
-    beat across the seam.
-
-    Returns True when something was carried. Never raises: a seam that cannot
-    be carried keeps the old behaviour (the new leg pre-buffers).
-    """
+    # MAIN THREAD ONLY: continue `old_leg`'s audio on `new_leg`. Both legs are read exactly the
+    # way EventHandeler._party_audio_receiver reads them (vc_source, music_source,
+    # music_compression), so an entity and a sink are the same thing here. A voice leg has no
+    # continuity state to carry (its frames play as they arrive and its jitter estimate is keyed
+    # by channel in voice_chat), so only its queue moves; the music leg also adopts the song's
+    # clock, which is what keeps remote jam notes on the beat across the seam. Returns True when
+    # something was carried; never raises, so a seam that cannot be carried keeps the old
+    # behaviour (the new leg pre-buffers).
     if old_leg is None or new_leg is None or old_leg is new_leg:
         return False
     if game is None:
@@ -499,15 +429,11 @@ def hand_over(old_leg, new_leg, game=None):
 
 
 def take_over_from_entity(gameplay, entity, channel, game=None):
-    """MAIN THREAD ONLY: a session member's entity is leaving this map.
-
-    Called from the entity-removal path (before the entity's sources are
-    destroyed): a member who travels to another map keeps the session -- the
-    frames keep arriving, addressed to their voice channel -- so what their
-    entity still holds has to cross into the sink that will play it. A channel
-    that is not a session member is left alone (their audio simply ends, as it
-    always has).
-    """
+    # MAIN THREAD ONLY: a session member's entity is leaving this map. Called from the
+    # entity-removal path BEFORE the entity's sources are destroyed: a member who travels to
+    # another map keeps the session -- the frames keep arriving, addressed to their voice
+    # channel -- so what their entity still holds has to cross into the sink that will play it.
+    # A channel that is not a session member is left alone.
     if gameplay is None or entity is None:
         return False
     try:
@@ -528,28 +454,16 @@ def take_over_from_entity(gameplay, entity, channel, game=None):
 
 
 def hand_back_to_entity(gameplay, entity, channel, game=None):
-    """MAIN THREAD ONLY: this entity is a session member's leg from now on.
-
-    Called from the spawn path for every player entity. Two jobs, and the
-    FIRST one is not about the sink at all:
-
-    1. Put the entity on the session's legs (`_apply_session_modes`), whether
-       or not a sink was ever built. A sink is only one way to arrive here: a
-       MAP LOAD or a return from another map replaces every entity in this
-       table, and the roster does not change to say the new ones are session
-       members -- so an entity left off the legs plays the host's song as a 3D
-       boombox standing at their body (nothing past `ENTITY_MUSIC_MAX_DISTANCE`
-       50 tiles), and the listener reports a silent party while the host hears
-       their own music perfectly. Asking for a sink here would make the legs
-       conditional on a race nobody can see: the per-frame reconcile only ever
-       builds that sink if it happens to run between the map's clear and this
-       spawn.
-
-    2. Carry the sink's queue and the song's clock into the entity, if there
-       was a sink, and release it. The sink was a direct-to-ear feed -- no
-       position, nothing spatializing it -- and the entity has to take those
-       legs over with the audio or the song changes character mid-phrase.
-    """
+    # MAIN THREAD ONLY: this entity is a session member's leg from now on. Two jobs, and the
+    # FIRST is not about the sink at all:
+    #   1. Put the entity on the session's legs (_apply_session_modes), whether or not a sink
+    #      was ever built. A map load or a return from another map replaces every entity in this
+    #      table and the roster does not change to say the new ones are session members, so an
+    #      entity left off the legs plays the host's song as a 3D boombox standing at their body
+    #      and the listener reports a silent party while the host hears their own music perfectly.
+    #   2. Carry the sink's queue and the song's clock into the entity, if there was a sink, and
+    #      release it: the sink was direct-to-ear, and the entity has to take those legs over
+    #      with the audio or the song changes character mid-phrase.
     if gameplay is None or entity is None:
         return False
     try:
@@ -570,23 +484,19 @@ def hand_back_to_entity(gameplay, entity, channel, game=None):
 
 
 def _apply_session_modes(gameplay, entity, channel, state):
-    """MAIN THREAD ONLY: put ONE entity on the session's direct legs.
-
-    The same two rules `EventHandeler._sync_party_sync_direct_audio` applies to
-    every entity at once, asked for the entity that is taking a sink's place.
-    That bulk sync runs on a session event or a map load and not on a spawn, so
-    without this a member who walks onto the map would keep playing a guest's
-    music positionally -- and the output format the packet path derives from
-    that flag would flush the very queue just carried across.
-    """
+    # MAIN THREAD ONLY: put ONE entity on the session's direct legs. The same two rules
+    # EventHandeler._sync_party_sync_direct_audio applies to every entity at once, asked for the
+    # entity taking a sink's place: that bulk sync runs on a session event or a map load and not
+    # on a spawn, so without this a member who walks onto the map would keep playing a guest's
+    # music positionally -- and the output format the packet path derives from that flag would
+    # flush the very queue just carried across.
     if state is None:
         return
-    # The local player's own entity is never on a session leg: nobody sends it
-    # audio (a client is never sent its own voice, and its own music is local),
-    # and `EventHandeler._sync_party_sync_direct_audio` skips it for exactly
-    # this reason. Without the guard a freshly spawned local entity would be
-    # flagged and later "restored" by `clear_direct_mode` as if it had ever
-    # been positional.
+    # The local player's own entity is never on a session leg: nobody sends it audio (a client is
+    # never sent its own voice, and its own music is local), and
+    # EventHandeler._sync_party_sync_direct_audio skips it for exactly this reason. Without the
+    # guard a freshly spawned local entity would be flagged and later "restored" by
+    # clear_direct_mode as if it had ever been positional.
     if getattr(entity, "is_user", False):
         return
     from .party_sync import set_direct_mode, set_voice_direct_mode
@@ -603,14 +513,10 @@ def _apply_session_modes(gameplay, entity, channel, state):
 
 
 def _own_channel(gameplay):
-    """This client's own voice_channel.
-
-    The login snapshot carries it (`own_voice_channel`); when that is missing
-    the local entity answers it, because our own entity is in this map's
-    channel table like everybody else's (`is_user` is only ever true there).
-    A client is never sent its own voice and its own music is local, so it
-    must never hold a sink for itself.
-    """
+    # This client's own voice_channel. The login snapshot carries it (`own_voice_channel`), and
+    # the local entity answers it when that is missing, because our own entity is in this map's
+    # channel table like everybody else's. A client is never sent its own voice and its own music
+    # is local, so it must never hold a sink for itself.
     own = getattr(gameplay, "own_voice_channel", None)
     try:
         if own is not None:

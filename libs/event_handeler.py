@@ -23,19 +23,12 @@ from .audio_diagnostics import probe as audio_probe
 
 
 def _route_music_to_room(game, entity, channel_id):
-    """Send a peer's Music Bot frames into a cabinet's room instead of ears.
-
-    A player can route their bot into a cabinet's room (Music Bot menu ->
-    ``Cinema Speakers:``, see libs/audio/cinema/peer.py). That routing is
-    *theirs*; every listener follows it by playing the frames arriving on
-    that voice channel out of that same room, resolved from the listener's
-    own map, rather than out of a 3D speaker on the sender's back.
-
-    Only the routing is decided here -- the room itself is built on the main
-    thread, because it creates OpenAL sources (``_room_feed`` in MusicComp)
-    and this runs on the receive thread. Nothing is resolved when the sender
-    never routed anything, which is every ordinary broadcast.
-    """
+    # Send a peer's Music Bot frames into a cabinet's room instead of ears. The routing
+    # belongs to the sender (Music Bot menu -> Cinema Speakers:, libs/audio/cinema/peer.py)
+    # and every listener follows it: the frames arriving on that voice channel are played
+    # out of that same room, resolved from the listener's own map, not out of a 3D speaker
+    # on the sender's back. Only the routing is decided here -- the room is built on the
+    # main thread, because it creates OpenAL sources and this runs on the receive thread.
     compression = getattr(entity, "music_compression", None)
     if compression is None or not hasattr(compression, "set_cinema_channel"):
         return
@@ -48,31 +41,21 @@ def _route_music_to_room(game, entity, channel_id):
 
 
 class EventHandeler:
-    # Jam-note/jukebox alignment mode.
-    #
-    # True (target-time, default): schedule notes on the shared server clock
-    # (creation time + this listener's own jukebox backlog) so every listener
-    # hears them on the same beat of the song. Required in practice: backlogs
-    # diverge (mid-song map joiners are warmed up with 8 relay frames ≈ 320ms
-    # while song-start listeners sit at the 4-frame prebuffer ≈ 160ms, and the
-    # queue depth never shrinks back), so with arrival-time playback those
-    # listeners heard drum/piano notes land ahead of the song while the
-    # performer's own mix sounded fine. Without music, notes stay immediate
-    # (the low-latency live-jam path).
-    #
-    # False (arrival-time): notes play the moment the packet arrives. Only
-    # correct while every listener's jukebox backlog closely matches the
-    # performer's own, which warmup joins and underrun resumes break.
+    # Jam-note alignment mode. True (target-time, the default): notes are scheduled on the
+    # shared server clock plus this listener's own jukebox backlog, so every listener hears
+    # them on the same beat. Backlogs diverge (a mid-song joiner is warmed up with 8 relay
+    # frames ~320ms, a song-start listener sits at the 4-frame prebuffer ~160ms, and the
+    # queue never shrinks back), so arrival-time playback put notes ahead of the song on
+    # those listeners. Without music, notes stay immediate (the low-latency live-jam path).
     SYNC_JAM_NOTES_WITH_JUKEBOX = True
     # Only used when SYNC_JAM_NOTES_WITH_JUKEBOX is True: compensates the
     # note's tail latency (playing-frame lead + queue drain).
     JAM_NOTE_ADVANCE_MS = 45
-    # A note heard through a cinema room at least this long after it was struck
-    # is reported (at most once per five seconds, on the routine sink): the
-    # numbers behind the hold are the only way to tell a room that is a queue
-    # behind apart from a performer who reported no lag of their own, and a
-    # probe low enough to catch the baseline also answers "it is not the hold"
-    # when no line appears at all.
+    # A note heard through a cinema room at least this long after it was struck is reported
+    # (at most once per five seconds, on the routine sink): the components behind the hold
+    # are the only way to tell a room that is a queue behind from a performer who reported
+    # no lag of their own, and a probe low enough to catch the baseline also answers
+    # "it is not the hold" when no line appears at all.
     JAM_LATENCY_REPORT_MS = 40
     def __init__(self, client, game):
         self.client = client
@@ -159,11 +142,8 @@ class EventHandeler:
         speak(msg, False)
 
     def password_changed(self, data):
-        """The server changed this account's password (slash command).
-
-        Refresh the saved login so the next automatic login keeps working
-        instead of failing on the stale stored password.
-        """
+        # The Server changed this account's password, so refresh the saved login: the next
+        # automatic login must not fail on the stale stored password.
         from . import options
         password = data.get("password") if isinstance(data, dict) else None
         if not isinstance(password, str) or not password:
@@ -185,11 +165,10 @@ class EventHandeler:
     def connected(self, data):
         self.game.reconnecting = False
         self.client.put(("connected", True))
-        # The login watchdog ends here: the snapshot is the proof the server
-        # finished authenticating this account (see
-        # networking.Client.login_timed_out). Being merely connected to the
-        # transport must not end it -- a handshake does not mean the login is
-        # done, and treating it as such let a slow server stay unanswered.
+        # The login watchdog ends here: the snapshot is the proof the Server finished
+        # authenticating this account (see networking.Client.login_timed_out). Being connected
+        # to the transport must not end it -- a handshake is not a finished login, and treating
+        # it as one let a slow server stay unanswered.
         self.client.put(("logged_in", True))
         self.game.replace(self.gameplay)
         self.gameplay.player.name = data["username"]
@@ -238,11 +217,9 @@ class EventHandeler:
             self.gameplay.can_lock_cinema_mode = bool(
                 data.get("can_lock_cinema_mode", False)
             )
-            # This client's own voice channel, needed to pan *yourself*: the
-            # Server tells a joiner about everyone on the map except them, so
-            # it never arrives in a spawn packet (libs/cinema_pan_menu.py).
-            # A Server that predates the field leaves it unset and self is
-            # simply not listed -- the old behaviour, never a guessed number.
+            # This client's own voice channel, needed to pan *yourself*: the Server tells a joiner
+            # about everyone on the map except them, so it never arrives in a spawn packet. A Server
+            # that predates the field leaves it unset and self is simply not listed, never guessed.
             if "voice_channel" in data:
                 self.gameplay.own_voice_channel = data.get("voice_channel")
         except Exception:
@@ -269,11 +246,10 @@ class EventHandeler:
                 pass
             self.gameplay.voice_chat = None
             
-        # Do not clear voice_channels here. The server constructs the player and
-        # sends map/player spawn packets on CHANNEL_MAP before this connected
-        # event on CHANNEL_MISC. ENet orders each channel independently, so the
-        # current connection's mappings may already be present. A reconnect gets
-        # a fresh EventHandeler/Gameplay instance and cannot inherit this dict.
+        # Do not clear voice_channels here: the Server sends map/player spawn packets on
+        # CHANNEL_MAP before this connected event on CHANNEL_MISC, and enet orders each channel
+        # independently, so this connection's mappings may already be present. A reconnect gets
+        # a fresh EventHandeler/Gameplay and cannot inherit this dict.
         if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
              self.gameplay.megaphone.setup_megaphone_speakers(force=True)
 
@@ -288,13 +264,10 @@ class EventHandeler:
         speak("Welcome. You are now online")
 
     def megaphone_permission(self, data):
-        """Server's authoritative answer to the PA Test Mode permission check.
-
-        Used when the login-time staff flags are missing/unknown (e.g. an
-        older server payload): the client asks the server when the player
-        presses O, and this completes the toggle with the live answer so every
-        staff level is honoured.
-        """
+        # The Server's authoritative answer to the PA Test Mode permission check, used when the
+        # login-time staff flags are missing or unknown (an older payload): the client asks when
+        # the player presses O and completes the toggle with the live answer, so every staff
+        # level is honoured.
         allowed = bool((data or {}).get("allowed", False))
         gp = self.gameplay
         if allowed:
@@ -316,10 +289,9 @@ class EventHandeler:
             if len(self.game.match_history) > 50:
                 self.game.match_history.pop(0)
 
-        # Defensive: some server paths have sent payloads without "buffer"
-        # (KeyError crash). Treat missing keys as their defaults. An empty
-        # text (e.g. an unpatched server sending {message, type}) is skipped
-        # entirely so the TTS never announces a blank utterance.
+        # Defensive: some server paths sent payloads without "buffer" (a KeyError crash), so a
+        # missing key reads as its default. An empty text is skipped entirely, so the TTS never
+        # announces a blank utterance.
         data = data or {}
         if not text and not data.get("sound"):
             return
@@ -402,9 +374,8 @@ class EventHandeler:
             self.gameplay._auto_ping_inflight = False
 
             # --- Stereo ping sound effect (manual F3 only) ---
-            # Left channel plays the "start" ping immediately; right channel
-            # plays the "end" ping after a delay proportional to the RTT.
-            # Faster ping = shorter delay = quicker left→right sweep.
+            # The left channel pings immediately and the right one after a delay proportional to the
+            # RTT, so a faster ping is a quicker left-to-right sweep.
             if not auto and self.game and hasattr(self.game, 'audio_mngr') and self.game.audio_mngr:
                 delay_ms = max(10, min(300, rtt_ms))
                 # Left: start ping (immediate)
@@ -426,14 +397,10 @@ class EventHandeler:
             self.gameplay.pingging = False
 
     def _queue_map_audio_event(self, callback, data):
-        """Serialize map/OpenAL mutations onto the game/audio owner thread.
-
-        ENet receives map packets on its network thread.  Map parsing creates and
-        destroys OpenAL sources, buffers, filters and EFX slots, so doing it in
-        the packet callback is undefined on OpenAL Soft and used to make reloads
-        fail nondeterministically.  Every map lifecycle event uses this helper,
-        preserving the order in which CHANNEL_MAP packets were received.
-        """
+        # Serialize map/OpenAL mutations onto the game/audio owner thread: enet receives map
+        # packets on its network thread, and parsing a map creates and destroys OpenAL sources,
+        # buffers, filters and EFX slots -- doing that in the packet callback is undefined on
+        # OpenAL Soft and used to make reloads fail nondeterministically.
         payload = dict(data) if isinstance(data, dict) else data
         self.game.put(lambda callback=callback, payload=payload: callback(payload))
 
@@ -480,25 +447,20 @@ class EventHandeler:
         if callable(detach):
             with contextlib.suppress(Exception):
                 detach()
-        # An in-place reload re-creates the map's reverb zones while this
-        # speaker set's per-speaker EFX slots are still held (setup only
-        # recycles them after the parser ran). Free them FIRST so the rebuilt
-        # room reverbs can borrow a pool slot; setup_megaphone_speakers is
-        # called right after parser.load and rebuilds from the cleared lists.
+        # An in-place reload re-creates the map's reverb zones while this speaker set still holds
+        # its per-speaker EFX slots (setup only recycles them after the parser ran), so free them
+        # FIRST or the rebuilt room reverbs cannot borrow a pool slot.
         release_speakers = getattr(megaphone, 'release_speaker_slots', None)
         if callable(release_speakers):
             with contextlib.suppress(Exception):
                 release_speakers()
-        # A voice playing out of a cabinet's room is playing at the speakers
-        # the parser is about to replace (their positions are the old map's),
-        # so those sources go back now; the next frame a talker sends builds
-        # the room again from the map that came back.
+        # A voice playing out of a cabinet's room is at speakers the parser is about to replace,
+        # so those sources go back now; the next frame the talker builds the room again.
         with contextlib.suppress(Exception):
             cinema_speech.release_all(self.game)
-        # A peer's song in a cabinet's room is at those same speakers, and the
-        # voice channels are cleared with the map (so the key the routing is
-        # remembered by stops meaning anything): both halves of it go back,
-        # and the next announcement rebuilds the room from the new map.
+        # A peer's song in a cabinet's room is at those same speakers, and the voice channels are
+        # cleared with the map (so the key the routing is remembered by stops meaning anything):
+        # both halves go back and the next announcement rebuilds the room from the new map.
         with contextlib.suppress(Exception):
             cinema_peer.release_all(self.game)
 
@@ -512,32 +474,22 @@ class EventHandeler:
         music_bot = getattr(gp, 'music_bot', None)
         if music_bot and hasattr(music_bot, '_sync_map_reverb'):
             music_bot._sync_map_reverb()
-        # Anything the map that just went away failed to hand back is returned
-        # here. The pool holds the 64 slots the driver grants for the life of
-        # the process, so a holder that vanished without releasing (an element
-        # replaced in place, an entity overwritten in the table) used to cost a
-        # slot until the client was restarted. The sweep only frees a slot
-        # whose holder is provably gone, so a live room is never taken away.
+        # Anything the departed map failed to hand back is returned here. The pool holds the 64
+        # slots the driver grants for the life of the process, so a holder that vanished without
+        # releasing used to cost a slot until the client was restarted. Only a slot whose holder
+        # is provably gone is freed, so a live room is never taken away.
         audio_mngr = getattr(self.game, 'audio_mngr', None)
         reclaim = getattr(audio_mngr, 'reclaim_orphaned_slots', None)
         if callable(reclaim):
             audio_probe.call("map.reclaim_slots", reclaim)
 
     def map_renamed(self, data):
-        """The map this client is standing in was renamed on the Server.
-
-        A map's name is its file name and the map itself did not change: the
-        bytes this client already parsed are the map it is still standing in,
-        and no speaker moved. So this is deliberately *not* a map load --
-        ``parse_map`` is what stops jukebox playback, resets the instruments
-        and drops the moving intro, because a ``parse_map`` naming a different
-        map means the map really changed. That comparison is exactly why the
-        name has to arrive on its own: the client holds the name it believes it
-        is in, and the next map packet (a builder edit, a Reload Map Data) would
-        otherwise read as a map change and tear the room's audio down for a
-        rename nobody heard. Queued onto the main thread like the rest of the
-        map channel, where that decision is made.
-        """
+        # The map this client is standing in was renamed on the Server. A map's name is its file
+        # name and the map itself did not change -- the bytes already parsed are the map still
+        # being stood in and no speaker moved -- so this is deliberately NOT a map load:
+        # parse_map is what stops jukebox playback and resets the instruments, and the next map
+        # packet (a builder edit, Reload Map Data) would otherwise read as a map change and tear
+        # the room's audio down for a rename nobody heard.
         if not isinstance(data, dict):
             return
         name = data.get("name")
@@ -577,19 +529,13 @@ class EventHandeler:
         # Clear it here (on CHANNEL_MAP) so subsequent spawn_entity packets on
         # that same ordered channel rebuild only valid mappings for the new map.
         self.gameplay.voice_channels.clear()
-        # Party Sync spans maps: the server keeps the session and addresses
-        # every leg to the player (voice_channel is assigned once per login),
-        # so a map load is not an end. The session mirror and the host's forced
-        # upload stay exactly as they were — a host who travels keeps playing
-        # to the room — and a member with no entity here keeps their sink.
-        # Only the server ends a session, and its party_sync_ended is what
-        # clears this, never the map.
-        #
-        # This call is about the SINKS and the members still standing here, not
-        # about the map that is arriving: the new entities do not exist yet (the
-        # table was cleared a line above, and the spawn packets come after), so
-        # putting them on the session's legs is `_apply_spawn_entity`'s job —
-        # every member's entity is put back on them there, sink or no sink.
+        # Party Sync spans maps: the Server keeps the session and addresses every leg to the
+        # player (voice_channel is assigned once per login), so a map load is not an end -- the
+        # session mirror and the host's forced upload stay exactly as they were, and a member
+        # with no entity here keeps their sink. Only the Server ends a session (party_sync_ended).
+        # This call is about the SINKS and the members still standing here, not about the map
+        # arriving: the new entities do not exist yet, so putting them on the session's legs is
+        # _apply_spawn_entity's job.
         ps = getattr(self.gameplay, "party_sync", None)
         if ps is not None and getattr(ps, "role", None) in ("host", "guest"):
             self._sync_party_sync_direct_audio()
@@ -598,13 +544,11 @@ class EventHandeler:
         # map so memory does not accumulate. Must run on the main thread because
         # reset() touches OpenAL sources/filters.
         self._reset_instruments_for_map_change()
-        # Stop any jukebox audio still playing from the previous map. A
-        # parse_map naming a DIFFERENT map is a real transition: stop every
-        # old-map jukebox NOW (sources, relay routes, pending sweeps) so no
-        # ghost audio bleeds into the new map and nothing from the old map can
-        # touch the new map's playback. Only a same-name full reparse keeps the
-        # graceful mark-and-sweep that lets re-broadcast play events preserve
-        # the stream seamlessly.
+        # Stop any jukebox audio still playing from the previous map. A parse_map naming a
+        # DIFFERENT map is a real transition: stop every old-map jukebox NOW (sources, relay
+        # routes, pending sweeps) so no ghost audio bleeds in and nothing from the old map can
+        # touch the new map's playback. Only a same-name reparse keeps the graceful mark-and-sweep
+        # that lets a re-broadcast play event preserve the stream seamlessly.
         incoming_map_name = data.get("name")
         same_map = bool(
             incoming_map_name
@@ -630,12 +574,10 @@ class EventHandeler:
         z = float(raw_z) if raw_z is not None else 0.0
         audio_probe.call("map.player_move", self.gameplay.player.move, x, y, z, play_sound=False)
         if getattr(self.gameplay, "spectator_mode", False):
-            # The ears, not the body: this packet moved this client's own
-            # character (`player.move` above), but the camera follows the
-            # player being watched, so its on_move never fired here -- and the
-            # new map's ambience bed, zone and reverb were never entered at
-            # all (the room stayed the old map's until the followed player
-            # happened to take a step). The coordinates on a map packet for a
+            # The ears, not the body: this packet moved this client's own character, but the camera
+            # follows the player being watched, whose on_move never fired here -- so the new map's
+            # ambience bed, zone and reverb were never entered at all (the room stayed the old map's
+            # until the followed player happened to take a step). A map packet's coordinates for a
             # spectator are that followed player's.
             audio_probe.call(
                 "map.listener_refresh",
@@ -643,10 +585,9 @@ class EventHandeler:
             )
         # Setup megaphone speakers after map data is loaded (with safety check)
         if hasattr(self.gameplay, 'megaphone') and self.gameplay.megaphone:
-            # A full parse may be a different map. Replace the old cached PA
-            # ownership with the authoritative snapshot carried on the same
-            # ordered map packet. In-place update_map rebuilds deliberately
-            # preserve its already-replicated state.
+            # A full parse may be a different map: replace the old cached PA ownership with the
+            # authoritative snapshot carried on the same ordered map packet. In-place update_map
+            # rebuilds deliberately preserve the already-replicated state.
             self.gameplay.megaphone.lock_owner = data.get("megaphone_lock_owner")
             owners = data.get("megaphone_lock_owners")
             self.gameplay.megaphone.lock_owners = (
@@ -683,12 +624,10 @@ class EventHandeler:
         self.game.audio_mngr.apply_filter(
             None, exclude=self.game.exclude_water, clear=True
         )
-        # This is an in-place map reload, not a map transition.  Do not reset
-        # Piano/Drums here: reset_for_map_change() stops every live local and
-        # remote voice, which made all instruments go silent when a builder
-        # pressed "Reload Map Data".  Full parse_map still resets them when a
-        # player actually changes maps.
-        # Jukebox audio is likewise preserved across update_map reloads.
+        # This is an in-place map reload, not a map transition: do not reset Piano/Drums here --
+        # reset_for_map_change() stops every live local and remote voice, which made all
+        # instruments go silent when a builder pressed "Reload Map Data". Jukebox audio is
+        # likewise preserved across update_map reloads.
         self.gameplay.player.in_water = False
         self.game.ignore_others_water = False
         self.game.exclude_water.clear()
@@ -793,10 +732,9 @@ class EventHandeler:
             # A resync can replace an entity with the same name.  Never leave the
             # spectator camera bound to the just-destroyed entity/audio sources.
             self.gameplay.camera.set_focus_object(entity)
-        # Vehicles: apply the engine state carried by the spawn packet itself.
-        # The server sets demo engines (e.g. /spawntruck auto-idle) before the
-        # object is broadcast, so relying only on a later vehicle_state packet
-        # would silently lose the engine when that packet races the spawn.
+        # Vehicles apply the engine state the spawn packet itself carries: the Server sets demo
+        # engines (e.g. /spawntruck auto-idle) before broadcasting the object, so relying only on
+        # a later vehicle_state packet would lose the engine when that packet races the spawn.
         if getattr(entity, "is_vehicle", False):
             entity.apply_state(
                 data.get("vehicle_speed", 0.0),
@@ -808,10 +746,9 @@ class EventHandeler:
                 horn_on=data.get("horn_on", False),
                 revving=data.get("revving", False),
             )
-        # Fresh truck2 placements announce themselves with the ENGINE START
-        # (truck_start_ext.ogg) — apply_state's engine-on branch plays it at
-        # the truck. The boarding sound (truck_spawn.ogg) is played by the
-        # server when a rider climbs in, not here.
+        # A fresh truck2 placement announces itself with the ENGINE START (truck_start_ext.ogg)
+        # in apply_state's engine-on branch; the boarding sound (truck_spawn.ogg) is played by
+        # the Server when a rider climbs in, not here.
         log(f"[ENTITY] Spawned {data['name']!r} at ({x}, {y}, {z})")
         if data.get("voice_channel", None) != None:
             if not hasattr(self.gameplay, 'voice_channels'):
@@ -820,12 +757,10 @@ class EventHandeler:
         if data.get("player", False) and not getattr(entity, "player", False):
             entity.player = True
 
-        # A session member's entity is the leg that plays them from here on.
-        # Runs after `player` (that setter is what creates the sources the legs
-        # are written to), and for EVERY member entity rather than only one that
-        # was handed a sink: a map load, a return from another map and a late
-        # session all produce a fresh entity that is not on the session's legs
-        # yet, and the roster will not say so again.
+        # A session member's entity is the leg that plays them from here on. Runs after `player`
+        # (that setter creates the sources the legs are written to) and for EVERY member entity,
+        # not only one that was handed a sink: a map load, a return from another map and a late
+        # session all produce a fresh entity that is not on the session's legs yet.
         if (data.get("voice_channel", None) is not None
                 and getattr(entity, "player", False)):
             party_sync_audio.hand_back_to_entity(
@@ -903,11 +838,9 @@ class EventHandeler:
             )
         if hasattr(self.gameplay, 'voice_channels') and isinstance(self.gameplay.voice_channels, dict):
             keys_to_remove = [k for k, v in self.gameplay.voice_channels.items() if getattr(v, 'name', None) == target_name]
-            # A session member who walks to another map keeps the session, so
-            # what their entity still holds (the song's queue and clock, the
-            # voice's queue) crosses into the sink that plays them from here.
-            # This must happen BEFORE the removal below destroys the entity's
-            # sources.
+            # A session member who walks to another map keeps the session, so what their entity still
+            # holds (the song's queue and clock, the voice's queue) crosses into the sink that plays
+            # them from here. This must happen BEFORE the removal below destroys the entity's sources.
             for k in keys_to_remove:
                 party_sync_audio.take_over_from_entity(
                     self.gameplay, self.gameplay.voice_channels.get(k), k,
@@ -930,11 +863,9 @@ class EventHandeler:
             self.gameplay.map.remove_entity(data["name"])
 
     def play_sound(self, data):
-        # ALL entity audio must be created on the main thread: the OpenAL
-        # context is only current there, and calling it from this network
-        # thread under mass-spawn load corrupted native state (hard 0xC0000005
-        # crashes with no Python traceback). Vehicles already queued
-        # themselves; now every entity sound does.
+        # ALL entity audio must be created on the main thread: the OpenAL context is only current
+        # there, and calling it from this network thread under mass-spawn load corrupted native
+        # state (hard 0xC0000005 crashes with no Python traceback).
         if (not data.get("_entity_main_thread")
                 and not data.get("_vehicle_main_thread")
                 and not data.get("_motorcycle_main_thread")):
@@ -1000,10 +931,9 @@ class EventHandeler:
         server_time = data.get("server_time")
         if server_time is not None:
             self._update_clock_offset(server_time)
-        # Piano/guitar notes take the music-synced queue first (before the
-        # main-thread gate below — they must never re-enter this handler).
-        # OpenAL context is only current on the main thread, so we MUST NOT
-        # play them from this network-thread handler.
+        # Piano/guitar notes take the music-synced queue first, before the main-thread gate below
+        # (they must never re-enter this handler): the OpenAL context is only current on the main
+        # thread, so they must not be played from this network-thread handler.
         if (data.get("is_stereo_spatial") and getattr(self, 'gameplay', None)
                 and getattr(self.gameplay, 'player', None)
                 and (data.get("piano_note") or data.get("guitar_note"))):
@@ -1029,10 +959,9 @@ class EventHandeler:
                     instrument="piano",
                 )
             return
-        # ALL remaining unbound sounds (zombie splashes/summons, foley,
-        # ambience — both the stereo-spatial and plain 3D branches) must
-        # play on the main thread: the OpenAL context is only current there,
-        # and network-thread playback under mass-spawn load caused hard
+        # All remaining unbound sounds (zombie splashes/summons, foley, ambience -- both the
+        # stereo-spatial and plain 3D branches) must play on the main thread: the OpenAL context
+        # is only current there, and network-thread playback under mass-spawn load caused hard
         # native crashes (0xC0000005 with no Python traceback).
         if not data.get("_main_thread"):
             sound_data = dict(data)
@@ -1048,11 +977,9 @@ class EventHandeler:
         # Keep door open sounds crisp and natural (bypass occlusion for door open)
         allow_occlusion = "door/open" not in snd_path
         if allow_occlusion and getattr(self, 'gameplay', None) and getattr(self.gameplay, 'player', None):
-            # The ears, not this client's character: a spectator's own body is
-            # parked where they joined the match, and judging a relayed sound
-            # from there muffled it behind walls that are nowhere near the
-            # listener (and, on the stereo-spatial path, dropped it outright
-            # past a distance the listener is not standing at).
+            # The ears, not this client's character: a spectator's own body is parked where they joined
+            # the match, so judging a relayed sound from there muffled it behind walls nowhere near the
+            # listener (and, on the stereo-spatial path, dropped it past a distance they do not stand at).
             listener = self.gameplay.listener_object()
             lx, ly, lz = listener.x, listener.y, listener.z
             facing = getattr(listener, 'facing', 0.0)
@@ -1102,12 +1029,9 @@ class EventHandeler:
                             self.game.audio_mngr.efx.send(s.source, 0, reverb.reverb)
 
     def play_piano_note(self, data):
-        """Queue a remote piano note for main-thread playback.
-
-        Never touch OpenAL from the network thread: the OpenAL context is only
-        current on the main thread. enqueue_remote_note validates and copies the
-        packet; PianoAudio.update() drains and plays on the main thread.
-        """
+        # Queue a remote piano note for main-thread playback: never touch OpenAL from the network
+        # thread (the context is only current on the main thread). enqueue_remote_note validates
+        # and copies the packet; PianoAudio.update() drains and plays on the main thread.
         if self._instrument_peer_is_silenced(data):
             return
         if not self._schedule_music_synced(
@@ -1156,11 +1080,9 @@ class EventHandeler:
         )
 
     def set_piano_pitch_bend(self, data):
-        """Apply a server-validated continuous or legacy pitch bend state.
-
-        Queued to the main thread because set_pitch_bend* mutates OpenAL source
-        pitch and transition state that update() iterates on the main thread.
-        """
+        # Apply a server-validated continuous or legacy pitch-bend state, queued to the main thread
+        # because set_pitch_bend* mutates OpenAL source pitch and transition state that update()
+        # iterates on there.
         if not data or data.get("peer_id") is None:
             return
         peer_id = data["peer_id"]
@@ -1192,14 +1114,10 @@ class EventHandeler:
         self.game.put(lambda: self.gameplay._start_drum_session(kit=kit))
 
     def drum_kit(self, data):
-        """The kit of the drumset this player is playing was changed on the map.
-
-        Staff can retune a drumset that is already standing there, and the
-        performer's own ears are what they are listening with: switching the
-        samples under a running session is what makes the change audible
-        without leaving the kit. Queued onto the main thread because the drum
-        and audio states live there, exactly like entering a session.
-        """
+        # The drumset's kit was changed on the map. Staff can retune a drumset already standing
+        # there, and the performer's own ears are what they are listening with: switching the
+        # samples under a running session is what makes the change audible without leaving the kit.
+        # Queued onto the main thread because the drum and audio states live there.
         kit = data.get("kit") if isinstance(data, dict) else None
         self.game.put(lambda: self.gameplay.drum.set_kit(kit))
 
@@ -1259,12 +1177,10 @@ class EventHandeler:
         if not data.get("name"):
             log("[ENTITY] Ignored move packet without a name")
             return
-        # entity.move() drives footsteps, water splashes, fall sounds and
-        # per-tile audio, and entity.face() mutates soundgroup orientation —
-        # all OpenAL work that must run on the main thread (the context is
-        # only current there). Queue the whole move; vehicles already worked
-        # this way. The FIFO game queue preserves packet order, including
-        # ordering against queued spawn_entity calls.
+        # entity.move() drives footsteps, water splashes, fall sounds and per-tile audio, and
+        # entity.face() mutates soundgroup orientation -- all OpenAL work that must run on the main
+        # thread. The whole move is queued, and the FIFO game queue preserves packet order,
+        # including ordering against queued spawn_entity calls.
         move_data = dict(data)
         move_data["_main_thread"] = True
         self.game.put(lambda move_data=move_data: self._apply_move(move_data))
@@ -1280,12 +1196,10 @@ class EventHandeler:
                 self._apply_vehicle_move(data)
                 return
             try:
-                # Armor is heard, and the piece to hear it from arrives with the
-                # step itself: set before the move, so the step that carries the
-                # cloth is the one it plays on. A step packet without the field
-                # (nothing worn, a piece that just broke, a walker gone hidden,
-                # or an older Server) clears it, so silence needs no state of
-                # its own to be kept in sync.
+                # Armor is heard, and the piece to hear it from arrives with the step itself: set before the
+                # move, so the step that carries the cloth is the one it plays on. A step packet without the
+                # field (nothing worn, a piece that just broke, a walker gone hidden, an older Server)
+                # clears it, so silence needs no state of its own to stay in sync.
                 set_cloth = getattr(entity, "set_armor_cloth", None)
                 if callable(set_cloth):
                     set_cloth(data.get("armor_cloth"), data.get("armor_cloth_volume"))
@@ -1293,10 +1207,9 @@ class EventHandeler:
                     data.get("x"), data.get("y"), data.get("z"),
                     bool(data.get("play_sound", False)), data.get("mode", "walk")
                 )
-                # Only when the packet really carries a facing. A missing
-                # angle used to be read as 0, which stamped north on every
-                # watched player -- and a spectator's camera turns with the
-                # entity they follow, so a walk read as a sideways shuffle.
+                # Only when the packet really carries a facing: a missing angle used to be read as 0, which
+                # stamped north on every watched player -- and a spectator's camera turns with the entity
+                # they follow, so a walk read as a sideways shuffle.
                 if "angle" in data:
                     entity.face(data.get("angle", 0), entity.vfacing, entity.bfacing, force=True)
             except Exception as e:
@@ -1373,14 +1286,9 @@ class EventHandeler:
             speak(data["message"], False)
 
     def typing_sound(self, data):
-        """Play a 3D typing tick at the position of the player who is typing.
-
-        The server relays keypress ticks to nearby players with the typer's
-        name and position; we play a short key sound spatialized at that spot
-        so it sounds like it comes from their character. Respects the
-        "Keyboard typing sounds" option - turning it off mutes these ticks
-        just like it mutes the local typing sounds.
-        """
+        # Play a 3D typing tick at the position of the player who is typing: the Server relays
+        # keypress ticks to nearby players, and a short key sound spatialized there sounds like it
+        # comes from their character. Respects the "Keyboard typing sounds" option.
         if options.get("keyboard_typing_sounds", True) != True:
             return
         if not (data or {}).get("name"):
@@ -1402,10 +1310,8 @@ class EventHandeler:
                 rolloff=1.0,
                 max_distance=30.0,
             )
-            # Blend the tick with the room acoustics where the LISTENER is
-            # standing: reverby inside a reverb zone, dry outside of it. The
-            # listener's own environment shapes what they hear, so walking out
-            # of a room makes the ticks dry again.
+            # Blend the tick with the room acoustics where the LISTENER is standing: reverby inside a
+            # reverb zone, dry outside of it, so walking out of a room makes the ticks dry again.
             if snd and getattr(self, "gameplay", None) and self.gameplay.map:
                 listener = self.gameplay.listener_object()
                 reverb = self.gameplay.map.get_reverb_at(
@@ -1466,11 +1372,9 @@ class EventHandeler:
         m.menu_type = data.get("menu_type", "normal")
         options = []
         for idx, i in enumerate(data["options"]):
-            # A line the Server described carries that description as a fourth
-            # field (Tab speaks it; see ``menu.Menu.speak_current_help``). A line
-            # with none is left a three-tuple, so every menu written before this
-            # existed -- and every menu that sets no descriptions -- builds
-            # exactly the items it always did.
+            # A line the Server described carries that description as a fourth field (Tab speaks it;
+            # see menu.Menu.speak_current_help). A line with none stays a three-tuple, so every menu
+            # written before this existed builds exactly the items it always did.
             help_text = i.get("help")
             item = (i["title"], functools.partial(on_select, i["value"], i["close"], idx), i.get("preview_sound"))
             options.append(item + (help_text,) if help_text else item)
@@ -1687,20 +1591,16 @@ class EventHandeler:
             # this range with each prompt too; this is the fallback for it.
             min_val, max_val = 40, 6000
         elif stage == 'cinema_crossover':
-            # A cinema speaker's crossover: the sign is the side the speaker
-            # keeps, so the one field spans both bands -- 40-300 Hz is a bass
-            # cabinet (nothing above it), -800 to -6000 Hz is a tweeter
-            # (nothing below it) and 0 is the full-range speaker. The Server
-            # sends these two numbers with the prompt too; this is the
-            # fallback for it.
+            # A cinema speaker's crossover: the sign is the side the speaker keeps, so one field spans
+            # both bands -- 40-300 Hz is a bass cabinet (nothing above it), -800 to -6000 Hz a tweeter
+            # (nothing below it) and 0 the full-range speaker. The Server sends the range with the
+            # prompt; this is its fallback.
             min_val, max_val = -6000, 300
         elif stage == 'cinema_delay':
-            # A cinema speaker's trim in milliseconds. It deliberately does not
-            # share the `delay` stage below: that one is the megaphone
-            # speaker's propagation delay in *seconds* (0-0.5), and the range
-            # is enforced one keystroke at a time, so a cinema trim typed there
-            # could never reach the first digit of "60". The Server sends this
-            # range with the prompt too; this is the fallback for it.
+            # A cinema speaker's trim in milliseconds. It deliberately does not share the `delay` stage
+            # below: that one is the megaphone speaker's propagation delay in seconds (0-0.5) and is
+            # enforced one keystroke at a time, so a cinema trim typed there could never reach the first
+            # digit of "60". The Server sends this range with the prompt; this is its fallback.
             min_val, max_val = 0, 100
         elif stage == 'delay':
             min_val, max_val = 0.0, 0.5
@@ -1718,12 +1618,9 @@ class EventHandeler:
             min_val=min_val,
             max_val=max_val,
             msg_length=msg_length,
-            # A field that holds a body of text keeps a pasted line break; a
-            # one-line field joins them (see virtual_input.paste_text). The
-            # Server sends it with the prompt because the field's own rule is
-            # what has to answer (staff_menu.ts sets it from the form step),
-            # and a Server that does not send it gets today's behaviour: the
-            # paste keeps its lines.
+            # A field holding a body of text keeps a pasted line break; a one-line field joins them (see
+            # virtual_input.paste_text). The Server sends it with the prompt because the field's own rule
+            # is what has to answer, and a Server that does not send it keeps today's behaviour.
             multiline=bool(data_obj.get("multiline", True)),
         ))
 
@@ -1806,11 +1703,9 @@ class EventHandeler:
 
 
     def _update_clock_offset(self, server_time_ms):
-        """Update clock offset using exponential moving average.
-
-        server_time_ms is the server's Date.now() when the note was created.
-        We compare it to our local time to estimate the one-way delay.
-        """
+        # Update the clock offset with an exponential moving average: server_time_ms is the Server's
+        # Date.now() when the note was created, compared against our local time to estimate the
+        # one-way delay.
         local_ms = time.time() * 1000
         try:
             from . import voice_chat
@@ -1831,22 +1726,15 @@ class EventHandeler:
         self._clock_offset_ms = alpha * instant_offset + (1 - alpha) * self._clock_offset_ms
 
     def _note_song_cabinet(self, position, peer=None):
-        """The cabinet whose song a live note is played along to, or None.
-
-        One answer on both ends of a note, and it is the *routing's* own
-        resolver (``live.room_for``): a staff pan names its cabinet, and with
-        no pan it is the room the performer is standing in -- so the song a
-        note is synced to and the room it comes out of can never be two
-        different places. A map can be playing two cabinets at once, and the
-        live-note sync used to measure whichever played first; a band jamming
-        into one room while another cabinet played elsewhere was then held by
-        the wrong song's queue (heard as the band trailing by a queue, or by
-        "the previous song", and only on some machines).
-
-        None means the note belongs to no room at all -- every map without
-        cinema speakers, a performer standing outside every room -- and the
-        caller then measures the playing jukebox exactly as it always did.
-        """
+        # The cabinet whose song a live note is played along to, or None. One answer on both ends of
+        # a note, and it is the *routing's* own resolver (live.room_for): a staff pan names its
+        # cabinet, and with no pan it is the room the performer is standing in -- so the song a note
+        # is synced to and the room it comes out of can never be two different places. A map can play
+        # two cabinets at once, and the live-note sync used to measure whichever played first: a band
+        # jamming into one room while another cabinet played elsewhere was then held by the wrong
+        # song's queue (heard as trailing by a queue, or by "the previous song", only on some
+        # machines). None means the note belongs to no room at all, and the caller then measures the
+        # playing jukebox exactly as it always did.
         if position is None:
             return None
         try:
@@ -1865,35 +1753,22 @@ class EventHandeler:
         return room[0] if room else None
 
     def _active_jukebox_buffer_ms(self, *, cabinet=None):
-        """How far behind the song's shared clock our jukebox audio is (ms), or None.
-
-        ``cabinet`` names the song this measurement is *for* (see
-        ``_note_song_cabinet``): with it, only that cabinet's own playback is
-        measured and None means "that song is not playing here", which is the
-        honest answer -- a note played against a beat that is not audible on
-        this machine is better off immediate than held by an unrelated song's
-        queue. Called with no cabinet, the first playing jukebox answers,
-        exactly as it always did, for a note that belongs to no room.
-
-        Returns None when no jukebox song is actively playing, so live
-        jamming without background music keeps the low-latency immediate
-        path. A relay receiver reports its queued 40ms OpenAL frames — the
-        backlog between what the server is sending and what we hear. An
-        anchored direct stream holds the SAME lead-in as every other
-        listener, so that lead-in cancels out of note timing; what remains
-        is this machine's own residual distance behind the room clock — its
-        small OpenAL staging queue (20ms buffers) plus any audible start
-        that ran past the shared wall-clock deadline (slow yt-dlp/ffmpeg
-        startup makes the local song trail the room).
-
-        A cinema room replaces the pair with one source per speaker, so the
-        room's frame queue is the backlog a note waits out there -- and only
-        the queue: the room plays its per-speaker delay trims when the note
-        is spawned at that speaker (``live.route_to_room``), so holding it
-        for the deepest trim as well made every speaker, untrimmed ones
-        included, late by it. What was measured is left behind in
-        ``_jam_buffer_kind/_jam_buffer_detail`` for the report below.
-        """
+        # How far behind the song's shared clock our jukebox audio is (ms), or None. ``cabinet`` names
+        # the song this measurement is *for* (_note_song_cabinet): with it, only that cabinet's own
+        # playback is measured and None means "that song is not playing here", which is the honest
+        # answer -- a note played against a beat that is not audible on this machine is better off
+        # immediate than held by an unrelated song's queue. Called with no cabinet, the first playing
+        # jukebox answers, exactly as it always did. None when no jukebox song is actively playing, so
+        # live jamming without background music keeps the low-latency immediate path. A relay receiver
+        # reports its queued 40ms OpenAL frames -- the backlog between what the Server sends and what
+        # we hear. An anchored direct stream holds the SAME lead-in as every other listener, so that
+        # lead-in cancels out of note timing; what remains is this machine's own residual distance
+        # behind the room clock: its small OpenAL staging queue (20ms buffers) plus any audible start
+        # that ran past the shared wall-clock deadline. A cinema room replaces the pair with one source
+        # per speaker, so the room's frame queue is the backlog a note waits out there -- and only the
+        # queue: the room plays its per-speaker delay trims when the note is spawned at that speaker,
+        # so holding it for the deepest trim as well made every speaker, untrimmed ones included, late
+        # by it. What was measured is left in _jam_buffer_kind/_jam_buffer_detail for the report below.
         self._jam_buffer_kind = None
         self._jam_buffer_detail = None
         self._jam_streamer = None
@@ -1916,20 +1791,15 @@ class EventHandeler:
                         and getattr(streamer, "_play_started", False)):
                     room = getattr(streamer, "cinema", None)
                     if room is not None and room.sources:
-                        # A cinema room owns one source per speaker, so this
-                        # receiver's own pair is deliberately None and its
-                        # 40ms-per-frame backlog no longer exists: the room's
-                        # frame queue IS the backlog a note waits out. Its
-                        # per-speaker delay trims are NOT counted on top of
-                        # that -- each one is played when the note is spawned
-                        # at its own speaker, so adding the deepest trim here
-                        # delayed every speaker, the untrimmed ones included.
+                        # A cinema room owns one source per speaker, so this receiver's own pair is deliberately None
+                        # and its 40ms-per-frame backlog no longer exists: the room's frame queue IS the backlog a note
+                        # waits out. Its per-speaker delay trims are NOT counted on top of that -- each one is played
+                        # when the note is spawned at its own speaker, so adding the deepest trim here delayed every
+                        # speaker, the untrimmed ones included.
                         self._jam_buffer_kind = "room"
-                        # The queue below is this listener's trail and the entry
-                        # is where the song's own position lives: a note aimed
-                        # at the *song* needs both, and a room is no exception
-                        # to that (``_audible_song_position_ms`` reads the entry
-                        # the measurement recorded here).
+                        # The queue below is this listener's trail and the entry is where the song's own position
+                        # lives: a note aimed at the *song* needs both, and a room is no exception to that
+                        # (_audible_song_position_ms reads the entry the measurement recorded here).
                         self._jam_entry = entry
                         spawn = self._room_note_spawn_ms(room)
                         self._jam_buffer_detail = (
@@ -1952,32 +1822,23 @@ class EventHandeler:
                 if (getattr(streamer, "_direct_anchor", False)
                         and getattr(streamer, "running", False)
                         and streamer.ready_event.is_set()):
-                    # Anchored direct playback (no relay available). Every
-                    # listener shares the same lead-in hold, so the lead-in
-                    # cancels between performer and listener — holding remote
-                    # notes for the whole lead-in put them ~DIRECT_LEAD_IN_S
-                    # behind the beat. A note only waits out THIS listener's
-                    # residual distance behind the room clock: the small
-                    # OpenAL staging queue (20ms buffers) plus how late this
-                    # machine's audible start ran past the shared deadline
-                    # (slow resolve/startup makes the local song trail the
-                    # room, so its notes must wait for it to catch up).
+                    # Anchored direct playback (no relay available). Every listener shares the same lead-in hold,
+                    # so the lead-in cancels between performer and listener -- holding remote notes for the whole
+                    # lead-in put them ~DIRECT_LEAD_IN_S behind the beat. A note only waits out THIS listener's
+                    # residual distance behind the room clock: the small OpenAL staging queue (20ms buffers) plus
+                    # how late this machine's audible start ran past the shared deadline (a slow resolve/startup
+                    # makes the local song trail the room, so its notes must wait for it to catch up).
                     late_ms = int(
                         max(0.0, float(getattr(streamer, "direct_late_s", 0.0) or 0.0)) * 1000)
                     room = getattr(streamer, "cinema", None)
                     if room is not None and room.sources:
-                        # Cinema mode replaces the stereo pair with the room's
-                        # own speakers, so the sources read below carry none of
-                        # this song: measuring them reported about one frame of
-                        # backlog for a room that is really a whole queue
-                        # behind, and the notes landed early by the difference.
-                        # The trims are the room's own, played per speaker when
-                        # the note is spawned (see the relay branch above).
+                        # Cinema mode replaces the stereo pair with the room's own speakers, so the sources read below
+                        # carry none of this song: measuring them reported about one frame of backlog for a room that
+                        # is really a whole queue behind, and the notes landed early by the difference. The trims are
+                        # the room's own, played per speaker when the note is spawned (see the relay branch above).
                         self._jam_buffer_kind = "room"
-                        # The room's queue is the trail and the entry is where
-                        # the song's own position lives: a note aimed at the
-                        # *song* needs both, and a room is no exception (see the
-                        # relay branch above).
+                        # The room's queue is the trail and the entry is where the song's own position lives: a note
+                        # aimed at the *song* needs both, and a room is no exception (see the relay branch above).
                         self._jam_entry = entry
                         self._jam_buffer_detail = (
                             f"room queue={room.buffered_ms()}ms"
@@ -2004,22 +1865,18 @@ class EventHandeler:
 
     @staticmethod
     def _sender_position_ms(data):
-        """The position stamp a note carries, or None if it carries none.
-
-        Only a finite, non-negative millisecond reading is a position in a
-        song: a Server that predates the field does not forward it at all
-        (``packet_validator`` strips what it does not declare), and a build
-        that cannot measure its own position simply says nothing. None keeps
-        the listener on the wall-clock path rather than on a guess.
-        """
+        # The position stamp a note carries, or None if it carries none. Only a finite, non-negative
+        # millisecond reading is a position in a song: a Server that predates the field does not
+        # forward it at all (packet_validator strips what it does not declare), and a build that cannot
+        # measure its own position simply says nothing. None keeps the listener on the wall-clock path
+        # rather than on a guess.
         try:
             value = data.get("sender_position_ms")
         except AttributeError:
             return None
-        # A number, and only a number: the Server's own schema refuses a string
-        # here (a packet that carried one would never reach a listener), and a
-        # build that cannot measure its position must not be able to aim
-        # somebody else's note with a guess that happens to parse.
+        # A number, and only a number: the Server's own schema refuses a string here (a packet that
+        # carried one would never reach a listener), and a build that cannot measure its position must
+        # not be able to aim somebody else's note with a guess that happens to parse.
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
         position = float(value)
@@ -2030,38 +1887,23 @@ class EventHandeler:
         return position
 
     def _audible_song_position_ms(self, *, buffer_ms, cabinet=None):
-        """Where in the song this machine's ears are, in ms, or None.
-
-        The one number two machines can compare without trusting each other's
-        clocks. A jam note must land at the *position in the song* the
-        performer heard when they struck it, and neither the instant they
-        struck (a wall clock, shared) nor the distance they reported
-        (``sender_lag_ms``, a number this side cannot check) says that: a
-        performer whose own song reaches them late reports a number that is
-        right about *their* stream and wrong about the beat, and the note lands
-        a whole queue behind the music for everyone listening
-        (``tests/two_machine_jam_sim.py`` measures exactly that row).
-
-        Both ends compute a position the same way, from what the Server said
-        about the song rather than from either machine's clock: the position
-        the song had when this machine's play event was built
-        (``start_offset``, re-sent at the current position for a joiner and on
-        every resync), plus the time since it arrived, minus what this machine
-        trails by -- the frames its own output still holds, which *is* what
-        ``_active_jukebox_buffer_ms`` measured (``buffer_ms``). One rule for
-        both transports, deliberately: that measurement already counts a direct
-        stream's late audible start (``direct_late_s``) as part of its trail,
-        so subtracting the lateness again here would read the song too early by
-        it -- for a listener, being late to start and holding frames ahead of
-        the ear are the same distance behind the music.
-
-        What remains is the transit of the play event itself -- tens of ms, and
-        equal on two machines only by luck -- which is why this is only ever
-        used as a *stamp* on a note and never to re-time a song. None when no
-        song of this map is playing here, or the entry does not carry the
-        Server's position: an unknown position falls back to the wall-clock
-        path, byte for byte (see ``_schedule_remote_note``).
-        """
+        # Where in the song this machine's ears are, in ms, or None -- the one number two machines can
+        # compare without trusting each other's clocks. A jam note must land at the position in the
+        # song the performer heard when they struck it, and neither the wall-clock instant nor the
+        # distance they reported (sender_lag_ms, which this side cannot check) says that: a performer
+        # whose own song reaches them late reports a number that is right about *their* stream and
+        # wrong about the beat, and the note lands a whole queue behind for everyone listening
+        # (tests/two_machine_jam_sim.py measures exactly that row). Both ends compute a position the
+        # same way, from what the Server said about the song rather than from either machine's clock:
+        # the position the song had when this machine's play event was built (start_offset, re-sent at
+        # the current position for a joiner and on every resync), plus the time since it arrived, minus
+        # what this machine trails by -- the frames its own output still holds, which is what
+        # _active_jukebox_buffer_ms measured (buffer_ms). One rule for both transports deliberately:
+        # that measurement already counts a direct stream's late audible start (direct_late_s), so
+        # subtracting the lateness again here would read the song too early by it. What remains is the
+        # transit of the play event itself -- tens of ms, equal on two machines only by luck -- which
+        # is why this is only ever a *stamp* on a note and never a way to re-time a song. None when no
+        # song of this map is playing here, or the entry carries no Server position.
         if buffer_ms is None:
             return None
         entry = getattr(self, "_jam_entry", None)
@@ -2081,22 +1923,15 @@ class EventHandeler:
         return position
 
     def _party_leg_backlog_ms(self):
-        """This machine's own distance behind the session's song, or None.
-
-        A Party Sync song is not a jukebox: it reaches this client as a stream
-        (a member's entity when they are standing here, else the sink kept for
-        them while they are on another map -- ``party_sync_audio.receiver_for``),
-        so the frames its own output still holds are the backlog a note waits
-        out, exactly as a cabinet's relay queue is. Only a leg that is playing
-        with something queued answers: a stopped stream, or one still building
-        its pre-buffer, is not a beat. None means the note plays on arrival, as
-        it always did for a jam with no shared song.
-
-        Both sides of a note ask this same question -- the performer's client
-        attaches its own answer as ``sender_lag_ms`` and the listener holds the
-        note for its own -- so the subtraction lands the note on the shared
-        beat rather than on either machine's buffer.
-        """
+        # This machine's own distance behind the session's song, or None. A Party Sync song is not a
+        # jukebox: it reaches this client as a stream (a member's entity when they are standing here,
+        # else the sink kept for them while they are on another map -- party_sync_audio.receiver_for),
+        # so the frames its own output still holds are the backlog a note waits out, exactly as a
+        # cabinet's relay queue is. Only a leg that is playing with something queued answers: a stopped
+        # stream, or one still building its pre-buffer, is not a beat, and None means the note plays on
+        # arrival. Both sides of a note ask this same question -- the performer attaches its own answer
+        # as sender_lag_ms and the listener holds the note for its own -- so the subtraction lands on
+        # the shared beat rather than on either machine's buffer.
         leg = party_sync_audio.session_music_leg(self.gameplay, self.game)
         compression = getattr(leg, "music_compression", None)
         if compression is None:
@@ -2117,17 +1952,13 @@ class EventHandeler:
         return int(round(queued * frame_ms))
 
     def _schedule_remote_note(self, data, enqueue, instrument=None):
-        """Play a remote instrument note now, or aligned with the jukebox song.
-
-        With a jukebox relay playing, every listener schedules the note on
-        the shared server clock (note creation time + THIS listener's own
-        jukebox backlog − the performer's reported lag), so the note lands
-        on the same beat of the song for everyone regardless of ping or how
-        late the performer's own song started — proper target-time
-        scheduling, not a fixed delay. Without music, notes play immediately
-        (the low-latency live-jam path). Uses game.call_after (one main-loop
-        scheduler) instead of spawning a thread per note.
-        """
+        # Play a remote instrument note now, or aligned with the jukebox song. With a relay playing,
+        # every listener schedules the note on the shared server clock (creation time + THIS listener's
+        # own jukebox backlog - the performer's reported lag), so it lands on the same beat for
+        # everyone regardless of ping or how late the performer's own song started -- proper
+        # target-time scheduling, not a fixed delay. Without music, notes play immediately (the
+        # low-latency live-jam path). Uses game.call_after, one main-loop scheduler, instead of
+        # spawning a thread per note.
         cabinet = self._note_song_cabinet(
             (data.get("x"), data.get("y"), data.get("z")),
             peer=data.get("peer_id"))
@@ -2135,10 +1966,9 @@ class EventHandeler:
         buffer_ms = self._active_jukebox_buffer_ms(cabinet=cabinet)
         if (buffer_ms is None or not self.SYNC_JAM_NOTES_WITH_JUKEBOX
                 or self._clock_offset_samples < 3):
-            # Arrival-time jamming (see SYNC_JAM_NOTES_WITH_JUKEBOX): no
-            # music playing, alignment disabled, or the clock offset is not
-            # seeded yet — scheduling against an unseeded offset holds notes
-            # at the cap. Play immediately until the clocks are known.
+            # Arrival-time jamming (see SYNC_JAM_NOTES_WITH_JUKEBOX): no music playing, alignment disabled,
+            # or the clock offset is not seeded yet -- scheduling against an unseeded offset holds notes at
+            # the cap, so play immediately until the clocks are known.
             enqueue()
             return
         server_time = data.get("server_time")
@@ -2146,56 +1976,44 @@ class EventHandeler:
             # Legacy packet without a timestamp: fall back to our own backlog.
             self.game.call_after(max(buffer_ms - self.JAM_NOTE_ADVANCE_MS, 0), enqueue)
             return
-        # _clock_offset_ms = server_clock - local_clock, so the local-time
-        # equivalent of a server instant is (server_time - offset).
-        # JAM_NOTE_ADVANCE_MS compensates for the note's own tail latency
-        # (game-frame waits + piano/drum queue drain before the speaker),
-        # which the continuous jukebox stream does not have — without it
-        # notes sit a touch behind the song.
-        # The performer's own song may trail the room clock (slow
-        # resolve/startup, or a mid-song join that had to resolve + seek):
-        # they strike when THEY hear the beat, so their server_time runs
-        # late by that lag. The sender attaches sender_lag_ms (its own
-        # _active_jukebox_buffer_ms) and we subtract it here, landing the
-        # note on the shared beat instead of trailing the performer's
-        # lateness. Mixed-version packets without the field keep the old
-        # behavior (lag 0).
+        # _clock_offset_ms = server_clock - local_clock, so the local-time equivalent of a server
+        # instant is (server_time - offset). JAM_NOTE_ADVANCE_MS compensates for the note's own tail
+        # latency (game-frame waits plus the piano/drum queue drain before the speaker), which the
+        # continuous jukebox stream does not have -- without it notes sit a touch behind the song. The
+        # performer's own song may trail the room clock (slow resolve/startup, or a mid-song join that
+        # had to resolve and seek), so their server_time runs late by that lag: the sender attaches
+        # sender_lag_ms and it is subtracted here, landing the note on the shared beat. Packets from a
+        # mixed-version build without the field keep the old behaviour (lag 0).
         try:
             sender_lag_ms = float(data.get("sender_lag_ms") or 0.0)
             sender_lag_ms = max(0.0, min(sender_lag_ms, 30000.0))
         except (TypeError, ValueError):
             sender_lag_ms = 0.0
-        # Where in the song the performer's own ears were when they struck.
-        # This outranks the lag above because the lag *is* their stream's own
-        # distance, and the beat is the song's: a performer whose stream sits a
-        # whole queue behind the Server's clock reports a lag that is true about
-        # their player and false about the music, and every listener then lands
-        # the note one queue late (``tests/two_machine_jam_sim.py``,
-        # ``sender_missing``). A position needs no clock of either machine to be
-        # true, and this machine answers the same question about itself
-        # (``_audible_song_position_ms``), so the note waits exactly until the
-        # song reaches the instant the performer played against. Both ends must
-        # be able to answer -- a map where this listener has no song of its own
-        # playing keeps the wall-clock path, byte for byte.
+        # Where in the song the performer's own ears were when they struck. This outranks the lag above
+        # because the lag *is* their stream's own distance and the beat is the song's: a performer whose
+        # stream sits a whole queue behind the Server's clock reports a lag that is true about their
+        # player and false about the music, and every listener then lands the note one queue late
+        # (tests/two_machine_jam_sim.py, ``sender_missing``). A position needs no clock of either
+        # machine to be true, and this machine answers the same question about itself
+        # (_audible_song_position_ms), so the note waits exactly until the song reaches the instant the
+        # performer played against. Both ends must be able to answer; a map where this listener has no
+        # song of its own playing keeps the wall-clock path, byte for byte.
         position_stamp = self._sender_position_ms(data)
         my_position = (self._audible_song_position_ms(
             buffer_ms=buffer_ms, cabinet=cabinet)
             if position_stamp is not None else None)
         if position_stamp is not None and my_position is not None:
-            # Both ends of the note answered where they are in the song, so
-            # this is the path that needs no clock of either machine -- and it
-            # is the one a live session has to be able to prove it took, which
-            # is what ``_jam_aim`` is read out as.
+            # Both ends of the note answered where they are in the song, so this is the path that needs no
+            # clock of either machine -- and it is the one a live session has to be able to prove it took,
+            # which is what _jam_aim is read out as.
             self._jam_aim = "stamp"
             delay = (position_stamp - my_position) - self.JAM_NOTE_ADVANCE_MS
             target_local = time.time() * 1000 + delay
         else:
-            # Two different failures wear the same clock: a packet that
-            # carried no position at all (an older build, or a Server that
-            # strips the field) and a packet that carried one this machine
-            # cannot answer for itself (no song of its own playing here, or an
-            # entry with no position base). They are told apart in the log
-            # because only the second is this client's own doing.
+            # Two different failures wear the same clock: a packet that carried no position at all (an older
+            # build, or a Server that strips the field) and one that carried a position this machine cannot
+            # answer for itself (no song of its own playing here, or an entry with no position base). They
+            # are told apart in the log because only the second is this client's own doing.
             self._jam_aim = ("clock" if position_stamp is None
                              else "clock-nopos")
             target_local = (
@@ -2203,11 +2021,9 @@ class EventHandeler:
                 - sender_lag_ms - self.JAM_NOTE_ADVANCE_MS
             )
             delay = target_local - time.time() * 1000
-        # What this machine measured one of the instrument's remote notes to
-        # cost to sound (``_instrument_note_spawn_ms``), read *before* the line
-        # below: that line is built from the detail, and a number nobody can
-        # read is not a measurement. A room's own figure is already in its
-        # detail, so this adds only the pair's.
+        # What this machine measured one of the instrument's remote notes to cost to sound, read BEFORE
+        # the line below: that line is built from the detail, and a number nobody can read is not a
+        # measurement. A room's own figure is already in its detail, so this adds only the pair's.
         spawn_ms = self._instrument_note_spawn_ms(instrument)
         if (spawn_ms
                 and getattr(self, "_jam_buffer_kind", None) in ("relay", "direct")
@@ -2221,29 +2037,21 @@ class EventHandeler:
             sound_local - (server_time - self._clock_offset_ms),
             buffer_ms, sender_lag_ms, delay)
         if delay > buffer_ms + 600:
-            # Steady-state holds sit just under this listener's jukebox
-            # backlog (relay queue depth or the direct lead-in); anything
-            # beyond it means clock skew or a drifting offset. Log the
-            # components (rate-limited) so a live server report pinpoints
-            # the cause, then clamp.
+            # Steady-state holds sit just under this listener's jukebox backlog (relay queue depth or the
+            # direct lead-in); anything beyond it means clock skew or a drifting offset. The components are
+            # logged (rate-limited) so a live server report pinpoints the cause, then the value is clamped.
             self._log_jam_sync_anomaly(delay, buffer_ms)
         if delay <= 0:
             enqueue()
             return
-        # A note whose room is playing *here* waits on that room's own clock
-        # instead of on the wall clock: the room's queue is the beat a listener
-        # actually hears, and it moves (a drain, a shed, a realign, a hold), so
-        # a wait measured once and slept out walks away from the song whenever
-        # the queue changes under it -- which is exactly how two machines
-        # listening to one room disagree about whether the band is on the beat.
-        # The room also knows what its own notes cost to sound on this machine
-        # (``bank.note_spawn_ms``), and spending that *before* the beat is what
-        # keeps a slower computer from playing the band behind it -- only the
-        # part the target does not already allow for (``_spawn_excess_ms``),
-        # which is the rule the pair below follows too: a room and a plain
-        # cabinet measure the same stage of the same note, so one constant must
-        # not land the same band a constant apart depending on which one the
-        # listener is hearing.
+        # A note whose room is playing *here* waits on that room's own clock instead of on the wall
+        # clock: the room's queue is the beat a listener actually hears, and it moves (a drain, a shed,
+        # a realign, a hold), so a wait measured once and slept out walks away from the song whenever
+        # the queue changes under it -- which is exactly how two machines listening to one room disagree
+        # about whether the band is on the beat. The room also knows what its own notes cost to sound on
+        # this machine (bank.note_spawn_ms), and spending that *before* the beat is what keeps a slower
+        # computer from playing the band behind it -- only the part the target does not already allow for
+        # (_spawn_excess_ms), which is the rule the pair below follows too.
         bank = self._note_room_bank(cabinet)
         if bank is not None:
             try:
@@ -2256,23 +2064,19 @@ class EventHandeler:
                     return
             except Exception:
                 pass
-        # A plain cabinet's pair is a clock too, and the same rule applies to
-        # it: the hold was measured when the note arrived, and the queue it was
-        # measured from drains and refills under it -- which is why a band on
-        # an ordinary jukebox is straight on one machine and behind on the
-        # next. Only the streamer whose backlog answered the measurement is
-        # asked, and only when that answer was a plain pair: a room playing
-        # here already took the note above.
+        # A plain cabinet's pair is a clock too, and the same rule applies to it: the hold was measured
+        # when the note arrived, and the queue it was measured from drains and refills under it -- which
+        # is why a band on an ordinary jukebox is straight on one machine and behind on the next. Only
+        # the streamer whose backlog answered the measurement is asked, and only when that answer was a
+        # plain pair (a room playing here already took the note above).
         clock = self._pair_clock_for_note()
         if clock is not None:
-            # What *this* machine measured one of the instrument's remote notes
-            # to cost to sound is spent before the beat, exactly as the room's
-            # own measurement above is, and by the one rule
-            # (``_spawn_excess_ms``): the target already allows for the
-            # game-frame wait and the instrument's queue drain, the instrument
-            # measures the work after that, and a machine that has not measured
-            # a note yet keeps the timing it always had, to the byte
-            # (``spawn_ms`` was read above, and is 0 until a note has sounded).
+            # What *this* machine measured one of the instrument's remote notes to cost to sound is spent
+            # before the beat, exactly as the room's own measurement above is, and by the one rule
+            # (_spawn_excess_ms): the target already allows for the game-frame wait and the instrument's
+            # queue drain, the instrument measures the work after that, and a machine that has not measured
+            # a note yet keeps the timing it always had, to the byte (spawn_ms was read above, and is 0 until
+            # a note has sounded).
             extra_ms = self._spawn_excess_ms(spawn_ms)
             try:
                 if extra_ms > 0.0:
@@ -2287,19 +2091,14 @@ class EventHandeler:
         self.game.call_after(min(int(delay), int(buffer_ms + 1000)), enqueue)
 
     def _spawn_excess_ms(self, measured_ms):
-        """What a wait may spend before the beat, over the target's own allowance.
-
-        ``JAM_NOTE_ADVANCE_MS`` is already inside the target the wait is
-        measured from (the game-frame wait plus the instrument's queue drain),
-        and what an output measures is its work *after* that point: a room's
-        ``route_to_room`` and a plain cabinet's instrument both time from the
-        play call's own entry. So only the excess over the constant is spent
-        early -- *one rule for a room and a pair alike*, because both are the
-        same number about the same stage of the same note. A machine that
-        measured less than the constant, or has not measured a note here at
-        all (0 is "never measured", not "free"), keeps the timing it always
-        had, to the byte.
-        """
+        # What a wait may spend before the beat, over the target's own allowance. JAM_NOTE_ADVANCE_MS is
+        # already inside the target the wait is measured from (the game-frame wait plus the instrument's
+        # queue drain), and what an output measures is its work *after* that point: a room's
+        # route_to_room and a plain cabinet's instrument both time from the play call's own entry. So
+        # only the excess over the constant is spent early -- one rule for a room and a pair alike,
+        # because both are the same number about the same stage of the same note. A machine that
+        # measured less than the constant, or has not measured a note here at all (0 is "never
+        # measured", not "free"), keeps the timing it always had, to the byte.
         try:
             measured = float(measured_ms)
         except (TypeError, ValueError):
@@ -2307,15 +2106,11 @@ class EventHandeler:
         return max(0.0, measured - float(self.JAM_NOTE_ADVANCE_MS))
 
     def _instrument_note_spawn_ms(self, instrument):
-        """What that instrument's remote notes cost to sound here (int ms).
-
-        Asked of the instrument itself -- it is the object that *places* a
-        remote note (``PianoAudio._play_queued_note`` /
-        ``DrumAudio._play_remote_hit``), so it is the one that measures the
-        work, and it measures its own (see ``libs/jukebox_clock.SpawnCost``).
-        Zero until one of its notes has sounded here, because "not measured"
-        is not "free".
-        """
+        # What that instrument's remote notes cost to sound here (int ms), asked of the instrument
+        # itself: it is the object that *places* a remote note (PianoAudio._play_queued_note /
+        # DrumAudio._play_remote_hit), so it is the one that measures the work, and it measures its own
+        # (see libs/jukebox_clock.SpawnCost). Zero until one of its notes has sounded here, because
+        # "not measured" is not "free".
         if not instrument:
             return 0
         try:
@@ -2326,19 +2121,13 @@ class EventHandeler:
         return int(round(ms)) if ms > 0.0 else 0
 
     def _pair_clock_for_note(self):
-        """The plain pair's own clock for this note, or None.
-
-        The streamer is the one whose backlog measured the hold
-        (``_jam_streamer``, set by ``_active_jukebox_buffer_ms`` -- for a
-        session leg it is the feed that holds that leg's clock), and it must
-        have answered as a *plain pair*: a cinema room has already been offered
-        the note (it has the room's own clock, one speaker at a time), and a
-        streamer with nothing playing has no clock to offer at all. A session's
-        music leg answers as ``party`` and is asked the same way, because it is
-        one output with one key exactly as a stereo pair is. An older streamer
-        with no clock falls through to the frame timer, exactly as it did
-        before any of this existed.
-        """
+        # The plain pair's own clock for this note, or None. The streamer is the one whose backlog
+        # measured the hold (_jam_streamer, set by _active_jukebox_buffer_ms -- for a session leg it is
+        # the feed that holds that leg's clock), and it must have answered as a *plain pair*: a cinema
+        # room has already been offered the note (it has the room's own clock, one speaker at a time),
+        # and a streamer with nothing playing has no clock to offer at all. A session's music leg
+        # answers as ``party`` and is asked the same way, because it is one output with one key exactly
+        # as a stereo pair is. An older streamer with no clock falls through to the frame timer.
         if getattr(self, "_jam_buffer_kind", None) not in ("relay", "direct", "party"):
             return None
         streamer = getattr(self, "_jam_streamer", None)
@@ -2350,12 +2139,9 @@ class EventHandeler:
             return None
 
     def _note_room_bank(self, cabinet):
-        """The bank playing the note's room on this machine, or None.
-
-        The room itself is already resolved (``_note_song_cabinet``); this only
-        asks whether *that* room is playing here, because a beat that is not
-        audible on this machine is not a beat this note can land on.
-        """
+        # The bank playing the note's room on this machine, or None. The room itself is already resolved
+        # (_note_song_cabinet); this only asks whether *that* room is playing here, because a beat that
+        # is not audible on this machine is not a beat this note can land on.
         if not cabinet:
             return None
         try:
@@ -2367,14 +2153,11 @@ class EventHandeler:
 
     @staticmethod
     def _room_note_spawn_ms(room):
-        """What this room measured one of its own notes to cost here (int ms).
-
-        Asked, never re-derived: the room measures its own spawn cost the first
-        time one of its notes sounds (``CinemaSpeakerBank.note_spawn_ms``), and
-        this only lifts the number into the line below -- which is the one place
-        a person can read it. Zero until a note has sounded there (and for any
-        object that is not a room), because "not measured" is not "free".
-        """
+        # What this room measured one of its own notes to cost here (int ms), asked and never
+        # re-derived: the room measures its own spawn cost the first time one of its notes sounds
+        # (CinemaSpeakerBank.note_spawn_ms), and this only lifts the number into the line below -- the
+        # one place a person can read it. Zero until a note has sounded there (and for any object that
+        # is not a room), because "not measured" is not "free".
         try:
             ms = float(getattr(room, "note_spawn_ms")())
         except Exception:
@@ -2382,32 +2165,17 @@ class EventHandeler:
         return int(round(ms)) if ms > 0.0 else 0
 
     def _report_room_note_latency(self, heard_ms, buffer_ms, sender_lag_ms, delay):
-        """Say how late a note came out of a cinema room, and what held it.
-
-        Reported for any note that was held for a song on this machine: a room
-        (its frame queue, its speakers' trims and their measured spawn), a plain
-        cabinet's pair (its queue and the instrument's measured spawn) and a
-        Party Sync session's leg (the frames its own feed still holds) all
-        answer "the band feels late here", and the line names every component,
-        because that cannot be told apart from "this machine's song is behind"
-        or "the performer is reporting no lag" without them.
-
-        ``aim=`` names the rule the note was actually placed by, because the
-        two of them can look identical from the outside and only one is the
-        good one: ``stamp`` is the position in the song (both ends of the note
-        answered where their own ears were), ``clock`` is the fallback to the
-        Server's clock because the packet carried no position (an older build,
-        or a Server that strips the field), and ``clock-nopos`` is a packet
-        that *did* carry one which this machine could not answer for itself --
-        no song of its own playing here, or an entry with no position base --
-        so a session that keeps sliding is one log line away from saying which
-        of the three it was.
-
-        Once per five seconds: a drum roll is twenty notes a second and every
-        one of them answers the same.
-        """
-        # Read defensively: the measurement is what records both, and it is
-        # the one thing a test (or an older build's caller) can replace.
+        # Say how late a note came out of a cinema room, and what held it. Reported for any note that
+        # was held for a song on this machine: a room (its frame queue, its speakers' trims and their
+        # measured spawn), a plain cabinet's pair (its queue and the instrument's measured spawn) and a
+        # Party Sync session's leg (the frames its own feed still holds) all answer "the band feels late
+        # here", and the line names every component, because that cannot be told apart from "this
+        # machine's song is behind" or "the performer is reporting no lag" without them. ``aim=`` names
+        # the rule the note was actually placed by, because the two can look identical from the outside
+        # and only one is the good one: ``stamp`` is the position in the song (both ends answered where
+        # their own ears were), ``clock`` the fallback to the Server's clock because the packet carried
+        # no position, and ``clock-nopos`` a packet that did carry one which this machine could not
+        # answer for itself. Once per five seconds: a drum roll is twenty notes a second.
         kind = getattr(self, "_jam_buffer_kind", None)
         # A session's leg held the note exactly as a cabinet's pair did, so it
         # reports too: the one jam nobody can see is the one that is off the beat.
@@ -2427,15 +2195,11 @@ class EventHandeler:
             f" aim={getattr(self, '_jam_aim', None) or 'none'}")
 
     def _report_timeline_note_latency(self, data, compression, arrived_ms):
-        """Say how late a note scheduled on a room-fed song comes out.
-
-        The note waits for the frame the performer heard to reach THIS
-        client's own audible position, so the wait is the room's queue plus
-        whatever this machine is behind the broadcast. Only a room is
-        reported -- that is the output this feature is about -- and at most
-        once per five seconds, because a drum roll is twenty notes a second
-        and every one of them answers the same.
-        """
+        # Say how late a note scheduled on a room-fed song comes out. The note waits for the frame the
+        # performer heard to reach THIS client's own audible position, so the wait is the room's queue
+        # plus whatever this machine is behind the broadcast. Only a room is reported -- that is the
+        # output this feature is about -- and at most once per five seconds, because a drum roll is
+        # twenty notes a second and every one of them answers the same.
         feed = getattr(compression, "cinema_feed", None)
         if feed is None or not getattr(feed, "active", False):
             return
@@ -2479,13 +2243,10 @@ class EventHandeler:
         )
 
     def _schedule_music_synced(self, data, callback):
-        """Schedule an instrument action on its performer's audible music clock.
-
-        Old servers/clients omit ``music_sync`` and keep the historical
-        immediate path.  A malformed marker also falls back immediately so a
-        note can never disappear merely because synchronization metadata was
-        damaged or arrived during a mixed-version rollout.
-        """
+        # Schedule an instrument action on its performer's audible music clock. Old servers/clients omit
+        # ``music_sync`` and keep the historical immediate path; a malformed marker also falls back
+        # immediately, so a note can never disappear merely because synchronization metadata was damaged
+        # or arrived during a mixed-version rollout.
         marker = data.get("music_sync") if isinstance(data, dict) else None
         if not isinstance(marker, dict) or marker.get("version") != 1:
             return False
@@ -2511,10 +2272,9 @@ class EventHandeler:
             entity.music_compression = compression
         if compression is None:
             return False
-        # A room-fed song is the case where a note's wait is worth saying out
-        # loud: the note lands on the frame the performer heard, and this
-        # client's own room plays that frame a pre-buffer behind the packets
-        # that arrive -- which is what a band means by "we feel late".
+        # A room-fed song is the case where a note's wait is worth saying out loud: the note lands on the
+        # frame the performer heard, and this client's own room plays that frame a pre-buffer behind the
+        # packets that arrive -- which is what a band means by "we feel late".
         arrived_ms = time.time() * 1000.0
 
         def _landed():
@@ -2530,11 +2290,10 @@ class EventHandeler:
             if len(data) < 2: return
             sender_id = data[0]
             opus_data = data[1:]
-            # Stamp remote PA activity for music-bot ducking. The server never
-            # echoes a broadcast back to its sender, so every frame arriving
-            # here is another player's voice (or live band) - the music bot
-            # owner ducks the broadcast while anyone else talks and every
-            # listener hears the dip in the owner's uploaded PCM.
+            # Stamp remote PA activity for music-bot ducking. The Server never echoes a broadcast back to its
+            # sender, so every frame arriving here is another player's voice (or live band): the music bot
+            # owner ducks the broadcast while anyone else talks, and every listener hears the dip in the
+            # owner's uploaded PCM.
             self.gameplay._last_remote_megaphone_voice_ts = time.monotonic()
             megaphone = getattr(self.gameplay, 'megaphone', None)
             player_sources = None
@@ -2542,10 +2301,9 @@ class EventHandeler:
                 # Per-player speaker sources (separate from the shared
                 # physical speakers the map placed).
                 player_sources = megaphone.get_megaphone_player_sources(sender_id)
-            # A talker standing in a cabinet's room is played through that
-            # room's speakers instead, and a map with no PA speakers at all
-            # hands over no channel and no sources here -- before this the
-            # voice died at this line and was heard by nobody.
+            # A talker standing in a cabinet's room is played through that room's speakers instead, and a map
+            # with no PA speakers at all hands over no channel and no sources here -- before this the voice
+            # died at this line and was heard by nobody.
             in_room = cinema_speech.routed(getattr(self, "game", None),
                                            self.gameplay, sender_id)
             channel = self.gameplay.voice_channels.get(channelID)
@@ -2582,15 +2340,11 @@ class EventHandeler:
     PARTY_LEG_REPORT_INTERVAL = 5.0
 
     def _party_leg_report(self, entity, channel_id, via_sink):
-        """Say ONCE per change which output is carrying a session's audio.
-
-        "The listener hears nothing" has three unrelated causes -- the frames
-        never arrived, they arrived and are playing at the member's *body* (a
-        3D source, inaudible past 50 tiles), or a cabinet's room took them --
-        and none of them leaves a trace anywhere. One routine line per change
-        of output makes that answerable from the listener's own log instead of
-        from a report that sounds the same in all three cases.
-        """
+        # Say ONCE per change which output is carrying a session's audio. "The listener hears nothing"
+        # has three unrelated causes -- the frames never arrived, they arrived and are playing at the
+        # member's *body* (a 3D source, inaudible past 50 tiles), or a cabinet's room took them -- and
+        # none of them leaves a trace anywhere. One routine line per change of output makes that
+        # answerable from the listener's own log.
         from .logger import log as _log
         ps = getattr(self.gameplay, "party_sync", None)
         if getattr(ps, "role", None) not in ("host", "guest"):
@@ -2622,16 +2376,11 @@ class EventHandeler:
              f"out of {leg}")
 
     def _party_audio_receiver(self, channel_id):
-        """Who plays one member's audio on this client.
-
-        The rule itself lives in ``party_sync_audio.receiver_for``: this map's
-        entity for that voice channel when the member is standing here,
-        otherwise the sink kept for them while they are on another map, with an
-        entity always winning. It has one home because three paths need the same
-        answer -- the music packet path, the voice path, and a jam note looking
-        for the song it was played against. This is that reader, kept as a
-        method for the callers that already ask the handler.
-        """
+        # Who plays one member's audio on this client. The rule itself lives in
+        # party_sync_audio.receiver_for: this map's entity for that voice channel when the member is
+        # standing here, otherwise the sink kept for them while they are on another map, with an entity
+        # always winning. It has one home because three paths need the same answer -- the music packet
+        # path, the voice path, and a jam note looking for the song it was played against.
         return party_sync_audio.receiver_for(self.gameplay, self.game, channel_id)
 
     def process_music_data(self, data):
@@ -2710,31 +2459,18 @@ class EventHandeler:
         )
 
     def staff_pan(self, data):
-        """Staff moved somebody's voice -- and their band -- to a cabinet.
-
-        Sent by the Server and relayed to the whole map, because the routing it
-        changes is decided on every *listener's* own machine: this client stores
-        the destination and resolves the room from its own map (see
-        ``libs/audio/cinema/pan.py``). An empty cabinet clears the pan, and the
-        voice goes back to the map's PA on the next frame.
-
-        This client's own switches are asked first and are the whole answer
-        (``live.note_reaches_a_room`` / ``speech.room_target``): a pan chooses
-        *which* room a sound belongs to, never whether this listener hears one,
-        so somebody who chose the map's PA keeps the PA and somebody who asked
-        for instruments where they stand keeps the instrument. What a pan does
-        override is the rule that the performer has to be standing at the
-        cabinet. A pan naming a cabinet this map does not have (or one the map
-        set to ``off``) resolves to nothing, and then nothing about this
-        client's behaviour changes.
-
-        Only the player whose own voice moved is spoken to, and the sentence is
-        built by ``pan.own_notice`` from the table itself rather than from the
-        packet's own fields: a pan can reach this client keyed by name *or* by
-        voice channel, and the player it moved is the one person who cannot look
-        it up any other way. What they are told is where **other players** now
-        hear them -- what they themselves hear stays their own switches.
-        """
+        # Staff moved somebody's voice -- and their band -- to a cabinet. Sent by the Server and relayed
+        # to the whole map, because the routing it changes is decided on every *listener's* own machine:
+        # this client stores the destination and resolves the room from its own map
+        # (libs/audio/cinema/pan.py). An empty cabinet clears the pan, and the voice goes back to the
+        # map's PA on the next frame. This client's own switches are asked first and are the whole
+        # answer (live.note_reaches_a_room / speech.room_target): a pan chooses *which* room a sound
+        # belongs to, never whether this listener hears one, so somebody who chose the map's PA keeps the
+        # PA. What a pan does override is the rule that the performer has to be standing at the cabinet.
+        # A pan naming a cabinet this map does not have (or one set to ``off``) resolves to nothing, and
+        # nothing about this client changes. Only the player whose own voice moved is spoken to, from the
+        # table itself rather than the packet's fields, because a pan can reach this client keyed by name
+        # *or* by voice channel -- and they are told where OTHER players hear them now.
         if not isinstance(data, dict):
             return
 
@@ -2756,28 +2492,17 @@ class EventHandeler:
             self.game.put(_apply)
 
     def cinema_test(self, data):
-        """The Server relayed a staff sound test: play it here and answer.
-
-        One short note is played at the named cabinet's speakers -- through the
-        same route a panned band travels -- and this client then reports what
-        *it* did with it (played at n speakers, or the one reason it did not).
-        The answer is the point: the decision is this machine's, so nobody else
-        can say whether this machine heard it, and an old build that drops the
-        relay says nothing at all (which the tester is told, rather than being
-        shown a count that quietly shrank).
-
-        No rank is checked here: whoever hears the relay may answer it, and the
-        Server files the answer under the name it knows this connection by. The
-        note, the switches and the report are all read and made on the main
-        thread -- spawning OpenAL sources off it is what the inbox is for.
-
-        The relay carries the name of whoever *fired* it, and that name is the
-        whole scope of the one exception the sound test holds: on that client --
-        and only there -- the shot it fired itself is played even with its own
-        ``Instruments:`` switch off (see ``sound_test.play``). Every other client
-        compares nothing and answers its own switches exactly as before, and a
-        client that cannot read its own name simply has no exception.
-        """
+        # The Server relayed a staff sound test: play it here and answer. One short note is played at the
+        # named cabinet's speakers -- through the same route a panned band travels -- and this client
+        # then reports what *it* did with it (played at n speakers, or the one reason it did not). The
+        # answer is the point: the decision is this machine's, so nobody else can say whether this
+        # machine heard it, and an old build that drops the relay says nothing at all (which the tester is
+        # told, rather than being shown a count that quietly shrank). No rank is checked here: whoever
+        # hears the relay may answer it, and the Server files the answer under the name it knows this
+        # connection by. The note, the switches and the report are all read and made on the main thread.
+        # The relay carries the name of whoever *fired* it, and that name is the whole scope of the one
+        # exception the sound test holds: on that client -- and only there -- the shot it fired itself is
+        # played even with its own ``Instruments:`` switch off (see sound_test.play).
         if not isinstance(data, dict):
             return
         cabinet = str(data.get("cabinet") or "").strip()
@@ -2800,13 +2525,10 @@ class EventHandeler:
             self.game.put(_run)
 
     def cinema_test_result(self, data):
-        """The Server's summary of a test this client fired: keep it, and say it.
-
-        One line -- how many machines heard it -- and the per-client reasons are
-        kept for the menu (libs/cinema_pan_menu.py shows them behind one press),
-        because a tester firing shots at five cabinets wants the count at once
-        and the names only for the misses.
-        """
+        # The Server's summary of a test this client fired: keep it, and say it. One line -- how many
+        # machines heard it -- and the per-client reasons are kept for the menu (libs/cinema_pan_menu.py
+        # shows them behind one press), because a tester firing shots at five cabinets wants the count at
+        # once and the names only for the misses.
         if not isinstance(data, dict):
             return
 
@@ -2820,27 +2542,20 @@ class EventHandeler:
             self.game.put(_apply)
 
     def cinema_test_menu(self, data):
-        """The Builder/Technician menu asked for the sound test.
-
-        Same division as the pan menu beside it: the Server checks the rank
-        before sending this, and the menu the client then opens resolves the
-        cabinets from its own map and fires the shot.
-        """
+        # The Builder/Technician menu asked for the sound test. Same division as the pan menu beside it:
+        # the Server checks the rank before sending this, and the menu the client then opens resolves the
+        # cabinets from its own map and fires the shot.
         opener = getattr(self.gameplay, "open_cinema_test", None)
         if opener is None:
             return
         opener(None)
 
     def sound_engine_report(self, data):
-        """The technician menu asked what the sound card's effect slots hold.
-
-        The pool belongs to the machine that listens -- the driver grants 64
-        auxiliary effect slots for the life of the process, and every room, PA
-        speaker, voice and chorus borrows from that one pool here. So the
-        Server sends only the invitation and this client answers with its own
-        numbers; nothing is written, no state is kept, and reading it leaves
-        the sound exactly as it was.
-        """
+        # The technician menu asked what the sound card's effect slots hold. The pool belongs to the
+        # machine that listens -- the driver grants 64 auxiliary effect slots for the life of the process
+        # and every room, PA speaker, voice and chorus borrows from that one pool here -- so the Server
+        # sends only the invitation and this client answers with its own numbers. Nothing is written, no
+        # state is kept, and reading it leaves the sound exactly as it was.
         from .logger import log
         audio_mngr = getattr(self.game, "audio_mngr", None)
         report = getattr(audio_mngr, "slot_report_line", None)
@@ -2849,18 +2564,12 @@ class EventHandeler:
         log(f"[AudioManager] {line}")
 
     def music_bot_cinema(self, data):
-        """Which cabinet's room another player's Music Bot plays through.
-
-        Sent by the sender's own client (and repeated while the song plays,
-        so a listener who joined mid-song, or who missed a packet, is not left
-        on the plain feed), relayed by the Server to the map. The frames
-        themselves keep arriving on the ordinary music channel; this only says
-        where they belong -- see libs/audio/cinema/peer.py.
-
-        An empty cabinet is the sender turning it off, and it puts listeners
-        back on the plain feed on the next frame rather than at the end of the
-        song.
-        """
+        # Which cabinet's room another player's Music Bot plays through. Sent by the sender's own client
+        # (and repeated while the song plays, so a listener who joined mid-song or missed a packet is not
+        # left on the plain feed), relayed by the Server to the map. The frames themselves keep arriving
+        # on the ordinary music channel; this only says where they belong -- see
+        # libs/audio/cinema/peer.py. An empty cabinet is the sender turning it off, and it puts listeners
+        # back on the plain feed on the next frame rather than at the end of the song.
         if not isinstance(data, dict):
             return
         channel = data.get("channel")
@@ -2878,12 +2587,11 @@ class EventHandeler:
         self.gameplay.player.has_radio = data["enable"]
 
     # ── Party Sync (private "listen together" sessions) ──────────────
-    # The server (libs/party_sync.ts) is authoritative: it runs the session,
-    # re-validates every step and gates the host's music relay to session
-    # guests only. These handlers only mirror the state for menus/prompts and
-    # keep the host's upload running while a session is active. Guests hear
-    # the host through the existing music-source receive leg (host
-    # voice_channel -> entity music_source), so no guest audio code is needed.
+    # The server (libs/party_sync.ts) is authoritative: it runs the session, re-validates every step
+    # and gates the host's music relay to session guests only. These handlers only mirror the state
+    # for menus/prompts and keep the host's upload running while a session is active. Guests hear the
+    # host through the existing music-source receive leg (host voice_channel -> entity music_source),
+    # so no guest audio code is needed for playback.
 
     def _party_sync(self):
         """Lazily create the PartySyncState mirror on the gameplay object."""
@@ -2911,10 +2619,9 @@ class EventHandeler:
         bot = getattr(self.gameplay, "music_bot", None)
         force = bool(bot) and ps.role == "host"
         if bot is not None:
-            # One routine line per change: whether this machine is uploading for
-            # its listeners is the other half of "the listener hears nothing",
-            # and it is otherwise invisible on the host's own machine (they
-            # hear their music either way, straight from the local stream).
+            # One routine line per change: whether this machine is uploading for its listeners is the other
+            # half of "the listener hears nothing", and it is otherwise invisible on the host's own machine
+            # (they hear their music either way, straight from the local stream).
             from .logger import log as _log
             if force != bool(getattr(bot, "party_sync_force_upload", False)):
                 if force:
@@ -2932,15 +2639,10 @@ class EventHandeler:
             bot.party_sync_force_upload = force
 
     def _sync_party_sync_direct_audio(self):
-        """Schedule (main thread) all Party Sync direct-to-ear audio modes.
-
-        1. Music (guest role): the host entity's music source stops being a
-           3D boombox and becomes a fixed, direct-to-ear feed.
-        2. Voice (any member): every OTHER member entity's voice source also
-           becomes direct-to-ear, so Party Sync doubles as a private
-           "team talk" room — members hear each other at any distance, and
-           leaving the session restores every source to positional behavior.
-        """
+        # Schedule (main thread) all Party Sync direct-to-ear audio modes: 1. music (guest role) -- the
+        # host entity's music source stops being a 3D boombox and becomes a fixed, direct-to-ear feed.
+        # 2. voice (any member) -- every OTHER member entity's voice source also becomes direct-to-ear,
+        # so a session doubles as a private "team talk" room, and leaving restores positional behaviour.
         ps = self._party_sync()
         target_voice = ps.host_voice_channel if ps.role == "guest" else None
         in_session = getattr(ps, "role", None) in ("host", "guest")
@@ -2984,9 +2686,8 @@ class EventHandeler:
                 elif getattr(e, "_party_sync_voice_direct", False):
                     clear_voice_direct_mode(e)
             # 3) The session's own sinks: one per member who is NOT on this map
-            #    (libs/party_sync_audio.py). Reconciled here as well as on every
-            #    frame, so a session that spans maps has a leg on every client
-            #    from the moment the roster changes.
+            # (libs/party_sync_audio.py). Reconciled here as well as on every frame, so a session that spans
+            # maps has a leg on every client from the moment the roster changes.
             sinks = party_sync_audio.sinks_for(gp, self.game)
             if sinks is not None:
                 sinks.sync(gp, ps)
@@ -3067,21 +2768,18 @@ class EventHandeler:
             return
         self._sync_party_sync_upload()
         self._sync_party_sync_direct_audio()
-        # A session's song-request switch is the host's own (`Song Requests:`,
-        # set from the Party Sync menus), and the server carries it in the
-        # state so every listener knows. Push ours once per session: a state
-        # push arrives on every roster change, and re-announcing it each time
-        # would be noise.
+        # A session's song-request switch is the host's own (`Song Requests:`, set from the Party Sync
+        # menus), and the Server carries it in the state so every listener knows. Push ours once per
+        # session: a state push arrives on every roster change, and re-announcing it each time is noise.
         if ps.role == "host" and getattr(self, "_party_song_flag_session", None) != ps.session_id:
             self._party_song_flag_session = ps.session_id
             bot = getattr(self.gameplay, "music_bot", None)
             announce = getattr(bot, "announce_song_requests", None)
             if callable(announce):
                 announce()
-        # A state push means the roster changed -- somebody just joined and
-        # cannot see this machine's queue, and the state they were handed only
-        # carries what the host last shared. So the host re-sends the queue now
-        # rather than waiting for the next change or the repeat interval.
+        # A state push means the roster changed -- somebody just joined and cannot see this machine's
+        # queue, and the state they were handed only carries what the host last shared. So the host
+        # re-sends the queue now rather than waiting for the next change or the repeat interval.
         if ps.role == "host":
             bot = getattr(self.gameplay, "music_bot", None)
             announce_queue = getattr(bot, "announce_party_queue", None)
@@ -3089,13 +2787,9 @@ class EventHandeler:
                 announce_queue(force=True)
 
     def party_sync_queue(self, data):
-        """Relayed to every listener: the host's play queue, as it stands.
-
-        Read-only and silent: it feeds the listener's own party menu (the same
-        snapshot also rides the state push, so a joiner starts with it). It
-        never touches this machine's audio or its own queue -- the queue being
-        displayed belongs to the host.
-        """
+        # Relayed to every listener: the host's play queue, as it stands. Read-only and silent -- it
+        # feeds the listener's own party menu (the same snapshot also rides the state push, so a joiner
+        # starts with it) and never touches this machine's audio or its own queue.
         from .party_sync import parse_queue
         ps = self._party_sync()
         if not getattr(ps, "role", None):
@@ -3105,14 +2799,10 @@ class EventHandeler:
         ps.queue = state["items"]
 
     def party_sync_song_request(self, data):
-        """Relayed to the HOST: a listener asked for a song (/p <name>).
-
-        The server has already checked that the sender is in this session and
-        that the request is not spam; what is left is this machine's own queue,
-        so the question is handed to the music bot (main thread: it may start a
-        stream) and answered from there. A request is only ever appended --
-        what is playing now is never touched.
-        """
+        # Relayed to the HOST: a listener asked for a song (/p <name>). The Server has already checked
+        # that the sender is in this session and that the request is not spam; what is left is this
+        # machine's own queue, so the question is handed to the music bot (main thread: it may start a
+        # stream) and answered from there. A request is only ever appended.
         from .party_sync import parse_song_request
         request = parse_song_request(data)
         if request is None:
@@ -3127,15 +2817,10 @@ class EventHandeler:
         )
 
     def party_sync_song_choices(self, data):
-        """Relayed to the ASKER: the host found these songs for their /p.
-
-        The picker opens HERE, on the machine of the person who typed the song
-        -- they are the one who knows which version they meant. It needs no
-        playback and no running bot (a listener may have their own music bot
-        switched off), and the choice travels back as an INDEX: the names in
-        this menu are the host's, and the host resolves the pick against the
-        results it searched for.
-        """
+        # Relayed to the ASKER: the host found these songs for their /p. The picker opens HERE, on the
+        # machine of the person who typed the song -- they are the one who knows which version they
+        # meant. It needs no playback and no running bot (a listener may have their own music bot
+        # switched off), and the choice travels back as an INDEX against the host's own results.
         from .party_sync import parse_song_choices
         choices = parse_song_choices(data)
         if choices is None:
@@ -3153,13 +2838,10 @@ class EventHandeler:
         ))
 
     def party_sync_song_pick(self, data):
-        """Relayed to the HOST: the asker chose one of the results.
-
-        The server has already checked that the sender is the member the
-        request belonged to; what the index means is this machine's own
-        business, so the pick is resolved here against the results this host
-        searched for (see MapMusicBot.serve_song_pick).
-        """
+        # Relayed to the HOST: the asker chose one of the results. The Server has already checked that
+        # the sender is the member the request belonged to; what the index means is this machine's own
+        # business, so the pick is resolved here against the results this host searched for (see
+        # MapMusicBot.serve_song_pick).
         from .party_sync import parse_song_pick
         pick = parse_song_pick(data)
         if pick is None:
@@ -3172,13 +2854,10 @@ class EventHandeler:
         ))
 
     def _clear_party_song_requests(self):
-        """A session ended: forget who asked for what.
-
-        The cooldown and the "you already asked for that" memory are per
-        session: a new party must not inherit either from the last one. Picks
-        still waiting for a choice go with them -- a request id from an ended
-        session can never be answered again.
-        """
+        # A session ended: forget who asked for what. The cooldown and the "you already asked for that"
+        # memory are per session -- a new party must not inherit either from the last one -- and picks
+        # still waiting for a choice go with them, because a request id from an ended session can never
+        # be answered again.
         bot = getattr(self.gameplay, "music_bot", None)
         for store in (getattr(bot, "song_requests", None),
                       getattr(bot, "song_picks", None)):
@@ -3235,10 +2914,9 @@ class EventHandeler:
             speak("The Party Sync session ended.")
 
     def party_sync_roster_change(self, data):
-        # A listener left. The server broadcasts a fresh party_sync_state
-        # right after this (see removeGuest -> sendState), and the state
-        # handler re-syncs the direct-to-ear sources so the departed member's
-        # entity returns to positional voice. Nothing to do here.
+        # A listener left. The Server broadcasts a fresh party_sync_state right after this (see
+        # removeGuest -> sendState), and the state handler re-syncs the direct-to-ear sources so the
+        # departed member's entity returns to positional voice. Nothing to do here.
         return
 
     def party_sync_player_list(self, data):
@@ -3248,13 +2926,10 @@ class EventHandeler:
         self.game.put(lambda players=players: self._open_party_sync_invite_list(players))
 
     def _open_party_sync_invite_list(self, players):
-        """Main-thread host picker of inviteable players (any map).
-
-        A session is not map-scoped, so the list is every player online, the
-        ones standing here first. Each line says which is which — the host is
-        inviting a *person*, and "they are over there" is the only thing that
-        makes a name from another map readable.
-        """
+        # Main-thread host picker of inviteable players (any map). A session is not map-scoped, so the
+        # list is every player online, the ones standing here first, and each line says which is which --
+        # the host is inviting a *person*, and "they are over there" is the only thing that makes a name
+        # from another map readable.
         gp = self.gameplay
         ps = self._party_sync()
         if ps.role != "host":
@@ -3305,16 +2980,11 @@ class EventHandeler:
         gp.add_substate(m)
 
     def cinema_pan_menu(self, data):
-        """The Builder/Technician menu asked for the cinema pan menu.
-
-        Builders and sound technicians reach the pan from the menu they already
-        open for the sound plumbing (libs/builder/menu_manager.ts lists it
-        beside the Cinema Speaker entry), which is what the Server checks the
-        permission for before sending this. The menu itself is the client's
-        own (libs/cinema_pan_menu.py): it resolves the cabinets from this
-        map and sends the pan, so there is nothing for the Server to build
-        here -- and no key of its own to collide with another binding.
-        """
+        # The Builder/Technician menu asked for the cinema pan menu. Builders and sound technicians reach
+        # the pan from the menu they already open for the sound plumbing (libs/builder/menu_manager.ts
+        # lists it beside the Cinema Speaker entry), which is what the Server checks the permission for
+        # before sending this. The menu itself is the client's own (libs/cinema_pan_menu.py): it resolves
+        # the cabinets from this map and sends the pan, so there is no key of its own to collide with.
         opener = getattr(self.gameplay, "open_cinema_pan", None)
         if opener is None:
             return
@@ -3336,13 +3006,10 @@ class EventHandeler:
         self.gameplay.add_substate(megaphone_settings.megaphone_settings(self.game, self.gameplay))
 
     def megaphone_lock_state(self, data):
-        """Handle megaphone lock state broadcasts from server.
-
-        ``owner`` is the single music-bot PA slot holder; ``owners`` is the
-        multi-owner instrument broadcast set (band / duo performances). The
-        server also sends this with ``music_taken`` when a performer toggles
-        "Broadcast to Megaphone" while someone else already holds the music slot.
-        """
+        # Handle megaphone lock state broadcasts from the Server. ``owner`` is the single music-bot PA
+        # slot holder; ``owners`` is the multi-owner instrument broadcast set (band / duo performances).
+        # The Server also sends this with ``music_taken`` when a performer toggles "Broadcast to
+        # Megaphone" while someone else already holds the music slot.
         if not isinstance(data, dict):
             return
         # CHANNEL_MISC can beat Gameplay.enter() across ENet channels. Preserve
@@ -3357,10 +3024,9 @@ class EventHandeler:
         if isinstance(owners, (list, tuple, set)):
             megaphone.lock_owners = set(owners)
         if data.get("music_taken"):
-            # The single music slot is held by someone else: revert the
-            # optimistic toggle so the menu does not claim a broadcast that
-            # the server will never route to the PA (the upload leg already
-            # keeps the MP3 private via the _is_music_owner gate).
+            # The single music slot is held by someone else: revert the optimistic toggle so the menu does
+            # not claim a broadcast the Server will never route to the PA (the upload leg already keeps the
+            # MP3 private via the _is_music_owner gate).
             music_bot = getattr(self.gameplay, "music_bot", None)
             if music_bot is not None:
                 music_bot.broadcast_to_megaphone = False
@@ -3382,27 +3048,20 @@ class EventHandeler:
         return player
 
     def _stop_jukebox_players_for_map_change(self, same_map=False):
-        """Stop old-map jukebox audio for a map change; mark-and-sweep on reload.
-
-        A real map transition (parse_map naming a different map) stops every
-        jukebox player SYNCHRONOUSLY: the old map's relay frames stop arriving
-        the instant the player leaves, so any buffered tail would otherwise
-        keep playing into the new map (~1s of ghost audio) and stale receivers
-        from the old map could race the new map's playback during quick
-        round-trips. Only a same-name full reparse keeps the graceful
-        mark-and-sweep: songs still playing get a jukebox_play from the server
-        right after the reload, which keeps them playing seamlessly, while
-        players that are NOT re-confirmed (song ended / jukebox gone) are
-        stopped a short while later."""
+        # Stop old-map jukebox audio for a map change; mark-and-sweep on reload. A real map transition
+        # (parse_map naming a different map) stops every jukebox player SYNCHRONOUSLY: the old map's relay
+        # frames stop arriving the instant the player leaves, so any buffered tail would otherwise keep
+        # playing into the new map (~1s of ghost audio) and stale receivers from the old map could race
+        # the new map's playback during quick round-trips. Only a same-name full reparse keeps the
+        # graceful mark-and-sweep: songs still playing get a jukebox_play from the Server right after the
+        # reload, while players that are NOT re-confirmed are stopped a short while later.
         gp = self.gameplay
         player = getattr(gp, "jukebox_player", None)
         if player is not None:
             if same_map:
                 cleanup_serial = player.control_serial
-                # parse_map itself is now serialized on the game thread, so
-                # mark immediately. Queuing a second callback let jukebox_play
-                # overtake this mark across ENet channels and made the stale
-                # sweep stop it.
+                # parse_map itself is now serialized on the game thread, so mark immediately: queuing a second
+                # callback let jukebox_play overtake this mark across ENet channels, and the stale sweep stopped it.
                 player.mark_pending_map_change(cleanup_serial)
             else:
                 # Invalidate every old-map jukebox now: stop sources, drop
@@ -3426,13 +3085,11 @@ class EventHandeler:
             for jid, box in boxes.items():
                 if not isinstance(box, dict):
                     continue
-                # How each cabinet plays is part of this payload, and it is
-                # the only description of a cabinet that is SILENT -- a map
-                # join, a band in a hall with no song, a staff pan into a
-                # room. The player's caches are what the routing asks (the
-                # menus read the payload itself), so they are fed here, or a
-                # cabinet nobody has heard a song from yet answers ``auto``
-                # to the very paths that decide where sound comes out.
+                # How each cabinet plays is part of this payload, and it is the only description of a cabinet that
+                # is SILENT -- a map join, a band in a hall with no song, a staff pan into a room. The player's
+                # caches are what the routing asks (the menus read the payload itself), so they are fed here, or a
+                # cabinet nobody has heard a song from yet answers ``auto`` to the very paths that decide where
+                # sound comes out.
                 if box.get("cinema_mode") is not None:
                     player.set_local_cinema_mode(jid, box.get("cinema_mode"))
                 reach = box.get("cinema_reach", box.get("cinema_radius"))
@@ -3491,19 +3148,14 @@ class EventHandeler:
         start_offset = float(data.get("start_offset") or 0.0)
         if player is not None:
             if data.get("transport") == "relay":
-                # Reserve the relay route synchronously on the network thread:
-                # relay frames arriving before the deferred play() registers
-                # the receiver are buffered instead of dropped, so the song
-                # starts from its true intro rather than a few frames in.
+                # Reserve the relay route synchronously on the network thread: relay frames arriving before the
+                # deferred play() registers the receiver are buffered instead of dropped, so the song starts from
+                # its true intro rather than a few frames in.
                 player.pend_relay_route(data.get("relay_id"), data.get("stream_epoch"))
-            # The network-arrival instant anchors the direct-transport room
-            # timeline (start_offset_received_at). The play() call itself is
-            # deferred to the main thread, so stamping there would shift the
-            # anchor by however long the main thread was busy — and for a
-            # sticky direct fallback the room is ALREADY playing, so the
-            # elapsed time since THIS arrival is exactly the room position
-            # the stream must join. Capture the instant HERE (network
-            # thread) — inside the lambda it would be the main-thread time.
+            # The network-arrival instant anchors the direct-transport room timeline (start_offset_received_at).
+            # The play() call itself is deferred to the main thread, so stamping there would shift the anchor
+            # by however long the main thread was busy -- and for a sticky direct fallback the room is ALREADY
+            # playing, so the elapsed time since THIS arrival is exactly the room position the stream must join.
             received_at = time.monotonic()
             self.game.put(lambda: player.play(
                 jid, x, y, z,
@@ -3516,10 +3168,9 @@ class EventHandeler:
                 relay_id=data.get("relay_id"),
                 stream_epoch=data.get("stream_epoch"),
                 http_headers=data.get("http_headers"),
-                # The page this song IS, alongside the signed stream URL: a
-                # direct listener rebuilds its own stream on every resume and
-                # seek, and only this link can fetch a fresh one when the signed
-                # URL it was handed has gone stale.
+                # The page this song IS, alongside the signed stream URL: a direct listener rebuilds its own stream
+                # on every resume and seek, and only this link can fetch a fresh one when the signed URL it was
+                # handed has gone stale.
                 canonical_url=data.get("canonical_url"),
                 eq_profile=data.get("eq_profile", "normal"),
                 eq_values=data.get("eq_values"),
@@ -3621,12 +3272,9 @@ class EventHandeler:
             )
 
     def staff_permissions(self, data):
-        """Apply a server-authoritative staff permission refresh in-session.
-
-        Login supplies the same values in ``connected``.  Rank changes made by
-        /set, /trust, or an edited staff file must not require an offline/login
-        cycle before client-gated staff controls become available.
-        """
+        # Apply a server-authoritative staff permission refresh in-session. Login supplies the same values
+        # in ``connected``; rank changes made by /set, /trust or an edited staff file must not require an
+        # offline/login cycle before client-gated staff controls become available.
         if not isinstance(data, dict):
             return
         gp = self.gameplay
@@ -3667,10 +3315,9 @@ class EventHandeler:
             if had_cinema_routing and not gp.can_use_cinema_speakers:
                 bot = getattr(gp, "music_bot", None)
                 if bot is not None and getattr(bot, "cinema_target", None):
-                    # The room owns the sources the running stream feeds, so
-                    # losing the permission hands the track back to the
-                    # listener's ears instead of leaving it writing into a room
-                    # whose menu line this account can no longer see.
+                    # The room owns the sources the running stream feeds, so losing the permission hands the track back
+                    # to the listener's ears instead of leaving it writing into a room whose menu line this account can
+                    # no longer see.
                     self.game.put(lambda: bot.set_cinema_target(None))
         can_use_music_bot = bool(
             gp.can_use_music_bot
@@ -3691,11 +3338,9 @@ class EventHandeler:
         key = friendly_key_name(
             self.game.keyconfig.get("interact", pygame.K_f)
         ).upper()
-        # A cabinet is an appliance and the map's power is its supply, so a
-        # hint that invited the player to open a machine with none would be the
-        # one thing standing between them and the power switch. A Server from
-        # before the field says nothing about power, which reads exactly as it
-        # always did.
+        # A cabinet is an appliance and the map's power is its supply, so a hint that invited the player to
+        # open a machine with none would be the one thing standing between them and the power switch. A
+        # Server from before the field says nothing about power, which reads exactly as it always did.
         powered = data.get("powered") if isinstance(data, dict) else None
         if powered is False:
             speak(
@@ -3826,10 +3471,9 @@ class EventHandeler:
             # Use get to avoid errors if entity not found
             entity = self.gameplay.map.entities.get(name)
             
-            # If we are focused on this entity, do we update it?
-            # If the server says it moved, we should update it so the camera follows.
-            # BUT, if updating it causes a crash (e.g. sound conflict), handle it.
-            # Re-enabling updates effectively but with safeguards.
+            # If we are focused on this entity, do we update it? If the Server says it moved, update it so the
+            # camera follows -- but defensively, because updating it once caused a crash (a sound conflict).
+            # Re-enabling updates effectively, with safeguards.
             
             if not entity:
                 log(f"[ENTITY] Spectator snapshot arrived before spawn for {name!r}")
@@ -3906,12 +3550,9 @@ class EventHandeler:
             self.gameplay.shield_mngr.unequip_shield()
 
     def equip_armor(self, data):
-        """The Server's word on what this player is wearing.
-
-        Sent when a wall sells a piece, when staff hand one over, and again on
-        every map entry -- a client that joined mid-song so to speak would
-        otherwise be walking in armor it cannot hear.
-        """
+        # The Server's word on what this player is wearing: sent when a wall sells a piece, when staff hand
+        # one over, and again on every map entry -- a client that joined later would otherwise be walking
+        # in armor it cannot hear.
         if hasattr(self.gameplay, 'armor_mngr'):
             self.gameplay.armor_mngr.equip_armor(data)
 

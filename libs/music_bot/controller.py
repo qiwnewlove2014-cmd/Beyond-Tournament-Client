@@ -40,12 +40,10 @@ from .streaming import AudioStreamer, LiveRelayStreamer
 
 
 class MapMusicBot:
-    """Music Bot — searches YouTube and streams audio in real-time.
-    Falls back to local files when YouTube is unavailable.
-    
-    Controls are resolved from the player's key bindings in gameplay.py.
-    Modifier combinations continue to use the configured Music Bot key.
-    """
+    """Music Bot — searches YouTube and streams audio in real-time (local files as a
+        fallback). Controls come from the player's key bindings in gameplay.py. Rules, paths
+        and every measured number: .agents/skills/music_bot_integration/.
+        """
 
     # Crossfade window (seconds): the outgoing outro fades down while the
     # next track's intro fades up. Tuning this only shifts the overlap, never
@@ -175,16 +173,14 @@ class MapMusicBot:
         self.feed_index = -1
 
         # Settings
-        # Cinema speaker output (opt-in, for testing and for rooms a builder
-        # built around a cabinet). When a cabinet is selected, this bot's
-        # audio plays through that jukebox's speakers instead of the
-        # listener's ears, using the exact same room the jukebox itself feeds.
+        # Cinema speaker output (opt-in, for testing and for rooms a builder built around a
+        # cabinet): with a cabinet selected this bot's audio plays through that jukebox's
+        # speakers instead of the listener's ears, using the exact same room it feeds.
         self.cinema_target = str(options.get("music_bot_cinema_target", "") or "") or None
-        # Live instruments through the nearest cabinet's room. The setting is
-        # the listener's and is on for everyone (see libs/audio/cinema/live.py):
-        # a live note is one sample per speaker on this client and takes
-        # nothing from anybody. Kept here so the menu has something to flip;
-        # the instruments read the option itself.
+        # Live instruments through the nearest cabinet's room: the listener's own setting,
+        # on for everyone (see libs/audio/cinema/live.py) - a live note is one sample per
+        # speaker on this client and takes nothing from anybody. Kept here so the menu has
+        # something to flip; the instruments read the option itself.
         self.instruments_cinema = live_instruments_enabled()
         self.cinema_bank = None
         self.cinema_bank_key = None
@@ -242,11 +238,9 @@ class MapMusicBot:
         self._eq_slots = {}   # preset profile -> effect slot
         self._custom_eq_slot = None  # custom profile's single live slot
 
-        # Crossfade between auto-advanced tracks (queue / playlists). A
-        # smooth transition needs the CURRENT track's duration so the next
-        # stream can be pre-rolled and faded in while the outro still plays;
-        # it is remembered per YouTube page URL whenever a resolve or a
-        # search result exposes it.
+        # Crossfade between auto-advanced tracks (queue / playlists): the current track's
+        # duration is remembered per YouTube page URL whenever a resolve or a search result
+        # exposes it, so the next stream can be pre-rolled while the outro still plays.
         self.crossfade_enabled = bool(options.get("music_bot_crossfade", True))
         self.current_duration = None       # seconds, when known (None = no crossfade)
         self._known_durations = {}         # youtube page URL -> duration seconds
@@ -339,13 +333,10 @@ class MapMusicBot:
 
     def _create_stream_source(self):
         """Create a fresh OpenAL source for streaming.
-        Uses direct_channels=True for clear stereo, plus EFX reverb send
-        for environmental atmosphere.
 
-        With a cinema cabinet selected this makes no source at all: the room
-        owns one source per speaker and the stream is handed to it instead, so
-        the bot must not leave a second local source playing alongside.
-        """
+                    With a cinema cabinet selected this makes NO source at all: the room owns one source
+                    per speaker and the stream is handed to it instead.
+                    """
         self._destroy_stream_source()
         if self.cinema_active_target():
             if self._ensure_cinema_bank() is not None:
@@ -364,13 +355,10 @@ class MapMusicBot:
     def _output_source(self):
         """The source the running stream is written into, or None.
 
-        Normally that is the bot's own ear source. With cinema routing it does
-        not exist *by design*: the room owns one source per speaker and the
-        bank is what carries the audio, so a caller asking "is there anywhere
-        for this stream to play" has to accept the room as an answer. Skipping
-        that made starting a track through a room report "Audio error." and
-        play nothing at all.
-        """
+                    With cinema routing it does not exist *by design* - the room's bank carries the audio
+                    - so a caller asking "is there anywhere for this stream to play" has to accept the
+                    room as an answer (skipping that made a track through a room report "Audio error.").
+                    """
         if self.stream_source is not None:
             return self.stream_source
         bank = getattr(self, "cinema_bank", None)
@@ -382,26 +370,17 @@ class MapMusicBot:
             self.stream_source = None
 
     # === Cinema speakers (play this bot through a cabinet's room) ===
-    #
-    # The Music Bot normally plays straight into the listener's ears. With a
-    # cabinet selected it feeds that jukebox's room instead, through the same
-    # CinemaSpeakerBank the cabinet's own playback uses -- one room per
-    # cabinet, whoever is feeding it. That makes the room audible without
-    # queueing a song on the jukebox itself, which is what a tester standing
-    # in the room actually wants to hear.
+    # With a cabinet selected the bot feeds that jukebox's room instead of the listener's ears,
+    # through the same CinemaSpeakerBank the cabinet's own playback uses - one room per cabinet,
+    # whoever is feeding it. Rules: .agents/skills/cinema_speaker_system/.
 
     def cinema_cabinets(self):
         """``(id, anchor, room)`` for every jukebox on the current map.
 
-        ``room`` is None for a cabinet with no speakers resolved around it, so
-        the menu can say which cabinets are ready instead of letting someone
-        pick one that would play nowhere.
-
-        The room is only *previewed*, never acquired: listing what the map has
-        must not turn the feature on. A tester has to be able to look before
-        sending audio into a room, and the menu reads the same whether cinema
-        happens to be on or off.
-        """
+                    ``room`` is None for a cabinet with no speakers resolved around it, so the menu can
+                    say which are ready. The room is only *previewed*, never acquired: listing what the
+                    map has must not turn the feature on.
+                    """
         gp = self._find_gameplay()
         map_obj = getattr(gp, "map", None) if gp else None
         cabinets = []
@@ -438,10 +417,9 @@ class MapMusicBot:
     def _cinema_key(cabinet_id):
         """This bot feeds a cabinet under its own key.
 
-        The room's speakers are the cabinet's, but the registry entry is
-        separate so a song playing on that jukebox at the same time cannot
-        share (and then tear down) the bot's bank, and vice versa.
-        """
+                    The room's speakers are the cabinet's, but the registry entry is separate so a song
+                    playing on that jukebox at the same time cannot share (and tear down) this bank.
+                    """
         return f"musicbot:{cabinet_id}"
 
     def cinema_target_label(self):
@@ -457,21 +435,18 @@ class MapMusicBot:
     def cinema_routing_allowed(self):
         """Whether this account may route the bot into a cabinet's room.
 
-        Server-owned: Developer/Contributor only. Feeding a room takes the
-        cabinet's speakers over, so this stays a building and testing tool
-        rather than a way to listen -- lower staff get a plain Music Bot, with
-        no Cinema Speakers line in the menu at all.
-        """
+                    Server-owned: Developer/Contributor only - feeding a room takes the cabinet's speakers
+                    over, so lower staff get a plain Music Bot with no Cinema Speakers line at all.
+                    """
         gp = self._find_gameplay()
         return bool(getattr(gp, "can_use_cinema_speakers", False))
 
     def cinema_active_target(self):
         """The cabinet this bot may feed right now, or None for normal playback.
 
-        A choice saved before a rank change is not acted on: the routing drops
-        back to the listener's ears instead of playing through a room whose
-        menu line this account can no longer see (or switch off).
-        """
+                    A choice saved before a rank change is not acted on: the routing drops back to the
+                    listener's ears rather than through a room whose menu line is no longer visible.
+                    """
         if not self.cinema_routing_allowed():
             return None
         return getattr(self, "cinema_target", None)
@@ -479,14 +454,11 @@ class MapMusicBot:
     def cinema_listening_allowed(self):
         """Whether this account gets the listener-side cinema switches.
 
-        Two lines ask this: the rooms switch and the live-instrument routing.
-        Both are about how *this* listener hears a cabinet and both take
-        nothing from anybody -- the *song* routing above stays
-        Developer/Contributor because feeding a room turns a cabinet over --
-        so the rule is the Music Bot's own access rule, asked rather than
-        copied, and neither line can appear in a menu the account cannot open.
-        The Server still owns the switch behind it and is accepted too.
-        """
+                    Two lines ask this - the rooms switch and the live-instrument routing - and both are
+                    about how *this* listener hears a cabinet, both taking nothing from anybody, so the
+                    rule is the Music Bot's own access rule, asked rather than copied. The *song* routing
+                    above stays Developer/Contributor. The Server is accepted too.
+                    """
         gp = self._find_gameplay()
         if gp is None:
             return False
@@ -503,18 +475,11 @@ class MapMusicBot:
     def instruments_cinema_active(self):
         """Whether this client plays live instruments through the room.
 
-        The listener's own choice, like ``cinema_speakers``, because it is
-        about how *you* hear the band and not about what the band does: the
-        performer's notes arrive with their world position, and every client
-        decides for itself whether to also play them at the speakers around
-        the cabinet. No packet changes, and two listeners in one hall can
-        disagree without either being wrong.
-
-        Open to everybody and on by default (see ``live.py``), because a live
-        note takes nothing from anybody: this is not a staff switch. The
-        instruments ask the option itself, so the answer here is the same one
-        a piano and a kit already act on.
-        """
+                    The listener's own choice, like ``cinema_speakers``: the performer's notes arrive with
+                    their world position and every client decides for itself whether to also play them at
+                    the speakers, so no packet changes and two listeners in one hall can disagree. Open to
+                    everybody and on by default.
+                    """
         return live_instruments_enabled()
 
     def instruments_cinema_label(self):
@@ -526,12 +491,9 @@ class MapMusicBot:
     def toggle_instruments_cinema(self):
         """Send (or stop sending) live instruments into the room.
 
-        Turning it off never needs a bank to be handed back: the notes were
-        never in the room's buffers, they were one sample per speaker, so the
-        very next note simply is not spawned there. The choice is saved where
-        both instruments read it, so the line cannot look switched while the
-        room stays silent.
-        """
+                    Turning it off never needs a bank handed back: the notes were one sample per speaker,
+                    never in the room's buffers, so the next note is simply not spawned there.
+                    """
         self.instruments_cinema = not live_instruments_enabled()
         set_live_instruments(self.instruments_cinema)
         if self.instruments_cinema:
@@ -542,12 +504,9 @@ class MapMusicBot:
     def speech_cinema_label(self):
         """Menu text for whether a voice comes out of the room it is spoken in.
 
-        The third listening switch, next to songs and instruments: a talker
-        standing inside a cabinet's room is heard from that room's speakers
-        instead of the map's PA speakers. Turning it off is exactly the PA
-        every map already had, so this changes how *this* listener hears a
-        voice and nothing about what anyone else hears.
-        """
+                    The third listening switch, next to songs and instruments: a talker inside a cabinet's
+                    room is heard from that room's speakers instead of the map's PA.
+                    """
         if not cinema_speech_enabled():
             return "Speech: through the map's PA speakers"
         return "Speech: through the nearest cabinet's room"
@@ -555,12 +514,10 @@ class MapMusicBot:
     def toggle_speech_cinema(self):
         """Hear a voice from the room it is spoken in, or from the map's PA.
 
-        Nothing has to be handed back when it changes: the next frame is
-        simply fed by the other path, and a room that was playing the voice
-        is released by the frame that no longer routes to it (the room's
-        speakers are never the ones a song is using -- a voice takes them for
-        itself, on this client only).
-        """
+                    Nothing has to be handed back when it changes: the next frame is fed by the other path,
+                    and the room that was playing the voice is released by the frame that no longer routes
+                    to it.
+                    """
         enabled = not cinema_speech_enabled()
         set_cinema_speech(enabled)
         if enabled:
@@ -571,12 +528,10 @@ class MapMusicBot:
     def cinema_rooms_label(self):
         """Menu text for whether songs come out of the rooms around cabinets.
 
-        This switch used to be a paragraph in Options; it is a listening
-        choice like the two lines next to it, so it lives with them (and
-        Options keeps its length). Which room a single cabinet uses is still
-        the map's decision, and turning this off only makes every jukebox the
-        plain two-source stereo for this listener.
-        """
+                    A listening choice like the two lines next to it (it used to be a paragraph in
+                    Options). Which room a single cabinet uses is still the map's decision; off is the
+                    plain two-source stereo for this listener.
+                    """
         if not rooms_enabled():
             return "Cinema rooms: OFF (every jukebox plays its own stereo here)"
         return "Cinema rooms: ON (songs come from the speakers around a cabinet)"
@@ -593,14 +548,10 @@ class MapMusicBot:
     def own_sound_label(self):
         """Read-only line: where staff have put *your* voice.
 
-        The one thing the player a pan moved could not look up. A pan is a staff
-        decision relayed to the map and the owner is told once when it lands --
-        and after that it can only be *heard*, which with a room around you
-        sounds much like standing anywhere else in that room. This line answers
-        it the way the pan menu answers for everybody else, and it changes
-        nothing: staff still choose, the owner just gets to see where their
-        voice went (never a veto -- see ``pan.own_notice``).
-        """
+                    A pan is a staff decision relayed to the map and the owner is told once when it lands;
+                    after that it can only be *heard*. This answers it the way the pan menu answers, and
+                    it changes nothing - never a veto.
+                    """
         gp = self._find_gameplay()
         if gp is None:
             return "Your sound: unknown here"
@@ -609,11 +560,10 @@ class MapMusicBot:
     def announce_own_sound(self):
         """Say where your own voice is heard, and what decides what you hear.
 
-        The two halves are said apart on purpose: other players hear the voice
-        from the staff-chosen room, while the owner hears it according to their
-        own ``Cinema rooms``/``Instruments``/``Speech`` switches. Same sentence
-        the announcement uses, so the menu and the moment it happens agree.
-        """
+                    The two halves are said apart on purpose: other players hear the staff-chosen room,
+                    while the owner hears it according to their own ``Cinema rooms``/``Instruments``/
+                    ``Speech`` switches. Same sentence the announcement uses.
+                    """
         gp = self._find_gameplay()
         if gp is None:
             speak("Your sound is not known here.")
@@ -628,11 +578,9 @@ class MapMusicBot:
     def _cinema_problem(self, anchor, cabinet_id=None):
         """Why this cabinet's speakers cannot be used, in the resolver's words.
 
-        "No speakers found" is what leaves a tester standing in front of four
-        of them with no idea what is wrong. The reason a room was refused is
-        knowable -- a missing front pair, a lone side wall, no speaker close
-        enough -- so the menu says it instead of guessing.
-        """
+                    "No speakers found" leaves a tester standing in front of four of them with no idea
+                    what is wrong; the reason a room was refused is knowable, so say it instead.
+                    """
         try:
             return cinema_diagnosis(self.game, anchor, room_id=cabinet_id)
         except Exception as exc:
@@ -656,26 +604,19 @@ class MapMusicBot:
     def cinema_force_upload(self):
         """Whether routing to a room means this bot must upload at all.
 
-        A room is a place other people stand in. A song routed into one and
-        then played only into the sender's own copy would leave the venue
-        silent -- which is exactly what happened before this existed, with the
-        bot in its default private mode and nobody else hearing anything.
-
-        The Broadcast switch itself is untouched: this only ORs into the
-        upload gate, so the account's own private-listening choice is still
-        what comes back the moment the routing is turned off.
-        """
+                    A room is a place other people stand in, so a song played only into the sender's own
+                    copy would leave the venue silent. The Broadcast switch itself is untouched: this only
+                    ORs into the upload gate.
+                    """
         return bool(self.cinema_active_target())
 
     def announce_cinema_target(self, force=False):
         """Tell the map which cabinet's room this bot is playing through.
 
-        Listeners cannot work this out for themselves: the room is a choice
-        made on this client. So it is announced when it changes (immediately,
-        reliably) and repeated at :data:`CINEMA_ANNOUNCE_INTERVAL` while a room
-        is in use, which is what makes a mid-song joiner hear the song from the
-        room rather than from a speaker on this character's back.
-        """
+                    Listeners cannot work this out themselves - the room is a choice made on this client.
+                    Announced when it changes and repeated at :data:`CINEMA_ANNOUNCE_INTERVAL`, which is
+                    what lets a mid-song joiner hear the song from the room.
+                    """
         target = self.cinema_active_target()
         # Read defensively: a bot object built by a test (or restored by an
         # older build) may never have been through __init__. Announcing is
@@ -701,9 +642,9 @@ class MapMusicBot:
     def set_cinema_target(self, cabinet_id):
         """Route (or un-route) this bot through a cabinet's speaker room.
 
-        Applying it restarts the current track the same way a seek does, so
-        the change is heard immediately instead of at the next song.
-        """
+                    Applying it restarts the current track the same way a seek does, so the change is
+                    heard immediately instead of at the next song.
+                    """
         cabinet_id = str(cabinet_id or "") or None
         self.cinema_target = cabinet_id
         options.set("music_bot_cinema_target", cabinet_id or "")
@@ -745,12 +686,10 @@ class MapMusicBot:
     def _restart_in_new_output(self):
         """Hand a playing track to whichever output now owns the stream.
 
-        Switching between the room and the listener's ears changes which
-        OpenAL sources carry the audio, so the running stream has to be
-        restarted into the new one. This is the same path a seek takes: the
-        position and the queue both survive, and without it the bot would
-        either fall silent or keep writing into deleted sources.
-        """
+                    Switching between the room and the ears changes which OpenAL sources carry the audio,
+                    so the running stream is restarted into the new one (the seek path). Without it the
+                    bot falls silent or writes into deleted sources.
+                    """
         if not getattr(self, "playing", False):
             return
         try:
@@ -800,11 +739,9 @@ class MapMusicBot:
     def _acquire_cinema_room(self, anchor, room):
         """Take (or re-shape) the room this bot feeds for a resolved cabinet.
 
-        Called both when a track starts and, once a second, while it plays:
-        the host hands back the SAME bank and re-shapes it in place when the
-        map gained or lost a speaker, so there is nothing for the caller to
-        hand over -- the running stream keeps feeding the room it holds.
-        """
+                    Called when a track starts and once a second while it plays: the host hands back the
+                    SAME bank and re-shapes it in place, so the running stream keeps feeding it.
+                    """
         key = self._cinema_key(self.cinema_target)
         bank = cinema_acquire_bank(
             self.game, key, anchor,
@@ -832,12 +769,9 @@ class MapMusicBot:
     def _cinema_occlusion(self, position, listener, max_distance):
         """Wall occlusion for the room, measured from each speaker's own spot.
 
-        Without a provider a room is heard as if the map had no walls at all:
-        a speaker standing in the next room plays as loudly and as brightly as
-        one beside the listener. The jukebox player's ray already caches tile
-        results for a fraction of a second, so this is cheap per speaker; the
-        music bot would otherwise be the one output that ignores walls.
-        """
+                    Without it a speaker in the next room plays as loudly as one beside the listener. The
+                    jukebox player's ray already caches tile results, so this is cheap per speaker.
+                    """
         gp = self._find_gameplay()
         if gp is None:
             return 0
@@ -902,11 +836,9 @@ class MapMusicBot:
     def _update_cinema_output(self):
         """Per-frame room upkeep: gains, map changes, recovery from a lost room.
 
-        A jukebox stop, map change or map reload can take the shared bank away
-        (one room per cabinet, owned by whoever is feeding it). The bot then
-        rebuilds it around the stream that is already playing rather than
-        going silent.
-        """
+                    A jukebox stop, map change or map reload can take the shared bank away; the bot then
+                    rebuilds it around the stream that is already playing rather than going silent.
+                    """
         if not self.cinema_active_target():
             if getattr(self, "cinema_bank", None) is not None:
                 self._release_cinema_bank()
@@ -929,14 +861,11 @@ class MapMusicBot:
     def _follow_cinema_map(self, bank):
         """Let the playing room follow the map under it.
 
-        A builder who places (or deletes) a speaker while a song is playing
-        gets the change without toggling this routing off and on again, which
-        stops and restarts the track. The room is re-resolved at most once a
-        second and the bank is re-shaped IN PLACE (see
-        ``CinemaSpeakerBank.reconfigure``), so the speakers that did not
-        change keep playing and one that just appeared joins on the current
-        beat.
-        """
+                    A builder placing or deleting a speaker mid-song gets the change without toggling the
+                    routing off and on (which restarts the track): the room is re-resolved at most once a
+                    second and re-shaped IN PLACE (``CinemaSpeakerBank.reconfigure``), so the speakers
+                    that did not change keep playing.
+                    """
         now = time.monotonic()
         if now - getattr(self, "_cinema_reshape_at", 0.0) < self.CINEMA_RESHAPE_INTERVAL:
             return
@@ -1137,24 +1066,19 @@ class MapMusicBot:
 
             items.append((self.cinema_target_label, go_cinema))
 
-        # Three listener-side switches, one line below the song's own routing:
-        # a room is how *this* listener hears a cabinet, so none of them takes
-        # anything from anybody and all three are open to everyone who can
-        # open this menu (the song routing above stays Developer/Contributor,
-        # because that one turns a cabinet over). Songs, instruments and a
-        # voice: the same three things a room carries.
+        # Three listener-side switches, one line below the song's own routing: a room is
+        # how *this* listener hears a cabinet, so none of them takes anything from anybody
+        # and all three are open to anyone who can open this menu (the song routing above
+        # stays Developer/Contributor). Songs, instruments and a voice.
         if self.cinema_listening_allowed():
             items.append((self.cinema_rooms_label, self.toggle_cinema_rooms))
             items.append((self.instruments_cinema_label,
                           self.toggle_instruments_cinema))
             items.append((self.speech_cinema_label, self.toggle_speech_cinema))
-            # The three lines above choose how *you* hear a room; this one is
-            # the other direction and is not a switch at all -- it is the answer
-            # to "where do other players hear me from", which is decided by
-            # staff and cannot be changed from here. It sits with them because
-            # this is where a listener comes to ask about rooms, and it reads
-            # rather than toggles: pressing it says the same sentence the moment
-            # of a pan says, so nothing about it can look like a setting.
+            # The three lines above choose how *you* hear a room; this one is the other
+            # direction and is not a switch at all - it answers "where do other players hear me
+            # from", which is decided by staff. It reads rather than toggles: pressing it says
+            # the same sentence the moment of a pan says, so it cannot look like a setting.
             items.append((self.own_sound_label, self.announce_own_sound))
 
         items.extend([
@@ -1170,12 +1094,9 @@ class MapMusicBot:
         gp.add_substate(m)
 
     # === Party Sync (listen together with invited friends) ===
-    # The server (libs/party_sync.ts) runs the session and gates the relay to
-    # session guests only. Host-side, the client only needs to keep uploading
-    # its stream while a session is active (party_sync_force_upload) and drive
-    # the invite/kick/end controls below. Guests receive the stream through the
-    # normal music-source receive leg (host voice_channel -> entity
-    # music_source), so no special guest audio code is needed.
+    # The server (libs/party_sync.ts) runs the session and gates the relay to guests; the client
+    # keeps uploading while a session is active and drives the controls, and guests receive the
+    # stream through the normal music-source receive leg. Rules: .agents/skills/party-sync-system/.
 
     def _party_sync_pair(self):
         """(gameplay, PartySyncState) pair, creating the state lazily."""
@@ -1203,12 +1124,9 @@ class MapMusicBot:
     def song_requests_switch_item(self, on_toggle=None):
         """The host's /p switch as a menu item, or None for a listener.
 
-        It lives in the Party Sync menus (`_open_party_sync_menu` and
-        `Gameplay._open_party_sync_quick_menu`) and NOT in the Music Bot menu:
-        a line about what a session's listeners may ask for, parked among the
-        bot's own settings, read like a bot setting. One builder feeds both
-        session menus, so the two can never word the switch differently.
-        """
+                    It lives in the Party Sync menus, NOT in the Music Bot menu: parked among the bot's
+                    own settings it read like a bot setting. One builder feeds both session menus.
+                    """
         _gp, ps = self._party_sync_pair()
         if ps is None or getattr(ps, "role", None) != "host":
             return None
@@ -1239,10 +1157,9 @@ class MapMusicBot:
     def announce_song_requests(self):
         """Tell the server whether this host takes requests (host only).
 
-        It travels with the session state rather than being advertised on the
-        wire once, so a guest who joins later still knows, and the server can
-        refuse a request from a client whose flag is stale.
-        """
+                    It travels with the session state, so a guest who joins later still knows, and the
+                    server can refuse a request from a client whose flag is stale.
+                    """
         gp, ps = self._party_sync_pair()
         if ps is None or getattr(ps, "role", None) != "host":
             return
@@ -1260,17 +1177,12 @@ class MapMusicBot:
     def queue_song_request(self, requester, query, request_id=None):
         """MAIN THREAD: serve one listener's request, or say why not.
 
-        Everything the host can refuse is decided before the search (it costs
-        about a second of yt-dlp, and a refused request must not cost that).
-        `request_id` is None for the host's own /p: there is nobody to answer,
-        so the outcome is spoken here instead of being relayed.
-
-        The search offers CANDIDATE_LIMIT results and THE ASKER PICKS ONE --
-        a search returns five ways to play one song and only the person who
-        asked knows which they meant. Nobody is asked to pick for somebody
-        else: a listener's request opens a picker on their own machine, and a
-        host's own /p opens the same picker here.
-        """
+                    Everything the host can refuse is decided before the search (which costs about a
+                    second of yt-dlp). `request_id` is None for the host's own /p: nobody to answer, so
+                    the outcome is spoken here. The search offers CANDIDATE_LIMIT results and THE ASKER
+                    PICKS ONE - only the person who asked knows which of five ways to play a song they
+                    meant, and nobody picks for somebody else.
+                    """
         from ..party_sync import clean_song_query
         requester = str(requester or "").strip()
         query = clean_song_query(query)
@@ -1299,11 +1211,10 @@ class MapMusicBot:
     def _offer_song_choices(self, requester, query, request_id, results):
         """MAIN THREAD: the search came back - offer it, or say there is none.
 
-        The host keeps the results (`song_picks`) and only the list of names
-        travels; the answer comes back as an index, so no client can name a
-        song into this queue. A host's own /p has no round trip (nothing to
-        send) and no asker to answer -- its picker opens locally.
-        """
+                    The host keeps the results (`song_picks`) and only the names travel; the answer comes
+                    back as an index, so no client can name a song into this queue. A host's own /p opens
+                    its picker locally with no round trip.
+                    """
         if request_id is None:
             self._local_pick_seq += 1
             key = f"{song_requests.LOCAL_REQUEST_ID}:{self._local_pick_seq}"
@@ -1330,10 +1241,9 @@ class MapMusicBot:
     def serve_song_pick(self, requester, request_id, index):
         """MAIN THREAD: one pick (or a withdrawal) for a request offered here.
 
-        The choice is resolved against the host's own list of results, and a
-        pick may only ever answer the request of the person who made it -- the
-        one thing a listener sends at another machine's queue.
-        """
+                    Resolved against the host's own list of results, and a pick may only ever answer the
+                    request of the person who made it.
+                    """
         local = str(request_id).startswith(song_requests.LOCAL_REQUEST_ID)
         query = self.song_picks.query(request_id)
         found, note = self.song_picks.pick(request_id, requester, index)
@@ -1361,13 +1271,10 @@ class MapMusicBot:
     def open_song_pick_menu(self, request_id, items, query="", on_pick=None):
         """The picker: which of the results this request may be queued from.
 
-        Used by both ends of a request -- a listener whose own music bot may
-        be switched off entirely (this needs no playback, no sources and no
-        bot state, only a menu), and a host who asked their own bot. One menu
-        and one wording (`song_requests.choice_line`) because it is the same
-        search either way. `on_pick(index)` is what the choice means on this
-        machine: send it back to the host, or queue it here.
-        """
+                    Used by both ends - a listener whose own bot may be switched off entirely (no
+                    playback, no sources, only a menu) and a host who asked their own bot. One menu and
+                    one wording (`song_requests.choice_line`); `on_pick(index)` is what it means here.
+                    """
         from .. import menu as menu_mod, menus
         gp = self._find_gameplay()
         if gp is None:
@@ -1412,10 +1319,9 @@ class MapMusicBot:
                              reason="", waiting=0):
         """MAIN THREAD: hand one result back to the session (or just speak it).
 
-        The server decides who hears it: the requester always, and the whole
-        room when it was really queued. Only the host's client knows the
-        resolved title, which is why the line is composed here.
-        """
+                    The server decides who hears it: the requester always, and the room when it was
+                    really queued. Only the host knows the resolved title, so the line is composed here.
+                    """
         if request_id is None:
             if ok:
                 speak(song_requests.request_line(
@@ -1437,21 +1343,17 @@ class MapMusicBot:
         self._party_sync_send("party_sync_song_result", payload)
 
     # ── the play queue the session can read ─────────────────────────────
-    # A listener hears this machine's music but cannot see what is coming:
-    # next_up_queue is client-side and the server has no music-bot queue at
-    # all. So the HOST relays a bounded snapshot of it (song_requests
-    # .queue_share) and every listener renders what arrives. It is a report in
-    # one direction only -- nothing a listener reads can change the queue.
+    # A listener hears this machine's music but cannot see what is coming (next_up_queue is
+    # client-side, the server has no music-bot queue), so the HOST relays a bounded snapshot
+    # (song_requests.queue_share). One direction only - nothing a listener reads changes it.
 
     def _now_playing_title(self):
         """The title of the song this bot has on right now ("" when idle).
 
-        One reader for "what is playing": the session relay and the Play
-        Queue menu both lead with the same now-playing line
-        (`song_requests.now_playing_line`), and a host whose menu named a
-        different song than the room was told about would be describing a
-        queue nobody is playing.
-        """
+                    One reader for "what is playing": the session relay and the Play Queue menu both lead
+                    with the same line (`song_requests.now_playing_line`), or a host would describe a
+                    queue nobody is playing.
+                    """
         if not (getattr(self, "playing", False)
                 or getattr(self, "paused", False)):
             return ""
@@ -1459,18 +1361,10 @@ class MapMusicBot:
             str(getattr(self, "current_title", "") or "").split())
 
     def announce_party_queue(self, force=False):
-        """Host: tell the session what is playing and what is waiting.
-
-        Called every frame like the cinema routing's own announce: it sends
-        the moment the queue changes (that is what makes a request show up for
-        the room as soon as it is queued) and repeats at
-        :data:`PARTY_QUEUE_INTERVAL` while there is anything to say, which
-        covers a lost packet and a listener who joined after the last change.
-        Quiet unless this client is the host of a session.
-        """
-        # Read the session without creating one: this runs every frame, and a
-        # client that has never used Party Sync must not grow a session state
-        # just because a music bot finished loading.
+        # Host: tell the session what is playing and what is waiting.
+        # Called every frame: it sends the moment the queue changes and repeats at
+        # :data:`PARTY_QUEUE_INTERVAL` while there is anything to say, which covers a lost packet and
+        # a late joiner. Reads the session without creating one (this runs for every bot that loads).
         gp = self._find_gameplay()
         if gp is None:
             return False
@@ -1506,10 +1400,9 @@ class MapMusicBot:
     def open_party_queue_view(self):
         """Read-only view of the host's queue, for a session listener.
 
-        The queue is somebody else's: every line here is a report, and there
-        is nothing to press but Close. It opens on top of whatever party menu
-        asked for it, so closing it comes back there.
-        """
+                    Somebody else's queue: every line is a report and there is nothing to press but Close.
+                    It opens on top of whatever party menu asked for it.
+                    """
         from .. import menu as menu_mod, menus
         gp, ps = self._party_sync_pair()
         if gp is None:
@@ -2201,15 +2094,12 @@ class MapMusicBot:
                        webpage_url="", direct_url="", requested_by=""):
         """Queue a track to play next (Queue Mode / Add to Queue).
 
-        When nothing is playing the earliest possible "next" is right now, so
-        the track starts immediately; otherwise it is appended and auto-plays
-        when the current track ends.        Returns how many tracks are waiting (0
-        when it started right away).
-
-        `requested_by` marks a Party Sync listener's song request (/p): it
-        travels with the queue entry so the queue menu can say whose song it is
-        and the request quota can count only the listeners' own slots.
-        """
+                    With nothing playing the earliest "next" is right now, so the track starts
+                    immediately; otherwise it is appended and auto-plays at the end. Returns how many
+                    tracks are waiting (0 when it started right away). `requested_by` marks a Party Sync
+                    listener's /p, so the menu can say whose song it is and the quota counts only the
+                    listeners' own slots.
+                    """
         if not target:
             speak("Cannot queue this track.")
             return 0
@@ -2257,12 +2147,9 @@ class MapMusicBot:
         self.next_up_queue = []
 
     # === Crossfade between auto-advanced tracks ===
-    # When the current track's duration is known, the NEXT queued track is
-    # pre-rolled (URL resolve + a paused ffmpeg streamer on its own source)
-    # during the last seconds of the current song. Right before the outro
-    # runs out the candidate is unpaused under gain 0 and both sources ramp
-    # against each other over CROSSFADE_SECONDS — a real overlapping
-    # fade-out/fade-in instead of a silent gap while the next track loads.
+    # With the current track's duration known, the NEXT queued track is pre-rolled (resolve + a
+    # paused ffmpeg on its own source) during the last seconds; right before the outro runs out
+    # it is unpaused under gain 0 and both ramp over CROSSFADE_SECONDS.
 
     def _remaining_seconds(self):
         """Seconds left on the current track, when its duration is known."""
@@ -2293,10 +2180,9 @@ class MapMusicBot:
     def _cancel_crossfade(self):
         """Abandon any pre-roll / in-progress fade and free its resources.
 
-        Never touches the CURRENT streamer/source (the caller owns those); it
-        only tears down the extra candidate pipeline and, when a fade was
-        already underway, the retired outgoing stream that was being faded.
-        """
+                    Never touches the CURRENT streamer/source (the caller owns those) - only the extra
+                    candidate pipeline and, mid-fade, the retired outgoing stream.
+                    """
         state = getattr(self, "_crossfade", None)
         if not state:
             return False
@@ -2569,18 +2455,13 @@ class MapMusicBot:
     def _open_queue_menu(self):
         """View / clear the play-next queue (Queue Mode).
 
-        Every queued song is its own menu item so the player scrolls through
-        them one at a time with the arrow keys / wheel — the menu speaks each
-        item as it is highlighted, instead of reading the whole list at once.
-        Enter on a song re-reads its line.
+                    Every queued song is its own menu item, so the player scrolls through them one at a
+                    time and the menu speaks each as it is highlighted; Enter re-reads a line.
 
-        Every line here is composed by `song_requests` (the count is the menu
-        title through `queue_label`, the body is `queue_lines`): the count, the
-        now-playing line, the numbered tracks and the empty sentence are the
-        same strings a Party Sync listener reads in their own view of this
-        queue, so the host and the room can never describe one queue two ways.
-        Only the ends differ — Clear Queue and Back here, Close there.
-        """
+                    Every line is composed by `song_requests` (the count is `queue_label`, the body
+                    `queue_lines`) - the same strings a Party Sync listener reads - so host and room can
+                    never describe one queue two ways. Only the ends differ: Clear Queue and Back here.
+                    """
         from .. import menu as menu_mod, menus
         gp = self._find_gameplay()
         if not gp:
@@ -2618,12 +2499,10 @@ class MapMusicBot:
     def _open_settings_menu(self):
         """Music Bot settings: underwater muffle and room reverb.
 
-        Broadcast to Others is deliberately NOT here — it has its own keyboard
-        shortcut, and duplicating it in the menu caused confusion about which
-        one is the source of truth.
-        Every toggle here is persisted in client options, so a player sets it
-        once and the game remembers it across restarts.
-        """
+                    Broadcast to Others is deliberately NOT here - it has its own shortcut, and
+                    duplicating it caused confusion about which is the source of truth. Every toggle here
+                    is persisted in client options.
+                    """
         from .. import menu as menu_mod, menus
         gp = self._find_gameplay()
         if not gp:
@@ -2736,9 +2615,9 @@ class MapMusicBot:
     def _reapply_bot_water_filter(self):
         """Apply the underwater-muffle setting to the bot's live stream source.
 
-        Matters when the toggle flips while the listener is underwater at a
-        constant depth — no camera automation tick runs then to re-apply it.
-        """
+                    Matters when the toggle flips while the listener is underwater at a constant depth -
+                    no camera automation tick runs then to re-apply it.
+                    """
         src = self.stream_source
         if src is None:
             return
@@ -2752,11 +2631,9 @@ class MapMusicBot:
                 del src.direct_filter
 
     # === Spoken subtitles (YouTube captions) ===
-    # A blind player cannot read a caption on the screen, so the Music Bot
-    # reads the video's own caption track out loud while the audio keeps
-    # playing (libs/music_bot/subtitles.py). It is per listener and per
-    # machine: the track comes from the page this bot is already playing from,
-    # and every cue is aimed at this machine's own audible position.
+    # A blind player cannot read a caption, so the bot reads the video's own caption track out
+    # loud while the audio keeps playing (libs/music_bot/subtitles.py). Per listener and per
+    # machine: every cue is aimed at this machine's own audible position.
 
     def subtitle_label(self):
         if not getattr(self, "subtitles_enabled", False):
@@ -2784,12 +2661,10 @@ class MapMusicBot:
     def _begin_subtitles(self, page_url):
         """Start reading one page's captions, or leave the reader empty.
 
-        Called whenever a stream starts (a fresh song, a replayed one, and a
-        seek's restart alike), so the reader is always aimed at the track that
-        is really playing. The fetch runs on its own thread: the yt-dlp import
-        behind it is ~700 ms and ~24 MB, and it must never sit in the frame
-        loop or the audio pump.
-        """
+                    Called whenever a stream starts (a fresh song, a replayed one, a seek's restart), so
+                    the reader always aims at the track really playing. The fetch runs on its own thread:
+                    the yt-dlp import behind it is ~700 ms and ~24 MB and must never sit in the frame loop.
+                    """
         self._subtitle_generation += 1
         generation = self._subtitle_generation
         self.subtitle_reader.clear()
@@ -2933,10 +2808,9 @@ class MapMusicBot:
     def _open_subtitle_timing_menu(self):
         """Shift the captions against the audio, half a second a press.
 
-        Reading a caption takes the reader its own time and the reader's rate
-        is the player's setting, so the line the player hears starts where the
-        reader starts. Nothing can measure that from here; the player can.
-        """
+                    Reading a caption takes the reader its own time and the rate is the player's setting,
+                    so only the player can say where the line they hear starts.
+                    """
         from .. import menu as menu_mod, menus
         gp = self._find_gameplay()
         if not gp:
@@ -2979,10 +2853,8 @@ class MapMusicBot:
         gp.add_substate(m)
 
     # === Equalizer (personal Music Bot) ===
-    # Same OpenAL EQUALIZER approach as the jukebox: preset slots are cached
-    # per profile, the custom profile owns one slot that is mutated in place
-    # while its sliders move (no slot leaks, audible in real time), and
-    # "normal" detaches the aux send so the stream stays perfectly flat.
+    # Same approach as the jukebox: preset slots cached per profile, a custom profile owning one
+    # slot mutated in place, and "normal" detaching the aux send so the stream stays perfectly flat.
 
     def _eq_profile_label(self):
         for profile, label in self.EQ_PROFILES:
@@ -3292,10 +3164,9 @@ class MapMusicBot:
     def _is_music_owner(self):
         """True if this performer holds the single music-bot PA slot.
 
-        The server keeps the music slot single-owner (only one MP3 stream on
-        the PA at a time, so two people's music never overlaps); everyone else
-        with "Broadcast to Megaphone" still broadcasts their live instruments.
-        """
+                    The server keeps the slot single-owner so two people's music never overlaps; everyone
+                    else with "Broadcast to Megaphone" still broadcasts their live instruments.
+                    """
         gp = self._find_gameplay()
         if not gp or not getattr(gp, 'megaphone', None):
             return False
@@ -3536,10 +3407,9 @@ class MapMusicBot:
                               start_offset=0.0, start_paused=False):
         """Start streaming from a YouTube audio URL or a local media file.
 
-        start_offset seeks the new decode head to a content position in
-        seconds (ffmpeg input seek, like the jukebox mid-song path);
-        start_paused keeps the pre-buffered head silent until resume.
-        """
+                    start_offset seeks the new decode head to a content position in seconds (ffmpeg input
+                    seek, like the jukebox mid-song path); start_paused keeps the pre-buffered head silent.
+                    """
         if (playback_generation is not None
                 and not self._is_current_playback_generation(playback_generation)):
             return
@@ -3595,11 +3465,9 @@ class MapMusicBot:
     def seek_by(self, delta):
         """Seek the current Music Bot stream by delta seconds (negative = backward).
 
-        Works for both YouTube links and local files: the current track is
-        restarted at the target position via an ffmpeg input seek, so the
-        same code path serves movies, video files and songs.  A seek while
-        paused keeps the new stream paused.
-        """
+                    Works for YouTube links and local files: the track is restarted at the target
+                    position via an ffmpeg input seek. A seek while paused keeps the new stream paused.
+                    """
         if self.is_loading_stream:
             speak("Please wait, the track is still loading.")
             return
@@ -3652,14 +3520,10 @@ class MapMusicBot:
             )
             return
 
-        # Remote (YouTube) tracks normally re-resolve so the seeked range
-        # request uses a fresh signed stream URL (an expired googlevideo URL
-        # 403s forever) - but that extraction is the SLOW part of a seek. When
-        # the outgoing stream still holds a direct URL + headers (they age over
-        # hours, not seconds) restart straight from them: the seek then only
-        # pays for one ffmpeg restart with a fast range request. A stale URL is
-        # self-healing - AudioStreamer.run's startup retry ladder re-resolves a
-        # fresh URL from the canonical page when ffmpeg 403s.
+        # Remote (YouTube) tracks normally re-resolve so a seek uses a fresh signed URL (an expired
+        # googlevideo URL 403s forever) - but that extraction is the SLOW part. With a direct URL +
+        # headers still held (they age over hours, not seconds) restart straight from them; a stale
+        # URL is self-healing via AudioStreamer.run's startup retry ladder.
         if seek_reuse_url.startswith(("http://", "https://")):
             self._start_youtube_stream(
                 seek_reuse_url, title, playback_generation,
@@ -3902,12 +3766,10 @@ class MapMusicBot:
         if gp and gp.voice_chat and gp.voice_chat.recording and getattr(gp, 'voice_chat_using_megaphone', False):
             is_speaking_on_mega = True
 
-        # Also duck while OTHERS talk on the PA: remote megaphone frames are
-        # stamped in event_handeler.process_voice_data (the server never
-        # echoes our own broadcast back, so any recent frame means someone
-        # else is speaking). The duck multiplier scales BOTH the local source
-        # and the uploaded PCM, so every listener hears the music dip together
-        # with no per-listener logic.
+        # Also duck while OTHERS talk on the PA: remote megaphone frames are stamped in
+        # event_handeler.process_voice_data, and the server never echoes our own broadcast back, so
+        # any recent frame means someone else is speaking. The multiplier scales BOTH the local source
+        # and the uploaded PCM, so every listener hears the music dip together.
         remote_speaking = False
         if gp:
             last_remote = getattr(gp, '_last_remote_megaphone_voice_ts', 0)
@@ -3951,11 +3813,10 @@ class MapMusicBot:
         if (self.stream_source or bank is not None) and (self.playing or self.paused):
             self._sync_map_reverb()
 
-        # A cinema room needs its own upkeep every frame (per-speaker gains,
-        # occlusion, and survival across a jukebox stop or map reload). This
-        # reads the raw attribute on purpose: whether the routing is actually
-        # allowed is decided inside, so a bot whose account lost the
-        # permission still runs the release path that hands the track back.
+        # A cinema room needs its own upkeep every frame (per-speaker gains, occlusion, and
+        # survival across a jukebox stop or map reload). This reads the raw attribute on
+        # purpose: whether the routing is actually allowed is decided inside, so a bot whose
+        # account lost the permission still runs the release path that hands the track back.
         if getattr(self, "cinema_target", None):
             self._update_cinema_output()
             # Keep the routing on the map fresh (a joiner, a return from
@@ -4022,14 +3883,11 @@ class MapMusicBot:
     def performance_timeline_marker(self):
         """Marker attached to this performer's event-driven instruments.
 
-        Only ordinary Music Broadcast has a versioned timeline. Megaphone and
-        private playback keep their existing paths and therefore return None.
-
-        A song routed into a cabinet's room counts as an ordinary broadcast:
-        the room is heard by other people and they play their own instrument
-        notes against this very clock, so the marker has to travel with them
-        even though the account's own Broadcast switch may be off.
-        """
+                    Only ordinary Music Broadcast has a versioned timeline; megaphone and private playback
+                    return None. A song routed into a cabinet's room counts as an ordinary broadcast -
+                    other people hear the room and play their notes against this very clock - so the
+                    marker travels even when the account's own Broadcast switch is off.
+                    """
         if (not (self.broadcast_enabled or self.cinema_force_upload)
                 or self.broadcast_to_megaphone
                 or self.paused or not self.playing):
@@ -4063,11 +3921,10 @@ class MapMusicBot:
 
     def _sync_map_reverb(self, force=False):
         """Apply the map's reverb at the player's position to the music source.
-        This gives the music an environmental feel — cave echo, outdoor ambience, etc.
-        The dry signal stays stereo-direct (headphone quality),
-        while the wet signal from the reverb adds the room's atmosphere.
-        Skipped entirely when the player disabled Room Reverb in settings.
-        """
+
+                    Cave echo, outdoor ambience: the dry signal stays stereo-direct (headphone quality)
+                    while the wet signal adds the room's atmosphere. Skipped when Room Reverb is disabled.
+                    """
         bank = getattr(self, "cinema_bank", None)
         if not self.stream_source and bank is None:
             return True
@@ -4144,9 +4001,9 @@ class MapMusicBot:
 class _MusicBotEqSlider(state.State):
     """Accessible Bass/Mid/Treble sliders for the personal Music Bot EQ.
 
-    The Custom profile owns one effect slot that is mutated in place on every
-    tick, so adjustments are audible immediately and no EFX slots leak.
-    """
+                    The Custom profile owns one effect slot mutated in place on every tick, so
+                    adjustments are audible immediately and no EFX slots leak.
+                    """
 
     BANDS = (("bass", "Bass"), ("mid", "Mid"), ("treble", "Treble"))
 

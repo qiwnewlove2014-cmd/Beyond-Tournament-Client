@@ -21,40 +21,20 @@ import audioop
 import collections
 import struct
 
-# ============================================================================
-# SOFT LIMITER - Prevents audio clipping when multiple speakers overlap
-# Used by professional audio software to prevent distortion
-# ============================================================================
+# SOFT LIMITER - prevents clipping when several speakers overlap
+# Voice chat, the megaphone PA path and every song feed. The rules, the thread
+# ownership and every measured number live in .agents/skills/chat_systems/.
 
-# Per-sender smoothed limiter gain (attack/release). The OLD limiter derived
-# its pre_scale from every packet's OWN peak, so adjacent 20ms packets got
-# different scaling -> gain steps at frame boundaries (audible 'kee-kee'
-# ticking on loud, continuous content like music and guitar). Now the gain
-# reduction is smoothed across packets: fast attack (~1 frame) when a peak
-# needs taming, slow release (~1s) back to unity, exactly like a hardware
-# limiter. No more 50Hz gain pumping.
+# Per-sender smoothed limiter gain: attack ~1 frame, release ~1 s. Sizing each
+# packet from its own peak stepped the gain at 20 ms boundaries ('kee-kee'
+# ticking on loud continuous content); smoothing removes the 50 Hz pumping.
 _limiter_gain_state = {}
 
 def soft_limit_audio(audio_bytes, threshold=0.85, ratio=8.0, state_key=None):
-    """
-    Soft limiter with a smoothed per-stream gain.
+    """Soft limiter with a smoothed per-stream gain.
 
-    Computes the gain this packet needs to keep its peak under control, but
-    applies it through a per-stream attack/release state so the scaling does
-    not jump between 20ms packets. This removes the frame-boundary gain steps
-    that caused a faint ticking/'kee-kee' noise on music and guitar, while
-    still preventing clipping when multiple streams combine.
-
-    Args:
-        audio_bytes: Raw 16-bit PCM audio data (MONO16)
-        threshold: Level (0.0-1.0) above which limiting starts
-        ratio: Compression ratio above threshold
-        state_key: Per-sender key for the smoothed gain state. When None, the
-                   packet's own target gain is applied directly (stateless).
-
-    Returns:
-        Limited audio bytes
-    """
+        `state_key=None` applies the packet's own target gain directly (stateless).
+        """
     try:
         samples = list(struct.unpack(f'<{len(audio_bytes)//2}h', audio_bytes))
         max_val = 32767
@@ -124,12 +104,8 @@ def _fade_in_packet(packet, samples=FADE_SAMPLES):
     return bytes(data)
 
 def _fade_out_from_tail(packet, tail_sample, samples=FADE_SAMPLES):
-    """Build a silence packet that ramps from `tail_sample` down to 0.
-
-    The first silence frame after real audio starts at the last real sample
-    value and fades to digital silence, so the audio->silence transition
-    doesn't click.
-    """
+    """Build a silence packet that ramps from `tail_sample` down to 0, so the
+        audio -> silence transition does not click."""
     n = len(packet) // 2
     if n == 0:
         return packet
@@ -147,15 +123,8 @@ def _tail_sample(packet):
         return 0
     return struct.unpack_from('<h', packet, (n - 1) * 2)[0]
 
-# ============================================================================
-# PROFESSIONAL JITTER BUFFER FOR MEGAPHONE
-# 
-# How professional VoIP apps handle multiple speakers:
-# 1. Jitter Buffer: Collect packets before playing (absorbs network jitter)
-# 2. Fixed Playback Rate: Play at exact 20ms intervals using timer
-# 3. Packet Dropping: Drop OLD packets, always play NEWEST audio
-# 4. Pre-buffering: Wait for N packets before starting playback
-# ============================================================================
+# PROFESSIONAL JITTER BUFFER FOR MEGAPHONE: pre-buffer N packets, then play at a
+# fixed 20 ms cadence and always drop old packets in favour of the newest audio.
 
 class MegaphoneJitterBuffer:
     """
@@ -241,11 +210,8 @@ class MegaphoneJitterBuffer:
                 else:
                     return None  # Still pre-buffering
 
-            # Minor underrun: the queue ran dry while playing. Mark it so the
-            # stream re-buffers a couple of frames before resuming, instead of
-            # playing one lonely frame then chopping again (the 'ติดๆขัด' heard
-            # on continuous music broadcasts). The first frames are held back
-            # until RESUME_FRAMES accumulate, then playback picks up smoothly.
+            # Minor underrun: the queue ran dry while playing, so hold the first frames
+            # until RESUME_FRAMES accumulate and playback picks up smoothly.
             if len(self.packet_queue) == 0:
                 self._underrun = True
                 return None
@@ -261,18 +227,9 @@ class MegaphoneJitterBuffer:
             return self.packet_queue.popleft()
     
     def should_output(self, current_time_ms=None):
-        """
-        Check if we should output a frame (fixed 20ms intervals).
-        This ensures consistent playback regardless of when packets arrive.
-
-        Advance the deadline by the frame duration instead of replacing it
-        with the sampled time. A polling loop normally wakes a little late on
-        Windows; replacing the deadline on every wake accumulates that
-        lateness until the PA source underruns. A genuinely long stall resets
-        the deadline so we never burst several catch-up frames at once.
-        """
-        # A monotonic clock cannot jump when Windows synchronizes wall time.
-        # Tests may inject a deterministic timestamp.
+        # Output at a fixed 20 ms cadence: advance the deadline by the frame duration instead of the
+        # sampled time, so a polling loop that wakes late on Windows cannot accumulate that lateness
+        # until the PA source underruns. (Monotonic; tests may inject a deterministic timestamp.)
         current_time = (
             time.perf_counter() * 1000
             if current_time_ms is None else float(current_time_ms)
@@ -315,23 +272,14 @@ _last_packet_times = {}
 # the adaptive jitter margin in the shared-channel playback path.
 _voice_last_pkt = {}
 
-# Measured inter-arrival jitter (ms) per sender - fast-attack peak hold with
-# time-based decay (the standard adaptive-jitter-buffer approach). Drives the
-# adaptive PA margin: steady 20ms streams stay at the 20ms minimum, jittery
-# networks grow the margin just enough to avoid crackle, and a clean network
-# automatically returns to the minimum after a couple of seconds.
+# Measured inter-arrival jitter (ms) per sender: a fast-attack peak hold with
+# time-based decay, driving the adaptive PA margin (20 ms floor, 6-frame cap).
 _speaker_jitter_ms = {}
 _speaker_jitter_ts = {}
 
 def _measure_speaker_jitter(sender_id, prev_time, now_time):
-    """Update the jitter estimate (ms) for a sender and return it.
-
-    The estimate is the largest recently-seen excess over the 20ms frame
-    cadence (peak hold): the moment a packet arrives late, the estimate jumps
-    to that excess so the next resync sizes the margin correctly. It then
-    decays with a ~2s half-life, so an old spike is forgotten and the PA
-    returns to the minimum latency on its own.
-    """
+    """Update the jitter estimate (ms) for a sender and return it: a peak hold over
+            the 20 ms cadence that decays with a ~2 s half-life."""
     global _speaker_jitter_ms, _speaker_jitter_ts
     prev_est = _speaker_jitter_ms.get(sender_id, 0.0)
     prev_ts = _speaker_jitter_ts.get(sender_id, now_time)
@@ -347,12 +295,8 @@ def _measure_speaker_jitter(sender_id, prev_time, now_time):
     return est
 
 def _adaptive_margin_frames(sender_id):
-    """Map a sender's measured jitter to a silence-padding margin in 20ms frames.
-
-    Minimum 2 frames (40ms) for smooth streams - absorbs minor OS and network
-    jitter seamlessly. Grows to at most 6 frames (120ms) for high-jitter
-    connections.
-    """
+    """Map a sender's measured jitter to a silence-padding margin in 20 ms frames:
+            at least 2 frames (40 ms), at most 6 (120 ms)."""
     global _speaker_jitter_ms
     jitter = _speaker_jitter_ms.get(sender_id, 0.0)
     frames = 2 + int(jitter / 20.0)
@@ -362,34 +306,18 @@ def _adaptive_margin_frames(sender_id):
 def _megaphone_margin_frames(sender_id):
     """Return the stable v1.6 PA reserve (six 20 ms frames).
 
-    The channel-30 legacy packet carries only ``sender_id + opus``. It has no
-    sequence number or timestamp for packet-loss concealment, so the reliable
-    server-to-listener leg may pause briefly for retransmission. Keeping six
-    decoded-frame slots at the OpenAL sources absorbs that pause without
-    synthesizing silence. Normal voice channels retain their adaptive margin.
-    """
+                    The legacy channel-30 packet carries only sender_id + opus, with no sequence or timestamp
+                    for concealment, so the server-to-listener leg may pause for a retransmission.
+                    """
     return 6
 
 
-# ============================================================================
 # SONG + LIVE COVER SYNC COMPENSATION
-# ============================================================================
-# A cover performer hears the song one network leg late, then their playing
-# travels a SECOND leg back to the song owner. At the owner's ears the remote
-# performance arrives behind the owner's own zero-latency local monitor:
-#
-#   Piano/drums are MIDI NOTE EVENTS (synthesized at the listener, no jitter
-#   buffer):   heard-song (RTT + 40ms jitter) + note travel (RTT) = 2RTT + 40ms
-#   Guitar/audio mixes ride the audio stream (jitter floor both ways):
-#              2 x (RTT + 40ms) = 2RTT + 80ms
-#
-# The fix delays the owner's LOCAL song monitor by the same amount so the song
-# and the remote band line up. 2RTT + 40ms targets the note-event instruments
-# (piano/drums - the common cover setup); audio-stream covers stay within one
-# jitter floor (40ms). Only the local 'music' producer is delayed: the owner's
-# own instruments stay on the instant path (their players anchor to the
-# delayed song themselves, and remote instruments line up automatically). Any
-# future producer can opt in by listing its tag here.
+# A cover performer hears the song one leg late and their playing travels a second leg back, so
+# at the owner's ears the remote performance arrives 2RTT + 40 ms behind the owner's own
+# zero-latency local monitor (note-event instruments; audio mixes ride one more 40 ms jitter
+# floor). The owner's local song monitor is delayed by that amount. Only the local 'music'
+# producer is delayed - a future producer opts in by listing its tag here.
 _COMP_NOTE_FLOOR_MS = 40.0     # one 40ms receive-path floor (the song B hears)
 _COMP_MAX_FRAMES = 12          # 240ms cap on bad networks
 _COMP_GAP_RESET_S = 0.5        # clear the FIFO after a feed gap (pause/stop)
@@ -401,14 +329,9 @@ _comp_last_feed = {}
 
 
 def _compensation_frames():
-    """20ms frames to delay the local song monitor by (2RTT + 40ms).
-
-    Note-event instruments (piano/drums) reach the owner at 2RTT + 40ms
-    (song heard via the audio stream one leg, then the note travels one
-    round trip with no jitter buffer), so the local song monitor is held
-    back by exactly that. Audio-stream covers (guitar) arrive 40ms later
-    and stay within one jitter floor.
-    """
+    """20 ms frames to delay the local song monitor by (2RTT + 40 ms): the delay at
+            which a note-event cover (piano/drums) reaches the owner. Audio-stream covers
+            (guitar) arrive 40 ms later and stay inside one jitter floor."""
     rtt = _measured_rtt_ms or 0.0
     delay_ms = 2.0 * rtt + _COMP_NOTE_FLOOR_MS
     return max(1, min(_COMP_MAX_FRAMES, int(round(delay_ms / 20.0))))
@@ -516,12 +439,11 @@ def _reclaim_source_buffers(src):
 
 
 def _play_voice_frame(mngr, sources, data, margin_frames, radio_source, channelID, gameplay):
-    """Queue one decoded 20ms voice frame (and its radio copy) for playback.
+    """Queue one decoded 20 ms voice frame (and its radio copy) for playback.
 
-    MAIN THREAD ONLY — called via AudioManager.defer_audio() from
-    voice_chat_compression.recieve2 so no OpenAL call happens on the
-    worker threads.
-    """
+                    MAIN THREAD ONLY - called via AudioManager.defer_audio() from
+                    voice_chat_compression.recieve2, so no OpenAL call runs on a worker thread.
+                    """
     sources_to_play = []
     for idx, src in enumerate(sources):
         try:
@@ -697,14 +619,10 @@ class voice_chat_compression(threading.Thread):
                     )
                     _last_play_times[sender_id] = time.time()
                     continue
-                # Hand the frame to the MAIN thread via the audio inbox:
-                # queue_and_delay_frame does OpenAL work (silence-pad buffers,
-                # unqueue/queue/play), and OpenAL must only ever be touched
-                # from the main thread — cross-thread AL calls (especially
-                # context.batch() nesting, a per-context GLOBAL flag) caused
-                # native heap corruption and hard crashes. The playout
-                # CADENCE stays clock-driven here (should_output above) —
-                # only the AL execution moves, at most one frame later.
+                # Hand the frame to the MAIN thread via the audio inbox: OpenAL must only ever
+                # be touched from the main thread (cross-thread calls, especially a nested
+                # context.batch(), caused native heap corruption and hard crashes). The playout
+                # CADENCE stays clock-driven here - only the AL execution moves, one frame later.
                 _gp, _sid, _srcs, _pkt = gameplay, sender_id, stream['sources'], packet
                 # Default arguments, not a closure over the loop's variables:
                 # two talkers handing a frame to the inbox in the same pass
@@ -776,11 +694,8 @@ class voice_chat_compression(threading.Thread):
         )
         data = bytearray(decoder.decode(bytearray(data)))
         
-        # NOTE: no context.batch() and no OpenAL calls in this method anymore.
-        # The AL work now runs on the MAIN thread via audio_mngr.defer_audio:
-        # cross-thread AL usage (especially context.batch(), whose defer flag
-        # is GLOBAL per context) raced the main thread's frame batch and
-        # corrupted native memory (hard 0xC0000005 crashes under load).
+        # No context.batch() and no OpenAL calls here: the AL work runs on the main
+        # thread via audio_mngr.defer_audio (cross-thread AL usage corrupted memory).
         if gameplay.player.dead:
             return
 
@@ -830,17 +745,10 @@ class voice_chat_compression(threading.Thread):
             else:
                 _measure_speaker_jitter(sender_id, last_pkt_time, current_time)
 
-            # CLOCK-DRIVEN OUTPUT: hand a frame to the speakers at most
-            # once per 20ms wall-clock (should_output), NOT once per
-            # packet arrival. A network burst leaves the extras buffered
-            # to play out at the steady cadence; a late packet is
-            # absorbed by the pre-buffer. Popping on arrival made the PA
-            # cadence track network jitter — the intermittent "ติดๆขัดๆ"
-            # chop heard on music broadcasts.
-            # Refresh the route only. The audio worker drains this
-            # jitter buffer independently every 20ms, even when ENet
-            # delivered these packets in a burst and no new packet is
-            # arriving at the next playout deadline.
+            # CLOCK-DRIVEN OUTPUT: at most one frame per 20 ms wall-clock, not one per packet arrival, so a
+            # network burst plays out at a steady cadence (popping on arrival tracked the network and caused
+            # the intermittent "ติดๆขัดๆ" chop on music broadcasts). The worker drains this jitter buffer
+            # every 20 ms even when ENet delivered the packets in a burst.
             self._megaphone_playouts[sender_id] = {
                 'gameplay': gameplay,
                 'sources': sources,
@@ -849,14 +757,9 @@ class voice_chat_compression(threading.Thread):
             }
             return  # Megaphone handled, skip normal processing
                 
-        # === NORMAL VOICE CHAT: Direct playback with an adaptive
-        # jitter margin (like the megaphone). The old fixed 100ms pad
-        # (5 x 20ms) made every cold-start burst - a guitarist's first
-        # strum after a pause, a new sentence - land 100ms late. The
-        # pad is now 1 + margin frames: 20ms minimum, growing only
-        # while the network actually shows jitter, decaying on its own.
-        # Arrival-time bookkeeping stays on THIS thread (true arrival
-        # cadence); only the OpenAL work is deferred to the main thread.
+        # NORMAL VOICE CHAT: direct playback with an adaptive jitter margin. The old fixed 5 x 20 ms pad
+        # made every cold-start burst - a first strum, a new sentence - land 100 ms late; the pad is now
+        # 1 + margin frames (20 ms minimum, growing only while the network shows jitter).
         vc_key = "vc:%s" % channelID
         _now = time.time()
         _last_pkt = _voice_last_pkt.get(vc_key, 0.0)
@@ -887,10 +790,9 @@ class voice_chat_compression(threading.Thread):
 def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
     """Hand local mic/music/instrument PCM to the main-thread PA path.
 
-    Producers run on capture/streaming workers, but every cyal/OpenAL operation
-    is owned by AudioManager.loop() on the main thread. Copy the small PCM frame
-    before deferring so the producer can safely reuse its input buffer.
-    """
+                    Producers run on capture workers but OpenAL is owned by AudioManager.loop(); the frame is
+                    copied before deferring so the producer can reuse its input buffer.
+                    """
     try:
         if not gameplay or not getattr(gameplay, 'game', None):
             return
@@ -920,19 +822,11 @@ def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
 def _feed_local_megaphone_main(gameplay, raw_buf, producer='producer'):
     """MAIN THREAD ONLY: queue one local producer frame to the PA sources.
 
-    Every local producer (music bot, mic, guitar, ...) gets its OWN per-player
-    source set, keyed '<player>:<producer>'. Simultaneous local streams therefore
-    play as SEPARATE OpenAL sources that OpenAL mixes together, instead of
-    sharing one queue where 20ms slices interleaved: the shared queue received
-    30ms of audio per 20ms (music 20 + mic 10), so the delay kept climbing
-    while talking and both streams played stretched/squeezed with clicks at
-    slice boundaries. Separate sources keep each stream on its own cadence —
-    no interleaving or shared-queue growth. Music uses three REAL PCM frames as
-    a 60 ms start/resume reserve; it never places a silence buffer between the
-    first and second music frames, which was the source of the repeating chop.
-
-    producer: a tag identifying the caller ('mic', 'music', 'guitar', ...).
-    """
+                    Each producer gets its OWN source set, keyed '<player>:<producer>': a shared queue
+                    received 30 ms of audio per 20 ms (music 20 + mic 10), so the delay climbed while talking
+                    and both streams played stretched with clicks at slice boundaries. Music uses three real
+                    PCM frames as a 60 ms start/resume reserve.
+                    """
     sources = []
     try:
         if not (gameplay and hasattr(gameplay, 'megaphone') and gameplay.megaphone):
@@ -943,11 +837,10 @@ def _feed_local_megaphone_main(gameplay, raw_buf, producer='producer'):
         # Separate source set per producer so concurrent local streams mix in
         # OpenAL instead of interleaving frames into one queue.
         local_key = f"{local_id}:{producer}"
-        # A player standing in a cabinet's room hears their own broadcast from
-        # that room -- the same speakers, and the same numbers, everyone else
-        # hears it from -- and on a map with no PA speakers at all that room is
-        # the only thing that can play it. The installer's trims are skipped
-        # for the owner's own ears (see cinema/speech.py::feed_local).
+        # A player standing in a cabinet's room hears their own broadcast from that room
+        # - the same speakers and numbers everyone else hears it from, and on a map with
+        # no PA speakers it is the only thing that can play it. The installer's trims are
+        # skipped for the owner (see cinema/speech.py::feed_local).
         if cinema_speech.feed_local(getattr(gameplay, 'game', None), gameplay,
                                     local_key, raw_buf):
             return
@@ -972,21 +865,14 @@ def _feed_local_megaphone_main(gameplay, raw_buf, producer='producer'):
                     if getattr(src, 'gain', 0.0) <= 0.05:
                         src.gain = entry['targets_vol'][idx]
 
-        # The local monitor must ride the SAME per-speaker propagation-delay
-        # stagger as remote listeners (queue_and_delay_frame). Without it every
-        # cabinet starts in perfect sync, the precedence effect fuses them into
-        # one phantom image, and the owner hears their own broadcast as a single
-        # speaker while everyone else hears the PA spread across the map. Local
-        # frames have no network leg, so no jitter margin is needed; music keeps
-        # its real-frame prebuffer for underrun recovery.
+        # The local monitor rides the SAME per-speaker propagation-delay stagger (distance / 343 m/s) as
+        # remote listeners, or every cabinet starts in sync, the precedence effect fuses them, and the
+        # owner hears their own broadcast as one speaker. Local frames have no network leg, so no jitter
+        # margin is needed.
         #
-        # ignore_speaker_delay: the per-speaker `delay` an installer sets on a
-        # map speaker is an alignment offset for the people standing out there -
-        # the owner is not listening to the broadcast from across the room, so
-        # holding their own voice back by it (up to 0.5 s) only made a performer
-        # hear their own line late. Only the geometry stagger (distance / 343)
-        # stays. It goes for EVERY local producer, so the owner's own voice and
-        # the song they are singing over stay aligned with each other.
+        # ignore_speaker_delay: an installer's per-speaker `delay` (up to 0.5 s) is an alignment offset
+        # for the people standing out there, so it is skipped for the owner's own ears - every local
+        # producer, so the owner's voice and the song they sing over stay aligned with each other.
         queue_and_delay_frame(
             gameplay,
             local_key,
@@ -1092,34 +978,25 @@ class VoiceChatRecord(threading.Thread):
                 
                 voice_using_mega = getattr(gp, 'voice_chat_using_megaphone', False) if gp else False
 
-                # Check if Music Bot is streaming to Megaphone
-                # Gameplay owns MapMusicBot for the whole map session. Resolve
-                # it directly first: game.stack may currently expose only a
-                # nested menu, which made the recorder microphone hook vanish
-                # as soon as the player left the Music Bot menu.
+                # Is Music Bot streaming to the megaphone? Gameplay owns MapMusicBot for the whole
+                # map session, so resolve it directly: game.stack may expose only a nested menu,
+                # which made the recorder microphone hook vanish when leaving that menu.
                 music_bot = self._find_music_bot(gp)
 
-                # When the mic is routed into the music bot's broadcast mix, the
-                # mixed stream is fed to the local PA sidechain by the streamer
-                # (zero latency). Feeding the raw mic here as well would double
-                # the broadcaster's own voice through the speakers.
-                # Voice is only mixed into the music bot broadcast when the
-                # megaphone is ACTUALLY in use (PA Test Mode or the megaphone
-                # weapon): otherwise a music bot broadcasting to the PA would
-                # hijack the performer's normal voice chat and blast it through
-                # the speakers too.
+                # The mic joins the music bot's broadcast mix only when the megaphone is ACTUALLY
+                # in use (PA Test Mode or the megaphone weapon): the streamer feeds the mixed
+                # stream to the local PA sidechain itself, so feeding the raw mic here too would
+                # double the broadcaster's own voice through the speakers.
                 route_to_bot = bool(
                     music_bot and music_bot.playing
                     and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone
                     and voice_using_mega
                 )
 
-                # The private game recorder normally captures only audio that
-                # the Client renders. Normal outgoing Voice Chat is not played
-                # back locally, so optionally hand its mono PCM to the recorder
-                # without doing any file or mixing work on this capture thread.
-                # Megaphone voice is already rendered through the local PA
-                # sidechain and must not be overlaid a second time.
+                # The private game recorder captures only what the Client renders, and normal
+                # outgoing voice chat is not played back locally, so hand its mono PCM to the
+                # recorder here without doing file or mixing work on this capture thread - the
+                # megaphone voice is already rendered through the local PA sidechain.
                 audio_recorder = getattr(music_bot, 'audio_recorder', None) if music_bot else None
                 if audio_recorder is not None:
                     audio_recorder.feed_transmitted_microphone(
@@ -1167,11 +1044,9 @@ class VoiceChatRecord(threading.Thread):
         # Check if Music Bot is streaming to Megaphone
         music_bot = self._find_music_bot()
 
-        # Voice is mixed into the music bot broadcast only when this recording
-        # session actually used the megaphone channel - otherwise a music bot
-        # broadcasting to the PA would hijack normal voice chat. The compression
-        # channel is the reliable per-session truth (PA Test Mode / megaphone
-        # weapon = 30, normal = 20).
+        # Voice joins the music bot broadcast only when this recording session used the
+        # megaphone channel - the compression's channel is the reliable per-session truth
+        # (30 = PA Test Mode / megaphone weapon, 20 = normal).
         route_to_bot = bool(
             music_bot and music_bot.playing
             and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone
@@ -1192,12 +1067,10 @@ class VoiceChatRecord(threading.Thread):
                 music_bot.mic_pcm_queue = collections.deque(maxlen=10)
             music_bot.mic_pcm_queue.append(bytes(buf))
         else:
-            # Send the tail chunk on the same channel this recording session used
-            # (the compression's channel is already set to it by run()). Re-deriving
-            # it from the music bot / voice_chat_using_megaphone here is wrong: by
-            # the time finish2 runs (40ms after stop) the megaphone flag is already
-            # reset to False, so the last 20ms would leak onto CHANNEL_VOICECHAT and
-            # the megaphone compression would be permanently re-pointed at it.
+            # Send the tail chunk on the session's own channel (already set by run()).
+            # Re-deriving it from the music bot here is wrong: by the time finish2 runs
+            # (40 ms after stop) the megaphone flag is reset, so the last 20 ms would leak
+            # onto CHANNEL_VOICECHAT and re-point the megaphone compression at it for good.
             target_channel = getattr(self.vc_compression, 'channel', None) or consts.CHANNEL_VOICECHAT
             if getattr(self.vc_compression, 'channel', None) != target_channel:
                 if hasattr(self.vc_compression, 'set_channel'):
@@ -1212,31 +1085,19 @@ class VoiceChatRecord(threading.Thread):
 
 
 # ── Handing one output over to another (Party Sync seams) ───────────────
-#
-# A session member has two possible outputs on this client: their own entity
-# while they stand on this map, and their party sink while they are on another
-# (libs/party_sync_audio.py). The seam between them is silent when what the
-# old output still holds travels across it, and plainly audible when it does
-# not: the new leg starts from an empty source, so it owes its whole
-# pre-buffer again (12 frames of music = 240 ms of nothing) while the frames
-# the old leg had queued are thrown away. These two helpers move the queue.
+# A session member has two outputs: their own entity on this map and their party sink on another
+# (libs/party_sync_audio.py). The seam is silent when what the old output still holds travels
+# across it - otherwise the new leg owes its whole pre-buffer again (12 frames of music = 240 ms
+# of nothing) while the old leg's frames are thrown away. These two helpers move the queue.
 
 def drain_source_queue(source, guard=512):
     """MAIN THREAD ONLY: take every frame `source` still holds, in order.
 
-    A PLAYING source reports only the buffers it has finished, so it is
-    stopped first: OpenAL then counts everything still queued as processed and
-    hands it all back. A source that never played needs no stop at all, for the
-    same disclosure (a stopped source's whole queue already counts as
-    processed -- the reason `_play_music_frame` refuses to unqueue a pre-buffer
-    before it starts).
-
-    The buffer that was mid-playback comes back with the rest and is played
-    again from its start by whoever takes it (<= one frame, 20-40 ms). Dropping
-    the queue instead is heard as a whole pre-buffer of silence.
-
-    Returns ``(buffers, was_playing)``.
-    """
+                    A PLAYING source reports only the buffers it has finished, so it is stopped first and
+                    OpenAL then hands everything back; one that never played needs no stop for the same
+                    disclosure. The mid-playback buffer comes back with the rest and is replayed from its start
+                    by whoever takes it (<= one frame, 20-40 ms). Returns ``(buffers, was_playing)``.
+                    """
     buffers = []
     if source is None:
         return buffers, False
@@ -1266,15 +1127,11 @@ def drain_source_queue(source, guard=512):
 def carry_output(old_source, new_source, guard=512):
     """MAIN THREAD ONLY: move `old_source`'s queued frames onto `new_source`.
 
-    Whatever the NEW output already holds is dropped first: it is the idle
-    silence a fresh entity source carries, or the tail of an older song, and a
-    source refuses to queue a buffer whose format differs from buffers still
-    queued on it (AL_INVALID_OPERATION). Dropping that also keeps the seam in
-    ONE order -- the carried frames are what the listener was about to hear.
-
-    Returns ``(moved, was_playing)``; `new_source` is started here when the old
-    one was playing, so playback continues without waiting for a new packet.
-    """
+                    Whatever the NEW output holds is dropped first: idle silence or the tail of an older song,
+                    and a source refuses a buffer whose format differs from buffers still queued on it
+                    (AL_INVALID_OPERATION). Returns ``(moved, was_playing)``; `new_source` is started here when
+                    the old one was playing, so playback does not wait.
+                    """
     if old_source is None or new_source is None or old_source is new_source:
         return 0, False
     drain_source_queue(new_source, guard)
@@ -1320,18 +1177,14 @@ class MusicCompression(threading.Thread):
             # Party Sync guests receive TRUE STEREO frames from the host; the
             # decoder/source format follows the entity's direct-mode flag.
             self._stereo = False
-            # The cabinet's room this stream should play out of instead of the
-            # entity's own source (see libs/audio/cinema/peer.py), or None for
-            # the shipped feed. The room owns one source per speaker, so the
-            # whole queueing half of this class is skipped for it -- only the
-            # decode and the music timeline are shared.
+            # The cabinet's room this stream should play out of instead of the entity's own
+            # source (see libs/audio/cinema/peer.py), or None for the shipped feed. The room
+            # owns one source per speaker, so only the decode and the music timeline are shared.
             self.cinema_channel = None
             self.cinema_feed = None
-            # Format-switch coordination (see set_output_stereo): the decoder
-            # generation lets _play_music_frame drop frames decoded with a
-            # stale format, and the pending flag performs the source flush on
-            # the main thread exactly when the first new-format frame lands
-            # (the source may not even exist yet when the switch runs).
+            # Format-switch coordination (see set_output_stereo): the decoder generation lets
+            # _play_music_frame drop frames decoded with a stale format, and the pending flag
+            # flushes the source on the main thread when the first new-format frame lands.
             self._format_generation = 0
             self._pending_format_flush = False
             self._has_started = False
@@ -1387,24 +1240,20 @@ class MusicCompression(threading.Thread):
     def set_cinema_channel(self, channel):
         """Point this feed at a cabinet's room, or at nothing (None).
 
-        Called from the receive path once per frame, so it only ever records
-        which speaker's song this is; the room itself is resolved in
-        ``_room_feed`` on the main thread, because building one creates OpenAL
-        sources and the receive path is not the thread that owns those.
-        """
+                                Called once per frame from the receive path, so it only records which speaker's song
+                                this is; the room is resolved in ``_room_feed`` on the main thread, because building
+                                one creates OpenAL sources.
+                                """
         self.cinema_channel = None if channel is None else int(channel)
 
     def _room_feed(self):
         """MAIN THREAD ONLY: the room this stream should play through now.
 
-        The output is decided per frame rather than once per song, because the
-        sender can route, re-route or un-route the song at any moment and the
-        listener has to follow within a frame or two. A change flushes the
-        other output: whatever it still holds is the other output's audio, and
-        a queue's worth of that (240 ms of the previous song, or of the
-        previous position after a seek) arriving from the wrong place is heard
-        as an echo.
-        """
+                                Decided per frame, because the sender can route, re-route or un-route the song at any
+                                moment. A change flushes the other output: a queue's worth of its audio (240 ms of the
+                                previous song, or of the previous position after a seek) arriving from the wrong place
+                                is heard as an echo.
+                                """
         if self.cinema_channel is None:
             feed = None
         else:
@@ -1421,10 +1270,9 @@ class MusicCompression(threading.Thread):
     def set_output_stereo(self, stereo):
         """Switch this music feed between mono and true stereo output.
 
-        Called by the receive path when the entity enters/leaves Party Sync
-        direct mode. The decoder swap happens on the compression worker
-        (decode thread) and queued buffers are flushed on the main thread.
-        """
+                                Called by the receive path when the entity enters/leaves Party Sync direct mode; the
+                                decoder swap runs on the decode thread and queued buffers are flushed on the main thread.
+                                """
         stereo = bool(stereo)
         if getattr(self, "_stereo", False) == stereo:
             return
@@ -1458,26 +1306,17 @@ class MusicCompression(threading.Thread):
     def carry_over(self, other, old_source, new_source):
         """MAIN THREAD ONLY: continue `other`'s song on this leg's output.
 
-        Used at a Party Sync seam: one member's entity and their party sink are
-        two outputs for the same song, and whichever of them appears has to
-        pick the song up where the other left it -- the queue itself
-        (`carry_output`) and the clock the remote jam notes are scheduled
-        against, which would otherwise be re-pinned a pre-buffer late.
+                                Used at a Party Sync seam: the entity and the party sink are two outputs for the same
+                                song, so whichever appears picks the song up where the other left it - the queue
+                                (``carry_output``) and the clock the remote jam notes are scheduled against, which
+                                would otherwise be re-pinned a pre-buffer late.
 
-        The OUTPUT FORMAT has to travel too, and synchronously. The packet path
-        calls `set_output_stereo` on whichever leg is current, and for a leg
-        that has not been put on that format yet that arms the flush which
-        empties a source -- the very queue this call just moved. So the decoder
-        is swapped here instead and the flush flag is left clear; the next
-        frame then sees a format it already has and a session it is already
-        inside.
-
-        A leg whose two formats cannot be agreed keeps nothing and starts like
-        a fresh one: mixing a mono buffer and a stereo one on one source is an
-        error OpenAL refuses, and guessing which one the queue is would trade a
-        gap for silence. Returns the number of frames carried (0 when this
-        could not help).
-        """
+                                The OUTPUT FORMAT travels too, synchronously: `set_output_stereo` would arm the flush
+                                that empties the very queue this call just moved, so the decoder is swapped here and
+                                the flush flag is left clear. A leg whose two formats cannot be agreed keeps nothing
+                                and starts fresh - mixing mono and stereo buffers on one source is an error OpenAL
+                                refuses. Returns the number of frames carried (0 when this could not help).
+                                """
         if other is None or other is self:
             return 0
         old_stereo = bool(getattr(other, "_stereo", False))
@@ -1499,14 +1338,11 @@ class MusicCompression(threading.Thread):
     def _set_format_now(self, stereo):
         """MAIN THREAD ONLY: put this leg on `stereo` without arming a flush.
 
-        `set_output_stereo` cannot be used at a handover: the decoder swap it
-        schedules on the worker also arms `_pending_format_flush`, which empties
-        the source on the next frame -- exactly the queue the handover just
-        carried. The decoder is rebuilt here (the worker only reads it after
-        this returns) and the generation is bumped, so a frame this leg decoded
-        with its old format is dropped instead of queued beside the carried
-        buffers.
-        """
+                                `set_output_stereo` would also arm `_pending_format_flush`, which empties the queue a
+                                handover just carried. The decoder is rebuilt here and the generation bumped, so a
+                                frame this leg decoded with its old format is dropped instead of queued beside the
+                                carried buffers.
+                                """
         self._stereo = bool(stereo)
         self._format_generation += 1
         try:
@@ -1521,15 +1357,11 @@ class MusicCompression(threading.Thread):
     def _flush_source(self, src):
         """MAIN THREAD ONLY: empty a source that may hold old-format buffers.
 
-        OpenAL sources refuse to queue a buffer whose format differs from
-        buffers still queued (AL_INVALID_OPERATION). A source that never
-        played can hold the entity's MONO16 idle silence buffer, and
-        alSourceStop has NO effect on an INITIAL source, so
-        unqueue_buffers (processed-only) cannot remove it. The reliable way
-        to flush it is to play (buffers become processed), stop, then unqueue
-        everything. Verified against the bundled OpenAL: without play, the
-        stereo queue fails with Invalid Operation on every frame.
-        """
+                                OpenAL refuses a buffer whose format differs from buffers still queued
+                                (AL_INVALID_OPERATION). A source that never played can hold the entity's MONO16 idle
+                                silence, and alSourceStop has NO effect on an INITIAL source, so play (buffers become
+                                processed), stop, then unqueue everything.
+                                """
         if src is None:
             return
         try:
@@ -1552,16 +1384,9 @@ class MusicCompression(threading.Thread):
         self._pair_clock_reset()
 
     # --------------------------------------------------- this feed's clock
-    #
-    # A note played along a song someone else is streaming -- a Party Sync
-    # session's music, or a Music Broadcast -- waits on the frames this feed has
-    # *played*, re-projected every frame, exactly as a cabinet's pair and a
-    # room's speakers do: the rule is one home (``libs/jukebox_clock.py``), and
-    # what is this feed's own is the counter and the frame's measured size.
-    # Without it a session's band was aligned for listeners on the performer's
-    # map and played on arrival for everybody else -- off the song by that
-    # listener's own jitter buffer (a pre-buffer and up), which is what "it
-    # feels late" means when the friend is on another map.
+    # A note played along a song someone else streams waits on the frames this feed has *played*,
+    # re-projected every frame, exactly as a cabinet's pair and a room's speakers do: the rule has one
+    # home (``libs/jukebox_clock.py``), and what is this feed's own is the counter and the frame size.
 
     def _note_pair_fed(self, pcm, stereo=False):
         """Record one frame handed to this feed's own output (its clock input)."""
@@ -1574,12 +1399,9 @@ class MusicCompression(threading.Thread):
             self._pair_frame_ms = measured
 
     def _pair_clock_reset(self):
-        """Start this feed's clock over (a new session, or a queue that was cut).
-
-        The epochs are forgotten rather than the waits dropped: a note already
-        waiting here keeps the instant it was going to sound at, which is what
-        a note lost to a hiccup would not have (``SpotClock.forget``).
-        """
+        """Start this feed's clock over (a new session, or a queue that was cut): the epochs are forgotten
+                                rather than the waits dropped, so a note already waiting keeps the instant it was going
+                                to sound at (``SpotClock.forget``)."""
         self.pair_frames_fed = 0
         self._pair_frame_ms = 0.0
         clock = getattr(self, "_pair_spot_clock", None)
@@ -1587,13 +1409,8 @@ class MusicCompression(threading.Thread):
             clock.forget()
 
     def pair_frame_ms(self):
-        """How long one frame of this feed is, measured from the audio (ms).
-
-        Latched from the frames actually handed over -- the pre-buffer's own
-        arithmetic (``PRE_BUFFER_FRAMES`` frames = 240 ms) says 20 ms, and this
-        says what the decoder really produced. Falls back to 20 ms until one
-        frame has been queued.
-        """
+        """How long one frame of this feed is (ms): latched from the frames actually handed over, falling
+                                back to 20 ms until one frame has been queued."""
         measured = float(getattr(self, "_pair_frame_ms", 0.0) or 0.0)
         return measured if measured > 0.0 else 20.0
 
@@ -1606,25 +1423,16 @@ class MusicCompression(threading.Thread):
             return 0
 
     def pair_played_frames(self):
-        """Frames this feed has already played: handed over minus still queued.
-
-        ``pair_queued_frames`` is what OpenAL reports as still ahead of the
-        listener and the fed counter is this feed's own, so the difference is
-        the content instant the output is playing right now -- what a live
-        note's wait is measured against, every frame.
-        """
+        """Frames this feed has already played: handed over minus still queued (``pair_queued_frames`` is
+                                what OpenAL reports ahead of the listener, so the difference is the content instant
+                                playing right now)."""
         fed = int(getattr(self, "pair_frames_fed", 0) or 0)
         return max(0, fed - self.pair_queued_frames())
 
     def pair_is_playing(self):
-        """True while this feed's own output is playing (see ``SpotClock``).
-
-        A feed whose frames are going into a cabinet's room has no output of
-        its own to measure -- the room's own bank is the clock then -- and a
-        source that is not playing reports everything it holds as finished, so
-        neither is a clock for a live note. A queue still building its
-        pre-buffer says nothing about where the song is either.
-        """
+        """True while this feed's own output is playing (see ``SpotClock``): a room-fed feed has no output of
+                                its own to measure, a source that is not playing reports everything it holds as
+                                finished, and a queue still building its pre-buffer says nothing either."""
         if getattr(self, "cinema_feed", None) is not None:
             return False
         if not getattr(self, "_has_started", False):
@@ -1639,12 +1447,9 @@ class MusicCompression(threading.Thread):
 
     @property
     def pair_clock(self):
-        """This feed's own clock, made on first use (see the note above).
-
-        Named like a cabinet's pair on purpose: the scheduler's question is one
-        question -- "where is the audio this listener hears?" -- and it is
-        asked of every output the same way (``EventHandeler._pair_clock_for_note``).
-        """
+        """This feed's own clock, made on first use; named like a cabinet's pair on purpose, because the
+                                scheduler asks every output the same one question
+                                (``EventHandeler._pair_clock_for_note``)."""
         clock = getattr(self, "_pair_spot_clock", None)
         if clock is None:
             clock = SpotClock(
@@ -1738,11 +1543,9 @@ class MusicCompression(threading.Thread):
                 self._last_err = time.time()
             return
 
-        # All OpenAL (and the timeline bookkeeping that schedules plays) now
-        # runs on the MAIN thread via the audio inbox; only the Opus decode
-        # stays on this worker thread. _dispatch_timeline_events is deferred
-        # to the main thread as well, keeping the _timeline_pending state
-        # single-threaded with this method.
+        # All OpenAL (and the timeline bookkeeping that schedules plays) runs on the MAIN
+        # thread via the audio inbox; only the Opus decode stays on this worker thread.
+        # _dispatch_timeline_events is deferred too, keeping _timeline_pending single-threaded.
         generation = self._format_generation
         stereo = self._stereo
         self.game.audio_mngr.defer_audio(
@@ -1796,11 +1599,9 @@ class MusicCompression(threading.Thread):
                     or sequence_discontinuity
                 )
                 if is_new_session:
-                    # New broadcast (or first after a stop): discard everything
-                    # queued on the source — including silent keep-alive buffers
-                    # that entity.loop() pushes when the queue runs empty — and
-                    # reset the pre-buffer threshold so playback starts cleanly,
-                    # mirroring the behaviour of a fresh map load.
+                    # New broadcast (or first after a stop): discard everything queued on the source -
+                    # including the silent keep-alive buffers entity.loop() pushes when the queue runs
+                    # empty - and reset the pre-buffer threshold, mirroring a fresh map load.
 
                     try:
                         music_source.stop()
@@ -1830,12 +1631,9 @@ class MusicCompression(threading.Thread):
                     self._timeline_last_received_seq = frame_seq
                 self._last_recv_time = now
 
-                # A cabinet's room is a second output for the very same
-                # frames: with one chosen, this feed plays out of the room's
-                # speakers instead of the entity's own source. Everything
-                # above is shared on purpose -- the session reset, the format
-                # flush and the timeline bookkeeping all describe the song,
-                # not the output it comes out of.
+                # A cabinet's room is a second output for the very same frames: everything above is
+                # shared on purpose - the session reset, the format flush and the timeline
+                # bookkeeping all describe the song, not the output it comes out of.
                 if room_feed is not None:
                     self._play_room_frame(room_feed, pcm, epoch, frame_seq, stereo)
                     self._dispatch_timeline_events()
@@ -1846,15 +1644,10 @@ class MusicCompression(threading.Thread):
                 except Exception:
                     state = cyal.SourceState.STOPPED
 
-                # If we were playing but just hit an underrun and STOPPED, we
-                # need to flush out the old processed buffers and restart the
-                # pre-buffering phase. The `if` line above the suite was
-                # missing: a comment stood where it belongs, the suite sat at
-                # the *handler's* own indentation (so CPython attached it to
-                # the try above, and it ran only if reading `state` raised --
-                # which it does not), and the flush (and the clock reset with
-                # it) was dead. A stopped source was then drained by the
-                # recycle below while it was rebuilt one frame at a time.
+                # An underrun that STOPPED playback needs the old processed buffers flushed and the
+                # pre-buffering phase restarted. (The `if` for this suite was once missing - a
+                # comment stood where it belonged and the suite sat at the handler's own
+                # indentation, so it was dead and a stopped source was rebuilt one frame at a time.)
                 if self._has_started and state == cyal.SourceState.STOPPED:
                     try:
                         self._has_started = False
@@ -1943,21 +1736,15 @@ class MusicCompression(threading.Thread):
     def _play_room_frame(self, feed, pcm, epoch, frame_seq, stereo):
         """MAIN THREAD ONLY: play one decoded frame out of a cabinet's room.
 
-        The room owns one source per speaker and its own renderer, so there is
-        no buffer and no source queue to manage here: the frame is handed over
-        and the bank does the rest (per-speaker trim, wall filter, gain,
-        reverb). What is kept is the music timeline -- remote instrument notes
-        are scheduled against the sequence this feed has reached (see
-        ``schedule_timeline_event``).
+                                The room owns one source per speaker and its own renderer, so there is no buffer and no
+                                source queue to manage: the frame is handed over and the bank does the rest. What is
+                                kept is the music timeline - remote instrument notes are scheduled against the sequence
+                                this feed has reached.
 
-        The anchor is taken exactly as the plain source's is: the frame the
-        room starts playing is audible the moment ``start_playback`` returns,
-        and every later frame follows it one frame later, so the queue's own
-        depth is already in the sequence delta. Adding it here as well (the
-        anchor used to be moved out by the room's whole queue) put the clock a
-        pre-buffer ahead of the speakers' real position, and every live note
-        over a room-fed song waited that much too long before it was played.
-        """
+                                The anchor is taken exactly as the plain source's is: adding the room's own queue depth
+                                here as well put the clock a pre-buffer ahead of the speakers' real position, and every
+                                live note over a room-fed song then waited that much too long.
+                                """
         try:
             accepted = feed.push(pcm, stereo=stereo, epoch=epoch)
         except Exception as e:
@@ -1988,11 +1775,9 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet,
     if real_prebuffer_frames is not None:
         try:
             if src.state == cyal.SourceState.STOPPED:
-                # OpenAL treats NEW buffers on a STOPPED source as processed,
-                # so reclaiming them on each call would prevent the prebuffer
-                # ever reaching its threshold. Drain then rewind to INITIAL,
-                # which preserves new frames until play(). Recheck/drain here
-                # in case playback ran dry during the first reclaim above.
+                # OpenAL treats NEW buffers on a STOPPED source as processed, so reclaiming them on
+                # each call would prevent the prebuffer ever reaching its threshold: drain then
+                # rewind to INITIAL, which preserves new frames until play().
                 _reclaim_source_buffers(src)
                 if src.buffers_queued:
                     return  # Do not replay stale audio if draining failed.
@@ -2094,11 +1879,10 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet,
 def _pad_frames_for_resync(target_active, current_active, needs_initial_delay, any_starved):
     """How many silence frames to pad for one speaker this packet.
 
-    Always pad up to target_active (frames_delay + margin) to preserve the exact
-    inter-speaker propagation delay stagger both on initial stream setup AND during
-    underrun recovery. This permanently prevents the stereo soundstage from collapsing
-    from wide stereo to merged mono.
-    """
+                    Always pad up to target_active (frames_delay + margin) so the exact inter-speaker propagation
+                    delay stagger survives underrun recovery and the stereo soundstage cannot collapse from wide
+                    stereo to merged mono.
+                    """
     if not needs_initial_delay and not any_starved:
         return 0
     return max(0, target_active - current_active)
@@ -2108,17 +1892,11 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet, margin_frames=No
                           ignore_speaker_delay=False):
     """Queue one frame to every speaker source with the PA's spatial stagger.
 
-    ignore_speaker_delay: TRUE for the OWNER's own monitor (local producers).
-    The per-speaker `delay` an installer sets on a map speaker is an ALIGNMENT
-    offset for the people standing out there, not something the owner should
-    hear themselves through. Holding the owner's own voice back by it (up to
-    0.5 s) made a performer hear their own line late. The propagation part of
-    the stagger (distance / 343 m/s) is still applied, so the owner's own
-    broadcast keeps the same spread every listener hears - only the installer's
-    offset is skipped. Remote listeners always keep it, and the delay baselines
-    are cached per sender key ('<player>:<producer>' vs the peer id), so the two
-    never share a cache entry.
-    """
+                    ignore_speaker_delay: TRUE for the OWNER's own monitor. An installer's per-speaker `delay` is
+                    an ALIGNMENT offset for the people standing out there, not something the owner should hear
+                    themselves through (up to 0.5 s late); the propagation part (distance / 343 m/s) still applies.
+                    Baselines are cached per sender key ('<player>:<producer>' vs the peer id).
+                    """
 
     global _speaker_delay_queues
     import math
@@ -2180,15 +1958,9 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet, margin_frames=No
             
     has_initial_delays = sender_id in _speaker_initial_delays
     needs_initial_delay = not has_initial_delays
-    # The propagation-delay baseline is FROZEN at the stream's start position.
-    # Re-basing it on every walk step and re-padding at the next recovery made
-    # the inter-cabinet stagger flip between merged (same quantized 20ms frame)
-    # and separated (one frame apart) as the listener moved - the PA image kept
-    # 'แยกบ้าง รวมบ้าง' with no rhyme or reason. The listener's position is
-    # still tracked continuously by the spatial GAINS (volume/occlusion refresh
-    # + per-frame LERP); the delay stagger stays put so the image is
-    # deterministic. Fresh streams and underrun recovery still rebuild the
-    # stagger from the frozen baseline.
+    # The propagation-delay baseline is FROZEN at the stream's start position: re-basing it on every
+    # walk step made the inter-cabinet stagger flip between merged and separated as the listener moved,
+    # so the PA image kept 'แยกบ้าง รวมบ้าง'. Spatial GAINS still track the listener.
     needs_resync = needs_initial_delay or any_starved
     
     # 3. A source that ran dry needs silence padding again, but it keeps the
