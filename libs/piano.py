@@ -169,7 +169,7 @@ class PianoAudio:
         if self.am._is_prepared_instrument_sample(path):
             return self.am.instrument_samples.get(path, kind="split") or (None, None)
         if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND): path = os.path.join(consts.SOUNDPREPEND, path)
-        if not path.endswith(".ogg"): path = path_utils.get_next_cycle_item(path)
+        if not path.endswith(".ogg"): path = path_utils.next_sound_item(path)
         try:
             path = os.path.normpath(path) if os.path.isabs(path) else os.path.relpath(path)
         except ValueError:

@@ -12,64 +12,6 @@ def random_item(dir):
         return ""
 
 
-_cycle_states = {}
-
-
-def get_next_cycle_item(dir_path):
-    """Returns the next sequential item for attack/hit sounds in a 2 -> 1 -> 3 cycle,
-    otherwise falls back to random_item."""
-    norm_path = os.path.normpath(dir_path).replace("\\", "/")
-    if not os.path.isdir(norm_path):
-        return dir_path
-    
-    try:
-        files = os.listdir(norm_path)
-    except Exception as e:
-        print(f"Error listing dir {norm_path}: {e}")
-        return dir_path
-
-    # Check if there are attack or hit files
-    attack_files = sorted([f for f in files if f.lower().startswith("attack") and f.lower().endswith(".ogg")])
-    hit_files = sorted([f for f in files if f.lower().startswith("hit") and f.lower().endswith(".ogg")])
-    
-    if attack_files:
-        ordered = []
-        for digit in ['2', '1', '3']:
-            for f in attack_files:
-                if digit in f:
-                    ordered.append(f)
-                    break
-        for f in attack_files:
-            if f not in ordered:
-                ordered.append(f)
-        
-        if ordered:
-            idx = _cycle_states.get(norm_path, 0)
-            chosen_file = ordered[idx % len(ordered)]
-            _cycle_states[norm_path] = (idx + 1) % len(ordered)
-            return f"{norm_path}/{chosen_file}"
-
-    if hit_files:
-        ordered = []
-        for digit in ['2', '1', '3']:
-            for f in hit_files:
-                if digit in f:
-                    ordered.append(f)
-                    break
-        for f in hit_files:
-            if f not in ordered:
-                ordered.append(f)
-        
-        if ordered:
-            idx = _cycle_states.get(norm_path, 0)
-            chosen_file = ordered[idx % len(ordered)]
-            _cycle_states[norm_path] = (idx + 1) % len(ordered)
-            return f"{norm_path}/{chosen_file}"
-
-    return random_item(dir_path)
-
-
-
 _bags = {}
 
 
@@ -77,11 +19,11 @@ def bag_item(dir_path, key=None, prefix=""):
     """Pick a file out of a folder without repeating one until the folder is used up.
 
     ``random_item`` picks freshly every time, so six cloth samples can come out
-    cloth2, cloth2, cloth5, cloth2 and read as a stutter; ``get_next_cycle_item``
-    walks a fixed order, which fails the other way -- a walk hears the same six
-    in the same sequence forever. A shuffle bag is neither: every file is dealt
-    once before any of them comes round again, and the order is different each
-    time round.
+    cloth2, cloth2, cloth5, cloth2 and read as a stutter; a fixed order (which is
+    what ``next_sound_item`` used to walk for attack pools) fails the other way
+    -- a walk hears the same six in the same sequence forever. A shuffle bag is
+    neither: every file is dealt once before any of them comes round again, and
+    the order is different each time round.
 
     ``key`` is who is asking, and it is why the bags are per asker: armor worn
     by three players on one map would otherwise be dealt from a single deck, so
@@ -123,6 +65,44 @@ def bag_item(dir_path, key=None, prefix=""):
     state["last"] = chosen
     _bags[bag_key] = state
     return f"{dir_path}/{chosen}"
+
+
+def next_sound_item(dir_path):
+    """Pick the file to play out of a folder path -- the one door every folder sound uses.
+
+    A weapon's `fire/` and `impact/`, an entity's `attack/`, a foley folder: a
+    server sends the folder and this decides which sample comes back. Two shapes
+    of folder, two answers.
+
+    * **attack / hit pools** come out of a shuffle bag (``bag_item``): every
+      sample once before any of them comes round again, a fresh random order
+      each round, and the sample that just played kept away from the start of
+      the next round so the seam is not a repeat either. This used to walk a
+      fixed ``2 -> 1 -> 3`` order, which is the other way a pool stops sounding
+      like one: the samples are all heard, but always in the same sequence, so a
+      match of swings reads as a single loop (the owner's report, 2026-09-28:
+      *"the melee sounds still play attack1.ogg, attack2.ogg, attack3.ogg --
+      do not repeat and do not loop, make it random"*).
+    * **the prefix is what makes those pools**, not the folder: `fire/` holds a
+      swing set *and* a block set in the same place (`Mjolnir`, `Goblin_Dagger`
+      ship `attack1-3.ogg` beside `block1-3.ogg`), so only the `attack` files
+      belong under a swing and only the `hit` files under an impact. A folder
+      with neither prefix is not a pool and falls through to ``random_item`` --
+      the plain fresh pick every other folder sound has always had, which may
+      repeat itself. A folder that turns out to need "never twice in a row"
+      belongs here, not at a call site. Both halves are pinned by
+      `client/tests/test_attack_sound_pool.py`.
+    """
+    if not dir_path or not os.path.isdir(dir_path):
+        return dir_path
+    try:
+        names = [name.lower() for name in os.listdir(dir_path)]
+    except OSError:
+        return dir_path
+    for prefix in ("attack", "hit"):
+        if any(name.startswith(prefix) and name.endswith(".ogg") for name in names):
+            return bag_item(dir_path, prefix=prefix) or random_item(dir_path)
+    return random_item(dir_path)
 
 
 def copy_folder(src, dst):

@@ -207,7 +207,7 @@ class ACompiledBuildAnswersTheSameTests(unittest.TestCase):
                                       f"foley/bullet_impacts/{INVISIBLE}")
                 self.assertTrue(os.path.isdir(folder),
                                 "a pack folder has to answer as a folder")
-                picked = path_utils.get_next_cycle_item(folder)
+                picked = path_utils.next_sound_item(folder)
                 self.assertTrue(picked.endswith(".ogg"), picked)
                 self.assertIn(INVISIBLE, picked)
                 self.assertEqual(_peak(picked), 0)

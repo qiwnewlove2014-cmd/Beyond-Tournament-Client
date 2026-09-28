@@ -425,7 +425,7 @@ class AudioManager():
                     except Exception as e:
                         print(e)
         if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND): path = os.path.join(consts.SOUNDPREPEND, path)
-        if not path.endswith(".ogg"): path = path_utils.get_next_cycle_item(path)
+        if not path.endswith(".ogg"): path = path_utils.next_sound_item(path)
         # Presence sounds are cached under the user's profile, which may be on
         # a different Windows drive than the game. relpath() raises ValueError
         # across drives, so absolute cache paths must remain absolute.

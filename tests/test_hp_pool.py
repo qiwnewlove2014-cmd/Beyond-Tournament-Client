@@ -1,15 +1,16 @@
 """A player's HP pool is the Server's number, and the client is told it.
 
-The pool is 200, and a Juggernog bottle widens it to 300 mid-match. The client
+The pool is 400, and a Juggernog bottle widens it to 600 mid-match. The client
 used to clamp HP at a flat 100 of its own -- its fall and drowning predictions
 are worked out locally from `self.hp` and sent back as `set_hp` -- so a pool of
-200 meant the Server's heal was dropped on arrival (the setter simply refused
+400 meant the Server's heal was dropped on arrival (the setter simply refused
 it) and the next drowning tick sent a figure read off a stale total, which the
 Server applied as a *heal* for a player who was going under.
 
 So the ceiling travels with every HP (`maxHp`), the client keeps what it is
-told, and its own starting pool is the same number the Server counts from,
-because the Server never announces a spawn's HP.
+told, and its own starting pool -- and its own ceiling, until the first packet
+arrives -- is the same number the Server counts from, because the Server never
+announces a spawn's HP.
 """
 
 import unittest
@@ -38,41 +39,47 @@ class EntityCeilingTests(unittest.TestCase):
         entity.hp = 100
         self.assertEqual(entity.hp, 100)
 
-    def test_a_pool_of_two_hundred_is_taken_not_clamped_away(self):
-        entity = self.entity(hp=100, max_hp=200)
-        entity.hp = 200
-        self.assertEqual(entity.hp, 200)
-        entity.hp = 199
-        self.assertEqual(entity.hp, 199)
+    def test_a_pool_of_four_hundred_is_taken_not_clamped_away(self):
+        entity = self.entity(hp=100, max_hp=400)
+        entity.hp = 400
+        self.assertEqual(entity.hp, 400)
+        entity.hp = 399
+        self.assertEqual(entity.hp, 399)
 
-    def test_and_a_drinkers_three_hundred_is_taken_too(self):
-        entity = self.entity(hp=200, max_hp=300)
-        entity.hp = 300
-        self.assertEqual(entity.hp, 300)
+    def test_and_a_drinkers_six_hundred_is_taken_too(self):
+        entity = self.entity(hp=400, max_hp=600)
+        entity.hp = 600
+        self.assertEqual(entity.hp, 600)
 
     def test_past_the_ceiling_and_below_zero_are_both_left_alone(self):
-        entity = self.entity(hp=250, max_hp=300)
-        entity.hp = 301
-        self.assertEqual(entity.hp, 250)
+        entity = self.entity(hp=500, max_hp=600)
+        entity.hp = 601
+        self.assertEqual(entity.hp, 500)
         entity.hp = -5
-        self.assertEqual(entity.hp, 250)
+        self.assertEqual(entity.hp, 500)
 
     def test_the_player_class_clamps_the_same_way(self):
         player = object.__new__(Player)
-        player._hp = 200
-        player.max_hp = 200
+        player._hp = 400
+        player.max_hp = 400
         player.lock_weapon = False
-        player.hp = 200
-        self.assertEqual(player.hp, 200)
-        player.hp = 201
-        self.assertEqual(player.hp, 200)
+        player.hp = 400
+        self.assertEqual(player.hp, 400)
+        player.hp = 401
+        self.assertEqual(player.hp, 400)
 
     def test_the_client_starts_on_the_pool_the_server_counts(self):
         # The Server never announces a spawn's HP, so this default and the
         # Server's own are one number in two places: `tools/player_hp_test.js`
         # reads this same default and compares it.
-        self.assertIn(200, Player.__init__.__defaults__,
+        self.assertIn(400, Player.__init__.__defaults__,
                       f"Player defaults are {Player.__init__.__defaults__}")
+
+    def test_and_a_players_own_ceiling_is_that_pool_before_any_packet(self):
+        # Entity's 100 would clamp a 400 pool the moment a local fall or drown
+        # was worked out ahead of the Server's first `set_hp`.
+        self.assertEqual(Player.max_hp, 400)
+        self.assertNotEqual(Player.max_hp, Entity.max_hp)
 
 
 class FallDamageTests(unittest.TestCase):
@@ -99,20 +106,20 @@ class FallDamageTests(unittest.TestCase):
         return player
 
     def test_a_landing_takes_the_damage_off_the_pool_the_player_has(self):
-        player = self.falling(hp=200, max_hp=200, distance=100)
-        self.assertLessEqual(player.hp, 153)
-        self.assertGreaterEqual(player.hp, 147)
+        player = self.falling(hp=400, max_hp=400, distance=100)
+        self.assertLessEqual(player.hp, 353)
+        self.assertGreaterEqual(player.hp, 347)
         self.assertEqual(player.sent, [(consts.CHANNEL_MISC, "set_hp", {"amount": player.hp})])
 
     def test_and_is_never_reported_as_the_hundred_it_used_to_be(self):
-        player = self.falling(hp=200, max_hp=200, distance=100)
+        player = self.falling(hp=400, max_hp=400, distance=100)
         self.assertNotEqual(player.hp, 100)
         self.assertEqual(player.sent[0][2]["amount"], player.hp)
 
     def test_a_fall_that_overshoots_lands_on_the_current_pool(self):
-        player = self.falling(hp=300, max_hp=300, distance=5000)
-        self.assertEqual(player.hp, 300)
-        self.assertEqual(player.sent[0][2]["amount"], 300)
+        player = self.falling(hp=600, max_hp=600, distance=5000)
+        self.assertEqual(player.hp, 600)
+        self.assertEqual(player.sent[0][2]["amount"], 600)
 
 
 class ServerToldCeilingTests(unittest.TestCase):
@@ -126,10 +133,10 @@ class ServerToldCeilingTests(unittest.TestCase):
 
     def test_a_packet_without_a_ceiling_still_sets_the_hp(self):
         # A Server that predates the field is read exactly as it always was.
-        player = SimpleNamespace(hp=100, max_hp=200, lock_weapon=False)
+        player = SimpleNamespace(hp=100, max_hp=400, lock_weapon=False)
         handler = SimpleNamespace(gameplay=SimpleNamespace(player=player))
         EventHandeler.set_hp(handler, {"amount": 150})
-        self.assertEqual((player.hp, player.max_hp), (150, 200))
+        self.assertEqual((player.hp, player.max_hp), (150, 400))
 
     def test_a_watched_player_is_judged_against_their_own_pool(self):
         watched = object.__new__(Entity)

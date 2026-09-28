@@ -11,7 +11,15 @@ class Player(Entity):
     # spawn's HP, and a client that began at 100 would work a fall or a drown
     # out from a full pool it does not have -- the amount it sends back would
     # land as a loss of a hundred the player never took.
-    def __init__(self, game, map, x, y, z, hp=200, player=False):
+    #
+    # It is a ceiling as well as a starting figure, which is why it is set here
+    # and not left at Entity's 100: a fall or a drown is worked out locally and
+    # clamped against `self.max_hp` before the Server's first `set_hp` arrives,
+    # so a player born on 400 with a hundred-point ceiling would report the
+    # ceiling -- a loss of 300 the player never took.
+    max_hp = 400
+
+    def __init__(self, game, map, x, y, z, hp=400, player=False):
         super().__init__(game, map, x, y, z, hp, "player", player=player)
         self.locked = False
         self.dead=False

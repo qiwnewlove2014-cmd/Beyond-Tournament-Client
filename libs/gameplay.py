@@ -278,6 +278,12 @@ class Gameplay(state.State):
                 self.chat2("/mainmenu") if not self.substates else None
             ),
             kc.get("check_stats", pygame.K_p): self.check_stats,
+            # The fort round is the one round whose objective cannot be seen and
+            # is not a creature the Client is sent: one press asks the Server
+            # where the Zombie Guardian is, and its answer comes straight back
+            # (asking again just asks again). A command and an Enter were seconds
+            # a fort round does not have.
+            kc.get("check_guardian", pygame.K_a): self.check_guardian,
             kc.get(
                 "export_buffers", pygame.K_BACKQUOTE
             ): lambda mod: buffer.export_buffers(),
@@ -694,6 +700,16 @@ class Gameplay(state.State):
         if self.spectator_mode and self.pong_arena:
             return
         self.game.network.send(consts.CHANNEL_MISC, "stats", {})
+
+    def check_guardian(self, mod=0):
+        """Ask the Server where the Zombie Guardian is (one press, one answer).
+
+        The Client cannot answer this locally: a living creature is not sent to
+        it as an object, and a fort draws nothing on the map. There is no cool
+        down -- the Server reads and speaks, and the guardian cannot move -- so
+        pressing again simply asks again.
+        """
+        self.game.network.send(consts.CHANNEL_MISC, "check_guardian", {})
 
     def spectator_cycle_cam_mode(self):
         """Cycle the Pong spectator ear: follow -> east edge -> west edge -> follow.

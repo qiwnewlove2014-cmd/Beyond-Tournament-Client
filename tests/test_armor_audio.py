@@ -10,8 +10,8 @@ like, so what a listener actually gets has to be pinned:
     gravel silent, and a piece of armor that muted the floor would be a
     different feature;
   * **no cloth sample comes round again until the folder has dealt all of them**.
-    That is a shuffle bag, not `random_item` (which stutters) and not
-    `get_next_cycle_item` (which is the same six in the same order forever). The
+    That is a shuffle bag, not `random_item` (which stutters) and not a fixed
+    walk (which is the same six in the same order forever). The
     bag is per wearer, so three armored players on one map do not deal from one
     deck, and the seam between two rounds of the folder is not a repeat either;
   * **every other player hears it too**, and the piece arrives with the step

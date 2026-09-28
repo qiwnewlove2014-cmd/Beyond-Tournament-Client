@@ -925,6 +925,12 @@ class Map:
     def spawn_zombieSpawn(self, **kwargs):
         pass
 
+    def spawn_guardianFort(self, **kwargs):
+        # A zombie guardian fort is a server-side spawn zone with no picture of
+        # its own (like `spawn_zombieSpawn` above): the client only has to not
+        # fall over when a map carries one.
+        pass
+
     # How long after a map is applied its piano range is finished warming.
     # The notes a keyboard plays arrive with the map; the rest of the shipped
     # range waits for the join to settle, because preparing all of it inside

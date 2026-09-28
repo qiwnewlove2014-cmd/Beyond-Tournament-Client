@@ -19,8 +19,9 @@ if mode == "run" and not os.path.isdir(
 So a surface has a run variant **if and only if the folder
 `data/steps/<tile>/run/` exists** and holds at least one `.ogg`. Nothing else
 is needed: `AudioManager.load_buffer` -> `path_utils.random_item` picks a
-random file out of that folder on every step, and `get_next_cycle_item` is
-only involved for attack/hit sets. Dropping the files in is the whole change —
+random file out of that folder on every step, and `next_sound_item` only adds
+its shuffle bag for attack/hit sets (every other folder keeps the plain fresh
+pick). Dropping the files in is the whole change —
 no code edit, no test edit, no map edit.
 
 The probe is a *folder* question on purpose. A compiled run has no `data/`
