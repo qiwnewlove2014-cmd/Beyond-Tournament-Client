@@ -1,39 +1,30 @@
 """A voice coming out of a cabinet's room.
 
-The megaphone already knows how to get a voice out of a set of speakers: every
-listener plays the talker's frames at the map's PA speakers with the PA's own
-delays, filters and gain. A cinema cabinet is the same job with better numbers
--- the speakers the builder placed around that one cabinet, the room's own
-distance ramp (8 m full, 60 m silent), the map's level for each speaker, the
-wall standing between, and the trim that speaker carries.
+The megaphone already gets a voice out of a set of speakers -- every listener
+plays the talker's frames at the map's PA speakers with the PA's own delays,
+filters and gain. A cinema cabinet is the same job with better numbers: the
+speakers around that one cabinet, the room's own ramp (8 m full, 60 m silent),
+the map's level per speaker, the wall standing between, and the trim it carries.
+So a talker inside a room's reach is heard *from that room* instead of the map's
+PA -- which also means a map with a cabinet and no PA speakers at all now
+carries a voice.
 
-So a talker standing inside a room's reach is heard *from that room* instead of
-from the map's PA: the room replaces the PA for that voice, which also means a
-map with a cabinet but no PA speakers at all -- where megaphone speech used to
-be silent everywhere -- now carries a voice through the cabinet.
+Three things it deliberately does not do: it leaves the PA path untouched
+(byte-identical for a talker with no room, a listener who turned this off, or a
+map the feature never reached); it never pushes the voice into the room's *frame
+queue* (80-240 ms deep plus the trims, and a voice has no beat that could take
+that back out -- the reason a live note is played at the speakers too); and it
+never plays the talker's own voice back *from their packet* (a client spawns
+copies of the frames it received and the Server never echoes to the sender, so
+each voice is heard once -- the talker's monitor is a separate leg,
+:func:`feed_local`).
 
-Three things this deliberately does not do:
+Every number comes from the room itself (``terms_for_plan``), so one speaker is
+exactly as loud for a voice as for the band and the song: same ramp, level, aim,
+wall filter and the same two EFX sends (the room's reverb zone, the cabinet's
+EQ).
 
-    * it does not touch the PA path. A talker with no room around them keeps
-      byte-identical PA behaviour, and so does every listener who turned this
-      off, on a map the feature never reached;
-    * it does not push the voice into the room's *frame queue*. That queue runs
-      80-240 ms deep plus the trims, and a voice has no beat that could take
-      that back out -- the same reason a live note is played at the speakers
-      rather than queued (see ``live.py``);
-    * it does not play the talker's own voice back at the room *from their
-      packet*. A client only ever spawns copies of the frames it received, and
-      the Server never echoes a broadcast to its sender, so a listener hears
-      each voice once. The talker's own monitor is a separate leg
-      (:func:`feed_local`, built from their own microphone) for the talker
-      standing where no PA can be heard at all.
-
-Every number comes from the room itself (``LiveRoomRouter.terms_for_plan``) so
-one speaker is exactly as loud for a voice as it is for the band and for the
-song: the same distance ramp, the same per-speaker level and aim, the same wall
-filters (`listener.occlusion_filter`), and the same two EFX sends -- the room's
-reverb zone and the cabinet's EQ (`room_environment`), which is what makes a
-voice come *out of that room* instead of out of a dry booth.
+Rules, traps and the measured numbers: .agents/skills/cinema_speaker_system/.
 """
 
 import time
@@ -46,11 +37,10 @@ from .crossover import mark_key, mark_of
 from .listener import restore_filter, speaker_filter
 from .pan import DEFAULT_DIRECTION, target_for_channel
 
-# The listener's own choice, like ``cinema_live_instruments``: it is how *you*
-# hear a voice, it takes nothing from anybody (no source of anyone else's is
-# touched and no packet changes), and it is on until someone in the Music Bot
-# menu turns it off. The switch behind it is on that menu, not in Options, and
-# the audio path never asks who you are -- only what you chose.
+# The listener's own choice, like cinema_live_instruments: it is how *you* hear
+# a voice, it takes nothing from anybody, and it is on until someone turns it
+# off in the Music Bot menu (never Options). The audio path never asks who you
+# are -- only what you chose.
 OPTION_ENABLED = "cinema_speech"
 DEFAULT_ENABLED = True
 
@@ -58,10 +48,10 @@ DEFAULT_ENABLED = True
 FRAME_MS = 20.0
 SAMPLE_RATE = 48000
 # REAL frames a speaker is given before it starts. The PA keeps a much bigger
-# cushion because its frames cross the network; this leg's frames only cross
-# the audio worker's own 20 ms timer, but a speaker handed one frame at a time
-# goes dry the first time that timer is a millisecond late -- heard as clicks
-# in the voice. Frames, never silence: the room has audio to wait for.
+# cushion because its frames cross the network; this leg's frames only cross the
+# worker's own 20 ms timer, but one frame at a time goes dry the first time that
+# timer is late -- heard as clicks. Frames, never silence: the room has audio to
+# wait for.
 START_FRAMES = 3
 # A speaker's trim is an installer's alignment offset. For a voice it is worth
 # honouring up to a point and no further: past ~60 ms a talker hears the room
@@ -114,10 +104,10 @@ def set_speech_enabled(enabled):
 def talker_position(gameplay, sender_id):
     """Where the talker stands, from their entity.
 
-    A megaphone frame carries the *sender's voice channel id* as its first
-    byte, and ``gameplay.voice_channels`` maps that id to the entity the
-    server put it on -- so the room a voice comes out of is the room the
-    person speaking is standing in, resolved locally and needing no packet.
+    A megaphone frame carries the *sender's voice channel id* as its first byte, and
+    ``gameplay.voice_channels`` maps that id to the entity the server put it on -- so
+    the room a voice comes out of is the room the person speaking stands in, resolved
+    locally and needing no packet.
     """
     try:
         entity = getattr(gameplay, "voice_channels", {}).get(sender_id)
@@ -134,8 +124,8 @@ def talker_position(gameplay, sender_id):
 def local_position(gameplay):
     """Where the LOCAL player stands, for their own monitor's room.
 
-    The player's own entity first (that is the body the server knows about),
-    then the listener's ears, so a client with no entity yet still answers.
+    The player's own entity first, then the listener's ears, so a client with no
+    entity yet still answers.
     """
     player = getattr(gameplay, "player", None)
     try:
@@ -166,33 +156,25 @@ def _router(game):
 def room_target(game, gameplay, sender_id):
     """``(cabinet_id, plan)`` for the room this talker's voice belongs to.
 
-    Cheap and safe on any thread: it reads one entity position and asks the
-    same router the live instruments ask (which re-resolves at most once a
-    second). It does no OpenAL work at all, which is what lets the audio
-    worker decide PA-or-room per frame without touching the audio thread's
-    objects.
+    Cheap and safe on any thread: it reads one entity position and asks the same
+    router the live instruments ask (which re-resolves at most once a second), and it
+    does no OpenAL work at all -- which is what lets the audio worker decide
+    PA-or-room per frame.
 
     This client's **own switch is asked first and is the whole answer**
-    (`cinema_speech`, the `Speech:` line): a staff pan decides *which* room a
+    (``cinema_speech``, the ``Speech:`` line): a staff pan decides *which* room a
     voice belongs to, never whether *you* hear one, so somebody who chose the PA
-    keeps the PA -- which is where a panned voice goes for them, and still
-    reaches them everywhere on the map. It is deliberately the only switch this
-    path asks: `Cinema rooms:` is the jukebox's songs and `Instruments:` the
-    band, so turning one of those off cannot silently take a voice off the map's
-    PA with it (one listening choice per shape of sound -- see
-    ``plugin.listening_summary`` for the answer said out loud).
+    keeps the PA -- and a panned voice still reaches them everywhere on the map. It
+    is deliberately the only switch this path asks: ``Cinema rooms:`` is the
+    jukebox's songs and ``Instruments:`` the band, so turning one of those off cannot
+    silently take a voice off the map's PA (one listening choice per shape of sound).
 
-    A **staff pan is asked next** and answers on its own (see ``pan.py``): it
-    names a cabinet, so the radius rule below is exactly what it overrides -- a
-    panned talker does not have to be standing in the destination's reach.
+    A **staff pan is asked next** and answers on its own (see ``pan.py``): it names a
+    cabinet, so the radius rule below is exactly what it overrides.
 
-    The rest of the time the talker has to be *in* the room, not merely nearest
-    to it: the router answers "the cabinet closest to this point", and a
-    speaker set is the room's reach from its own cabinet (``ROOM_RADIUS``).
-    Somebody standing out in the map with one cabinet far behind them is on the
-    map's PA -- the room's speakers are all out of earshot of every listener
-    anyway, so routing them there would silence an announcement that the PA
-    would have carried everywhere.
+    The rest of the time the talker has to be *in* the room, not merely nearest to it
+    (``ROOM_RADIUS``): somebody out in the map with one cabinet far behind them keeps
+    the PA, which is the path that carries everywhere.
     """
     if game is None or gameplay is None:
         return None
@@ -207,14 +189,11 @@ def room_target(game, gameplay, sender_id):
 def _pan_target(game, gameplay, sender_id):
     """``(cabinet_id, plan, direction)`` for a talker staff moved, or None.
 
-    Asked before the talker has to be anywhere near the cabinet, because that
-    is the rule a staff decision is *for*: a player panned into a hall does not
-    have to be standing in it. It is deliberately **not** asked before the
-    listener's own switches -- ``room_target`` does those first, so a pan is
-    where a voice is, not a way past somebody's listening choice (a listener
-    who chose the PA hears the panned voice on the PA). Everything else -- which
-    speakers, how loud, which wall, which reverb -- is the destination room's
-    own, exactly as if the talker had walked in.
+    Asked before the talker has to be anywhere near the cabinet, because that is the
+    rule a staff decision is *for*. Deliberately **not** asked before the listener's
+    own switches -- ``room_target`` does those first, so a pan is where a voice is,
+    not a way past somebody's listening choice. Everything else -- which speakers,
+    how loud, which wall, which reverb -- is the destination room's own.
     """
     try:
         target = target_for_channel(gameplay, sender_id)
@@ -235,9 +214,9 @@ def _pan_target(game, gameplay, sender_id):
 def _target_parts(target):
     """``(cabinet_id, plan, direction)`` from any target this module returns.
 
-    The direction only exists when a staff pan named one, and a two-tuple is
-    the shape every other caller and test already builds, so both are accepted
-    here rather than at each of the four places that unpack a target.
+    The direction only exists when a staff pan named one, and a two-tuple is the
+    shape every other caller and test already builds, so both are accepted here
+    rather than at each of the four places that unpack a target.
     """
     if target is None:
         return None, None, DEFAULT_DIRECTION
@@ -248,14 +227,11 @@ def _target_parts(target):
 def local_room_target(game, gameplay):
     """``(cabinet_id, plan)`` for the room the LOCAL player is standing in.
 
-    The same question as :func:`room_target`, asked about this client's own
-    body: a player standing in a hall hears their own broadcast out of that
-    hall's speakers, exactly like everyone else in it.
-
-    Deliberately *not* the staff pan: this leg is the talker's own monitor, so
-    it stays where they physically stand. A performer panned into the bar while
-    standing in the hall hears their own line from the hall (a monitor), while
-    everyone else hears them from the bar (the pan).
+    The same question as :func:`room_target`, asked about this client's own body, and
+    deliberately *not* the staff pan: this leg is the talker's own monitor, so it
+    stays where they physically stand (a performer panned into the bar while standing
+    in the hall hears their own line from the hall while everyone else hears them
+    from the bar).
     """
     if game is None or gameplay is None:
         return None
@@ -265,9 +241,8 @@ def local_room_target(game, gameplay):
 def local_room_available(game, gameplay):
     """Whether a room could carry this player's own voice right now.
 
-    Used by the PA Test Mode gate: on a map with a cabinet and no PA
-    speakers, the room *is* the public address system, so the O key has
-    something to test instead of refusing with "no PA speakers available".
+    Used by the PA Test Mode gate: on a map with a cabinet and no PA speakers, the
+    room *is* the public address system, so the O key has something to test.
     """
     try:
         return local_room_target(game, gameplay) is not None
@@ -301,9 +276,9 @@ def routed(game, gameplay, sender_id):
 def rooms_for(game):
     """The registry of voices this client is playing through rooms.
 
-    One per client, held by the audio manager with the audio it plays into, so
-    a relogin or a map change takes the sources with it instead of leaving
-    them on a dead map.
+    One per client, held by the audio manager with the audio it plays into, so a
+    relogin or a map change takes the sources with it instead of leaving them on a
+    dead map.
     """
     audio = getattr(game, "audio_mngr", None)
     if audio is None:
@@ -322,18 +297,15 @@ def rooms_for(game):
 def room_environment(game, gameplay, cabinet_id, plan):
     """``(reverb_slot, eq_slot)`` for a cabinet's room: what the song gets.
 
-    A voice out of a room should sound like *that room*, not like it was played
-    into the room from a dry booth, so it goes through the same two sends the
-    room's own speakers use for the song. Both are properties of the cabinet,
-    not of a playing stream, so they are derived the way the jukebox derives
-    them -- the reverb zone the cabinet stands in, and the cabinet's own EQ
-    preset -- which also means they exist with nothing playing at all (a band
-    in a hall with no song).
+    A voice out of a room should sound like *that room*, so it goes through the same
+    two sends the room's own speakers use for the song. Both are properties of the
+    cabinet rather than of a playing stream -- the reverb zone the cabinet stands in
+    and the cabinet's own EQ preset -- which also means they exist with nothing
+    playing at all (a band in a hall with no song).
 
-    **No reverb zone around the cabinet is no reverb send**: a voice is never
-    handed an invented room, it is played dry, which is what a plain map has
-    always sounded like. Either slot may be None, and every caller has to treat
-    None as "clear that send" rather than "keep the last one".
+    **No reverb zone around the cabinet is no reverb send**: a voice is never handed
+    an invented room, it is played dry. Either slot may be None, and every caller
+    treats None as "clear that send" rather than "keep the last one".
     """
     anchor = _room_anchor(game, cabinet_id, plan)
     return (_zone_reverb(gameplay, anchor),
@@ -375,10 +347,9 @@ def _zone_reverb(gameplay, anchor):
 def _cabinet_eq(gameplay, cabinet_id):
     """The cabinet's own EQ slot, or None (normal profile, or no jukebox).
 
-    The cabinet owns one EQ, so a voice and the song coming out of the same box
-    are shaped by the same box. ``_get_eq_slot`` is the jukebox's own (cached)
-    resolver, asked rather than re-implemented: a preset the player picked must
-    not be able to mean two different things.
+    The cabinet owns one EQ, so a voice and the song coming out of the same box are
+    shaped by the same box. ``_get_eq_slot`` is the jukebox's own (cached) resolver,
+    asked rather than re-implemented: a preset must not mean two things.
     """
     player = getattr(gameplay, "jukebox_player", None)
     resolver = getattr(player, "_get_eq_slot", None)
@@ -399,10 +370,10 @@ def _cabinet_eq(gameplay, cabinet_id):
 def feed(game, gameplay, sender_id, packet):
     """Play one voice frame at the room's speakers. MAIN THREAD ONLY.
 
-    Returns False when there is no room for this talker -- no cabinet on the
-    map, a cabinet the map set to ``off``, a speaker set that never resolved,
-    or a listener who turned this off. The caller then keeps the PA path, so
-    the fallback is the behaviour that shipped, not a new one.
+    Returns False when there is no room for this talker -- no cabinet on the map, a
+    cabinet the map set to ``off``, a speaker set that never resolved, or a listener
+    who turned this off. The caller then keeps the PA path, so the fallback is the
+    behaviour that shipped.
     """
     return _feed_at(game, gameplay, sender_id, packet,
                     room_target(game, gameplay, sender_id),
@@ -412,15 +383,10 @@ def feed(game, gameplay, sender_id, packet):
 def feed_local(game, gameplay, key, packet):
     """The OWNER's own broadcast, at the room they are standing in.
 
-    MAIN THREAD ONLY. Same room, same speakers and same numbers as everyone
-    else hears this player through, so a performer standing in the hall hears
-    their own voice from the hall instead of from a PA that (on a map with a
-    cabinet and no PA speakers) does not exist at all.
-
-    ``monitor=True``: the installer's per-speaker trims are skipped. They are
-    an alignment offset for the people standing out there, not something the
-    performer should hear their own line through (the same rule the PA
-    monitor follows, see ``voice_chat.queue_and_delay_frame``).
+    MAIN THREAD ONLY. Same room, same speakers and same numbers as everyone else
+    hears this player through. ``monitor=True``: the installer's per-speaker trims
+    are skipped, because they are an alignment offset for the people standing out
+    there, not something the performer should hear their own line through.
     """
     return _feed_at(game, gameplay, key, packet,
                     local_room_target(game, gameplay),
@@ -446,9 +412,9 @@ def _feed_at(game, gameplay, key, packet, target, position, monitor):
 def drop(game, sender_id):
     """Stop playing this talker's voice through a room. MAIN THREAD ONLY.
 
-    Destroying OpenAL sources is the one thing here that must never happen on
-    the audio worker: it is called from the play-out thread through the audio
-    inbox, exactly like the frame feed.
+    Destroying OpenAL sources is the one thing here that must never happen on the
+    audio worker: it is called from the play-out thread through the audio inbox,
+    exactly like the frame feed.
     """
     holder = getattr(getattr(game, "audio_mngr", None), "cinema_speech", None)
     if holder is None:
@@ -487,10 +453,9 @@ def _trim_frames(delay_ms):
 def _volume(game):
     """The global PA volume, times the cabinet's own category.
 
-    The same two numbers the PA path answers to (``megaphone_volume``) and the
-    same category the room's song uses, so a listener who turns that cabinet
-    down hears the voice come down with the song instead of a voice at full
-    volume over a quiet cabinet.
+    The same two numbers the PA path answers to and the same category the room's song
+    uses, so a listener who turns that cabinet down hears the voice come down with
+    the song instead of a voice at full volume over a quiet cabinet.
     """
     global_volume = 1.0
     try:
@@ -561,17 +526,16 @@ class SpeechRooms:
 class RoomSpeechLeg:
     """One talker's voice, at every speaker of the room they stand in.
 
-    Its sources are flat (``rolloff_factor = 0``): the room's own ramp already
-    shaped this voice, and letting OpenAL attenuate it again would fade the
-    same speaker twice -- the same reason a live note is spawned flat.
+    Its sources are flat (``rolloff_factor = 0``): the room's own ramp already shaped
+    this voice, and letting OpenAL attenuate it again would fade the same speaker
+    twice -- the same reason a live note is spawned flat.
     """
 
-    # How often the room's reverb and EQ are re-read. The room refreshes its
-    # own environment once a second (``JukeboxPlayer.sync_reverb``), and both
-    # are properties of the cabinet rather than of a frame: asking per frame
-    # would also re-run the jukebox's EQ resolver on every one of them, which
-    # for a custom profile means re-writing its parameters fifty times a
-    # second to no effect. A change is heard on the next refresh either way.
+    # How often the room's reverb and EQ are re-read. The room refreshes its own
+    # environment once a second, and both are properties of the cabinet rather than
+    # of a frame: asking per frame would also re-run the jukebox's EQ resolver on
+    # every one of them, which for a custom profile means re-writing its parameters
+    # fifty times a second to no effect. A change is heard on the next refresh.
     ENVIRONMENT_INTERVAL_S = 1.0
 
     def __init__(self, holder, sender_id, monitor=False):
@@ -593,12 +557,11 @@ class RoomSpeechLeg:
         self.holds = {}       # slot -> how many frames that speaker holds
         self.tiers = {}       # slot -> the wall tier last applied
         self.tones = {}       # slot -> the map's own voicing last applied
-        # slot -> the crossover mark this speaker carries (0 = full range, a
-        # positive mark a bass cabinet, a negative one a tweeter) and the state
-        # that mark's own filter carries from one voice frame to the next (see
-        # ``crossover``). A voice is a stream like the song, so a per-frame
-        # filter would click at every frame boundary; and it is per *speaker*,
-        # because each one is a stream of its own.
+        # slot -> the crossover mark this speaker carries (0 = full range, a positive
+        # mark a bass cabinet, a negative one a tweeter) and the state that mark's own
+        # filter carries from one voice frame to the next. A voice is a stream like the
+        # song, so a per-frame filter would click at every frame boundary; and it is per
+        # *speaker*, because each one is a stream of its own.
         self.crossovers = {}
         self.filters = {}
         self.environments = {}  # slot -> the (reverb, EQ) pair last applied
@@ -621,11 +584,10 @@ class RoomSpeechLeg:
                 continue
             waiting.append(packet)
             if len(waiting) <= self.holds.get(slot, 0):
-                # This speaker carries a trim: it plays the frame that many
-                # frames later, so speech keeps the room's alignment the way
-                # the song does. The room's first frame is never held back by
-                # waiting for audio nobody will send (the limit is whole
-                # frames, and `holds` is derived from the trim itself).
+                # This speaker carries a trim: it plays the frame that many frames later, so
+                # speech keeps the room's alignment the way the song does. The limit is whole
+                # frames (``holds`` is derived from the trim itself), so the room's first frame
+                # is never held back waiting for audio nobody will send.
                 continue
             self._publish(slot, source, waiting.popleft())
         return True
@@ -633,9 +595,8 @@ class RoomSpeechLeg:
     def _follow(self, target):
         """Re-shape for the room the talker's voice belongs to now.
 
-        A resolve that finds nothing keeps the room that is already playing: a
-        builder deleting one speaker mid-sentence must not cut the voice off
-        (the same rule the playing room follows for the song).
+        A resolve that finds nothing keeps the room that is already playing: a builder
+        deleting one speaker mid-sentence must not cut the voice off.
         """
         cabinet_id, plan, direction = _target_parts(target)
         self.direction = direction
@@ -660,12 +621,11 @@ class RoomSpeechLeg:
                 self._retire(slot)
         for slot, spec in specs.items():
             if slot in self.sources:
-                # The map is live: a speaker that is already playing a voice is
-                # handed whatever the map says *now* rather than the values it
-                # was born with, or the builder's crossover (and voicing) would
-                # wait for the next talker to be heard. The marked speaker's
-                # own filter state is deliberately kept -- it is a stream, and
-                # a filter that starts from silence clicks (see ``crossover``).
+                # The map is live: a speaker that is already playing a voice is handed whatever
+                # the map says *now* rather than the values it was born with, or the builder's
+                # crossover (and voicing) would wait for the next talker to be heard. The marked
+                # speaker's own filter state is deliberately kept -- it is a stream, and a filter
+                # that starts from silence clicks.
                 self.crossovers[slot] = mark_of(spec)
                 self.tones[slot] = None   # re-apply the map's voicing too
                 continue
@@ -708,11 +668,10 @@ class RoomSpeechLeg:
     def _shape(self):
         """Per-speaker gain, aim, distance and wall, from the room's numbers.
 
-        A speaker the terms no longer mention is *out of reach* (the room's own
-        ramp already decided that), so it is silenced rather than left at the
-        last gain it happened to have: a listener who walks out of the hall
-        must stop hearing the voice, and a frozen gain would keep playing it at
-        whatever level the last position gave.
+        A speaker the terms no longer mention is *out of reach* (the room's own ramp
+        decided that), so it is silenced rather than left at the last gain it happened to
+        have: a listener who walks out of the hall must stop hearing the voice, and a
+        frozen gain would keep playing it at whatever level the last position gave.
         """
         terms = self._terms()
         environment = self._environment()
@@ -725,11 +684,9 @@ class RoomSpeechLeg:
                 with suppress(Exception):
                     source.gain = 0.0
                 continue
-            # Seven fields since the note path started carrying a channel: a
-            # voice is one mono stream at every speaker of the room and has
-            # no half to take, but it is heard through the speaker's own
-            # voicing like everything else the room carries (see
-            # ``live.terms_for_plan``).
+            # Seven fields since the note path started carrying a channel: a voice is one
+            # mono stream at every speaker of the room and has no half to take, but it is
+            # heard through the speaker's own voicing like everything else the room carries.
             _slot, _spot, gain, _delay, tier, *_rest = term
             tone = _rest[1] if len(_rest) > 1 else None
             with suppress(Exception):
@@ -752,11 +709,10 @@ class RoomSpeechLeg:
     def _environment(self):
         """The room's reverb and EQ (see :func:`room_environment`).
 
-        Re-read on a timer rather than remembered forever: a player who changes
-        the cabinet's EQ, or a reload that moves the reverb zone the cabinet
-        stands in, has to reach a voice that is already playing. Never
-        *invented*, either: a room with no reverb zone yields None, which the
-        caller sends as "clear that send" and the voice stays dry.
+        Re-read on a timer rather than remembered forever: a player who changes the
+        cabinet's EQ, or a reload that moves the reverb zone the cabinet stands in, has
+        to reach a voice that is already playing. Never *invented*, either: a room with
+        no reverb zone yields None, which the caller sends as "clear that send".
         """
         now = time.monotonic()
         if now - self._environment_at < self.ENVIRONMENT_INTERVAL_S:
@@ -773,15 +729,13 @@ class RoomSpeechLeg:
     def _send_environment(self, source, environment, filt):
         """Route one speaker's voice through the room's reverb and its EQ.
 
-        The same sends the room's own speakers carry for the song, on the same
-        slots and with the wall filter as the send filter, so a voice behind a
-        wall is muffled *inside the reverb* exactly as much as it is dry (the
-        room's filters are shared, see ``listener.occlusion_filter``).
+        The same sends the room's own speakers carry for the song, on the same slots and
+        with the wall filter as the send filter, so a voice behind a wall is muffled
+        *inside the reverb* exactly as much as it is dry.
 
-        A slot that is None is sent as None, which *clears* the send: the room
-        the voice was in may have stopped having a reverb, and a voice left
-        ringing in a room that no longer has one is a bug you hear once and
-        then never trust the speaker again.
+        A slot that is None is sent as None, which *clears* the send: the room the voice
+        was in may have stopped having a reverb, and a voice left ringing in a room that
+        no longer has one is a bug you hear once and then never trust the speaker again.
         """
         audio = getattr(self.holder.game, "audio_mngr", None)
         efx = getattr(audio, "efx", None)
@@ -809,17 +763,13 @@ class RoomSpeechLeg:
     def _publish(self, slot, source, frame):
         """Queue one frame on one speaker and make sure it is playing.
 
-        A STOPPED or INITIAL source reports **every** buffer it holds as
-        *processed*: OpenAL counts a buffer as done the moment its source is
-        not playing it. Recycling on that number before queueing the next
-        frame therefore hands back the frame that was just queued, and the
-        queue can never reach ``START_FRAMES`` -- so a speaker that had ever
-        played (the first word of the previous sentence, the end of the last
-        burst) never started again, and the next thing said through the room
-        was silent until the leg was swept and its sources rebuilt. Only a
-        *playing* source's finished buffers are recycled here; while a stopped
-        one is being filled, what is left over from the previous burst goes
-        first and this burst's own frames stay.
+        A STOPPED or INITIAL source reports **every** buffer it holds as *processed*:
+        OpenAL counts a buffer as done the moment its source is not playing it. Recycling
+        on that number before queueing the next frame therefore hands back the frame that
+        was just queued, and the queue can never reach ``START_FRAMES`` -- so a speaker
+        that had ever played never started again, and the next thing said through the
+        room was silent until the leg was swept. Only a *playing* source's finished
+        buffers are recycled here.
         """
         try:
             import cyal
@@ -872,14 +822,11 @@ class RoomSpeechLeg:
     def _voiced(self, slot, frame):
         """This speaker's own crossover: the room's voice, shaped by the mark.
 
-        A bass cabinet plays the low end of it and nothing above, a tweeter the
-        top of it and nothing below; a speaker with no mark is handed the frame
-        it was given.
-
-        Filtered here, in the one place a frame is really about to be queued,
-        so a frame the holder had no buffer for is not walked through the
-        filter on its way to the bin: the state a marked speaker carries
-        belongs to the frames it actually plays.
+        A bass cabinet plays the low end of it and nothing above, a tweeter the top of it
+        and nothing below, a speaker with no mark is handed the frame it was given.
+        Filtered here, in the one place a frame is really about to be queued, so a frame
+        the holder had no buffer for is not walked through the filter on its way to the
+        bin: the state a marked speaker carries belongs to the frames it actually plays.
         """
         mark = self.crossovers.get(slot, FULL_RANGE)
         if mark == FULL_RANGE:
@@ -919,10 +866,9 @@ class RoomSpeechLeg:
     def _drain(self, source):
         """Return whatever OpenAL has finished with, bounded and never looped.
 
-        ``unqueue_buffers`` only ever hands back *processed* buffers, so a
-        queue whose remaining buffers are still counted as queued would spin
-        here forever -- on the main thread. Ask at most as many times as the
-        queue holds and stop the moment nothing comes back.
+        ``unqueue_buffers`` only ever hands back *processed* buffers, so a queue whose
+        remaining buffers are still counted as queued would spin here forever -- on the
+        main thread. Ask at most as many times as the queue holds.
         """
         with suppress(Exception):
             for _ in range(int(source.buffers_queued) + 1):
@@ -944,11 +890,10 @@ def _specs(plan):
 def _signature(plan):
     """What makes this room *this* room, for reuse without rebuilding.
 
-    Position, level, aim, trim, voicing and crossover per slot: a builder
-    placing or moving a speaker mid-sentence is followed, a speaker re-marked
-    as a bass cabinet (or a tweeter) is re-cut, and a re-resolve that returns
-    the same room keeps the speakers that are already playing (rebuilding them
-    would drop a queue's worth of voice).
+    Position, level, aim, trim, voicing and crossover per slot: a speaker placed or
+    moved mid-sentence is followed, a speaker re-marked as a bass cabinet is re-cut,
+    and a re-resolve that returns the same room keeps the speakers that are already
+    playing (rebuilding them would drop a queue's worth of voice).
     """
     placement = getattr(plan, "placement", None)
     parts = []

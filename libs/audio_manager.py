@@ -27,10 +27,10 @@ from . import consts
 def _report_efx_armor_breach(f_id, site, label, finalizing):
     """EFX armor-breach warning that cannot block interpreter shutdown.
 
-    The normal logger holds a lock and fsyncs every line; a weakref
-    finalizer running during shutdown must never wait on that path — an
-    fsync stalled behind an antivirus scan at process exit once hung the
-    quit until the watchdog raised "Native Deadlock Detected".
+    The normal logger holds a lock and fsyncs every line; a weakref finalizer running
+    during shutdown must never wait on that path -- an fsync stalled behind an
+    antivirus scan at process exit once hung the quit until the watchdog raised
+    "Native Deadlock Detected".
     """
     try:
         if finalizing:
@@ -50,16 +50,12 @@ def _report_efx_armor_breach(f_id, site, label, finalizing):
 def split_channel_buffer(provider, path, channel):
     """One channel of a stereo sample (``'l'``/``'r'``), or None if it cannot split.
 
-    The split itself belongs to whoever holds the sample cache -- the piano and
-    the drums both expose ``load_stereo_split_buffers`` (their prepared
-    instrument cache, or a decoder + weak cache for anything else) and both
-    already serve the instruments' own stereo image with it.
-
-    None always means "play the whole file": a mono sample (whose loader
-    hands back the same buffer twice), a sample the cache is still preparing, a
-    provider that cannot split at all. A speaker of a cinema room going silent
-    because a sample happened to be mono would be far worse than a note that is
-    not panned, so the caller falls back rather than skipping the note.
+    The split belongs to whoever holds the sample cache (the piano and the drums
+    both expose ``load_stereo_split_buffers``). None always means "play the whole
+    file": a mono sample, one the cache is still preparing, a provider that cannot
+    split at all -- a speaker of a cinema room going silent because a sample happened
+    to be mono would be far worse than a note that is not panned, so the caller falls
+    back rather than skipping the note.
     """
     if channel not in ("l", "r"):
         return None
@@ -156,14 +152,13 @@ class AudioManager():
         self._headphone_test_sound = None
         self.buffers = weakref.WeakValueDictionary()
         self._preloaded_buffers = {}  # Strong references for preloaded sounds to prevent GC
-        # Audio Inbox: worker threads (voice chat, megaphone playout, music
-        # bot) hand their OpenAL work here instead of touching OpenAL
-        # themselves. AudioManager.loop() drains it on the MAIN thread inside
-        # the frame batch, so every AL call in the process happens on one
-        # thread — the OpenAL context is only current there, and concurrent
-        # cross-thread AL usage (especially mismatched context.batch()
-        # nesting, a per-context GLOBAL flag) corrupted native memory and
-        # crashed the game (0xC0000005) under load.
+        # Audio Inbox: worker threads (voice chat, megaphone playout, music bot) hand
+        # their OpenAL work here instead of touching OpenAL themselves. loop() drains it
+        # on the MAIN thread inside the frame batch, so every AL call in the process
+        # happens on one thread -- the context is only current there, and concurrent
+        # cross-thread AL usage (especially mismatched context.batch() nesting, a
+        # per-context GLOBAL flag) corrupted native memory and crashed the game
+        # (0xC0000005) under load.
         self._audio_inbox = queue.SimpleQueue()
         self._jukebox_receivers = deque()
         self.instrument_samples = InstrumentSampleCache(
@@ -193,23 +188,20 @@ class AudioManager():
             self.set_volume(cat, val[0])
         
         # === EFX Auxiliary Effect Slot Pool ===
-        # Pre-allocate a fixed pool of aux effect slots at startup.
-        # This is the industry-standard approach (FMOD/Wwise/Unreal pattern):
-        # slots are NEVER created or destroyed during gameplay, only borrowed/returned.
-        # The shipped driver grants exactly 64 slots alive at once and no request
-        # raises that (measured through this build: asking for 128 sends still
-        # grants 64, and the 65th answers MemoryError), so 64 is the ceiling the
-        # whole game fits under -- which is why identical settings share one
-        # slot (lease_effect) rather than a map element owning one each.
+        # A fixed pool pre-allocated at startup; slots are NEVER created or destroyed
+        # during gameplay, only borrowed and returned. The shipped driver grants exactly
+        # 64 slots alive at once and no request raises that (measured: asking for 128
+        # still grants 64, and the 65th answers MemoryError), so 64 is the ceiling the
+        # whole game fits under -- which is why identical settings share one slot
+        # (lease_effect) rather than a map element owning one each.
         self._slot_pool = []      # Available slots
         self._slot_in_use = []    # Currently borrowed slots
         self._slot_pool_size = 0
-        # Recycled EFX filters. cyal's Filter has no explicit delete(): the
-        # AL resource is only released by __dealloc__, which calls through a
-        # function pointer stored on the EfxExtension instance — a call that
-        # hard-crashes the game (0xC0000005 into python311.dll's .data) when
-        # that pointer slot is corrupted. Pooling filter wrappers means they
-        # are NEVER garbage collected, so that code path never runs at all.
+        # Recycled EFX filters. cyal's Filter has no explicit delete(): the AL resource is
+        # only released by __dealloc__, which calls through a function pointer stored on
+        # the EfxExtension instance -- a call that hard-crashes the game (0xC0000005 into
+        # python311.dll's .data) when that pointer slot is corrupted. Pooling the wrappers
+        # means they are NEVER garbage collected, so that code path never runs at all.
         self._filter_pool = []
         # Who is holding each borrowed slot, so the pool can answer two
         # questions a count alone cannot: what the slots are being spent on
@@ -277,9 +269,9 @@ class AudioManager():
     def get_light_unbound_occlusion_filter(self):
         """Lowpass for PARTIALLY occluded unbound 3D sounds.
 
-        A thin obstacle (a single pillar tile between source and listener)
-        should only slightly dull the sound — much gentler than the heavy
-        full-wall filter from get_unbound_occlusion_filter().
+        A thin obstacle (a single pillar tile between source and listener) should only
+        slightly dull the sound -- much gentler than the heavy full-wall filter from
+        get_unbound_occlusion_filter().
         """
         if getattr(self, "_light_unbound_occlusion_filter", None) is None:
             flt = self.gen_filter("LOWPASS")
@@ -516,13 +508,12 @@ class AudioManager():
     def play_unbound(self, path, x, y, z, looping=False, cat="miscelaneous", direct=False, cone_inner_angle=360, cone_outer_angle=360, cone_outer_gain=0.4, cone_outer_gainhf=0.4, direction=(0,0,0), velocity=(0,0,0), volume=100, pitch=1.0, reference_distance=15.0, rolloff=1.0, max_distance=100.0, direct_filter=None, channel=None, stereo_provider=None, crossed=None):
         if self.muted and not looping: return
         direction=self.make_orientation(*direction)
-        # A cinema speaker a builder gave a crossover plays its own side of the
-        # split, and for a *note* that means this sample run through the room's
-        # own filter once (see libs/crossed_samples.py -- OpenAL has no filter
-        # that can say "this speaker plays the bass"). While that copy is being
-        # made, or when the sample cannot be crossed at all, the speaker plays
-        # the sample it played before rather than nothing: a note a little early
-        # in its life is better than one that is missing or late.
+        # A cinema speaker a builder gave a crossover plays its own side of the split, and
+        # for a *note* that means this sample run through the room's own filter once (see
+        # libs/crossed_samples.py -- OpenAL has no filter that can say "this speaker plays
+        # the bass"). While that copy is being made, or when the sample cannot be crossed
+        # at all, the speaker plays the sample it played before rather than nothing: a
+        # note a little early in its life is better than one that is missing or late.
         buffer = None
         if crossed is not None:
             cache = getattr(self, "crossed_samples", None)
@@ -596,19 +587,15 @@ class AudioManager():
             gc.enable()
         return snd
 
-    # ─── The speaker / headphone test ───
-    # Where a mono test voice is placed: one unit to the listener's own left or
-    # right, or one unit straight ahead. The source is relative
-    # (AL_SOURCE_RELATIVE), so each one means *this* listener's own side wherever
-    # they happen to be standing. That is what lets the test live in a menu
-    # before a map exists -- there is no world point to compute "left of the
-    # player" from there -- and it also means the answer never depends on which
-    # way anybody is facing.
-    # OpenAL's own forward is -z, so straight ahead is (0, 0, -1): on headphones
-    # that is the phantom centre between the ears, and on a surround system the
-    # panner's own front-centre -- which is the channel a stereo pair cannot
-    # check. Distance attenuation is off (one unit, no rolloff), so the position
-    # decides the placement and nothing else: this is a pan, never a volume.
+    # --- The speaker / headphone test ---
+    # Where a mono test voice is placed: one unit to the listener's own left or right,
+    # or one unit straight ahead. The source is relative (AL_SOURCE_RELATIVE), so each
+    # one means *this* listener's own side wherever they stand -- which is what lets
+    # the test live in a menu before a map exists and makes it independent of facing.
+    # OpenAL's own forward is -z, so straight ahead is (0, 0, -1): the phantom centre
+    # between the ears on headphones, the panner's front-centre on a surround system.
+    # Distance attenuation is off, so the position decides the placement and nothing
+    # else: this is a pan, never a volume.
     HEADPHONE_TEST_PLACEMENTS = {
         "left": (-1.0, 0.0, 0.0),
         "centre": (0.0, 0.0, -1.0),
@@ -618,16 +605,12 @@ class AudioManager():
     def play_headphone_test(self, path, placement, volume=100):
         """Play a mono test sample hard-panned to one placement.
 
-        ``placement`` is a key of ``HEADPHONE_TEST_PLACEMENTS`` -- the listener's
-        own left, right, or straight ahead. Returns how long that placement will
-        sound, in seconds (0.0 when nothing was played at all), so a caller can
-        follow it with the next one without guessing at a gap. Whatever was
-        already sounding is stopped first: one placement at a time is the whole
-        point of the test.
-
-        Unlike ``play_unbound`` this takes no direct filter and no effects sends
-        on purpose -- what is being verified is the pan, and a wall or a hall
-        behind the voice would answer a different question.
+        ``placement`` is a key of ``HEADPHONE_TEST_PLACEMENTS``. Returns how long that
+        placement will sound, in seconds (0.0 when nothing was played at all), so a
+        caller can follow it with the next one without guessing at a gap. Whatever was
+        already sounding is stopped first: one placement at a time is the whole point of
+        the test. No direct filter and no effects sends on purpose -- what is being
+        verified is the pan, and a wall or a hall would answer a different question.
         """
         self.stop_headphone_test()
         if self.muted:
@@ -713,16 +696,12 @@ class AudioManager():
 
         if as_3d_stereo:
             # Linear distance fade for playable instruments.
-            #
             # cyal/OpenAL only exposes the INVERSE_DISTANCE_CLAMPED model, whose gain
-            # asymptotically approaches (but never reaches) zero. With that model a
-            # hard cutoff at max_distance feels like the sound is abruptly switched
-            # off, because the gain just before the cutoff is still audible. To make
-            # the fade-out natural AND reach true silence at the edge, we bypass the
-            # OpenAL rolloff entirely (rolloff_factor=0) and apply our own linear
-            # gain ramp: full gain inside reference_distance, then linearly down to
-            # 0 at max_distance. The remaining hard cutoff at max_distance is then
-            # inaudible (gain is already ~0).
+            # asymptotically approaches but never reaches zero, so a hard cutoff at
+            # max_distance feels like the sound is abruptly switched off. We bypass the
+            # OpenAL rolloff entirely (rolloff_factor=0) and apply our own linear ramp: full
+            # gain inside reference_distance, then linearly down to 0 at max_distance, which
+            # makes the remaining cutoff inaudible.
             ddx = x - listener_x
             ddy = y - listener_y
             ddz = z - listener_z
@@ -896,10 +875,9 @@ class AudioManager():
     def defer_audio(self, fn):
         """Schedule an OpenAL-touching callable to run on the main thread.
 
-        Safe to call from ANY thread (SimpleQueue, no locks, never blocks,
-        never raises). The callable runs inside AudioManager.loop()'s frame
-        batch on the main thread. Use this for every AL operation that used
-        to run on voice/music worker threads.
+        Safe to call from ANY thread (SimpleQueue, no locks, never blocks, never raises).
+        The callable runs inside loop()'s frame batch on the main thread. Use this for
+        every AL operation that used to run on voice/music worker threads.
         """
         self._audio_inbox.put(fn)
 
@@ -1023,14 +1001,13 @@ class AudioManager():
     def _armor_filter(self, filter_obj, site, label="filter"):
         """Permanently INCREF an EFX wrapper so its refcount can never hit 0.
 
-        cyal EFX wrappers (Filter/Effect/AuxiliaryEffectSlot) delete their AL
-        resource in __dealloc__ through stored function pointers — crash
-        dumps show this firing on a Filter whose memory was ALREADY reused
-        (its efx field pointed at a static type object), i.e. a
-        use-after-free of the wrapper itself. Leaking one reference makes
-        that dealloc unreachable no matter what reference-counting bug
-        occurs elsewhere. The finalize callback only fires if the armor
-        somehow fails, and then names the creation site.
+        cyal EFX wrappers (Filter/Effect/AuxiliaryEffectSlot) delete their AL resource in
+        __dealloc__ through stored function pointers, and crash dumps show that firing on
+        a Filter whose memory was ALREADY reused (its efx field pointed at a static type
+        object) -- a use-after-free of the wrapper itself. Leaking one reference makes
+        that dealloc unreachable no matter what reference-counting bug occurs elsewhere.
+        The finalize callback only fires if the armor somehow fails, and names the
+        creation site.
         """
         try:
             import ctypes
@@ -1052,10 +1029,9 @@ class AudioManager():
     def gen_filter(self, type, *args):
         """Borrow an EFX filter, serving from the pool when possible.
 
-        Wrappers are INCREF-armored (see _armor_filter) and pooled, so their
-        crash-prone __dealloc__ is unreachable. Return filters with
-        release_filter() instead of dropping them. Returns ``None`` when the
-        filter type is unsupported — callers must check.
+        Wrappers are INCREF-armored (see _armor_filter) and pooled, so their crash-prone
+        __dealloc__ is unreachable. Return filters with release_filter() instead of
+        dropping them. Returns None when the filter type is unsupported.
         """
         import sys as _sys
         try:
@@ -1092,10 +1068,9 @@ class AudioManager():
     def release_filter(self, filter_obj):
         """Return a borrowed filter to the pool (call on the main thread).
 
-        The wrapper is deliberately kept alive forever — deleting a cyal
-        Filter runs through __dealloc__'s crash-prone indirect call. Peak
-        live filter count is bounded by concurrent use, never above the
-        previous (GC-based) peak.
+        The wrapper is deliberately kept alive forever -- deleting a cyal Filter runs
+        through __dealloc__'s crash-prone indirect call. Peak live filter count is
+        bounded by concurrent use, never above the previous (GC-based) peak.
         """
         if filter_obj is None:
             return
@@ -1108,16 +1083,14 @@ class AudioManager():
     # === Effect Slot Pool Methods ===
 
     def _init_slot_pool(self):
-        """Pre-allocate auxiliary effect slots at startup.
-        These slots are NEVER deleted — they are reused for the lifetime of the app.
-        This prevents the OpenAL resource exhaustion that causes reverb to die."""
-        # Try to allocate up to 64 (driver will cap at its limit). 32 was too
-        # tight for busy PA maps: Mor Lam Field / Pool carry 12-13 per-speaker
-        # reverb slots + the global megaphone reverb/EQ/compressor, and every
-        # remote player entity holds two more (EQ + distortion), so a full
-        # lobby plus jukebox/music-bot EQ presets could exceed 32 and starve
-        # the room reverbs of a slot during an in-place map reload. Only slots
-        # the driver actually grants are pooled; the loop stops on its error.
+        # Pre-allocate auxiliary effect slots at startup: they are NEVER deleted, only
+        # reused for the lifetime of the app, which prevents the OpenAL resource
+        # exhaustion that makes reverb die. 32 was too tight for busy PA maps: Mor Lam
+        # Field / Pool carry 12-13 per-speaker reverb slots + the global megaphone
+        # reverb/EQ/compressor, and every remote player entity holds two more (EQ +
+        # distortion), so a full lobby plus jukebox/music-bot EQ presets could starve the
+        # room reverbs of a slot during an in-place map reload. Only the slots the driver
+        # actually grants are pooled; the loop stops on its error.
         max_slots = 64
         for i in range(max_slots):
             try:
@@ -1133,9 +1106,9 @@ class AudioManager():
     def _owner_ref(ref):
         """A weakref to the holder when it can have one, else None.
 
-        Bookkeeping must never keep a holder alive: a slot released by the
-        sweep is released because its holder is *gone*, and a strong reference
-        here would make that impossible.
+        Bookkeeping must never keep a holder alive: a slot released by the sweep is
+        released because its holder is *gone*, and a strong reference here would make
+        that impossible.
         """
         if ref is None:
             return None
@@ -1207,10 +1180,10 @@ class AudioManager():
 
     def gen_effect(self, type, *args, hold=None):
         """Create an effect + acquire a slot from pool. Pool-aware version.
-        Returns the slot with the effect attached, or None.
 
-        ``hold`` is an optional ``(kind, key, ref)`` naming what the slot is
-        for; it only feeds the report and the sweep.
+        Returns the slot with the effect attached, or None. ``hold`` is an optional
+        ``(kind, key, ref)`` naming what the slot is for; it only feeds the report and
+        the sweep.
         """
         efx = self.create_effect(type, *args)
         if efx is None:
@@ -1223,21 +1196,19 @@ class AudioManager():
         return slot
 
     # === Shared effect leases ===
-    #
-    # The driver grants 64 auxiliary effect slots in total and no request can
-    # raise that (measured: asking for 128 sends still grants 64).  A map that
-    # places thirteen PA speakers carrying three distinct reverb settings was
-    # therefore asking for thirteen slots to serve three sounds -- and on a
-    # full lobby the rooms that could not borrow one stayed dry.  A lease gives
-    # one slot to every holder whose parameters are identical, and only the
-    # last holder to leave returns it to the pool.
+    # The driver grants 64 auxiliary effect slots in total and no request can raise
+    # that. A map placing thirteen PA speakers carrying three distinct reverb settings
+    # was asking for thirteen slots to serve three sounds -- and on a full lobby the
+    # rooms that could not borrow one stayed dry. A lease gives one slot to every
+    # holder whose parameters are identical, and only the last holder to leave
+    # returns it to the pool.
 
     def lease_label(self, kind="slot"):
         """A holder name that cannot collide, for holders without a natural one.
 
-        A map element has an id and a peer has a name; a plain object does not,
-        and two builds of the same map must never share a label (a stale holder
-        would otherwise look like a fresh one).
+        A map element has an id and a peer has a name; a plain object does not, and two
+        builds of the same map must never share a label (a stale holder would otherwise
+        look like a fresh one).
         """
         self._lease_serial = getattr(self, "_lease_serial", 0) + 1
         return f"{kind}#{self._lease_serial}"
@@ -1245,10 +1216,9 @@ class AudioManager():
     def lease_effect(self, type, params, label, ref=None, kind=None):
         """Borrow the one slot for ``(type, params)``, shared by name.
 
-        ``label`` names this holder and must be unique per holder for the
-        lifetime of the lease (an element id, a speaker index, a peer id).
-        Returns the slot, or None when the pool is exhausted -- the same
-        graceful degradation ``gen_effect`` has always had.
+        ``label`` names this holder and must be unique per holder for the lifetime of the
+        lease (an element id, a speaker index, a peer id). Returns the slot, or None when
+        the pool is exhausted -- the graceful degradation ``gen_effect`` has always had.
         """
         key = (str(type), tuple(params))
         lease = self._effect_leases.get(key)
@@ -1274,11 +1244,11 @@ class AudioManager():
     def _refresh_lease_hold(self, lease):
         """Point a leased slot's recorded holder at somebody still alive.
 
-        The holder table is the truth about who owns a shared slot; the
-        ``_slot_hold`` entry is a summary the pool report and the sweep read.
-        A holder whose ref is ``None`` cannot be seen through a weakref and
-        means "the lease itself owns this" -- recorded as such, it is left
-        exactly where it is rather than reclaimed on a guess.
+        The holder table is the truth about who owns a shared slot; the ``_slot_hold``
+        entry is a summary the pool report and the sweep read. A holder whose ref is
+        ``None`` cannot be seen through a weakref and means "the lease itself owns this"
+        -- recorded as such, it is left exactly where it is rather than reclaimed on a
+        guess.
         """
         slot = lease.get("slot")
         if slot is None:
@@ -1305,9 +1275,9 @@ class AudioManager():
     def release_effect_lease(self, type, params, label):
         """Give up one holder's claim; the last one returns the slot.
 
-        Returns True when the slot actually went back to the pool, so a caller
-        that also has to detach its own sends can tell whether anything else
-        was still listening to it.
+        Returns True when the slot actually went back to the pool, so a caller that also
+        has to detach its own sends can tell whether anything else was still listening to
+        it.
         """
         key = (str(type), tuple(params))
         lease = self._effect_leases.get(key)
@@ -1330,12 +1300,11 @@ class AudioManager():
     def _detach_slot_from_long_lived_sources(self, slot):
         """Clear every send that still points at a slot about to be recycled.
 
-        A recycled slot is handed on to somebody else, so a source left
-        pointing at it would play through the next holder's effect -- the
-        wrong room rather than no room.  Only the two sets this manager owns
-        (its own send table and each soundgroup's) can be walked; per-source
-        sends are the owning system's own detach calls, which the map reload
-        already makes.
+        A recycled slot is handed on to somebody else, so a source left pointing at it
+        would play through the next holder's effect -- the wrong room rather than no room.
+        Only the two sets this manager owns (its own send table and each soundgroup's)
+        can be walked; per-source sends are the owning system's own detach calls, which
+        the map reload already makes.
         """
         try:
             for sendnum, current in enumerate(self.sends):
@@ -1364,12 +1333,12 @@ class AudioManager():
     def reclaim_orphaned_slots(self, verbose=False):
         """Return slots whose holder no longer exists, before demanding a new one.
 
-        Run after a map is rebuilt: a slot the previous map failed to hand back
-        (an element replaced in place, an entity overwritten in the table, a
-        lease nobody released) used to be gone for the rest of the session --
-        that is what made a client need a restart instead of recovering at the
-        next map load.  Only holders this manager can see through a weakref are
-        reclaimable; a slot nobody recorded is left exactly where it is.
+        Run after a map is rebuilt: a slot the previous map failed to hand back (an
+        element replaced in place, an entity overwritten in the table, a lease nobody
+        released) used to be gone for the rest of the session -- that is what made a
+        client need a restart instead of recovering at the next map load. Only holders
+        this manager can see through a weakref are reclaimable; a slot nobody recorded is
+        left exactly where it is.
         """
         freed = 0
         for key, lease in list(self._effect_leases.items()):
@@ -1389,15 +1358,14 @@ class AudioManager():
             ref = hold[2] if len(hold) > 2 else None
             if ref is None or ref() is not None:
                 continue
-            # A slot a live lease still holds is never the sweep's to take,
-            # however dead the holder recorded here looks: that ref is the
-            # first holder of a shared slot, and a shared slot outlives it
-            # (a re-saved zone, a new map joining an identical room). Freeing
-            # it detaches sends that are still listening and hands the slot to
-            # the next borrower, whose effect those sends then play through --
-            # a room that comes back "wrong" or buzzing instead of the room
-            # the player is standing in. The holders that write the summary
-            # keep it pointed at somebody alive; this is the rule itself.
+            # A slot a live lease still holds is never the sweep's to take, however dead the
+            # holder recorded here looks: that ref is the first holder of a shared slot, and a
+            # shared slot outlives it (a re-saved zone, a new map joining an identical room).
+            # Freeing it detaches sends that are still listening and hands the slot to the
+            # next borrower, whose effect those sends then play through -- a room that comes
+            # back "wrong" or buzzing instead of the room the player is standing in. The
+            # holders that write the summary keep it pointed at somebody alive; this is the
+            # rule itself.
             if self._slot_is_leased(slot):
                 continue
             self._detach_slot_from_long_lived_sources(slot)

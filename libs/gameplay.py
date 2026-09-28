@@ -50,10 +50,9 @@ import cyal
 class _ExitFadeState(state.State):
     """Blocks all input while the exit fade-out plays out.
 
-    Pushed as a substate on top of Gameplay: Gameplay keeps running underneath
-    (so its map audio stays alive and audibly fades instead of hard-cutting),
-    but every key/event is swallowed until the fade finishes and the process
-    exits.
+    Gameplay keeps running underneath, so its map audio stays alive and audibly
+    fades instead of hard-cutting; every key/event is swallowed until the fade
+    finishes and the process exits.
     """
 
     def update(self, events):
@@ -66,11 +65,10 @@ class Gameplay(state.State):
     _DRUM_MIDI_CHROMATIC_FIRST_NOTE = DRUM_MIDI_PROFILE.CHROMATIC_FIRST_NOTE
     _DRUM_MIDI_CHROMATIC_LAST_NOTE = DRUM_MIDI_PROFILE.CHROMATIC_LAST_NOTE
     _DRUM_MIDI_GM_NOTE_TO_PAD = DRUM_MIDI_PROFILE.GENERAL_MIDI_NOTE_TO_PAD
-    # How often a turn that sends no movement packet is reported, and how far
-    # the head must have moved before it is worth a packet at all. A player
-    # spinning on the spot is the case this exists for: fast enough that a
-    # spectator's room wheels with them, quiet enough that standing still
-    # costs nothing and a slow drift is never reported twice for one degree.
+    # How often a turn that sends no movement packet is reported, and how far the
+    # head must have moved to be worth a packet at all. A spin must reach a
+    # spectator's room quickly; standing still must cost nothing and a slow drift
+    # must never be reported twice for one degree.
     FACING_REPORT_INTERVAL_MS = 100
     FACING_REPORT_STEP_DEG = 2.0
 
@@ -121,11 +119,10 @@ class Gameplay(state.State):
         # the connected event enters this state.  Create the mapping here and
         # preserve it in enter() so those current-session packets are not lost.
         self.voice_channels = {}
-        # This client's OWN voice channel, from the login snapshot: the Server
-        # tells a joiner about everyone on the map except them, so it is the one
-        # channel that never arrives through ``voice_channels`` -- and the one a
-        # staff member needs to pan their own voice (libs/cinema_pan_menu.py).
-        # It is per player, not per map, so a map change must not clear it.
+        # This client's OWN voice channel, from the login snapshot: the Server tells a
+        # joiner about everyone on the map except them, so it is the one channel that
+        # never arrives through ``voice_channels``. Per player, not per map -- a map
+        # change must not clear it.
         self.own_voice_channel = None
         # The last staff sound test this client was answered about (libs/
         # audio/cinema/sound_test.py). On the gameplay object like the pan
@@ -151,14 +148,10 @@ class Gameplay(state.State):
     def listener_object(self):
         """The object whose ears are hearing the world right now.
 
-        Everything that asks "how far is this sound, is it behind a wall,
-        where in the stereo field does it sit" must ask this, never
-        ``self.player``: while spectating the camera follows somebody else's
-        body, and this client's own character is parked at the spot the
-        spectator jumped in from. Measured from that parked body, the sounds
-        the Server does relay arrive muffled by walls that are nowhere near
-        the listener, and are dropped outright past a distance the listener
-        is not actually standing at.
+        Everything that asks how far a sound is, whether a wall is in the way or where
+        it sits in the stereo field must ask this, never ``self.player``: while
+        spectating the camera follows somebody else's body, and this client's own
+        character is parked at the spot the spectator jumped in from.
         """
         focus = getattr(getattr(self, "camera", None), "focus_object", None)
         return focus if focus is not None else self.player
@@ -166,13 +159,11 @@ class Gameplay(state.State):
     def _report_facing(self, force=False):
         """Tell the Server where our head is pointing.
 
-        A movement packet already carries the facing, but a player who turns
-        on the spot sends no movement at all -- so a spectator following them
-        got a head that never moved (a forward walk read as a sideways one),
-        and the Server's idea of the player's angle went stale, which is what
-        the shield's block arc is measured against. Throttled: a spin is
-        reported at most FACING_REPORT_INTERVAL_MS apart and only when the
-        head really moved.
+        A movement packet already carries the facing, but a player who turns on the spot
+        sends no movement at all -- so a spectator's head never moved and the Server's
+        idea of the angle went stale, which is what the shield's block arc is measured
+        against. Throttled to ``FACING_REPORT_INTERVAL_MS``, and only when the head
+        really moved.
         """
         network = getattr(self.game, "network", None)
         if network is None:
@@ -215,11 +206,9 @@ class Gameplay(state.State):
             pygame.K_RETURN: self.buffer_options,
             kc.get("open_volume_mixer", pygame.K_F7): lambda mod: self.add_substate(volume_mixer.volume_mixer(self.game, parent=self)),
             kc.get("open_staff_menu", pygame.K_F8): self.open_staff_menu,
-            # The cinema pan menu has no key of its own: it used to sit on F6,
-            # which is the beacon toggle's key (default_keyconfig.json binds
-            # toggle_beacons to f6), so one of the two could never be reached.
-            # It is opened from the Builder/Technician menu instead, where the
-            # rest of the sound plumbing lives (see cinema_pan_menu's header).
+            # The cinema pan menu has no key of its own: it sat on F6, which
+            # default_keyconfig.json binds to toggle_beacons, so one of the two could never
+            # be reached. It is opened from the Builder/Technician menu instead.
             pygame.K_o: self.handle_o_key,  # PA Test Mode (no mod) or Options (ALT+O)
             kc.get("map_chat", pygame.K_SLASH): self.map_chat,
             kc.get("chat", pygame.K_QUOTE): self.chat,
@@ -327,12 +316,10 @@ class Gameplay(state.State):
             (kc.get("spectator_cycle_camera", pygame.K_p), self.cycle_spectator_camera_if_active),
         ]
 
-        # Party Sync Leave is a modifier chord by default (Ctrl+F8) because F8
-        # already belongs to the Staff Menu. When the configured leave key
-        # shares a keycode with another action, Ctrl must be held to leave and
-        # a plain press keeps the other action (mirroring Ctrl+M / Ctrl+F9
-        # chord handling elsewhere). When it is rebound to an unused key, a
-        # plain press leaves directly.
+        # Party Sync Leave is a modifier chord by default (Ctrl+F8) because F8 belongs to
+        # the Staff Menu. When the configured leave key shares a keycode with another
+        # action, Ctrl must be held to leave and a plain press keeps the other action;
+        # rebound to an unused key, a plain press leaves directly.
         leave_key = kc.get("party_sync_leave", pygame.K_F8)
         base_action = self.keys_pressed.get(leave_key)
 
@@ -347,15 +334,11 @@ class Gameplay(state.State):
 
         self.keys_pressed[leave_key] = dispatch_party_sync_leave
 
-        # Party Sync text chat rides Shift+Slash (the map-chat key). A plain
-        # press keeps map chat; holding Shift (no Ctrl/Alt) opens the typed
-        # input for the private Party Sync room. Rebound to an unused key, a
-        # plain press opens party chat directly. The fallback default matters:
-        # saved user keyconfig files written BEFORE party_sync_chat existed do
-        # not contain the action, and without the fallback the chord below
-        # would silently never register (Shift+/ would stay map chat). Fall
-        # back to whatever key map chat uses so the two stay on one physical
-        # key even for older saved configs.
+        # Party Sync text chat rides Shift+Slash (plain Slash stays map chat). The
+        # fallback default matters: keyconfig files written BEFORE party_sync_chat
+        # existed do not carry the action, so a missing entry falls back to whatever key
+        # map chat uses -- which keeps the two on one physical key instead of silently
+        # registering nothing.
         party_chat_key = kc.get(
             "party_sync_chat", kc.get("map_chat", pygame.K_SLASH)
         )
@@ -442,10 +425,10 @@ class Gameplay(state.State):
     def _is_megaphone_owner(self):
         """True if this performer currently broadcasts to the PA.
 
-        True when the performer holds the single music-bot PA slot OR is a
-        member of the multi-owner instrument broadcast set, so several people
-        can perform piano/drums/guitar through the PA at the same time
-        (band / duo) instead of one lock slot per person.
+        True while the performer holds the single music-bot PA slot OR is a member of
+        the multi-owner instrument broadcast set, so several people can play
+        piano/drums/guitar through the PA at once (band / duo) instead of one lock slot
+        each.
         """
         mega = getattr(self, 'megaphone', None)
         if not mega:
@@ -458,13 +441,10 @@ class Gameplay(state.State):
     def _attach_music_timeline(self, packet):
         """Attach the current audible Music Bot frame when one is available.
 
-        Also stamps how far THIS machine's audible jukebox song trails the
-        room's shared clock (``sender_lag_ms``): a note is struck when the
-        performer HEARS the beat, so if their local song started late (slow
-        resolve/startup, or a mid-song join that had to resolve + seek) their
-        server_time runs late by exactly that lag. Listeners subtract it when
-        landing the note, so a replacement performer mid-song lands on the
-        beat like the original one instead of trailing its own lateness.
+        Also stamps how far THIS machine's audible jukebox song trails the room's shared
+        clock (``sender_lag_ms``): a note is struck when the performer HEARS the beat, so
+        a late local start (slow resolve, a mid-song join that had to seek) runs their
+        server_time late by exactly that, and listeners subtract it when landing the note.
         """
         try:
             marker = self.music_bot.performance_timeline_marker()
@@ -477,25 +457,20 @@ class Gameplay(state.State):
     def _attach_jukebox_sender_lag(self, packet):
         """Attach this machine's audible jukebox trail behind the room clock.
 
-        Reuses the listener-side measurement (queue depth + audible-start
-        lateness for direct; relay frame backlog for relay), so sender and
-        listener always agree on what "behind the room" means. The song it is
-        measured against is the one this note is played along to -- the room
-        the performer stands in (``_note_song_cabinet``), never whichever
-        cabinet happens to play first on a map that is playing two.
+        Reuses the listener-side measurement (queue depth + audible-start lateness for
+        direct, relay frame backlog for relay), so sender and listener agree on what
+        "behind the room" means. The song is the one this note is played along to -- the
+        room the performer stands in (``_note_song_cabinet``), never whichever cabinet
+        happens to play first on a map that is playing two.
 
-        Two numbers ride along, and they answer the same question two ways:
-        ``sender_lag_ms`` says how far this machine trails the song *as a
-        clock* (what the note timing was built on), while
-        ``sender_position_ms`` says where in the song this performer's own ears
-        were when they struck. The second one is the honest one -- a listener
-        that can answer its own position in the same song lands the note on the
-        beat whatever the performer's stream did, while the first is only ever
-        right when the performer's stream is level with the Server's clock
-        (``tests/two_machine_jam_sim.py`` has a row for the case where it is
-        not: the whole band lands one queue late). Older listeners ignore the
-        new field; older servers drop it (the validator strips what it does not
-        declare), and both fall back to the lag path, byte for byte.
+        Two numbers answer the question two ways: ``sender_lag_ms`` is how far this
+        machine trails the song *as a clock* (what the note timing was built on), while
+        ``sender_position_ms`` is where in the song this performer's own ears were when
+        they struck -- and the second is the honest one, because a listener that can
+        answer its own position lands on the beat whatever the performer's stream did
+        (the lag is only right while that stream is level with the Server's clock:
+        ``tests/two_machine_jam_sim.py`` has the row where it is not). Older listeners
+        ignore the field, older servers strip it, and both fall back to the lag path.
         """
         player = getattr(self, "player", None)
         position = None
@@ -521,11 +496,11 @@ class Gameplay(state.State):
     def _send_jam_note(self, event, packet):
         """Send one instrument note on the dedicated unreliable jam channel.
 
-        Notes are fire-and-forget events: on the shared reliable
-        CHANNEL_MAP/CHANNEL_SOUND queues a single lost world-sound packet
-        stalls every following note behind an ENet retransmission
-        (100-500ms spikes). A small uint16 sequence number lets listeners
-        drop reordered duplicates instead of playing them late."""
+        Notes are fire-and-forget: on the shared reliable CHANNEL_MAP/CHANNEL_SOUND
+        queues a single lost world-sound packet stalls every following note behind an
+        ENet retransmission (100-500 ms spikes). A small uint16 sequence number lets
+        listeners drop reordered duplicates instead of playing them late.
+        """
         seq = getattr(self, "_jam_note_seq", 0)
         self._jam_note_seq = (seq + 1) & 0xFFFF
         packet["seq"] = seq
@@ -785,12 +760,9 @@ class Gameplay(state.State):
 
 
 
-    # ============================================================================
-    # PER-PLAYER MEGAPHONE SOURCE MANAGEMENT
-    # Each player who speaks through the megaphone gets their own set of OpenAL
-    # sources (one per physical speaker), preventing audio interleaving.
-    # Max 8 concurrent players. Inactive players are auto-cleaned after 5 seconds.
-    # ============================================================================
+    # Per-player megaphone sources: one OpenAL source per physical speaker per talker,
+    # so voices never interleave. Max 8 concurrent players; an inactive one is
+    # auto-cleaned after 5 seconds.
 
     MAX_MEGAPHONE_PLAYERS = 8
 
@@ -810,16 +782,13 @@ class Gameplay(state.State):
         if self.player.locked and self.game.network and getattr(self.game.network, 'event_handeler', None):
             self.game.network.event_handeler.death({"dead": False})
         if self.game.network:
-            # NEVER join here. gameplay.exit() runs from game.pop(), which the
-            # main loop invokes while holding game.lock (game.py loop_function
-            # wraps st.update in the lock). The network worker acquires the
-            # SAME lock around every received packet (networking.py Client.loop),
-            # so if a chat echo or map packet arrived during the transition it
-            # is parked on `with self.game.lock:` and join() would wait for it
-            # forever -> the intermittent complete freeze seen when a chat
-            # message is sent while a map transition is in flight. The worker
-            # is a daemon: stop its polling and queue the terminator; it flushes
-            # and exits on its own within a couple of milliseconds.
+            # NEVER join here. gameplay.exit() runs from game.pop(), which the main loop
+            # invokes while holding game.lock, and the network worker acquires the SAME lock
+            # around every received packet -- so a chat echo or map packet arriving during the
+            # transition is parked on that lock and join() would wait forever (the
+            # intermittent complete freeze seen when a chat message is sent during a map
+            # transition). The worker is a daemon: stop its polling and queue the terminator;
+            # it flushes and exits on its own within a couple of milliseconds.
             network = self.game.network
             network.put(("should_poll", False))
             network.put(None)
@@ -883,11 +852,10 @@ class Gameplay(state.State):
         if warlock_intro is not None:
             audio_probe.call("gp.warlock_intro", warlock_intro.update)
         if self.guitar.active and self.guitar.instrument_input and not self.spectator_mode:
-            # Guitar audio is raw-only: the player's own strums play back 3D
-            # through the local monitor, and nearby players hear the real
-            # pedal/guitar sound streamed on the 3D voice channel. Piano
-            # placeholder notes are intentionally NOT played/broadcast so the
-            # real sound is what comes out, not a fake piano sample.
+            # Guitar audio is raw-only: the player's own strums play back 3D through the local
+            # monitor, and nearby players hear the real pedal/guitar streamed on the 3D voice
+            # channel. Piano placeholder notes are intentionally NOT played, so the real sound
+            # is what comes out rather than a fake sample.
             audio_probe.call("gp.guitar", self.guitar.instrument_input.drain_notes)
             audio_probe.call("gp.guitar", self.guitar.feed_monitor)
         if not self.spectator_mode:
@@ -927,12 +895,11 @@ class Gameplay(state.State):
             audio_probe.call("gp.music_bot", self.music_bot.loop)
 
         # === Party Sync sinks (members who are not on this map) ===
-        # A session member standing on another map has no entity here to play
-        # their music/voice through, so the session keeps its own source pair
-        # per member (libs/party_sync_audio.py). Per frame this reconciles the
-        # table with this map's entities — a member who walks away hands over
-        # to their sink and one who walks in hands over to their entity — and
-        # re-reads the listener's own "music" slider.
+        # A session member standing on another map has no entity here to play their
+        # music/voice through, so the session keeps its own source pair per member
+        # (libs/party_sync_audio.py). Per frame this reconciles the table with this map's
+        # entities -- walking away hands over to the sink, walking in hands back to the
+        # entity -- and re-reads the listener's own "music" slider.
         audio_probe.call("gp.party_sync",
                          party_sync_audio.sinks_for(self).tick, self)
 
@@ -988,13 +955,10 @@ class Gameplay(state.State):
             return
         elif isinstance(should_block, list):
             events = should_block
-        # A Ctrl+chord that opens a menu/substate (e.g. Ctrl+F8 Party Sync
-        # menu, Ctrl+R language channel) has its Ctrl KEYUP consumed by the
-        # open menu, so the snap-turn latch (turn_mod) never sees the release
-        # and stays on: after closing the menu, movement keys still snap-turn
-        # or spin until Ctrl is tapped again. Trust the keyboard's live
-        # modifier state instead of the KEYUP event that a substate may have
-        # eaten, and clear the latch the moment Ctrl is physically up.
+        # A Ctrl+chord that opens a menu/substate (Ctrl+F8, Ctrl+R) has its Ctrl KEYUP
+        # consumed by that menu, so the snap-turn latch (turn_mod) never sees the release
+        # and stays on: movement keys keep snap-turning until Ctrl is tapped again. Trust
+        # the keyboard's live modifier state, not the event a substate may have eaten.
         if getattr(self, "turn_mod", False) and not (
             pygame.key.get_mods() & pygame.KMOD_CTRL
         ):
@@ -1010,13 +974,8 @@ class Gameplay(state.State):
             audio_probe.call("gp.input_instrument", self._poll_piano_midi)
         elif getattr(self, "drum_mode", False):
             audio_probe.call("gp.input_instrument", self._poll_drum_midi)
-        # A Ctrl+chord that opens a menu/substate (e.g. Ctrl+F8 Party Sync
-        # menu, Ctrl+R language channel) has its Ctrl KEYUP consumed by the
-        # open menu, so the snap-turn latch (turn_mod) never sees the release
-        # and stays on: after closing the menu, movement keys still snap-turn
-        # or spin until Ctrl is tapped again. Trust the keyboard's live
-        # modifier state instead of the KEYUP event that a substate may have
-        # eaten, and clear the latch the moment Ctrl is physically up.
+        # The same snap-turn latch as above: the live keyboard modifier state is the
+        # truth, never the KEYUP event a substate may have eaten.
         for event in events:
             if getattr(self, "drum_mode", False):
                 if audio_probe.call("gp.input_instrument", self.drum.handle_event, event):
@@ -1103,22 +1062,19 @@ class Gameplay(state.State):
     def in_competition_match(self):
         """True while this player is in a started competition match.
 
-        The server only sends `enter_match` / `exit_match` from a real match's
-        start() / remove_player: the persistent world maps, the Pong cabinet
-        (arcade or ranked) and a Blackjack table never do. The flag is therefore
-        exactly "a competition is running for this player", not merely "a game
-        object exists", which is what lets a shield reminder tell the two apart.
+        The server only sends `enter_match` / `exit_match` from a real match's start() /
+        remove_player -- the persistent world maps, the Pong cabinet (arcade or ranked)
+        and a Blackjack table never do -- so this is exactly "a competition is running
+        for this player", not merely "a game object exists".
         """
         return bool(getattr(self, "game_started", False))
 
     def start_raise_shield(self, mod=0):
         if not self.spectator_mode and not getattr(self.player, 'dead', False):
             if not self.shield_mngr.equipped_shield:
-                # "No shield equipped." answers a player who meant to raise a
-                # shield, so it only belongs where a shield could be raised at
-                # all -- inside a competition. In a world/build map or in a
-                # minigame the key is stray, and a line spoken for it talks over
-                # the map's own sounds for nothing.
+                # "No shield equipped." answers a player who meant to raise a shield, so it only
+                # belongs inside a competition: in a world/build map or a minigame the key is
+                # stray, and a line spoken for it talks over the map's own sounds for nothing.
                 if self.in_competition_match():
                     speak("No shield equipped.")
                 return
@@ -1281,10 +1237,10 @@ class Gameplay(state.State):
     def _clock_hour_step(self, direction):
         """Clock-face turning: one press rotates exactly one hour mark (30°).
 
-        Used when the turning mode is "clock_hour": players who think in
-        clock positions ("the door is at 3 o'clock") tap Left/Right once per
-        hour mark instead of holding a continuous turn. The announcement is
-        immediate so every tap answers "where am I now?".
+        Used when the turning mode is "clock_hour": players who think in clock positions
+        ("the door is at 3 o'clock") tap Left/Right once per hour mark instead of holding
+        a continuous turn. The announcement is immediate so every tap answers where the
+        player is now.
         """
         self.player.face(
             self.player.hfacing + direction * 30, self.player.vfacing
@@ -1476,14 +1432,11 @@ class Gameplay(state.State):
             self.player.movetime = self.player.walktime
 
     def _strafe_key_down(self, mod):
-        """Strafe key pressed — only cancel running when SHIFT is NOT held.
+        """Strafe key pressed -- only cancel running when SHIFT is NOT held.
 
-        When the player holds SHIFT and presses a strafe direction the
-        original code unconditionally called run_stop + can_run=False,
-        which made running impossible with arrow keys (the default
-        strafe binds).  Keeping the existing no-auto-run behaviour for
-        bare strafe presses while preserving an active run when the
-        player explicitly holds the run key.
+        The original code called run_stop + can_run=False unconditionally, which made
+        running impossible with arrow keys (the default strafe binds); an active run is
+        kept when the player explicitly holds the run key.
         """
         if not (mod & pygame.KMOD_SHIFT):
             self.can_run = False
@@ -1607,11 +1560,10 @@ class Gameplay(state.State):
     def _wallbuy_label(obj):
         """What a wall is called, never the id the map stores under it.
 
-        A shield or a piece of armor is stored as a prefixed id
-        (``armor:cloth_armor``), and read out loud that is "armor colon cloth
-        underscore armor". A wall written by the builder carries the name
-        beside the id, and one that predates that (or was hand-written) is read
-        out of the id here instead, so a player is never handed the raw one.
+        A shield or a piece of armor is stored as a prefixed id (``armor:cloth_armor``),
+        which read out loud is "armor colon cloth underscore armor". A wall written by
+        the builder carries the name beside the id; one that predates that (or was
+        hand-written) is read out of the id here, so a player is never handed the raw one.
         """
         display = getattr(obj, "displayName", None)
         if display:
@@ -1829,15 +1781,13 @@ class Gameplay(state.State):
     def open_cinema_pan(self, mod=None):
         """Technicians and contributors: move a player's sound to a cabinet.
 
-        Reached from the Builder/Technician menu, which is where the Server
-        checks the permission (``can_use_cinema_pan``) before inviting this
-        client to open it -- and the menu refuses again here, so it cannot be
-        opened by an account that may not move somebody else's sound even if it
-        is reached another way. It has no key of its own any more: it sat on F6,
-        which is the beacon toggle's key.
-
-        Not a line in the Music Bot menu on purpose: that menu holds how *you*
-        hear the world, this holds where somebody else's sound comes out.
+        Reached from the Builder/Technician menu, where the Server checks the permission
+        (``can_use_cinema_pan``) before inviting this client -- and the menu refuses
+        again here, so it cannot be opened by an account that may not move somebody
+        else's sound even if it is reached another way. No key of its own (it sat on F6,
+        the beacon toggle's key) and deliberately not a line in the Music Bot menu: that
+        menu holds how *you* hear the world, this holds where somebody else's sound
+        comes out.
         """
         from . import cinema_pan_menu
         if not cinema_pan_menu.allowed(self):
@@ -1848,18 +1798,13 @@ class Gameplay(state.State):
     def open_cinema_test(self, mod=None):
         """Technicians and contributors: fire one test note at a cabinet.
 
-        The other half of the menu above, and opened the same way -- the Server
-        checks the rank before inviting this client and the menu refuses again
-        here, through the *same* flag the pan uses (``can_use_cinema_pan``): the
-        two actions have one rank, and a second flag that must always agree with
-        the first is a way for them to drift apart. A pan is resolved on every listener's
-        own machine, so this is how a destination is heard *and* checked
-        without needing a second client in the room: one short note, played by
-        each machine according to its own switches, with every one of them
-        reporting what it did (libs/audio/cinema/sound_test.py).
-
-        No key of its own, exactly like the pan: the Builder/Technician menu is
-        the only way in, and a menu line cannot collide with a binding.
+        Opened the same way as the pan and gated by the *same* flag
+        (``can_use_cinema_pan``): the two actions have one rank, and a second flag that
+        must always agree with the first is a way for them to drift apart. A pan is
+        resolved on every listener's own machine, so this is how a destination is heard
+        *and* checked without needing a second client in the room: one short note, each
+        machine answering according to its own switches (libs/audio/cinema/sound_test.py).
+        No key of its own, exactly like the pan.
         """
         from . import cinema_pan_menu
         if not cinema_pan_menu.allowed(self):
@@ -1933,11 +1878,9 @@ class Gameplay(state.State):
     def _exit_faded(self, mod):
         """Yes on the Esc confirm: fade the map audio out, then quit.
 
-        Announces "Disconnecting" and fades while Gameplay is still alive so
-        the ambience/music actually softens to silence instead of being
-        destroyed instantly; when it completes, the normal quit flow (logout
-        + cleanup) runs and the server disconnect lands us back on the main
-        menu.
+        "Disconnecting" is announced and the fade runs while Gameplay is still alive, so
+        the ambience/music softens to silence instead of being destroyed instantly; the
+        normal quit flow (logout + cleanup) runs when it completes.
         """
         if not self.game.start_exit_fade(
             on_faded=lambda: self.quit(mod),
@@ -2018,13 +1961,10 @@ class Gameplay(state.State):
         )
 
     def music_bot_control(self, mod):
-        """Music Bot controls using the configured Music Bot key:
-        Key              = Open YouTube search
-        Shift+Key        = Pause / Resume
-        Ctrl+Key         = Stop playback
-        Ctrl+Shift+Key   = Speak status
-        Alt+Key          = Toggle broadcast (mute to others)
-        """
+        # Music Bot controls on the configured key:
+        #   plain = open YouTube search      Shift = pause / resume
+        #   Ctrl = stop playback            Ctrl+Shift = speak status
+        #   Alt = toggle broadcast (mute to others)
         if not hasattr(self, 'music_bot') or not self.music_bot:
             return
         if not self._can_use_music_bot():
@@ -2068,11 +2008,9 @@ class Gameplay(state.State):
         speak(f"Music Bot volume: {new_vol} percent.")
 
     def music_bot_volume_key(self, direction, mod=0):
-        """Music Bot F9/F10 keys: plain press changes volume (10% steps).
-        Ctrl+F9/F10 seek the active track by 10 seconds (rewind/forward);
-        add Shift for 60-second jumps. Works for YouTube links and local
-        audio/video files alike.
-        """
+        # F9/F10: a plain press changes the volume (10% steps); Ctrl seeks the active
+        # track by 10 seconds (rewind / forward) and Shift adds 60-second jumps. Works for
+        # YouTube links and local audio/video files alike.
         if not hasattr(self, 'music_bot') or not self.music_bot:
             return
         if not self._can_use_music_bot():
@@ -2086,9 +2024,9 @@ class Gameplay(state.State):
     def party_sync_leave_key(self, mod=0):
         """Open the Party Sync quick menu from free gameplay.
 
-        Never leaves instantly: the menu shows who is listening plus a
-        Leave/End action, so a stray Ctrl+F8 press cannot silently kick
-        the player out of (or end) a session.
+        Never leaves instantly: the menu shows who is listening plus a Leave/End action,
+        so a stray Ctrl+F8 press cannot silently kick the player out of (or end) a
+        session.
         """
         ps = getattr(self, "party_sync", None)
         if not ps or not getattr(ps, "role", None):
@@ -2099,9 +2037,9 @@ class Gameplay(state.State):
     def _open_party_sync_quick_menu(self, ps):
         """Roster + Leave/End prompt shown from free gameplay (Ctrl+F8).
 
-        Hosts see their listeners and an End action; guests see who else is
-        listening and a Leave action. Both use the same server events as the
-        Music Bot menu path (party_sync_leave / party_sync_end).
+        Hosts see their listeners and an End action; guests see who else is listening and
+        a Leave action. Both use the same server events as the Music Bot menu path
+        (party_sync_leave / party_sync_end).
         """
         try:
             from . import menu as menu_mod, menus
@@ -2135,11 +2073,10 @@ class Gameplay(state.State):
             own_name = str(getattr(self.player, "name", "") or "")
         except Exception:
             pass
-        # A cross-map session is otherwise invisible in the world: the roster
-        # names somebody the map does not show. Saying which members are on
-        # another map is the whole difference between "where are they?" and a
-        # session that makes sense; it is read-only (this map's channel table
-        # and the server's own state, nothing else).
+        # A cross-map session is otherwise invisible in the world: the roster names
+        # somebody the map does not show. Saying which members are on another map is the
+        # whole difference between "where are they?" and a session that makes sense; it is
+        # read-only (this map's channel table and the server's own state, nothing else).
         from .party_sync_audio import member_is_local, state_members
         channels_of = {}
         for channel, meta in state_members(ps).items():
@@ -2239,9 +2176,9 @@ class Gameplay(state.State):
     def party_sync_chat_key(self, mod=0):
         """Open the typed input for the private Party Sync room chat.
 
-        Bound as Shift+Slash by default (plain Slash stays map chat). Only
-        session members can use it; the server routes the message to the
-        room and plays the arenachat sound for the other members.
+        Bound as Shift+Slash by default (plain Slash stays map chat). Only session
+        members can use it; the server routes the message to the room and plays the
+        arenachat sound for the other members.
         """
         ps = getattr(self, "party_sync", None)
         if not ps or not getattr(ps, "role", None):
@@ -2259,20 +2196,18 @@ class Gameplay(state.State):
             return speak("Message too long (max 1000 characters).")
         if not message.lstrip().rstrip():
             return self.cancel()
-        # `/m <song>` (and `/p`, its first spelling) asks the host's music bot
-        # for a song. This is read HERE,
-        # in the Party Sync room, and nowhere else: party chat is plain text and
-        # never fires a server command, so a slash typed here means a request
-        # (and travels as its own event, never as a chat line).
+        # `/m <song>` (and `/p`, its first spelling) asks the host's music bot for a song.
+        # Read HERE, in the Party Sync room, and nowhere else: party chat is plain text
+        # and never fires a server command, so a slash typed here means a request (and
+        # travels as its own event, never as a chat line).
         from .party_sync import near_song_command, parse_chat_request
         query = parse_chat_request(message)
         if query is not None:
             return self._request_party_song(query)
-        # A slash line that is not a request would be SAID IN THE ROOM as chat
-        # (party chat is plain text), so a near miss of the request command is
-        # answered here instead of being announced -- and the input stays open
-        # so the typo can be fixed rather than retyped. Anything that is not a
-        # near miss is somebody's ordinary message and goes as one.
+        # A slash line that is not a request would be SAID IN THE ROOM as chat, so a near
+        # miss of the request command is answered here instead of being announced -- and
+        # the input stays open so the typo can be fixed rather than retyped. Anything that
+        # is not a near miss is somebody's ordinary message and goes as one.
         hint = near_song_command(message)
         if hint:
             return speak(hint)
@@ -2286,11 +2221,10 @@ class Gameplay(state.State):
     def _request_party_song(self, query):
         """/m <song> in the Party Sync room (see libs/music_bot/song_requests.py).
 
-        The queue belongs to the host, so a guest asks and is answered by the
-        server (which is what keeps a stranger from filling somebody's queue);
-        a host asking their own bot is the same request with no round trip.
-        The input stays open when the request cannot be sent, so the player can
-        retype it rather than losing what they typed.
+        The queue belongs to the host, so a guest asks and is answered by the server
+        (which is what keeps a stranger from filling somebody's queue); a host asking
+        their own bot is the same request with no round trip. The input stays open when
+        the request cannot be sent, so the player can retype it.
         """
         ps = getattr(self, "party_sync", None)
         if not ps or not getattr(ps, "role", None):
@@ -2315,8 +2249,8 @@ class Gameplay(state.State):
     def party_sync_leave_key_name(self):
         """Human-readable name of the configured Party Sync Leave key.
 
-        The default shares F8 with the Staff Menu, so the action is a chord:
-        "ctrl+f8". A leave key rebound to an unshared key is announced plain.
+        The default shares F8 with the Staff Menu, so the action is a chord: "ctrl+f8". A
+        leave key rebound to an unshared key is announced plain.
         """
         try:
             leave_key = self.kc.get("party_sync_leave", pygame.K_F8)
@@ -2507,11 +2441,11 @@ class Gameplay(state.State):
     def _recover_streaming_audio_after_options(self):
         """Promptly recover long-running streams after closing an in-game menu.
 
-        Options no longer creates a competing menu-music source in gameplay,
-        but an output driver can still have stopped a buffered source while the
-        menu was open.  The music bot can resume its existing queued buffers;
-        the authoritative jukebox resync also supplies relay warm-up packets.
-        Neither action recreates a song nor changes its queue position.
+        Options no longer creates a competing menu-music source in gameplay, but an
+        output driver can still have stopped a buffered source while the menu was open.
+        The music bot resumes its existing queued buffers and the authoritative jukebox
+        resync supplies relay warm-up packets: neither action recreates a song or changes
+        its queue position.
         """
         music = getattr(self, "music_bot", None)
         if music is not None:
@@ -2571,11 +2505,10 @@ class Gameplay(state.State):
             if hasattr(self.map, 'megaphone_speakers') and self.map.megaphone_speakers:
                 self.megaphone.setup_megaphone_speakers(force=True)
 
-        # A cinema cabinet is a public address system too. On a map with a
-        # cabinet and no PA speakers the room is the only thing there is to
-        # test, so the key must work there instead of refusing -- the whole
-        # point of testing is to talk and listen, and nobody should have to
-        # place PA speakers that exist only for the test.
+        # A cinema cabinet is a public address system too. On a map with a cabinet and no
+        # PA speakers the room is the only thing there is to test, so the PA Test Mode key
+        # works there instead of refusing -- nobody should have to place PA speakers that
+        # exist only for the test.
         from .audio.cinema import speech as cinema_speech
         room_ready = cinema_speech.local_room_available(self.game, self)
         pa_ready = (hasattr(self.megaphone, 'sources') and self.megaphone.sources
@@ -2700,20 +2633,18 @@ class Gameplay(state.State):
                  speak("System: No public address system available directly in this area.")
                  return
             
-            # Voice is NEVER locked by the music-bot broadcast slot. The
-            # server deliberately keeps the single-owner lock for music only
-            # (so two MP3 streams cannot overlap on the PA) while any number
-            # of players talk simultaneously - the client mixes them with
-            # equal power. The music slot is enforced separately on the
-            # music-bot upload path (_is_music_owner gate), not here.
+            # Voice is NEVER locked by the music-bot broadcast slot. The server deliberately
+            # keeps the single-owner lock for music only (so two MP3 streams cannot overlap on
+            # the PA) while any number of players talk simultaneously -- the client mixes them
+            # with equal power. The music slot is enforced separately on the music-bot upload
+            # path (_is_music_owner gate), not here.
         
         # Route to appropriate channel based on mode
         if use_megaphone:
-            # Use megaphone's compression (sends to CHANNEL_MEGAPHONE). The
-            # map's own PA channel is preferred; only where there is none (a
-            # map with a cinema cabinet and no PA speakers) does the megaphone
-            # manager build a room-only channel -- the room is a perfectly
-            # good public address system, and it is the only one there to test.
+            # Use the megaphone's compression (sends to CHANNEL_MEGAPHONE). The map's own PA
+            # channel is preferred; only where there is none (a map with a cinema cabinet and
+            # no PA speakers) does the megaphone manager build a room-only channel -- the room
+            # is a perfectly good public address system and the only one there to test.
             from libs import logger
             channel = self.voice_channels.get(consts.CHANNEL_MEGAPHONE)
             if channel is None:
@@ -2738,11 +2669,10 @@ class Gameplay(state.State):
         try:
             self.voice_chat.audio_input.start()
         except cyal.exceptions.CyalError as e:
-            # The microphone handle can die while the game runs (device
-            # unplugged or disabled, default-device switch, sleep/resume).
-            # That is a voice chat problem, not a game crash: say so, stay in
-            # the game, and retire the dead recorder so the next key press
-            # rebuilds capture against the current device list.
+            # The microphone handle can die while the game runs (device unplugged or disabled,
+            # a default-device switch, sleep/resume). That is a voice chat problem, not a game
+            # crash: say so, stay in the game, and retire the dead recorder so the next key
+            # press rebuilds capture against the current device list.
             from libs import logger
             logger.log(f"[VOICE] Microphone failed to start: {e}")
             self.voice_chat_using_megaphone = False
@@ -2793,9 +2723,8 @@ class Gameplay(state.State):
     def voice_chat_key(self, mod):
         """Voice chat key press, honouring the selected mode.
 
-        "Push to talk" (the default) starts recording on key down and stops
-        on key up (see voice_chat_key_release); "Tap to talk" toggles on key
-        down.
+        "Push to talk" (the default) starts recording on key down and stops on key up
+        (see voice_chat_key_release); "Tap to talk" toggles on key down.
         """
         if options.get_voice_chat_mode() == "ptt":
             self.voice_chat_start(mod)

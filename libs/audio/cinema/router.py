@@ -1,22 +1,20 @@
 """Speaker distribution: one stereo frame in, one mono feed per speaker out.
 
-The renderer is where the two halves of the problem meet. A stereo frame is
-spread with the profile's Mid/Side weights so the front pair rebuilds the
-original image and the rest of the room carries the difference; a mono frame
-takes the mono path instead.
+A stereo frame is spread with the profile's Mid/Side weights so the front pair
+rebuilds the original image and the rest of the room carries the difference; a
+mono frame takes the mono path instead.
 
-Mono content must never go through the stereo profile. With identical
-channels the front, centre and the sides all collapse to the same samples
-(the sides collapse to silence), which is both a destroyed image and two or
-three speakers playing identical content -- the comb-filtering case. A mono
-programme therefore always renders through the mono-spread weights, where
-every speaker gets the programme itself. This is the one automatic decision
-the renderer makes, and it is the reason the source layout has to be
-detected at all.
+Mono content must never go through the stereo profile. With identical channels
+the front, centre and the sides all collapse to the same samples (the sides
+collapse to silence), which is both a destroyed image and two or three speakers
+playing identical content -- the comb-filtering case. A mono programme therefore
+always renders through the mono-spread weights, where every speaker gets the
+programme itself: the one automatic decision the renderer makes, and the reason
+the source layout has to be detected at all.
 
-No OpenAL here by design. Sources, buffers, upload and queueing stay with
-the transport that already owns them and on the audio owner thread; this
-class only answers "what should each speaker be fed right now".
+No OpenAL here by design: this class only answers "what should each speaker be
+fed right now", and the transport that already owns the sources stays on the
+audio owner thread.
 """
 
 from math import sqrt
@@ -37,14 +35,12 @@ MONO_PROFILE = "mono_spread"
 def ordered_edges(low, high):
     """A slot's two raw crossover edges, rounded and in order.
 
-    The edges are carried *as the map wrote them* -- this module may not import
-    the reader that decides what a mark means (it is part of the portable
-    core, which imports nothing but the standard library and its five
-    siblings) -- but they are ordered here, because a band written the other
-    way round is the same band and must not read as a different room. Ordering
-    is pure arithmetic; the vocabulary each edge is settled into is the
-    reader's, and a change only it would make is a change the room re-reads
-    anyway.
+    The edges are carried *as the map wrote them* -- this module may not import the
+    reader that decides what a mark means (it is part of the portable core, which
+    imports nothing but the standard library and its five siblings) -- but they are
+    ordered here, because a band written the other way round is the same band and
+    must not read as a different room. Ordering is pure arithmetic; the vocabulary
+    each edge is settled into is the reader's.
     """
     first = round(float(low or 0.0), 4)
     second = round(float(high or 0.0), 4)
@@ -54,11 +50,10 @@ def ordered_edges(low, high):
 class CinemaRenderer:
     """Per-jukebox renderer: stereo PCM in, per-slot mono PCM out.
 
-    ``slots`` is the union of every slot any plan can drive, so the transport
-    can create one OpenAL source per slot once and then queue only what the
-    active plan returns. A verdict change mid-song (a mono intro, a stereo
-    chorus) therefore never needs a source to be created while audio is
-    already flowing.
+    ``slots`` is the union of every slot any plan can drive, so the transport can
+    create one OpenAL source per slot once and then queue only what the active plan
+    returns: a verdict change mid-song (a mono intro, a stereo chorus) never needs a
+    source created while audio is already flowing.
     """
 
     MAX_SPEAKERS = 12
@@ -75,14 +70,13 @@ class CinemaRenderer:
         self._plans = {}
         self._slots = ()
         # The frame this renderer last decided, and the last window it decoded:
-        # ``(left, right, verdict, plan)`` and ``(left, right, l_samples,
-        # r_samples)``. The room feeds one frame in several *groups* -- one per
-        # distinct crossover and delay trim -- and each group asks for the
-        # slots that belong to it, so a frame must be judged once (the layout
-        # detector counts one vote per frame) and a window decoded once
-        # however many groups are cut out of it. Told apart by identity: the
-        # transport hands the same objects to every group of one frame and new
-        # objects for the next.
+        # (left, right, verdict, plan) and (left, right, l_samples, r_samples). The room
+        # feeds one frame in several *groups* -- one per distinct crossover and delay
+        # trim -- and each group asks for the slots that belong to it, so a frame must be
+        # judged once (the layout detector counts one vote per frame) and a window
+        # decoded once however many groups are cut out of it. Told apart by identity: the
+        # transport hands the same objects to every group of one frame and new objects
+        # for the next.
         self._frame = None
         self._window = None
         self._build_plans()
@@ -92,12 +86,10 @@ class CinemaRenderer:
     def _plan_for(self, profile, only=None):
         """Resolve a profile into concrete ``(slot, gain_l, gain_r)`` terms.
 
-        ``only`` restricts the plan to a given speaker set, which is how a
-        mono passage is spread across the speakers the room actually has
-        instead of conjuring extra ones. Slots are emitted in room order, so
-        truncating to ``max_speakers`` drops the back of the room before the
-        screen wall -- the centre and front pair are the last things a
-        constrained room should lose.
+        ``only`` restricts the plan to a given speaker set, which is how a mono passage
+        is spread across the speakers the room actually has instead of conjuring extra
+        ones. Slots are emitted in room order, so truncating to ``max_speakers`` drops
+        the back of the room before the screen wall.
         """
         available = self.layout.slots
         slots = [slot for slot in profile.slots
@@ -153,17 +145,15 @@ class CinemaRenderer:
     def _prepared(self, left, right, live=None):
         """``(verdict, plan)`` for the frame ``left``/``right`` belong to.
 
-        The verdict is the frame's own evidence -- one vote per frame -- so the
-        second window of a frame gets the first window's answer rather than a
-        second opinion (see ``_frame``).
+        The verdict is the frame's own evidence -- one vote per frame -- so the second
+        window of a frame gets the first window's answer rather than a second opinion.
 
-        ``live`` is that frame when ``left``/``right`` are a *window* cut out
-        of it: a speaker carrying a delay trim is fed the same programme a few
-        milliseconds late, and that window is the room's audio, not a frame of
-        its own. Judging the window would count one frame of the song as
-        several votes of layout evidence. ``None`` means the bytes being fed
-        are the frame, which is what a caller reading or replaying the room
-        hands in.
+        ``live`` is that frame when ``left``/``right`` are a *window* cut out of it: a
+        speaker carrying a delay trim is fed the same programme a few milliseconds late,
+        and that window is the room's audio, not a frame of its own. Judging the window
+        would count one frame of the song as several votes of layout evidence. ``None``
+        means the bytes being fed are the frame, which is what a caller reading or
+        replaying the room hands in.
         """
         subject_l, subject_r = (left, right) if live is None else live
         cached = self._frame
@@ -181,10 +171,9 @@ class CinemaRenderer:
     def _samples_for(self, left, right):
         """The two channels of this *window* as sample arrays, decoded once.
 
-        Decoding is only needed for the blends (a whole-channel slot is handed
-        the source bytes), so a room whose plan is only the front pair never
-        decodes at all. A window fed twice -- a refused frame offered again --
-        is not decoded twice either.
+        Decoding is only needed for the blends (a whole-channel slot is handed the source
+        bytes), so a room whose plan is only the front pair never decodes at all. A
+        window fed twice -- a refused frame offered again -- is not decoded twice either.
         """
         cached = self._window
         if cached is not None and cached[0] is left and cached[1] is right:
@@ -197,20 +186,20 @@ class CinemaRenderer:
     def render(self, left, right, only=None, live=None):
         """Return ``[(slot, mono_pcm16), ...]`` for this frame.
 
-        Slots the active plan does not use are simply absent, so an idle
-        speaker is never fed silence buffers. ``only`` is the set of slots the
-        caller is about to feed this frame: the room renders one frame in
-        several groups -- one per distinct crossover and delay trim -- and a
-        group that asked for the whole room would mix every speaker once per
-        group, so each group asks for its own slots and the room mixes each
-        fed speaker exactly once. ``None`` means the whole plan, which is what
-        a caller reading the room (a test, a read-out) wants.
+        Slots the active plan does not use are simply absent, so an idle speaker is never
+        fed silence buffers. ``only`` is the set of slots the caller is about to feed this
+        frame: the room renders one frame in several groups -- one per distinct crossover
+        and delay trim -- and a group that asked for the whole room would mix every
+        speaker once per group, so each group asks for its own slots and the room mixes
+        each fed speaker exactly once. ``None`` means the whole plan, which is what a
+        caller reading the room (a test, a read-out) wants.
 
-        ``live`` is the frame these bytes are cut from, for a caller feeding a
-        delayed window of it (see ``_prepared``); the verdict is that frame's.
+        ``live`` is the frame these bytes are cut from, for a caller feeding a delayed
+        window of it (see ``_prepared``); the verdict is that frame's.
+
+        # An empty frame means nothing arrived; queueing a silent buffer for every
+        # speaker would burn the transport's pool for no audio.
         """
-        # An empty frame means nothing arrived; queueing a silent buffer for
-        # every speaker would burn the transport's pool for no audio.
         if not left and not right:
             self._frame = self._window = None
             return []
@@ -254,31 +243,20 @@ class CinemaRenderer:
     def signature(self):
         """A stable description of the room's shape, for reuse decisions.
 
-        Two renderers built from the same speakers, profile and trims are the
-        same room even though they are different objects, so a caller that
-        re-offers a song on a map reload keeps the room it already has. A
-        renderer whose speaker set, positions, levels, voicings, crossovers or
-        aims differ is a *different* room: treating those as equal is what made
-        a speaker a builder placed mid-song inaudible until the feature was
-        toggled, and what left a bass cabinet playing full range until the next
-        track after the builder dialled its crossover (the room was
-        "unchanged", so the bank that holds the room was never re-shaped).
+        Two renderers built from the same speakers, profile and trims are the same room
+        even though they are different objects, so a caller that re-offers a song on a
+        map reload keeps the room it already has. A speaker set, position, level, voicing,
+        crossover or aim that differs is a *different* room: treating those as equal is
+        what made a speaker a builder placed mid-song inaudible until the feature was
+        toggled, and what left a bass cabinet playing full range until the next track.
 
-        Every number a builder can change while a song plays belongs here. A
-        mark or a voicing is not a *shape*, but it is a property of the room a
-        bank is playing, and a field left out of this tuple is a change that
-        never reaches that bank at all -- plugin.acquire hands back the
-        renderer it already has, so nothing re-reads the map. A crossover's
-        *sign* is what makes it one mark or the other (a bass cabinet below a
-        frequency, a tweeter above it), so it is carried as it was written and
-        a room that swaps one for the other is a different room. **Both**
-        edges are carried, because a speaker that grew a second one became a
-        *band* rather than a two-way split: a mid cabinet's upper edge is as
-        much a property of the room as its lower one, and a builder who dials
-        200-3 kHz onto a speaker already set to 200-1.5 kHz must get a room
-        that re-cuts -- the two numbers are read as the map wrote them here,
-        not composed into a mark, because this module is part of the portable
-        core and may not import the reader that composes one.
+        Every number a builder can change while a song plays belongs here, because a
+        field left out of this tuple is a change that never reaches the bank that holds
+        the room at all (``plugin.acquire`` hands back the renderer it already has, so
+        nothing re-reads the map). A crossover's *sign* makes it one mark or the other,
+        and **both** edges are carried, because a speaker that grew a second one became a
+        *band* -- read as the map wrote them, not composed into a mark, since this module
+        is part of the portable core and may not import the reader that composes one.
         """
         slots = []
         for slot in self._slots:
@@ -302,10 +280,9 @@ class CinemaRenderer:
     def extra_latency_s(self):
         """Latency this room adds beyond the transport's own buffering.
 
-        The jam-note sync measures the jukebox staging queue so remote
-        instruments land on the beat; a per-speaker delay is latency the
-        song gains but that measurement cannot see, so it is reported here
-        for the sync to subtract.
+        The jam-note sync measures the jukebox staging queue so remote instruments land on
+        the beat; a per-speaker delay is latency the song gains but that measurement
+        cannot see, so it is reported here for the sync to subtract.
         """
         return self.layout.max_delay_s
 
@@ -326,14 +303,11 @@ def renderer_for(anchor, profile, *, specs=None, fill=True, layout=None,
                  max_speakers=None, detect_channels=True, declared_layout=AUTO):
     """The renderer a room asks for, ring and all -- one rule, two callers.
 
-    ``fill`` is the only difference between a room read off the map and one a
-    builder asked for by name: a requested shape may pad itself out with the
-    geometric ring for the slots the map does not have, while a room read off
-    the map is exactly the speakers someone placed. Playback
-    (``plugin.CinemaSpeakerHost.acquire_bank``) and the read-outs (a cabinet's
-    own menu, which has to answer *before* anything is acquired) both build
-    their room here, so a menu can never describe a room that would play
-    differently -- which is the whole point of being able to ask.
+    ``fill`` is the only difference between a room read off the map and one a builder
+    asked for by name: a requested shape may pad itself out with the geometric ring
+    for the slots the map does not have. Playback (``acquire_bank``) and the read-outs
+    (a cabinet's menu, which must answer *before* anything is acquired) both build
+    their room here, so a menu can never describe a room that would play differently.
     """
     if layout is None and not fill and specs:
         layout = CinemaLayout(anchor, specs, use_ring=False)

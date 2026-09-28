@@ -1,8 +1,9 @@
 """
-Piano Audio Module — Manages all piano-specific audio logic.
+Piano Audio Module -- manages all piano-specific audio logic.
 
-Handles stereo buffer splitting, 3D spatial note playback, wall occlusion
-filtering, active note tracking, and damper fade-out for piano performances.
+Stereo buffer splitting, 3D spatial note playback, wall occlusion filtering,
+active note tracking and damper fade-out for piano performances.
+Rules and traps: .agents/skills/piano_system/.
 """
 import contextlib
 import os
@@ -57,13 +58,12 @@ class PianoAudio:
         # instead of being dropped, so a listener never permanently loses the
         # first strike of a note.
         self._deferred_notes = []
-        # Released notes waiting to be faded out by ``update``, on the audio
-        # thread -- never by a thread of their own. A note is one sound at the
-        # instrument, one per PA speaker and one per cinema-room speaker, so
-        # "a thread per sound" meant seven threads and seven OpenAL writes per
-        # key release in a six-speaker room, every one of them outside the
-        # frame batch (see ``_schedule_fade``). The drums have always faded
-        # this way; this is the same queue for the piano.
+        # Released notes waiting to be faded out by ``update``, on the audio thread --
+        # never by a thread of their own. A note is one sound at the instrument, one per
+        # PA speaker and one per cinema-room speaker, so "a thread per sound" meant seven
+        # threads and seven OpenAL writes per key release in a six-speaker room, every one
+        # of them outside the frame batch (see ``_schedule_fade``). The drums have always
+        # faded this way; this is the same queue for the piano.
         self._fades = []
         # What one of this instrument's remote notes costs to sound *here*,
         # measured as it sounds (see ``_play_queued_note``), because that cost
@@ -118,14 +118,13 @@ class PianoAudio:
     _NOTE_NAMES = ("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")
     _SHIPPED_OCTAVES = tuple(range(1, 8))
     _EDGE_NOTES = ("B0", "C8")
-    # The octaves a keyboard starts on (the default octave and its neighbours).
-    # They arrive with the map, because a player walks up and plays before
-    # anything else on the map is ready. The rest of the shipped range is asked
-    # for once the join has settled -- see Map.spawn_instrument -- because
-    # preparing all 86 notes (~92 MB of PCM, ~314 driver inserts, measured
-    # 1.3 s of one core) inside the map parse competed with the login snapshot,
-    # the map itself and its entity spawns on EVERY client that joined a map
-    # with a piano in it.
+    # The octaves a keyboard starts on (the default octave and its neighbours). They
+    # arrive with the map, because a player walks up and plays before anything else on
+    # the map is ready. The rest of the shipped range is asked for once the join has
+    # settled -- see Map.spawn_instrument -- because preparing all 86 notes (~92 MB of
+    # PCM, ~314 driver inserts, measured 1.3 s of one core) inside the map parse
+    # competed with the login snapshot, the map itself and its entity spawns on EVERY
+    # client that joined a map with a piano in it.
     EAGER_OCTAVES = (3, 4, 5)
 
     @classmethod
@@ -147,12 +146,12 @@ class PianoAudio:
     def warm_shipped_range(self):
         """Warm the rest of the shipped range once the join has settled.
 
-        A note outside the eager octaves is not lost in the meantime: the
-        sample is requested the first time the note reaches the play path, and
-        a listener's cold note is HELD (bounded by DEFERRED_NOTE_TIMEOUT_S)
-        rather than dropped. The shipped set stops at Gb6, so Gb7 resolves to
-        one cached decode failure per generation - harmless, and it starts
-        warming automatically if that sample ever ships.
+        A note outside the eager octaves is not lost in the meantime: the sample is
+        requested the first time the note reaches the play path, and a listener's cold
+        note is HELD (bounded by DEFERRED_NOTE_TIMEOUT_S) rather than dropped. The
+        shipped set stops at Gb6, so Gb7 resolves to one cached decode failure per
+        generation -- harmless, and it starts warming automatically if that sample ever
+        ships.
         """
         self.am.instrument_samples.request(
             self._octave_paths(self._SHIPPED_OCTAVES)
@@ -162,11 +161,11 @@ class PianoAudio:
     def load_stereo_split_buffers(self, path: str):
         """Return split L/R buffers, or (None, None) while notes prepare.
 
-        Instruments use the shared prepared cache; other spatial sounds retain
-        their original decoder/weak cache. Mono sources share one buffer.
+        Instruments use the shared prepared cache; other spatial sounds retain their
+        original decoder/weak cache. Mono sources share one buffer. This provider is also
+        used by non-instrument spatial sounds: keep their existing path, but never decode
+        piano/drums on the game thread.
         """
-        # This provider is also used by non-instrument spatial sounds. Keep
-        # their existing path, but never decode piano/drums on the game thread.
         if self.am._is_prepared_instrument_sample(path):
             return self.am.instrument_samples.get(path, kind="split") or (None, None)
         if not os.path.isabs(path) and not path.startswith(consts.SOUNDPREPEND): path = os.path.join(consts.SOUNDPREPEND, path)
@@ -222,9 +221,8 @@ class PianoAudio:
     def get_light_occlusion_filter(self):
         """Lazy-create a gentle lowpass for PARTIALLY occluded notes.
 
-        A thin obstacle (a single pillar tile between performer and listener)
-        should only slightly dull the tone, unlike the heavy behind-a-wall
-        filter above.
+        A thin obstacle (a single pillar tile between performer and listener) should only
+        slightly dull the tone, unlike the heavy behind-a-wall filter above.
         """
         if self._light_occlusion_filter is None:
             self._light_occlusion_filter = self.am.gen_filter(
@@ -237,11 +235,10 @@ class PianoAudio:
     def room_tone_filter(self, tier, tone):
         """A room speaker's own voicing plus the wall in the way, as one filter.
 
-        A speaker holds one direct filter, so a note played at a speaker the
-        map made dull has to be dulled by *that* filter rather than by a second
-        one beside the wall's. The numbers live in
-        ``libs/audio/cinema/listener.py`` so the song, the band and a voice
-        dull the same speaker by the same amount.
+        A speaker holds one direct filter, so a note played at a speaker the map made
+        dull has to be dulled by *that* filter rather than by a second one beside the
+        wall's. The numbers live in ``libs/audio/cinema/listener.py`` so the song, the
+        band and a voice dull the same speaker by the same amount.
         """
         from .audio.cinema.listener import speaker_filter
         return speaker_filter(self.am, tier, tone, self._room_tone_filters)
@@ -859,10 +856,9 @@ class PianoAudio:
     def reset_for_map_change(self):
         """Lightweight reset for map transitions.
 
-        Stops live voices, drops queued events, and releases preloaded piano
-        buffers so the next map starts clean. Preserves the gameplay back-ref
-        because the same Gameplay instance keeps running on the new map.
-        Mirrors DrumAudio.reset_for_map_change().
+        Stops live voices, drops queued events and releases preloaded piano buffers so the
+        next map starts clean; the gameplay back-ref is preserved because the same
+        Gameplay instance keeps running on the new map.
         """
         self.reset()
 
@@ -873,9 +869,9 @@ class PianoAudio:
     def enqueue_remote_note(self, data):
         """Network-thread entry point for a remote piano note event.
 
-        Validates the packet and queues a copy for main-thread playback. Never
-        touches OpenAL from the calling (network) thread — the OpenAL context
-        is only current on the main thread.
+        Validates the packet and queues a copy for main-thread playback. Never touches
+        OpenAL from the calling (network) thread -- the OpenAL context is only current on
+        the main thread.
         """
         if not isinstance(data, dict):
             return
@@ -939,14 +935,13 @@ class PianoAudio:
     def _play_queued_note(self, data):
         """Main-thread playback of a queued remote piano note.
 
-        Handles BOTH packet shapes (play_piano_note and play_unbound's piano
-        branch) so the queue is the single OpenAL entry point.
+        Handles BOTH packet shapes (play_piano_note and play_unbound's piano branch) so
+        the queue is the single OpenAL entry point.
 
-        This is also where a note's own cost is measured: the time from here to
-        the note being played is this machine's work (occlusion, the sample and
-        its filters, the PA and venue copies), and it is the figure the
-        scheduler spends before the beat instead of guessing one for every
-        computer.
+        This is also where a note's own cost is measured: the time from here to the note
+        being played is this machine's work (occlusion, the sample and its filters, the PA
+        and venue copies), and it is the figure the scheduler spends before the beat
+        instead of guessing one for every computer.
         """
         gameplay = self.gameplay
         player = getattr(gameplay, "player", None) if gameplay else None
@@ -1063,10 +1058,10 @@ class PianoAudio:
 
     def play_note(self, peer_id, note_name, x, y, z, listener_x, listener_y, listener_z, volume=300, occluded=False, soft=None, via_megaphone=False, occlusion=None):
         """Play a piano note with 3D stereo spreading (remote) or direct stereo (local).
-        
-        Automatically handles note re-triggering, occlusion filtering,
-        and active note tracking for sustain/staccato pedal support.
-        Also routes notes through PA Megaphone Speakers if broadcasting to Megaphone.
+
+        Automatically handles note re-triggering, occlusion filtering and active note
+        tracking for sustain/staccato pedal support, and routes notes through PA Megaphone
+        Speakers when broadcasting to Megaphone.
         """
         if soft is not None:
             self.set_soft_pedal(peer_id, soft)
@@ -1083,13 +1078,12 @@ class PianoAudio:
             # Thin obstacle (a lone pillar tile): only slightly dull the note
             # instead of the full behind-a-wall muffle.
             filter_obj = self.get_light_occlusion_filter()
-        # Is this note heard from a venue's speakers on this client? Asked
-        # *before* the instrument's own sound is made, because the answer is
-        # what decides whether it is made at all: a note coming out of a hall
-        # must not also be heard at the piano standing in that hall (two copies
-        # of one note, one of them in the wrong place). The performer's own
-        # note is exempt -- they are at the instrument and in the room at once,
-        # and keep hearing both, exactly as before.
+        # Is this note heard from a venue's speakers on this client? Asked *before* the
+        # instrument's own sound is made, because the answer decides whether it is made at
+        # all: a note coming out of a hall must not also be heard at the piano standing in
+        # that hall (two copies of one note, one of them in the wrong place). The
+        # performer's own note is exempt -- they are at the instrument and in the room at
+        # once and keep hearing both.
         venue = False
         if not is_local:
             with contextlib.suppress(Exception):
@@ -1152,27 +1146,24 @@ class PianoAudio:
             self.active_piano_notes[piano_key] = snd
         return snd
 
-    # Live instruments come out of the cabinet's room at the same wall it is
-    # mixed at: a band through a venue's speakers is louder than the same band
-    # heard from the instrument itself, but not so loud it drowns the song.
-    # The switch is the listener's own (the Music Bot menu line next to the
-    # rooms switch) and it is on for everyone by default, so this runs for
-    # whoever asked for it and never for anyone else.
+    # Live instruments come out of the cabinet's room at the same wall it is mixed at:
+    # a band through a venue's speakers is louder than the same band heard from the
+    # instrument itself, but not so loud it drowns the song. The switch is the
+    # listener's own (the Music Bot menu line next to the rooms switch) and it is on by
+    # default, so this runs for whoever asked for it and never for anyone else.
     CINEMA_ROOM_VOLUME = 0.5
 
     def route_to_cinema_room(self, peer_id, note_name, x, y, z, base_volume=300):
         """Play this note at the speakers of the room nearest the performer.
 
-        The megaphone's route is a broadcast -- every PA speaker on the map,
-        wherever it stands. This is the opposite: one room, the cabinet the
-        performer is standing at, shaped by that room's own numbers (its
-        distance ramp, the map's level for each speaker, the trim that speaker
-        carries, the wall standing between) so a band sounds like it is playing
-        through the venue instead of through an unshaped second copy of itself.
-
-        Tracked under ``cin-<peer>-<note>`` so ``stop_note`` fades it with the
-        note. Returns how many speakers the note reached (0 when the listener
-        has this off, or when there is no room to play into).
+        The megaphone's route is a broadcast -- every PA speaker on the map, wherever it
+        stands. This is the opposite: one room, the cabinet the performer is standing at,
+        shaped by that room's own numbers (its distance ramp, the map's level for each
+        speaker, the trim that speaker carries, the wall standing between) so a band
+        sounds like it is playing through the venue instead of through an unshaped second
+        copy of itself. Tracked under ``cin-<peer>-<note>`` so ``stop_note`` fades it with
+        the note. Returns how many speakers it reached (0 when the listener has this off,
+        or when there is no room to play into).
         """
         gameplay = self.gameplay
         if gameplay is None:
@@ -1218,12 +1209,12 @@ class PianoAudio:
             pan=panned,
         )
 
-    # The staff sound test plays one short note at a cabinet's speakers: a pan
-    # is resolved on every listener's own machine, so "where did that go, and
-    # can they hear it" can only be answered by firing a note down the very
-    # path a panned band travels and asking each client what it did. It shares
-    # this class's room route deliberately -- a test taking a path of its own
-    # would answer a different question from the one it was fired to ask.
+    # The staff sound test plays one short note at a cabinet's speakers: a pan is
+    # resolved on every listener's own machine, so "where did that go, and can they
+    # hear it" can only be answered by firing a note down the very path a panned band
+    # travels and asking each client what it did. It shares this class's room route
+    # deliberately -- a test taking a path of its own would answer a different question
+    # from the one it was fired to ask.
     TEST_PEER = "cinema-test"
     TEST_NOTE = "C4"
     # Short on purpose: it is a test, not a performance, and the next shot has
@@ -1233,11 +1224,10 @@ class PianoAudio:
     def _room_note_gain(self):
         """The room's own loudness rule, for one note played at its speakers.
 
-        The Music Bot's volume, floored at 10% and scaled by the venue's own
-        constant: a band through a room is louder than the same band heard at
-        the instrument, but not so loud it drowns the song the room plays. Both
-        the band and the staff test ask this, so a test is heard at the level
-        the band it checks will be.
+        The Music Bot's volume, floored at 10% and scaled by the venue's own constant: a
+        band through a room is louder than the same band heard at the instrument, but not
+        so loud it drowns the song the room plays. Both the band and the staff test ask
+        this, so a test is heard at the level the band it checks will be.
         """
         bot = getattr(self.gameplay, "music_bot", None)
         return (max(0.1, getattr(bot, "volume", 50) / 100.0)
@@ -1245,14 +1235,14 @@ class PianoAudio:
 
     def _room_note_player(self, path, key, peer_id, base_volume, reverb,
                           room_gain):
-        """        The ``play_one`` a room hands each of its speakers for one note.
+        """The ``play_one`` a room hands each of its speakers for one note.
 
-        Shared by the band's room copy and the staff sound test, because the
-        numbers here *are* the room: flat at the source (its own ramp already
-        shaped the note), the speakers' level folded in by the caller, the
-        wall's filter, the half of the stereo sample that speaker carries, the
-        speaker's own crossover (a bass cabinet's copy of the note is not the
-        note), and the venue's reverb. Two copies of this would be two rooms.
+        Shared by the band's room copy and the staff sound test, because the numbers here
+        *are* the room: flat at the source (its own ramp already shaped the note), the
+        speakers' level folded in by the caller, the wall's filter, the half of the stereo
+        sample that speaker carries, the speaker's own crossover (a bass cabinet's copy of
+        the note is not the note), and the venue's reverb. Two copies of this would be two
+        rooms.
         """
         from .audio.cinema import live as cinema_live
         from .audio.cinema import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
@@ -1265,14 +1255,12 @@ class PianoAudio:
             sound = self.am.play_unbound(
                 path, px, py, pz,
                 volume=volume, cat="miscelaneous",
-                # Flat at the source: the room's own ramp already shaped this
-                # note, and letting OpenAL attenuate it again would fade the
-                # same speaker twice. Because it is flat, this ``max_distance``
-                # does no work either -- the room's own reach decided *whether*
-                # this speaker gets the note at all (``live.room_terms_for``
-                # shaped the gain), and the room's bank carries the reach for
-                # the song. It is here so the source is built like every other
-                # room source, not as a second home for the room's size.
+                # Flat at the source: the room's own ramp already shaped this note, and letting
+                # OpenAL attenuate it again would fade the same speaker twice. Because it is flat,
+                # this max_distance does no work either -- the room's own reach decided *whether*
+                # this speaker gets the note at all (live.room_terms_for shaped the gain). It is
+                # here so the source is built like every other room source, not as a second home
+                # for the room's size.
                 reference_distance=ROOM_REFERENCE_DISTANCE, rolloff=0.0,
                 max_distance=ROOM_MAX_DISTANCE,
                 direct_filter=cinema_live.wall_filter(self, tier, tone),
@@ -1298,14 +1286,13 @@ class PianoAudio:
     def route_test_note_to_room(self, cabinet, direction, position, *,
                                 note_name=None, base_volume=300,
                                 duration_ms=None):
-        """Play one short note at a *named* cabinet's speakers, leaning
-        ``direction``: the note a staff sound test fires.
+        """Play one short note at a *named* cabinet's speakers, leaning ``direction``.
 
-        The room is named rather than derived from the performer's position,
-        exactly like a staff pan names its destination, and the note is played
-        at that room's speakers with its own numbers. Returns how many speakers
-        it reached (0 when the destination does not resolve here) -- the caller
-        reports that back, because that number is the whole point of the shot.
+        The note a staff sound test fires. The room is named rather than derived from the
+        performer's position, exactly like a staff pan names its destination, and the note
+        is played at that room's speakers with its own numbers. Returns how many speakers
+        it reached (0 when the destination does not resolve here) -- the caller reports
+        that back, because that number is the whole point of the shot.
         """
         gameplay = self.gameplay
         game = getattr(gameplay, "game", None) if gameplay is not None else None
@@ -1346,8 +1333,8 @@ class PianoAudio:
         """Spawn a piano note at every megaphone PA speaker position with PA filter & EQ.
 
         Shared by the local performer (play_note) and remote listeners
-        (event_handeler.play_unbound). Tracked under key "mega-<peer_id>-<note>"
-        so stop_note fades every spawned source out together.
+        (event_handeler.play_unbound). Tracked under key "mega-<peer_id>-<note>" so
+        stop_note fades every spawned source out together.
         """
         try:
             gp = self.gameplay
@@ -1438,16 +1425,15 @@ class PianoAudio:
     def _schedule_fade(self, sounds, duration):
         """Put a released note's sounds on the audio thread's fade queue.
 
-        Called from the note-off path, which may run on a network handler's or
-        an input handler's thread: the queue is what keeps every OpenAL call
-        this makes -- the gain steps and the ``stop`` -- on the audio thread,
-        inside ``update`` (see ``_finish_fades``). Nothing here touches a
-        source, not even to read its gain: the start gain is read on the first
-        pass instead, so a key release costs OpenAL nothing at all.
+        Called from the note-off path, which may run on a network handler's or an input
+        handler's thread: the queue is what keeps every OpenAL call this makes -- the gain
+        steps and the ``stop`` -- on the audio thread, inside ``update`` (see
+        ``_finish_fades``). Nothing here touches a source, not even to read its gain: the
+        start gain is read on the first pass instead, so a key release costs OpenAL
+        nothing at all.
 
-        A sound whose source is already gone (destroyed by the manager's own
-        cleanup) is dropped rather than queued -- a note nobody can hear is not
-        an error. ``duration`` is how long the whole fade takes.
+        A sound whose source is already gone (destroyed by the manager's own cleanup) is
+        dropped rather than queued. ``duration`` is how long the whole fade takes.
         """
         now = time.monotonic()
         duration = max(0.001, float(duration))
@@ -1466,11 +1452,10 @@ class PianoAudio:
     def _finish_fades(self, now):
         """Advance every fade in flight: one gain step, then the stop.
 
-        The rule is the drums' own (``DrumAudio._finish_fades``): a linear ramp
-        from the gain the note had down to silence over ``duration`` seconds,
-        and the source is stopped exactly when the ramp reaches zero. Nothing in
-        this method runs from the note-off path -- that is the whole point of
-        the queue (see ``_schedule_fade``).
+        The rule is the drums' own (``DrumAudio._finish_fades``): a linear ramp from the
+        gain the note had down to silence over ``duration`` seconds, and the source is
+        stopped exactly when the ramp reaches zero. Nothing in this method runs from the
+        note-off path -- that is the whole point of the queue (see ``_schedule_fade``).
         """
         remaining = []
         for fade in self._fades:

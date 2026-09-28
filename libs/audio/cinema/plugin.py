@@ -1,24 +1,15 @@
 """The plugin seam between a playing source and the room's speakers.
 
-This module is the only part of the Cinema Speaker System the Jukebox ever
-touches, and it is deliberately tiny: ask for a renderer, hand over PCM
-frames, give the renderer back when the song ends. Everything else -- the
-queue, the relay, the direct ffmpeg stream, the timeline alignment, the
-recovery watches -- keeps working exactly as it does today.
+The only part of the Cinema Speaker System the Jukebox touches: ask for a
+renderer, hand over PCM frames, give it back when the song ends. What a cabinet
+plays through is the *map's* decision, never a player's -- ``cinema_mode``
+(``auto``/``off``/a profile id) rides every play event, and ``auto`` uses the
+speakers around that cabinet if there are any, so every cabinet that shipped
+before this feature is the plain two-source jukebox byte for byte.
+``OPTION_ENABLED`` is only a listener's own override of that: with it off
+:func:`acquire_renderer` returns None and the caller keeps its own code path.
 
-What a cabinet plays through is **the map's decision**, not a player's: the
-jukebox element carries a ``cinema_mode`` (``auto``, ``off``, or a profile
-id) and the server sends it with every play. ``auto`` uses the speakers a
-builder placed around that cabinet if there are any, so a cabinet with no
-room around it -- every cabinet on every map that shipped before this feature
--- is still the plain two-source jukebox, byte for byte. ``off`` refuses the
-room even when one stands around the cabinet, and a profile id names the
-shape outright.
-
-The player option (:data:`OPTION_ENABLED`) is only an override on top of
-that: it is how somebody who prefers the plain jukebox turns rooms off for
-themselves. With it off, :func:`acquire_renderer` returns None and the caller
-runs its original two-source code path untouched.
+Rules, measured numbers and every trap: .agents/skills/cinema_speaker_system/.
 """
 
 from .bank import DEFAULT_CATEGORY, CinemaSpeakerBank
@@ -64,10 +55,8 @@ def _option_enabled():
 def rooms_enabled():
     """Whether this listener hears a jukebox through the room around it.
 
-    The value :func:`acquire_renderer` itself acts on, asked rather than
-    copied, so the menu line that switches it and the playback path can never
-    disagree about it. Off is the plain two-source jukebox, which is why the
-    switch sits next to the other listening choices instead of being buried.
+    The value :func:`acquire_renderer` asks, one home so a menu line and the playback
+    path can never disagree. Off is the plain two-source jukebox.
     """
     return _option_enabled()
 
@@ -75,17 +64,10 @@ def rooms_enabled():
 def listening_summary():
     """One phrase for what *this client* hears out of a cabinet right now.
 
-    The three listening switches, each said the way its own menu line says it,
-    because the routing of a staff pan happens on the *listener's* machine: a
-    staff member testing with two clients sees the pan land on both and hears
-    it on neither, and a switch on the machine doing the listening is otherwise
-    indistinguishable from a room that would not resolve. ``pan.apply_packet``
-    logs this whenever a pan arrives and the pan menu says it back to whoever
-    just sent one, so the answer is in front of the person asking.
-
-    The switches are read live and asked rather than copied (the Music Bot
-    menu's lines edit them); everything here is ``libs``-only and makes no
-    sound, so it is safe to call from a menu callback.
+    The three listening switches, each said the way its own menu line says it:
+    routing happens on the *listener's* machine, so a switch here and a room that
+    would not resolve look alike. Read live and asked rather than copied; silent and
+    ``libs``-only, so it is safe from a menu callback.
     """
     from .live import live_instruments_enabled
     from .speech import speech_enabled
@@ -103,10 +85,7 @@ def listening_summary():
 def set_rooms_enabled(game, enabled):
     """Record the listener's choice and apply it to a room already playing.
 
-    A room is released when this goes off, because the switch exists to be
-    heard: leaving a song playing into a room until the next track would make
-    the line look broken for as long as anyone is listening. A game that never
-    used cinema is left with no host at all, exactly as before.
+    A room is released when this goes off, because the switch exists to be heard.
     """
     enabled = bool(enabled)
     try:
@@ -155,15 +134,11 @@ class CinemaSpeakerHost:
     def acquire(self, jukebox_id, anchor, **options):
         """Return the renderer for this cabinet, or None when cinema is off.
 
-        A re-offered play event for the same song (a map reload) keeps the
-        existing renderer, and a reload that changed the room *re-shapes it in
-        place*: the bank's slots are rebuilt against the new renderer so
-        whatever is streaming into it keeps playing, a speaker the builder
-        just placed joins on the current beat, and a speaker they removed goes
-        away -- all without the song being stopped and restarted. A room that
-        only moved the cabinet keeps the channel verdict it already reached
-        (re-analysing from scratch would flip a mono stream back to stereo for
-        a second or two and feed two speakers the same content meanwhile).
+        A re-offered play event for the same song (a map reload) keeps the existing
+        renderer, and a reload that changed the room re-shapes it in place -- slots
+        rebuilt against the new renderer so the stream keeps playing, a speaker placed
+        on the current beat, one removed gone, and the channel verdict kept (re-analysing
+        would flip a mono stream back to stereo for a second).
         """
         if not self._enabled:
             return None
@@ -219,14 +194,9 @@ class CinemaSpeakerHost:
     def plan_for(self, jukebox_id, anchor, requested=None, room_id=None):
         """Resolve this cabinet's room from the map, or None to stay plain.
 
-        The server's own profile (an explicit ``cinema_profile``) is only a
-        hint: whatever the map's speakers can actually reproduce wins, and a
-        cabinet with neither a profile nor any speakers near it is not a
-        cinema at all.
-
-        ``room_id`` is the cabinet whose speakers make up the room, for
-        callers that feed a cabinet under their own registry key (the music
-        bot's test output) rather than claiming the cabinet's own room.
+        The server's own profile is only a hint: what the map's speakers can actually
+        reproduce wins. ``room_id`` is the cabinet whose speakers make up the room, for a
+        caller feeding under its own registry key (the music bot's test output).
         """
         requested = "" if requested is None else str(requested).strip().lower()
         if requested == CINEMA_OFF:
@@ -250,12 +220,10 @@ class CinemaSpeakerHost:
         if placement is not None:
             return _plan_from(placement, requested, reach)
         if requested and str(requested).strip().lower() not in ("", AUTO_PROFILE):
-            # A cabinet the server marked but a map with no speakers in it: a
-            # geometric ring behind the cabinet is still a real room, and it
-            # is what makes the feature usable before anyone places a speaker.
-            # A map that *did* place speakers this cabinet took (or came within
-            # its own reach of) is not that case, and the plan carries the
-            # reason (see ``_ring_notes``), which is what gets logged.
+            # A cabinet the server marked on a map with no speakers: a geometric ring
+            # behind the cabinet is still a real room, and it is what makes the feature
+            # usable before anyone places a speaker. A map that *did* place speakers this
+            # cabinet took is not that case -- see ``_ring_notes``.
             return _ring_room(requested, reach,
                               _ring_notes(scope_reasons, room_reasons, candidates))
         return None
@@ -275,10 +243,9 @@ class CinemaSpeakerHost:
     def describe(self, jukebox_id, audio=None):
         """A one-line reading of this room and the listener's place in it.
 
-        "Which speakers are in front of me, which are behind me, and where is
-        the image" is the question a person debugging a room actually asks;
-        this is the answer, and it is also how the turn-around behaviour is
-        checked without an audio device (see ListenerPose).
+        Which speakers are in front of me, which behind, where the image is -- the
+        question a person debugging a room actually asks, and how the turn-around
+        behaviour is checked without an audio device.
         """
         renderer = self._renderers.get(self._key(jukebox_id))
         if renderer is None:
@@ -300,9 +267,8 @@ class CinemaSpeakerHost:
     def acquire_bank(self, jukebox_id, anchor, **options):
         """Acquire the OpenAL speaker bank for this cabinet, or None when off.
 
-        Re-acquiring the same room (a map reload re-offering the same song)
-        keeps the existing bank and just refreshes its settings: rebuilding it
-        would create new sources and interrupt audio that is already flowing.
+        Re-acquiring the same room keeps the existing bank and refreshes its settings:
+        rebuilding it would create new sources and interrupt audio already flowing.
         """
         volume = options.pop("volume", 100)
         cabinet_volume = options.pop("cabinet_volume", 100)
@@ -346,10 +312,8 @@ class CinemaSpeakerHost:
     def release(self, jukebox_id, bank=None):
         """Give a room back. ``bank`` names the room being released.
 
-        A retired room is released half a second after its replacement has
-        already claimed the key, so releasing "whatever is registered now"
-        would tear down the new song's room. Naming the room being retired
-        releases that one and leaves the live room alone.
+        A retired room is released half a second after its replacement claimed the key,
+        so releasing "whatever is registered now" would tear down the new song's room.
         """
         key = self._key(jukebox_id)
         current = self._banks.get(key)
@@ -419,9 +383,8 @@ def set_enabled(game, enabled):
 def _active_host(game):
     """The host when cinema is actually in use, else None.
 
-    A host is only attached to the game object once something has turned the
-    feature on, so a player who never uses cinema keeps an untouched game
-    object and the caller keeps its original code path.
+    Attached to the game object only once something turned the feature on, so a
+    player who never uses cinema keeps an untouched game object.
     """
     host = host_for(game, create=False)
     if host is not None:
@@ -434,10 +397,8 @@ def _active_host(game):
 def _gameplay_or(game):
     """The gameplay a game hangs its live state off, or the thing itself.
 
-    A menu is usually opened with the game object, but what a cabinet says
-    about itself (its mode, its reach, the state the server last sent) hangs
-    off the *gameplay*, and a read-out that only has the gameplay must get the
-    answer the live path would get: one reader, two callers.
+    What a cabinet says about itself hangs off the *gameplay*, so a read-out holding
+    only the gameplay gets the answer the live path would: one reader, two callers.
     """
     return getattr(game, "gameplay", None) or game
 
@@ -455,9 +416,8 @@ def _map_of(game):
 def map_speakers(game):
     """Every cinema speaker element of the map this game is playing.
 
-    Deliberately tolerant: a dedicated server, a headless test harness or a
-    game object without a map all simply have no speakers, which resolves to
-    "no room" and leaves the jukebox on its plain two-source path.
+    Deliberately tolerant: a dedicated server, a headless test harness or a game
+    object with no map all simply have no speakers, which resolves to "no room".
     """
     map_ = _map_of(game)
     getter = getattr(map_, "get_cinema_speakers", None)
@@ -472,9 +432,8 @@ def map_speakers(game):
 def cabinet_anchor(game, jukebox_id):
     """Where a cabinet stands *now*, from the map, or None when it is gone.
 
-    A builder can move a cabinet as well as its speakers, and the room has to
-    follow the map the player is actually playing rather than the position the
-    song started at.
+    A builder can move a cabinet as well as its speakers, so the room follows the map
+    the player is actually playing rather than the position the song started at.
     """
     map_ = _map_of(game)
     for zone in getattr(map_, "jukebox_list", ()) or ():
@@ -493,9 +452,8 @@ def cabinet_anchor(game, jukebox_id):
 def cabinet_anchors(game):
     """``(cabinet_id, anchor)`` for every jukebox this map has.
 
-    The single place that reads the map's cabinets, so a caller that needs to
-    know which cabinet is *which* (rather than only where the others stand)
-    takes the same view of the map as the jukebox and the menus do.
+    The single place that reads the map's cabinets, so whoever needs to know which
+    cabinet is *which* takes the jukebox's own view of the map.
     """
     map_ = _map_of(game)
     found = []
@@ -514,9 +472,9 @@ def cabinet_anchors(game):
 def map_cabinet_anchors(game, exclude=None):
     """Position of every jukebox on the map except ``exclude``.
 
-    Two cabinets can easily sit inside each other's room radius, so whoever
-    resolves a room needs the rivals' positions to hand each speaker to the
-    cabinet it actually stands next to (see ``exclusive_speakers``).
+    Two cabinets can easily sit inside each other's room radius, so whoever resolves
+    a room needs the rivals' positions to hand each speaker to the cabinet it
+    actually stands next to.
     """
     return [anchor for cabinet_id, anchor in cabinet_anchors(game)
             if exclude is None or cabinet_id != str(exclude)]
@@ -534,24 +492,16 @@ def cabinet_element(game, jukebox_id):
 def cabinet_reach(game, jukebox_id, default=None):
     """How far this cabinet's room reaches, in metres.
 
-    The cabinet's own ``cinema_radius``, which the server sends with the
-    cabinet state and with every play event, exactly as it sends the mode (the
-    client reads both through ``jukebox.JukeboxPlayer``, so a cabinet has one
-    home for how it plays). One number, two names: it is how far a speaker may
-    stand from the cabinet to belong to its room *and* how far from a listener
-    that speaker is still heard -- a hall that reaches 90 m is heard to 90 m,
-    and the two can never drift apart because there is only one of them.
+    ``cinema_radius``, the number the server validates and sends with the cabinet
+    state and with every play event -- one number, two names: how far a speaker may
+    stand from the cabinet to belong to its room *and* how far from a listener that
+    speaker is still heard, so the two can never drift apart.
 
-    A missing or unusable value (an older server, a client that has not joined
-    yet, a hand-edited map) is ``default``, which is the radius every room has
-    always had. A value outside the bounds the server enforces is *ignored*
-    rather than obeyed -- ``MIN_ROOM_REACH`` and ``MAX_ROOM_REACH`` are the very
-    numbers the Server validates with (``CINEMA_RADIUS_MIN``/``_MAX``) -- so a
-    map that spells out 5000 behaves like a map that spelled out nothing
-    instead of swallowing every speaker on it.
-
-    ``game`` may be the game itself or the gameplay hanging off it: the menus
-    hold one or the other, and both are asking the same question.
+    Missing or unusable (an older server, a hand-edited map) is ``default``. A value
+    outside ``MIN_ROOM_REACH``/``MAX_ROOM_REACH`` -- the very numbers the Server
+    validates with (``CINEMA_RADIUS_MIN``/``_MAX``) -- is *ignored*, so a map that
+    spells out 5000 behaves like one that spelled out nothing instead of swallowing
+    every speaker on it. ``game`` may be the game or the gameplay hanging off it.
     """
     fallback = float(ROOM_MAX_DISTANCE if default is None else default)
     reader = getattr(getattr(_gameplay_or(game), "jukebox_player", None),
@@ -581,12 +531,9 @@ def cabinet_reach(game, jukebox_id, default=None):
 def _state_reach(game, jukebox_id):
     """The reach the server last sent for a cabinet, or None.
 
-    The cabinet state names every cabinet on the map and is sent to a client
-    when it joins, so it answers before any song plays -- which is exactly
-    when the live path needs it (a band playing in a hall with no song). The
-    player's own cache is asked first, because that is the copy a play event
-    updates; this is the answer for a client whose player has not been built
-    yet (nothing has played and no cabinet menu has been opened).
+    The cabinet state names every cabinet and arrives on join, so it answers before
+    any song plays -- when a band in a hall with no song needs it. The player's own
+    cache is asked first, because that is the copy a play event updates.
     """
     state = getattr(_gameplay_or(game), "jukebox_state", None)
     boxes = state.get("jukeboxes") if isinstance(state, dict) else None
@@ -605,37 +552,17 @@ def _state_reach(game, jukebox_id):
 def cabinet_area(game, jukebox_id):
     """The named map zone this cabinet stands in, as ``(name, bounds)``.
 
-    A wide map with several cinema setups is a map whose venues are drawn as
-    zones -- the map already has them and the builder already draws them -- so
-    the zone a cabinet stands in is that setup's own boundary: a speaker
-    outside it belongs to another hall, however close it stands. A cabinet the
-    map draws no zone around answers ``(None, None)``, and then distance alone
-    decides, which is what every map did before this existed.
-
-    Two things are deliberately *not* an area, because both would take a room
-    away from speakers it should feed:
-
-    * the cabinet's own **marker zone**. The builder writes a zone at an
-      element's own bounds when it places it (the server's
-      ``associated_zones``); for a cabinet that zone is named ``jukebox`` and
-      covers the cabinet itself. Taken as the area it would be the smallest
-      zone at the cabinet's own block -- it would always win -- and every
-      speaker standing anywhere else would be "outside the area", which is a
-      silent room. A zone that is no bigger than the cabinet cannot be a room,
-      so it is skipped by *size*, not by name and not by comparing bounds:
-      bounds can be rounded in a hand-written or legacy map, and a room lost to
-      a rounding error is exactly the failure this feature must not have.
-
-    * a zone with **no cinema speaker in it**. A venue zone drawn before
-      anybody places a speaker describes nothing yet, and an unrelated zone
-      somebody drew through the cabinet (a light, a reverb) is not a hall. The
-      area appears the moment a speaker stands in it -- rooms are re-resolved
-      once a second, so it arrives on the current beat -- and until then
-      distance decides, which is the behaviour every map already had.
-
-    Where several zones qualify the *smallest* wins, because that is the rule
-    the map itself uses when it asks which zone something is in
-    (``Map.get_zone_at``): a booth drawn inside a hall is the room.
+    The map's venues are already drawn as zones, so the zone a cabinet stands in is
+    that setup's own boundary: a speaker outside it belongs to another hall, however
+    close it stands. Two things are deliberately *not* an area, because either would
+    take a room away from speakers it should feed: the cabinet's own **marker zone**
+    (the builder writes one named ``jukebox`` at the element's own bounds -- it would
+    always win and every other speaker would be "outside the area", so it is skipped
+    by *size*, not by name or bounds, which a hand-written map can round) and a zone
+    with **no cinema speaker in it** (a venue drawn before anybody places one
+    describes nothing yet; rooms re-resolve once a second, so it arrives on the
+    current beat). Where several qualify the *smallest* wins, the rule
+    ``Map.get_zone_at`` itself uses.
     """
     element = cabinet_element(game, jukebox_id)
     map_ = _map_of(game)
@@ -698,11 +625,10 @@ def cabinet_candidates(game, jukebox_id, anchor, *, radius=None, default=None,
     """The speakers one cabinet may take, and the reach it takes them at.
 
     The single home of the scope rule, so the playing path, the menus and the
-    diagnostics all ask the same question: a speaker belongs to this cabinet
-    when it stands inside the cabinet's own area (when the map has one for it)
-    and within the cabinet's reach, and no cabinet that could claim it either
-    stands closer. Returns ``(speakers, reach)`` so the caller builds the room
-    and the bank it plays through from the same number.
+    diagnostics ask one question: a speaker belongs to this cabinet when it stands
+    inside the cabinet's own area (when the map has one) and within its reach, and no
+    cabinet that could claim it stands closer. Returns ``(speakers, reach)`` so the
+    room and the bank are built from the same number.
     """
     key = str(jukebox_id)
     reach = cabinet_reach(game, key, default) if radius is None else float(radius)
@@ -723,9 +649,8 @@ def cabinet_candidates(game, jukebox_id, anchor, *, radius=None, default=None,
 class SpeakerOwner:
     """Which cabinet would own the speaker standing at a point, and why.
 
-    A read-out, not a rule: it carries the answers a builder needs in one
-    sentence -- who owns it, how far it stands from that cabinet, and, when
-    nobody owns it, which of the two boundaries said no.
+    A read-out, not a rule: who owns it, how far it stands from that cabinet, and
+    when nobody owns it, which of the two boundaries said no.
     """
 
     __slots__ = ("cabinet", "distance", "reach", "area", "reason")
@@ -764,11 +689,8 @@ class SpeakerOwner:
 def speaker_owner(game, position, *, radius=None, default=None):
     """Which cabinet owns a speaker standing at ``position`` (a read-out).
 
-    Asks the very decision the resolver makes (``placement.claims_point``)
-    about one point and every cabinet on the map, so a menu or a log can say
-    where a speaker belongs -- and, when it belongs to nobody, which boundary
-    refused it -- without a second copy of the scope rule. The nearest cabinet
-    that would take it wins, exactly as it does in a room.
+    Asks the very decision the resolver makes about one point and every cabinet, so a
+    menu or a log can say where a speaker belongs without a second scope rule.
     """
     try:
         feet = (float(position[0]), float(position[1]), float(position[2]))
@@ -796,10 +718,8 @@ def speaker_owner(game, position, *, radius=None, default=None):
 class CabinetNeighbour:
     """Another cabinet on the map, and what stands between the two.
 
-    A read-out, never a rule: the room resolution is untouched, and each field
-    answers the questions a person standing at a cabinet asks -- how far away
-    is the next one, how far does *its* room reach, and does the map draw one
-    hall around both of them or one around each (``same_area``).
+    A read-out, never a rule: how far the next cabinet is, how far *its* room
+    reaches, and whether the map draws one hall around both (``same_area``).
     """
 
     __slots__ = ("area", "cabinet", "distance", "reach", "same_area")
@@ -819,12 +739,9 @@ class CabinetNeighbour:
 def cabinet_neighbours(game, jukebox_id):
     """Every other cabinet on the map, nearest first.
 
-    A wide map can hold several venues, and two cabinets standing close enough
-    to share the speakers between them are the one thing an map does not show
-    by itself -- whichever cabinet is nearer takes a speaker placed between
-    them. So this answers "what else is around here" with distances and areas
-    only; the resolution itself stays ``exclusive_speakers``, and nothing here
-    can change how a room plays.
+    Two cabinets standing close enough to share speakers are the one thing a map does
+    not show by itself, so this answers "what else is around here" with distances and
+    areas only -- and nothing here can change how a room plays.
     """
     key = str(jukebox_id)
     anchor = cabinet_anchor(game, key)
@@ -847,9 +764,9 @@ def cabinet_neighbours(game, jukebox_id):
 def neighbour_line(game, jukebox_id):
     """The one-line read-out a cabinet's menu carries, or "" when it is alone.
 
-    Short on purpose: it is a line read aloud while walking a menu, so it says
-    the distance, the count and the id, and leaves the explanation to the
-    sentence the line speaks (``neighbour_note``).
+    Short on purpose: a line read aloud while walking a menu, so it says the
+    distance, the count and the id, and leaves the explanation to
+    ``neighbour_note``.
     """
     others = cabinet_neighbours(game, jukebox_id)
     if not others:
@@ -870,14 +787,11 @@ def neighbour_line(game, jukebox_id):
 def neighbour_note(game, jukebox_id):
     """What the cabinets around this one mean for the speakers here, or "".
 
-    Asks the very rule the room is built with -- ``cabinet_area`` decides
-    whether an area can separate the two cabinets at all -- so the sentence
-    cannot promise a speaker the resolver would hand to somebody else. Four
-    answers, because there are four situations: one hall around both (distance
-    decides), a hall each (each keeps its own, however near the other stands),
-    no halls drawn at all (distance decides, and that is every map that drew
-    nothing), and one of the two drawn (then distance decides inside that area
-    and this cabinet keeps whatever stands outside it).
+    Asks the very rule the room is built with (``cabinet_area`` decides whether an
+    area can separate the two cabinets at all), so the sentence cannot promise a
+    speaker the resolver would hand to somebody else. Four answers for four
+    situations: one hall around both (distance decides), a hall each, no halls drawn
+    at all, and one of the two drawn.
     """
     others = cabinet_neighbours(game, jukebox_id)
     if not others:
@@ -917,15 +831,12 @@ def neighbour_note(game, jukebox_id):
 class RoomExtent:
     """What a reach is measured against: this cabinet's speakers and its room.
 
-    Two numbers a person choosing a reach needs and no other read-out gives --
-    the distance to the speaker standing furthest from the cabinet (the one a
-    smaller reach would *cut*, so its crossover, tone, level and delay stop
-    being heard) and the distance to the far corner of the map zone drawn
-    around the cabinet (the part of the room a smaller reach leaves silent).
-    Both come from the readers the room itself is built with: speakers from
-    ``cabinet_candidates`` asked without a reach, so a speaker the current
-    reach already cut is still named, and the area from ``cabinet_area``. A
-    menu cannot therefore promise geometry the resolver would refuse.
+    Two numbers a person choosing a reach needs and no other read-out gives: the
+    distance to the speaker standing furthest from the cabinet (the one a smaller
+    reach would *cut*, so its crossover, tone, level and delay stop being heard) and
+    the distance to the far corner of the zone drawn around the cabinet (the part a
+    smaller reach leaves silent). Both come from the readers the room itself is built
+    with, so a menu cannot promise geometry the resolver would refuse.
     """
 
     __slots__ = ("area", "corner", "speakers")
@@ -954,12 +865,10 @@ class RoomExtent:
     def note(self, reach, prefix=" - "):
         """One menu-sized sentence: what this reach would leave unheard here.
 
-        Nothing at all when the reach covers the room, so the lines of a choice
-        that is fine stay short and the ones that are not are the ones that
-        say why. The first half is about the *speakers* (a cut one goes silent
-        entirely) and the second about the room's own drawn edge (the far end
-        of the room is simply not heard), which are the two different ways a
-        small reach bites.
+        Nothing at all when the reach covers the room, so only the choices that bite say
+        why. The first half is about the *speakers* (a cut one goes silent entirely), the
+        second about the room's own drawn edge (the far end is simply not heard) -- the
+        two different ways a small reach bites.
         """
         try:
             value = float(reach)
@@ -1004,9 +913,9 @@ class RoomExtent:
 def room_extent(game, jukebox_id, anchor):
     """This cabinet's own geometry: its speakers' distances and its area's edge.
 
-    A read-out, never a rule: nothing here decides a room, and asking it twice
-    changes nothing (``cabinet_area`` and ``cabinet_candidates`` are the very
-    readers the room is built with).
+    A read-out, never a rule: asking it twice changes nothing, because
+    ``cabinet_area`` and ``cabinet_candidates`` are the readers the room is built
+    with.
     """
     here = tuple(float(value) for value in anchor)
     candidates, _reach = cabinet_candidates(game, jukebox_id, here,
@@ -1026,10 +935,9 @@ def room_extent(game, jukebox_id, anchor):
 def _corner_distance(anchor, bounds):
     """How far the far corner of a zone's bounds stands from ``anchor``.
 
-    The room's own edge, as the map's geometry writes it -- the furthest of the
-    box's eight corners. A room is heard from the back row, so this is what a
-    reach has to cover to be heard everywhere the map drew it, and it is the
-    number a person choosing a small preset never sees anywhere else.
+    The room's own edge as the map's geometry writes it -- the furthest of the box's
+    eight corners. A room is heard from the back row, so this is what a reach has to
+    cover to be heard everywhere the map drew it.
     """
     if not bounds:
         return None
@@ -1063,15 +971,12 @@ def _ring_room(requested, reach, notes=()):
 def _ring_notes(scope_reasons, room_reasons, candidates):
     """What to say when a requested shape plays the ring instead of the map.
 
-    Silent when the map placed nothing for this cabinet: a ring is the shape a
-    map with no cinema speakers gets, and that is not a mistake. It speaks
-    when the map *did* place something this cabinet took -- or came within its
-    own reach of and then refused -- and no room came of it: a speaker cut by
-    the cabinet's reach, a pair that did not survive, a speaker standing in
-    another hall. That is exactly the case a person hears as "the room stopped
-    working" (their speakers' crossover, tone, level and delay are all unread,
-    because not one of them is fed) and can see nowhere else, so the reason
-    travels with the room to whoever logs or asks.
+    Silent when the map placed nothing for this cabinet: a ring is the shape a map
+    with no cinema speakers gets, and that is not a mistake. It speaks when the map
+    *did* place something this cabinet took -- or came within its reach of and then
+    refused -- and no room came of it: heard as "the room stopped working", with
+    every speaker's crossover, tone, level and delay unread and nothing on any screen
+    to say so, which is why the reason travels with the room to whoever logs or asks.
     """
     if not candidates and not scope_reasons:
         return ()
@@ -1087,12 +992,10 @@ def _ring_notes(scope_reasons, room_reasons, candidates):
 def _plan_from(placement, requested, reach=None):
     """A resolved placement as the :class:`RoomPlan` a caller asked for.
 
-    The ``fill`` rule lives here because the playing path and the menus both
-    need it: only an explicitly asked-for profile may pad itself out with
-    speakers the map does not have (see ``RoomPlan.fill``), while a room read
-    off the map is exactly the speakers someone placed. ``reach`` is the same
-    number the speakers were claimed with, so the room is heard exactly as far
-    as it reached (see ``RoomPlan.reach``).
+    The ``fill`` rule lives here because the playing path and the menus both need it:
+    only an explicitly asked-for profile may pad itself out with speakers the map
+    does not have, while a room read off the map is exactly the speakers someone
+    placed. ``reach`` is the same number the speakers were claimed with.
     """
     requested = "" if requested is None else str(requested).strip().lower()
     return RoomPlan(room_profile(placement, requested), placement.specs,
@@ -1104,10 +1007,9 @@ def _plan_from(placement, requested, reach=None):
 def preview_room(game, anchor, *, room_id=None, radius=None):
     """Resolve the room the map describes, without turning the feature on.
 
-    Used by menus: a player must be able to see which cabinets have a room
-    before deciding to route audio into one, and previewing must not change
-    how the jukeboxes themselves play. :func:`cinema_room` is the playing
-    path and still requires the feature to be enabled.
+    Used by menus: a player must see which cabinets have a room before deciding to
+    route audio into one, and previewing must not change how the jukeboxes play.
+    :func:`cinema_room` is the playing path and still requires the feature enabled.
     """
     plan, _silent = room_plan(game, anchor, room_id=room_id, radius=radius)
     return plan
@@ -1116,18 +1018,12 @@ def preview_room(game, anchor, *, room_id=None, radius=None):
 def room_plan(game, anchor, *, requested=None, room_id=None, radius=None):
     """The room a cabinet's mode would play, and the speakers it leaves out.
 
-    Returns ``(plan, silent)``: ``plan`` is the room ``requested`` resolves to
-    here (None when it has none), and ``silent`` is ``[(name, slot), ...]`` --
-    the speakers standing around the cabinet that this shape does not feed.
-
-    A requested shape names a fixed set of slots, so a speaker somebody placed
-    on a slot that shape does not have (a rear pair under ``surround``, say)
-    is never handed a buffer: silent, with nothing on any screen that says so,
-    which is indistinguishable from a broken room. This is the answer a menu
-    gives, and it is derived from the very renderer playback would build
-    (:func:`router.renderer_for`), so a read-out can never name a speaker the
-    room would not feed -- or stay quiet about one it will not. Previewing
-    acquires nothing and changes nothing.
+    Returns ``(plan, silent)``: the room ``requested`` resolves to here (None when it
+    has none), and ``[(name, slot), ...]`` -- the speakers standing around the cabinet
+    that this shape does not feed, which is silent with nothing on any screen saying
+    so. Derived from the very renderer playback would build
+    (:func:`router.renderer_for`), so a read-out can never name a speaker the room
+    would not feed, or stay quiet about one it will not. Previewing acquires nothing.
     """
     requested = "" if requested is None else str(requested).strip().lower()
     if requested == CINEMA_OFF:
@@ -1150,12 +1046,10 @@ def room_plan(game, anchor, *, requested=None, room_id=None, radius=None):
                   for slot, placed in placement.speakers.items()]
         fed = set(room.slots)
     elif requested not in ("", AUTO_PROFILE):
-        # A shape that was asked for outlives the map: the ring behind the
-        # cabinet is the room, so every speaker standing here is outside it.
-        # NOT one of them is fed -- their slot names may match the ring's, but
-        # the speaker playing that slot stands nowhere on the map, so a room
-        # that reads them as fed would be promising a crossover, a tone and a
-        # delay that nothing on this map makes.
+        # A shape that was asked for outlives the map: the ring behind the cabinet is
+        # the room, so NOT one of the speakers standing here is fed -- their slot names
+        # may match the ring's, but a room that reads them as fed would be promising a
+        # crossover, a tone and a delay that nothing on this map makes.
         plan = _ring_room(requested, reach,
                           _ring_notes(scope_reasons, room_reasons, candidates))
         room = renderer_for(anchor, plan.profile, specs=None, fill=True)
@@ -1172,9 +1066,9 @@ def room_plan(game, anchor, *, requested=None, room_id=None, radius=None):
 def room_diagnosis(game, anchor, *, room_id=None, radius=None):
     """Why a cabinet has no room, in one line, for menus and logs.
 
-    This runs the same resolver that plays the room and hands back its own
-    reason, so a tester standing in front of four speakers hears which wall is
-    missing instead of "no cinema speakers around it".
+    The same resolver that plays the room hands back its own reason, so a tester
+    standing in front of four speakers hears which wall is missing instead of "no
+    cinema speakers around it".
     """
     anchor = tuple(float(value) for value in anchor)
     reasons = []
@@ -1192,10 +1086,9 @@ def room_diagnosis(game, anchor, *, room_id=None, radius=None):
 def cinema_room(game, jukebox_id, anchor, requested=None, *, host=None, room_id=None):
     """What a cabinet should play through, or None to stay a plain jukebox.
 
-    This is the single call the jukebox makes. It is a module function so the
-    jukebox never has to know about rooms, placements, profiles or the map's
-    speaker elements -- and so a caller with no host at all (feature off)
-    still gets a cheap, correct "no".
+    The single call the jukebox makes, so it never has to know about rooms,
+    placements, profiles or the map's speaker elements -- and a caller with no host
+    at all (feature off) still gets a cheap, correct "no".
     """
     host = host or _active_host(game)
     if host is None:
@@ -1222,8 +1115,8 @@ def acquire_bank(game, jukebox_id, anchor, **options):
 def release_renderer(game, jukebox_id, bank=None):
     """Release a cabinet's room; its OpenAL sources are the caller's to delete.
 
-    ``bank`` names the specific room being released, for a retired room that
-    must go back without taking the song which replaced it down with it.
+    ``bank`` names the specific room, for a retired one that must go back without
+    taking the song which replaced it down with it.
     """
     host = host_for(game, create=False)
     return None if host is None else host.release(jukebox_id, bank)
