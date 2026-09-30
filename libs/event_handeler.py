@@ -182,6 +182,12 @@ class EventHandeler:
         self.game.music_timeline_supported = bool(
             data.get("music_timeline_v1", False)
         )
+        # Same negotiation for the PA's sequenced channel: without it a Client
+        # uploads its PA frames on channel 30, which is the only transport a
+        # Server that predates channel 31 understands.
+        self.game.pa_timeline_supported = bool(
+            data.get("pa_timeline_v1", False)
+        )
         self.game.presence_sounds.configure(data)
 
         # Store staff status for PA Test Mode (with safe fallback)
@@ -2283,39 +2289,69 @@ class EventHandeler:
 
         return bool(compression.schedule_timeline_event(epoch, frame_seq, _landed))
 
+    def process_megaphone_timeline_data(self, data):
+        """One PA frame WITH its position: version, channel, epoch, frameSeq, Opus.
+
+                    This is the same audio as the channel-30 payload, sent on its own channel so a listener
+                    can tell a frame that is MISSING from one that is merely late, and conceal it (Opus PLC)
+                    instead of holding a reserve deep enough to sit through every hole. A sender only uses
+                    this once the Server advertised ``pa_timeline_v1`` (see voice_chat._outgoing_packet),
+                    and the Server relays the header only to listeners that advertised the same, so an old
+                    client on either side keeps the legacy payload on channel 30.
+                    """
+        if not options.get("voice_chat", True): return
+        if len(data) < consts.PA_TIMELINE_HEADER_BYTES + 1: return
+        packet = bytes(data)
+        if packet[0] != consts.PA_TIMELINE_VERSION: return
+        epoch = int.from_bytes(packet[2:6], 'big')
+        frame_seq = int.from_bytes(packet[6:10], 'big')
+        opus_data = packet[consts.PA_TIMELINE_HEADER_BYTES:]
+        # Played through the PA path, so the channel handed on is the PA's own:
+        # what makes this frame different is the position it carries.
+        self._route_megaphone_frame(packet[1], opus_data, consts.CHANNEL_MEGAPHONE,
+                                    epoch=epoch, frame_seq=frame_seq)
+
+    def _route_megaphone_frame(self, sender_id, opus_data, channelID,
+                               epoch=None, frame_seq=None):
+        """Play one PA frame through that sender's own speaker sources."""
+        if not opus_data: return
+        # Stamp remote PA activity for music-bot ducking. The Server never echoes a broadcast back to its
+        # sender, so every frame arriving here is another player's voice (or live band): the music bot
+        # owner ducks the broadcast while anyone else talks, and every listener hears the dip in the
+        # owner's uploaded PCM.
+        self.gameplay._last_remote_megaphone_voice_ts = time.monotonic()
+        megaphone = getattr(self.gameplay, 'megaphone', None)
+        player_sources = None
+        if megaphone is not None:
+            # Per-player speaker sources (separate from the shared
+            # physical speakers the map placed).
+            player_sources = megaphone.get_megaphone_player_sources(sender_id)
+        # A talker standing in a cabinet's room is played through that room's speakers instead, and a map
+        # with no PA speakers at all hands over no channel and no sources here -- before this the voice
+        # died at this line and was heard by nobody.
+        in_room = cinema_speech.routed(getattr(self, "game", None),
+                                       self.gameplay, sender_id)
+        channel = self.gameplay.voice_channels.get(channelID)
+        compression = getattr(channel, 'vc_compression', None)
+        if compression is None and in_room and megaphone is not None:
+            # No PA on this map: the room's own channel is the one that
+            # carries a voice (built on demand, with no PA sources).
+            compression = getattr(megaphone.megaphone_channel(),
+                                  'vc_compression', None)
+        if compression is not None and (player_sources or in_room):
+            compression.recieve(opus_data, player_sources or [], None,
+                                channelID, self.gameplay, sender_id,
+                                epoch=epoch, frame_seq=frame_seq)
+
     def process_voice_data(self, data, channelID):
         if not options.get("voice_chat", True): return
         if channelID == consts.CHANNEL_MEGAPHONE:
-            # Per-player megaphone: first byte = sender's voice_channel ID
+            # Per-player megaphone: first byte = sender's voice_channel ID.
+            # This is the LEGACY payload -- it carries no position for the
+            # frame, so this sender keeps the big reserve; see
+            # process_megaphone_timeline_data for the sequenced one.
             if len(data) < 2: return
-            sender_id = data[0]
-            opus_data = data[1:]
-            # Stamp remote PA activity for music-bot ducking. The Server never echoes a broadcast back to its
-            # sender, so every frame arriving here is another player's voice (or live band): the music bot
-            # owner ducks the broadcast while anyone else talks, and every listener hears the dip in the
-            # owner's uploaded PCM.
-            self.gameplay._last_remote_megaphone_voice_ts = time.monotonic()
-            megaphone = getattr(self.gameplay, 'megaphone', None)
-            player_sources = None
-            if megaphone is not None:
-                # Per-player speaker sources (separate from the shared
-                # physical speakers the map placed).
-                player_sources = megaphone.get_megaphone_player_sources(sender_id)
-            # A talker standing in a cabinet's room is played through that room's speakers instead, and a map
-            # with no PA speakers at all hands over no channel and no sources here -- before this the voice
-            # died at this line and was heard by nobody.
-            in_room = cinema_speech.routed(getattr(self, "game", None),
-                                           self.gameplay, sender_id)
-            channel = self.gameplay.voice_channels.get(channelID)
-            compression = getattr(channel, 'vc_compression', None)
-            if compression is None and in_room and megaphone is not None:
-                # No PA on this map: the room's own channel is the one that
-                # carries a voice (built on demand, with no PA sources).
-                compression = getattr(megaphone.megaphone_channel(),
-                                      'vc_compression', None)
-            if compression is not None and (player_sources or in_room):
-                compression.recieve(opus_data, player_sources or [], None,
-                                    channelID, self.gameplay, sender_id)
+            self._route_megaphone_frame(data[0], data[1:], channelID)
         else:
             # Team talk reaches every session member wherever they are, so this
             # leg must exist without an entity on this map: the sender's entity

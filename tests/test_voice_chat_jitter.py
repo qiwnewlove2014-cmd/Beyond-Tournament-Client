@@ -27,15 +27,26 @@ class TestMegaphoneJitterBuffer(unittest.TestCase):
         self.jb = MegaphoneJitterBuffer(FakeGame())
 
     def test_pa_uses_stable_v16_reserve(self):
-        # Stable PA reserve: six 20ms pre-buffer frames (120ms) plus the
-        # fixed six-frame source margin absorb real-network ENet
-        # retransmission pauses without the rapid re-underrun chop the old
-        # 3-frame reserve produced (see f092214, stutter fix). RESUME_FRAMES
-        # is pinned with it — the same fix raised it from 2 to stop
-        # re-underrun cycles right after a stall.
-        self.assertEqual(MegaphoneJitterBuffer.PRE_BUFFER_FRAMES, 6)
+        # The PA's reserve is the SIX-FRAME SOURCE MARGIN (120 ms of silence
+        # queued ahead of the audio), not the jitter buffer's gate: the margin
+        # is the cushion an ENet retransmission pause eats through, and
+        # tools/megaphone_latency_sim.py shows four frames or three doubling
+        # and tripling the starvation count on its spikey patterns.
+        #
+        # The pre-buffer is a start gate now - it used to wait for six frames
+        # too, which made the two cushions one reserve counted twice and cost
+        # every burst 80 ms of pure start latency at no gain in starvation
+        # (the same table). RESUME_FRAMES stays at 4 - the same fix that raised
+        # it from 2 to stop rapid re-underrun cycles right after a stall.
+        self.assertEqual(MegaphoneJitterBuffer.PRE_BUFFER_FRAMES, 2)
         self.assertEqual(MegaphoneJitterBuffer.RESUME_FRAMES, 4)
         self.assertEqual(vc._megaphone_margin_frames(7), 6)
+        # The two cushions must not add up to the old double reserve again.
+        self.assertLess(
+            MegaphoneJitterBuffer.PRE_BUFFER_FRAMES
+            + vc._megaphone_margin_frames(7),
+            12,
+        )
 
     def test_prebuffers_before_first_playback(self):
         # Fewer than PRE_BUFFER_FRAMES -> still pre-buffering (None).

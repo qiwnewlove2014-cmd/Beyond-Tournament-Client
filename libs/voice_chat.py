@@ -1,3 +1,4 @@
+import random
 import threading
 import time
 import queue
@@ -123,6 +124,64 @@ def _tail_sample(packet):
         return 0
     return struct.unpack_from('<h', packet, (n - 1) * 2)[0]
 
+# THE SHIPPED VOICE FRAME: 20 ms of 48 kHz mono16 PCM. The mic capture cuts a
+# frame the moment this much audio exists (VoiceChatRecord.run), the receive
+# path pads in the same unit, and the capture device hands audio over in 10 ms
+# periods on this project's machines (measured, tools/instrument_monitor_latency_sim.py),
+# which is why the capture trigger is one such period and not a smaller number.
+# One home for the numbers the latency budget is made of (tools/voice_latency_sim.py).
+VOICE_FRAME_BYTES = 1920                # 20 ms mono16 at 48 kHz
+VOICE_FRAME_MS = 20.0
+VOICE_CAPTURE_TRIGGER_SAMPLES = 480     # one 10 ms device delivery period
+VOICE_SEND_POLL_S = 0.002               # the encode worker's poll (voice_chat_compression.run)
+
+# THE PA'S SEQUENCED UPLOAD (channel 31): version(1) + epoch(4) + frameSeq(4)
+# in front of the Opus frame. The Server relays the same header to every
+# listener that advertised `pa_timeline_v1`, which is what lets a listener
+# CONCEAL a missing frame (Opus PLC) instead of holding a reserve big enough to
+# sit through it. tools/megaphone_latency_sim.py measures both sides of that
+# trade; the reserve is the number that moves (see _megaphone_margin_frames).
+# The wire format itself lives in consts (both ends of channel 31 read it there).
+# Frames of a hole that are concealed rather than treated as a restart: the
+# same bound the music timeline's upload repair uses.
+PA_TIMELINE_MAX_GAP = 9
+OPUS_FRAME_MS = 20.0                    # what decode_missing_packet is asked for
+# Concealment is a bridge, not a substitute for a stream: after this many
+# consecutive concealed frames (100 ms) the playout goes quiet and lets the
+# reserve/ re-pad path take over, the way a VoIP receiver stops extrapolating a
+# talk spurt that never came back.
+PA_TIMELINE_MAX_CONCEAL = 5
+
+
+def pa_timeline_epoch(epoch=None):
+    """The epoch to stamp on a PA upload: the sender's own, made once and kept.
+
+    Random rather than the wall clock, because a listener only re-bases its
+    sequence bookkeeping when the epoch CHANGES: two streams can start inside
+    the same second (one song replacing another), and a repeated epoch would
+    leave the listener refusing the new stream's frames as reordered copies.
+    """
+    if epoch is None:
+        return random.getrandbits(32)
+    return int(epoch) & 0xFFFFFFFF
+
+
+def pa_timeline_upload(opus_frame, epoch, frame_seq):
+    """One PA upload framed for channel 31: version + epoch + frameSeq, then Opus.
+
+    The Server inserts the sender's voice channel at offset 1, so the listener
+    reads the same header with one extra byte (consts.PA_TIMELINE_HEADER_BYTES).
+    This is the only place either end builds it - the player's own PA upload
+    (``voice_chat_compression._outgoing_packet``) and the music bot's live
+    broadcast both call here, so the two can never drift apart.
+    """
+    header = bytearray(consts.PA_TIMELINE_UPLOAD_BYTES)
+    header[0] = consts.PA_TIMELINE_VERSION
+    struct.pack_into('>I', header, 1, int(epoch) & 0xFFFFFFFF)
+    struct.pack_into('>I', header, 5, int(frame_seq) & 0xFFFFFFFF)
+    return bytes(header) + bytes(opus_frame)
+
+
 # PROFESSIONAL JITTER BUFFER FOR MEGAPHONE: pre-buffer N packets, then play at a
 # fixed 20 ms cadence and always drop old packets in favour of the newest audio.
 
@@ -135,8 +194,16 @@ class MegaphoneJitterBuffer:
     # === CONFIGURATION ===
     FRAME_SIZE = 1920           # 20ms at 48kHz mono (960 samples * 2 bytes)
     FRAME_DURATION_MS = 20      # Each Opus frame is 20ms
-    # Increased pre-buffer to prevent underruns on real networks.
-    PRE_BUFFER_FRAMES = 6       # Wait for 6 frames (120ms) before playing
+    # START GATE ONLY. The PA's stall cover is the fixed source margin that
+    # ``queue_and_delay_frame`` queues ahead of the audio in the OpenAL source
+    # (``_megaphone_margin_frames``), not this queue depth: a stall is paid out
+    # of the source's queued frames, while every frame waited for here is pure
+    # start latency in front of the speakers. The old six-frame gate made the
+    # two cushions one reserve counted twice (120 + 120 ms).
+    # tools/megaphone_latency_sim.py has the candidate table: with the six-frame
+    # margin kept, two frames here hold the same starvation counts on every
+    # pattern at 160 ms instead of 240 ms (240 -> 160 ms one-way).
+    PRE_BUFFER_FRAMES = 2       # Wait for 2 frames (40ms) before playing
     # After an underrun, re-buffer more frames before resuming to prevent
     # rapid re-underrun cycles.
     RESUME_FRAMES = 4           # Re-buffer 4 frames (80ms) after an underrun
@@ -146,6 +213,10 @@ class MegaphoneJitterBuffer:
     def __init__(self, game):
         self.game = game
         self.lock = threading.Lock()
+        # True once this sender's frames carry a sequence (channel 31). The
+        # playout then conceals a missing frame in place, so the re-buffer gate
+        # in get_packet must NOT hold the real frames that arrive after a hole.
+        self.sequenced = False
         
         # Packet queue (deque for O(1) append/popleft)
         self.packet_queue = collections.deque(maxlen=self.MAX_BUFFER_FRAMES)
@@ -213,9 +284,16 @@ class MegaphoneJitterBuffer:
             # Minor underrun: the queue ran dry while playing, so hold the first frames
             # until RESUME_FRAMES accumulate and playback picks up smoothly.
             if len(self.packet_queue) == 0:
+                if self.sequenced:
+                    # A sequenced stream's missing frame is concealed in place
+                    # by the playout, which knows which position is due. This is
+                    # not an underrun to wait out: setting the flag would hold
+                    # the real frames arriving afterwards for another
+                    # RESUME_FRAMES ticks and play all of them late.
+                    return None
                 self._underrun = True
                 return None
-            if self._underrun:
+            if self._underrun and not self.sequenced:
                 if len(self.packet_queue) < self.RESUME_FRAMES:
                     return None  # keep buffering for a smooth resume
                 self._underrun = False
@@ -296,20 +374,53 @@ def _measure_speaker_jitter(sender_id, prev_time, now_time):
 
 def _adaptive_margin_frames(sender_id):
     """Map a sender's measured jitter to a silence-padding margin in 20 ms frames:
-            at least 2 frames (40 ms), at most 6 (120 ms)."""
+            ONE frame (20 ms) on a clean link, growing with measured jitter to at most
+            six (120 ms).
+
+            This is the NORMAL voice chat cushion only - the megaphone path keeps its
+            fixed v1.6 six-frame reserve (``_megaphone_margin_frames``). A cushion is
+            latency paid for every frame of the burst, so the floor is one frame: the
+            measured jitter decides when the stream needs a deeper one (the estimate
+            attacks on the first late packet), and a >180 ms gap resets it.
+            """
     global _speaker_jitter_ms
     jitter = _speaker_jitter_ms.get(sender_id, 0.0)
-    frames = 2 + int(jitter / 20.0)
-    return max(2, min(6, frames))
+    frames = 1 + int(jitter / 20.0)
+    return max(1, min(6, frames))
+
+
+# The PA's reserve in 20 ms frames, queued AHEAD of the audio in the source.
+# Two numbers, because the two transports have different information:
+#
+#   SEQUENCED (channel 31) - the frame's position is known, so a hole can be
+#   replaced by a concealment frame (Opus PLC) in place. Nothing is paid out of
+#   the reserve for a lost 20 ms, so it only has to cover arrival jitter, and
+#   tools/megaphone_latency_sim.py measures ZERO starvations for it at 1/3/5%
+#   loss on the lossy table, against 0/9/17 for the same pair with no
+#   concealment. That is the whole reason channel 31 exists.
+#
+#   LEGACY (channel 30) - the packet carries only sender id + opus. There is
+#   nothing to conceal a hole with, the server relays the listener leg
+#   RELIABLY so it can pause for a retransmission, and the reserve is the only
+#   thing keeping the speakers fed. It must not be trimmed: four frames or
+#   three double and triple the starvation counts on the sim's spikey patterns.
+MEGAPHONE_MARGIN_SEQUENCED = 2          # 40 ms
+MEGAPHONE_MARGIN_LEGACY = 6             # 120 ms
+
+# Senders whose PA frames carry a sequence (marked by the receive path).
+_megaphone_sequenced_senders = set()
 
 
 def _megaphone_margin_frames(sender_id):
-    """Return the stable v1.6 PA reserve (six 20 ms frames).
+    """Return the PA's silence reserve for one sender, in 20 ms frames.
 
-                    The legacy channel-30 packet carries only sender_id + opus, with no sequence or timestamp
-                    for concealment, so the server-to-listener leg may pause for a retransmission.
+                    A sender on the sequenced transport has its holes concealed, so it pays the small
+                    reserve; a legacy sender keeps the six-frame one. The keys are the sender ids the
+                    receive path already uses for per-player sources.
                     """
-    return 6
+    if sender_id in _megaphone_sequenced_senders:
+        return MEGAPHONE_MARGIN_SEQUENCED
+    return MEGAPHONE_MARGIN_LEGACY
 
 
 # SONG + LIVE COVER SYNC COMPENSATION
@@ -378,6 +489,8 @@ def reset_jitter_buffers():
     """Reset all jitter buffers and delay queues"""
     global _jitter_buffers, _speaker_delay_queues, _last_play_times, _last_packet_times, _speaker_jitter_ms, _speaker_jitter_ts
     global _last_tail_sample, _just_padded, _limiter_gain_state, _voice_last_pkt
+    global _megaphone_sequenced_senders
+    _megaphone_sequenced_senders = set()
     _jitter_buffers = {}
     _speaker_delay_queues = {}
     _last_play_times = {}
@@ -545,6 +658,13 @@ class voice_chat_compression(threading.Thread):
             # worker owns their decoder and clock-driven playout state.
             self._megaphone_decoders = {}
             self._megaphone_playouts = {}
+            # Per-sender sequenced-stream state (channel 31): which epoch this
+            # stream is, and the frame sequence the playout expects next, so a
+            # hole can be concealed instead of paid for out of the reserve.
+            self._megaphone_timeline = {}
+            # This sender's own PA upload identity (see _outgoing_packet).
+            self._pa_epoch = None
+            self._pa_seq = 0
             self.running = True
             self.start()
             logger.log(f"VoiceChatCompression initialized for channel {self.channel}")
@@ -554,6 +674,26 @@ class voice_chat_compression(threading.Thread):
     def set_channel(self, channel):
         self.channel = channel
         logger.log(f"VoiceChatCompression switched to channel {self.channel}")
+
+    def _outgoing_packet(self, opus_frame):
+        """Return ``(channel, payload)`` for one encoded frame.
+
+                    On the PA, and once the Server has advertised ``pa_timeline_v1``, the upload carries the
+                    frame's POSITION (version + epoch + frameSeq) so every listener can tell a missing
+                    frame from a late one and conceal it (see ``_megaphone_margin_frames``). Normal voice,
+                    and a Server that predates the channel, keep the legacy payload - an old Server would
+                    route a channel-31 packet as ordinary proximity voice.
+                    """
+        if (self.channel != consts.CHANNEL_MEGAPHONE
+                or not getattr(self.game, 'pa_timeline_supported', False)):
+            return self.channel, opus_frame
+        # One epoch per sender session: a listener resets its sequence
+        # bookkeeping on a change, and a talker's silence is a gap in the
+        # sequence rather than a new stream.
+        self._pa_epoch = pa_timeline_epoch(self._pa_epoch)
+        payload = pa_timeline_upload(opus_frame, self._pa_epoch, self._pa_seq)
+        self._pa_seq = (self._pa_seq + 1) & 0xFFFFFFFF
+        return consts.CHANNEL_MEGAPHONE_TIMELINE, payload
 
     def put(self, value):
         if getattr(self, 'running', True):
@@ -572,6 +712,64 @@ class voice_chat_compression(threading.Thread):
             decoder.set_sampling_frequency(48000)
             self._megaphone_decoders[key] = decoder
         return decoder
+
+    def _mark_megaphone_sequenced(self, sender_id):
+        """Remember that this sender's PA frames carry a sequence.
+
+                    Read by ``_megaphone_margin_frames`` (the reserve the source is padded with) and by
+                    ``MegaphoneJitterBuffer.sequenced`` (the re-buffer gate), so the two move together.
+                    """
+        _megaphone_sequenced_senders.add(sender_id)
+        jb = _jitter_buffers.get(sender_id)
+        if jb is not None:
+            jb.sequenced = True
+
+    def _conceal_frame(self, sender_id):
+        """One 20 ms frame of Opus concealment for a frame that never arrived.
+
+                    ``decode_missing_packet`` extrapolates from that sender's own decoder history, which
+                    is why it must be their decoder; the result goes through the same limiter the real
+                    frames do so the sender's gain stays stable across the boundary.
+                    """
+        try:
+            pcm = self._megaphone_decoder(sender_id).decode_missing_packet(OPUS_FRAME_MS)
+        except Exception as e:
+            logger.log(f"[Voice] PA concealment failed for {sender_id}: {e}")
+            return None
+        if not pcm:
+            return None
+        return soft_limit_audio(bytes(pcm), threshold=0.85, ratio=8.0, state_key=sender_id)
+
+    def _sequenced_pa_gap(self, sender_id, epoch, frame_seq):
+        """Return ``(accept, conceal_frames)`` for one sequenced PA arrival."""
+        state = self._megaphone_timeline.get(sender_id)
+        if state is None:
+            state = {'epoch': None, 'next_seq': None, 'concealed': 0}
+            self._megaphone_timeline[sender_id] = state
+        epoch = None if epoch is None else (int(epoch) & 0xFFFFFFFF)
+        frame_seq = int(frame_seq) & 0xFFFFFFFF
+        if state['epoch'] != epoch or state['next_seq'] is None:
+            # A new stream, or a new epoch: nothing to conceal and nothing to
+            # carry over from the stream before it.
+            state['epoch'] = epoch
+            state['next_seq'] = (frame_seq + 1) & 0xFFFFFFFF
+            return True, 0
+        delta = (frame_seq - state['next_seq']) & 0xFFFFFFFF
+        if delta == 0:
+            state['next_seq'] = (frame_seq + 1) & 0xFFFFFFFF
+            return True, 0
+        if delta >= 0x80000000:
+            # Behind the playout: that slot already played a concealment frame
+            # (or this is a reordered copy). Rewinding would replay audio.
+            return False, 0
+        if delta > PA_TIMELINE_MAX_GAP:
+            # Too far ahead to be a hole in this stream - the sender restarted
+            # its counter, or the playout retired the stream and this is a new
+            # one. Re-base instead of concealing a second of audio.
+            state['next_seq'] = (frame_seq + 1) & 0xFFFFFFFF
+            return True, 0
+        state['next_seq'] = (frame_seq + 1) & 0xFFFFFFFF
+        return True, delta
 
     def _drain_megaphone_playout(self, now_ms=None, now_monotonic=None):
         """Drain PA frames at 20 ms cadence independently of packet arrivals."""
@@ -599,12 +797,30 @@ class voice_chat_compression(threading.Thread):
             if not jb.should_output(clock_ms):
                 continue
             # Do not invent silence for a packet that merely arrived a little
-            # late. The legacy PA payload has no sequence/timestamp, so that
-            # guess can mute good music frames. The server's reliable listener
-            # leg and this real-frame reserve now provide the v1.6 behaviour.
+            # late. A legacy PA payload has no sequence/timestamp, so that guess
+            # can mute good music frames: its reserve and the reliable listener
+            # leg are what cover it.
             packet = jb.get_packet()
             if packet is None:
-                continue
+                # SEQUENCED (channel 31): this sender's frames carry their
+                # position, so the slot that is due right now can be concealed
+                # instead of draining the reserve. This - not a bigger cushion -
+                # is the difference the loss table in
+                # tools/megaphone_latency_sim.py measures.
+                if not stream.get('sequenced') or not jb.is_playing:
+                    continue
+                state = self._megaphone_timeline.get(sender_id)
+                if state is None or state.get('next_seq') is None:
+                    continue
+                if state.get('concealed', 0) >= PA_TIMELINE_MAX_CONCEAL:
+                    # A hole this long is not a hole: stop extrapolating and go
+                    # quiet until a real frame arrives.
+                    continue
+                packet = self._conceal_frame(sender_id)
+                if packet is None:
+                    continue
+                state['next_seq'] = (state['next_seq'] + 1) & 0xFFFFFFFF
+                state['concealed'] = state.get('concealed', 0) + 1
             try:
                 if gameplay.player.dead:
                     continue
@@ -640,6 +856,9 @@ class voice_chat_compression(threading.Thread):
         for sender_id in stale:
             self._megaphone_playouts.pop(sender_id, None)
             self._megaphone_decoders.pop(sender_id, None)
+            # The stream is over, so its sequence bookkeeping is too: a later
+            # transmission re-reads the epoch and starts clean.
+            self._megaphone_timeline.pop(sender_id, None)
             # Destroying the room's sources is OpenAL work too, so it rides
             # the same inbox; a leg that outlived its voice would leave the
             # speakers queued and quiet, not free.
@@ -651,7 +870,7 @@ class voice_chat_compression(threading.Thread):
         logger.log(f"VoiceChatCompression thread started: {self.channel}")
         while getattr(self, 'running', True):
             try:
-                time.sleep(0.002)
+                time.sleep(VOICE_SEND_POLL_S)
                 if not self.queue.empty():
                     value = self.queue.get_nowait()
                     if value is None:
@@ -669,10 +888,11 @@ class voice_chat_compression(threading.Thread):
                                 logger.log(f"[Voice] Error applying gain: {e}")
 
                         buf = self.encoder.encode(value)
+                        channel, payload = self._outgoing_packet(buf)
                         self.game.network.send(
-                            self.channel,
+                            channel,
                             "n/a",
-                            buf
+                            payload
                         )
                 self._drain_megaphone_playout()
             except Exception as e:
@@ -683,10 +903,13 @@ class voice_chat_compression(threading.Thread):
 
 
 
-    def recieve(self, data, vc_source, radio_source, channelID, gameplay, sender_id=None):
-        self.put(lambda: self.recieve2(data, vc_source, radio_source, channelID, gameplay, sender_id))
+    def recieve(self, data, vc_source, radio_source, channelID, gameplay, sender_id=None,
+                epoch=None, frame_seq=None):
+        self.put(lambda: self.recieve2(data, vc_source, radio_source, channelID, gameplay,
+                                       sender_id, epoch, frame_seq))
 
-    def recieve2(self, data, vc_source, radio_source, channelID, gameplay, sender_id=None):
+    def recieve2(self, data, vc_source, radio_source, channelID, gameplay, sender_id=None,
+                 epoch=None, frame_seq=None):
         buffer = None
         decoder = (
             self._megaphone_decoder(sender_id)
@@ -718,7 +941,26 @@ class voice_chat_compression(threading.Thread):
             # Single jitter buffer per sender — ensures all speakers play the same frame simultaneously
             buffer_key = sender_id if sender_id is not None else "megaphone_shared"
             jb = get_jitter_buffer(self.game, buffer_key)
-            jb.add_packet(limited_data)
+            if frame_seq is None:
+                jb.add_packet(limited_data)
+            else:
+                # SEQUENCED (channel 31): the frame's position is known, so the
+                # frames a hole skipped are concealed HERE, in order, before the
+                # arrival - they go through the same playout cadence, so the
+                # audio content stays whole and nothing is paid out of the
+                # reserve (see _megaphone_margin_frames).
+                self._mark_megaphone_sequenced(sender_id)
+                accept, missing = self._sequenced_pa_gap(sender_id, epoch, frame_seq)
+                if not accept:
+                    # A reordered copy, or a frame the playout already covered
+                    # with concealment: queueing it would replay audio.
+                    return
+                for _ in range(missing):
+                    conceal = self._conceal_frame(sender_id)
+                    if conceal is None:
+                        break
+                    jb.add_packet(conceal)
+                jb.add_packet(limited_data)
 
             # Arrival bookkeeping runs for EVERY packet (even ones that
             # stay buffered): the jitter estimate and "fresh burst"
@@ -749,11 +991,16 @@ class voice_chat_compression(threading.Thread):
             # network burst plays out at a steady cadence (popping on arrival tracked the network and caused
             # the intermittent "ติดๆขัดๆ" chop on music broadcasts). The worker drains this jitter buffer
             # every 20 ms even when ENet delivered the packets in a burst.
+            state = self._megaphone_timeline.get(sender_id)
+            if state is not None and frame_seq is not None:
+                # A real frame ends any run of concealment.
+                state['concealed'] = 0
             self._megaphone_playouts[sender_id] = {
                 'gameplay': gameplay,
                 'sources': sources,
                 'jitter_buffer': jb,
                 'last_packet_monotonic': time.monotonic(),
+                'sequenced': frame_seq is not None,
             }
             return  # Megaphone handled, skip normal processing
                 
@@ -949,7 +1196,7 @@ class VoiceChatRecord(threading.Thread):
                 self.recording = False
                 accumulated_bytes.clear()
                 continue
-            if samples >= 480:  # 10ms ultra-fast hardware capture
+            if samples >= VOICE_CAPTURE_TRIGGER_SAMPLES:  # one 10ms hardware delivery period
                 is_stereo = getattr(self, 'stereo', False)
                 chunk = bytearray(samples * (4 if is_stereo else 2))
                 try:
@@ -1008,11 +1255,11 @@ class VoiceChatRecord(threading.Thread):
                 if voice_using_mega and gp and not route_to_bot:
                     _feed_local_megaphone_direct(gp, chunk, producer='mic')
 
-                # Accumulate for Opus encoder (requires 20ms / 1920 bytes)
+                # Accumulate for the Opus encoder (a frame is exactly VOICE_FRAME_BYTES)
                 accumulated_bytes.extend(chunk)
-                while len(accumulated_bytes) >= 1920:
-                    chunk_bytes = accumulated_bytes[:1920]
-                    accumulated_bytes = accumulated_bytes[1920:]
+                while len(accumulated_bytes) >= VOICE_FRAME_BYTES:
+                    chunk_bytes = accumulated_bytes[:VOICE_FRAME_BYTES]
+                    accumulated_bytes = accumulated_bytes[VOICE_FRAME_BYTES:]
 
                     if route_to_bot:
                         if not hasattr(music_bot, 'mic_pcm_queue'):
@@ -1033,8 +1280,8 @@ class VoiceChatRecord(threading.Thread):
     
     def voice_chat_finish2(self):
         try:
-            if self.audio_input.available_samples < 960: return self.audio_input.capture_samples(bytearray(self.audio_input.available_samples*2))
-            buf = bytearray(1920)
+            if self.audio_input.available_samples < VOICE_FRAME_BYTES // 2: return self.audio_input.capture_samples(bytearray(self.audio_input.available_samples*2))
+            buf = bytearray(VOICE_FRAME_BYTES)
             self.audio_input.capture_samples(buf)
         except cyal.exceptions.CyalError:
             # The microphone can die between the key release and this delayed
@@ -2019,8 +2266,10 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet, margin_frames=No
             frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
             _speaker_current_delays[sender_id].append(frames_delay)
             
-            # Stable v1.6 PA reserve: 6 frames (120ms) for remote listeners, whose
-            # reliable leg can pause briefly for retransmission. Local producers
+            # The PA's reserve for remote listeners, whose reliable leg can pause
+            # briefly for retransmission: six frames (120 ms), queued ahead of the
+            # audio. This - not the jitter buffer's pre-buffer - is the cushion a
+            # stall consumes (tools/megaphone_latency_sim.py). Local producers
             # pass margin_frames=0 — their monitor has no network leg, so a fixed
             # cushion would only push the owner's own voice/music late.
             if margin_frames is None:

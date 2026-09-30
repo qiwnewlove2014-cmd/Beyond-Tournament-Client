@@ -36,6 +36,17 @@ CHANNEL_MUSICBOT = 22
 CHANNEL_JUKEBOX_RELAY = 23
 CHANNEL_MUSICBOT_TIMELINE = 24
 CHANNEL_MEGAPHONE = 30
+# PA upload with the frame's position in it: version, epoch and frame sequence
+# in front of the Opus frame, so a listener can see that a frame is MISSING and
+# conceal it (Opus PLC) instead of holding a reserve big enough to sit through
+# every hole. Only used once the Server advertises `pa_timeline_v1`.
+CHANNEL_MEGAPHONE_TIMELINE = 31
+# The wire format on that channel (both ends read it from here): version, then
+# the sender's voice_channel, then the stream epoch, then the frame sequence -
+# 9 bytes uploaded by the sender, 10 once the Server has inserted the channel.
+PA_TIMELINE_VERSION = 1
+PA_TIMELINE_UPLOAD_BYTES = 9            # what the sender writes: version + epoch + frameSeq
+PA_TIMELINE_HEADER_BYTES = 10           # what a listener reads: + the sender's voice_channel
 SOUNDSPREPEND="/data/"
 # Bound on the lazy VFS temp cache (MB). Only played assets land on disk,
 # and the oldest ones are evicted while this limit is exceeded.

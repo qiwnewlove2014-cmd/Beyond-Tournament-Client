@@ -174,7 +174,9 @@ class Client(threading.Thread):
 
     def handle_event(self, data, channelID):
         try:
-            if channelID == consts.CHANNEL_MUSICBOT:
+            if channelID == consts.CHANNEL_MEGAPHONE_TIMELINE:
+                return self.event_handeler.process_megaphone_timeline_data(data)
+            elif channelID == consts.CHANNEL_MUSICBOT:
                 return self.event_handeler.process_music_data(data)
             elif channelID == consts.CHANNEL_MUSICBOT_TIMELINE:
                 return self.event_handeler.process_music_timeline_data(data)

@@ -545,7 +545,8 @@ class Game:
                     "username": options.get("username"),
                     "password": options.get("password"),
                     "version": consts.CLIENT_VERSION,  # 🔢 Version for compatibility check
-                    "capabilities": ["music_timeline_v1", "jam_notes_v1"],
+                    "capabilities": ["music_timeline_v1", "jam_notes_v1",
+                                     "pa_timeline_v1"],
                 },
             )
             return self.replace(self.network.loop)
@@ -666,7 +667,8 @@ class Game:
                     "username": options.get("username", ""),
                     "password": options.get("password", ""),
                     "version": consts.CLIENT_VERSION,  # 🔢 Version for compatibility check
-                    "capabilities": ["music_timeline_v1", "jam_notes_v1"],
+                    "capabilities": ["music_timeline_v1", "jam_notes_v1",
+                                     "pa_timeline_v1"],
                 },
             )
             return self.replace(self.network.loop)

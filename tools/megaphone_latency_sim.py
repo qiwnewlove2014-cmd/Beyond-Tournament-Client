@@ -16,9 +16,16 @@ Metrics per run:
     (audible crackle / drop).
 
 Configs compared:
-  OLD      pre=3, fixed margin=6
-  RESTORED production v1.6 pre-buffer + fixed PA margin
+  v1.5     pre=3, fixed margin=6
+  v1.6     pre=6, fixed margin=6   (two cushions, but only one reserve)
+  NOW      the shipped pair from libs/voice_chat (gate + source margin)
   MIN      pre=1, fixed margin=1 (the earlier crackly experiment)
+
+The last table answers a different question: the client->server PA leg is
+UNRELIABLE, so a lost packet is a permanent hole rather than a pause, and the
+source margin is what pays for it. It models the NOT-YET-BUILT sequence + Opus
+PLC concealment (plc=True) so the cut it would buy can be measured before it is
+written -- nothing in that table is shipped behaviour.
 
 Run:  python tools/megaphone_latency_sim.py
 """
@@ -36,10 +43,15 @@ FRAME_MS = 20.0
 # Discrete-event pipeline model
 # --------------------------------------------------------------------------
 class Pipeline:
-    def __init__(self, pre_frames, margin_fn, frames_delay=0):
+    def __init__(self, pre_frames, margin_fn, frames_delay=0, plc=False):
         self.pre_frames = pre_frames
         self.margin_fn = margin_fn          # callable() -> margin frames
         self.frames_delay = frames_delay
+        # plc=True models the candidate fix: a sequence gap is concealed with a
+        # decode-missing-packet frame, so the hole never reaches the source and
+        # the reserve stops draining. plc=False is every shipped build today.
+        self.plc = plc
+        self.last_seq = None
         self.jb = []                        # buffered packets (arrival times)
         self.src = []                       # source queue: ('S'|'R', t)
         self.playhead = 0.0                 # source audio consumed (ms)
@@ -80,8 +92,19 @@ class Pipeline:
             self.playing = True
             self.last_tick = packet_time
 
-    def on_packet(self, t):
+    def on_packet(self, t, seq=None):
+        missing = 0
+        if seq is not None:
+            if self.last_seq is not None and seq > self.last_seq + 1:
+                missing = seq - self.last_seq - 1
+            self.last_seq = seq
         self._consume(t)
+        if self.plc and missing:
+            # The gap is decoded as concealment frames and queued like any other
+            # frame; the first one inherits a resync if the source had already
+            # run dry, exactly as a real arrival would.
+            for _ in range(missing):
+                self._fill(t, resync=self.starved)
         self.jb.append(t)
         if not self.playing:
             if len(self.jb) >= self.pre_frames:
@@ -187,11 +210,15 @@ patterns = {
 
 print()
 print("Floor latency math (0m distance, no propagation delay):")
-print(f"  OLD: pre=3x20ms + fixed 6x20ms = {9 * FRAME_MS:.0f}ms minimum")
+print(f"  v1.5: pre=3x20ms + fixed 6x20ms = {9 * FRAME_MS:.0f}ms minimum")
+print(f"  v1.6: pre=6x20ms + fixed 6x20ms = {12 * FRAME_MS:.0f}ms minimum "
+      "(the same reserve counted twice)")
 steady_margin = vc._megaphone_margin_frames("steady_floor")
-print(f"  RESTORED: pre={vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES}x20ms + fixed "
+print(f"  NOW:  pre={vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES}x20ms + fixed "
       f"({steady_margin}x20ms) = "
       f"{(vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES + steady_margin) * FRAME_MS:.0f}ms minimum")
+print(f"  MIN:  pre=1x20ms + fixed 1x20ms = {2 * FRAME_MS:.0f}ms minimum"
+      " (crackly: see the candidate table below)")
 
 print()
 print("Propagation delay (distance / 343 m/s, per speaker, kept):")
@@ -201,17 +228,125 @@ for dist in (5, 20, 50, 100):
 for name, pat in patterns.items():
     print()
     print(f"--- {name} ---")
-    old_lat, old_starv = run(pat, 3, "fixed:6")
+    old_lat, old_starv = run(pat, 6, "fixed:6")
     new_lat, new_starv = run(
         pat,
         vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES,
         f"fixed:{vc._megaphone_margin_frames('production')}",
     )
     min_lat, min_starv = run(pat, 1, "fixed:1")
-    table_row("OLD (fixed 120ms)", old_lat, old_starv)
-    table_row("RESTORED (v1.6)", new_lat, new_starv)
-    table_row("MIN (fixed 20ms)", min_lat, min_starv)
+    table_row("v1.6 (pre6 + m6)", old_lat, old_starv)
+    table_row("NOW (shipped pair)", new_lat, new_starv)
+    table_row("MIN (pre1 + m1)", min_lat, min_starv)
     print(f"  (measured peak jitter: {last_est():.1f} ms)")
+
+# --------------------------------------------------------------------------
+# CANDIDATE RESERVES: the PA pays TWO cushions before the first word is heard
+# - the jitter pre-buffer (a start gate over the arrival queue) and the fixed
+# source margin (silence queued ahead of the audio). Their SUM is the start
+# latency, but only the source margin is what a stall has to eat through
+# before the speakers go quiet, so the pair is not interchangeable. This table
+# is the evidence for whichever pair ships: latency AND starvations on every
+# pattern, so a cheaper cushion cannot be bought with an audible gap.
+print()
+print("=" * 74)
+print("CANDIDATE RESERVES (latency / starvations per pattern)")
+print("=" * 74)
+
+CANDIDATES = [
+    ("pre6+m6 (shipped)", 6, "fixed:6"),
+    ("pre2+m6", 2, "fixed:6"),
+    ("pre6+m4", 6, "fixed:4"),
+    ("pre2+m4", 2, "fixed:4"),
+    ("pre3+m3", 3, "fixed:3"),
+    ("pre2+m3", 2, "fixed:3"),
+    ("pre1+m1 (crackly)", 1, "fixed:1"),
+]
+
+print()
+print(f"  {'reserve':<20} " + " ".join(f"{n.split(' ')[0]:>16}" for n in patterns))
+for label, pre, margin_kind in CANDIDATES:
+    cells = []
+    for pat in patterns.values():
+        lat, starv = run(pat, pre, margin_kind)
+        cells.append(f"{lat:6.0f}ms/{starv:<2d}" if lat is not None else "   n/a  ")
+    print(f"  {label:<20} " + " ".join(f"{c:>16}" for c in cells))
+
+# --------------------------------------------------------------------------
+# HOLES, NOT LAG. The client->server PA leg is UNRELIABLE (`send2` forces it for
+# channels >= 20), so a lost packet is a PERMANENT hole: the listener never gets
+# that 20 ms and the source's reserve pays for it, one frame per hole, until it
+# hits zero and re-pads (the audible spike). That - not the reliable leg's
+# retransmission pause - is what the six-frame margin is really buying, and it
+# is why sequence + Opus PLC is the only way to buy it back: a concealed frame
+# keeps the reserve full instead of draining it. The `plc=True` row models that
+# fix, which does not exist yet; the first row is today's build.
+def arrivals_lossy(seconds, loss_pct, seed):
+    """20 ms cadence where `loss_pct` of the frames never arrive.
+
+    Returns (t_ms, frame_seq) pairs, so a gap in frame_seq is a visible hole.
+    """
+    import random
+    r = random.Random(seed)
+    t = 0.0
+    seq = 0
+    out = []
+    while t < seconds * 1000.0:
+        if r.random() * 100.0 < loss_pct:
+            t += FRAME_MS          # lost on the wire: no arrival, no advance
+            seq += 1
+            continue
+        out.append((t, seq))
+        t += FRAME_MS
+        seq += 1
+    return out
+
+
+def run_seq(pattern, pre_frames, margin_kind, plc):
+    """As run(), but the arrivals carry a frame sequence so a gap is visible."""
+    if margin_kind.startswith("fixed:"):
+        n = int(margin_kind.split(":")[1])
+        margin_fn = lambda: n
+    else:
+        margin_fn = lambda: vc._adaptive_margin_frames(SENDER)
+    pipe = Pipeline(pre_frames, margin_fn, plc=plc)
+    t0 = pattern[0][0]
+    for t, seq in pattern:
+        pipe.on_packet(t, seq)
+    if pipe.first_heard is None:
+        return None, pipe.starvations
+    return pipe.first_heard - t0, pipe.starvations
+
+
+print()
+print("=" * 74)
+print("HOLES, NOT LAG (unreliable leg: a lost PA packet is a permanent hole)")
+print("=" * 74)
+
+LOSSES = (("loss 1%", 1.0, 11), ("loss 3%", 3.0, 22), ("loss 5%", 5.0, 33))
+# The sequenced rows use the SHIPPING reserve, not a copy of its number: the
+# whole point of the table is that this reserve only survives because a
+# listener conceals the hole, so the two must not be able to drift apart.
+_SEQ_RESERVE = vc.MEGAPHONE_MARGIN_SEQUENCED
+LOSS_CONFIGS = [
+    ("v1.6 pre6+m6 (240ms)", 6, "fixed:6", False),
+    ("now pre2+m6 (160ms)", 2, "fixed:6", False),
+    (f"pre2+m{_SEQ_RESERVE}, no PLC (80ms)", 2, f"fixed:{_SEQ_RESERVE}", False),
+    (f"pre2+m{_SEQ_RESERVE} + PLC (80ms)", 2, f"fixed:{_SEQ_RESERVE}", True),
+]
+print()
+print("  latency / starvations over 20 s, with holes")
+print(f"  {'config':<28} " + " ".join(f"{n:>15}" for n, _, _ in LOSSES))
+loss_cells = {}
+for label, pre, mk, plc in LOSS_CONFIGS:
+    cells = []
+    starvs = []
+    for _n, pct, seed in LOSSES:
+        lat, starv = run_seq(arrivals_lossy(20.0, pct, seed), pre, mk, plc)
+        starvs.append(starv)
+        cells.append(f"{lat:6.0f}ms/{starv:<2d}" if lat is not None else "   n/a  ")
+    loss_cells[label] = starvs
+    print(f"  {label:<28} " + " ".join(f"{c:>15}" for c in cells))
 
 # --------------------------------------------------------------------------
 print()
@@ -231,42 +366,103 @@ def check(name, ok, detail=""):
         print(f"  FAIL - {name} {detail}")
 
 
-# Production intentionally matches the stable v1.6 PA latency budget.
-steady_old, _ = run(arrivals_steady(4.0), 3, "fixed:6")
-steady_new, _ = run(
+# Production's PA floor is the sum of the shipped pair: the start gate from
+# libs/voice_chat plus the fixed six-frame source margin. tests/
+# test_voice_chat_jitter.py pins both numbers.
+steady_shipped, _ = run(
     arrivals_steady(4.0),
     vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES,
     f"fixed:{vc._megaphone_margin_frames('production')}",
 )
-check("steady: RESTORED matches v1.6 latency",
-      steady_old is not None and steady_new == steady_old,
-      f"v1.6 {steady_old:.0f}ms -> RESTORED {steady_new:.0f}ms")
+shipped_floor_ms = ((vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES
+                     + vc._megaphone_margin_frames("production")) * FRAME_MS)
+check("steady: shipped PA floor is gate + source margin",
+      steady_shipped is not None and steady_shipped == shipped_floor_ms,
+      f"{steady_shipped:.0f}ms vs floor {shipped_floor_ms:.0f}ms")
+check("the PA no longer pays the reserve twice (floor under 240ms)",
+      shipped_floor_ms < 240.0, f"{shipped_floor_ms:.0f}ms")
 
-# Spikey delivery: restored PA must starve less than the fixed-20ms attempt.
-j_spike, j_starv_spike = run(
-    arrivals_spikey(10.0, 60.0, 2000, 1),
-    vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES,
-    f"fixed:{vc._megaphone_margin_frames('production')}",
-)
-m_spike, m_starv_spike = run(arrivals_spikey(10.0, 60.0, 2000, 1), 1, "fixed:1")
-check("spikey: restored PA starves LESS than fixed 20ms",
-      j_starv_spike <= m_starv_spike,
-      f"restored {j_starv_spike} vs fixed20 {m_starv_spike}")
-check("spikey: restored latency stays within v1.6 budget",
-      j_spike is not None and j_spike <= 180.0, f"{j_spike:.0f}ms")
+# Keeping the six-frame source margin is what buys back the cut: the same
+# patterns, the same starvation counts as the old double reserve, 80ms less
+# start latency. Trimming the margin instead is what costs dropouts.
+for _pn, _pat in (("spikey 60ms", arrivals_spikey(10.0, 60.0, 2000, 1)),
+                  ("spikey 100ms", arrivals_spikey(12.0, 100.0, 3000, 7))):
+    _n_lat, _n_starv = run(
+        _pat,
+        vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES,
+        f"fixed:{vc._megaphone_margin_frames('production')}",
+    )
+    _o_lat, _o_starv = run(_pat, 6, "fixed:6")
+    _m_lat, _m_starv = run(
+        _pat,
+        vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES,
+        "fixed:3",
+    )
+    check(f"{_pn}: shipped pair starves no more than the old double reserve",
+          _n_starv <= _o_starv,
+          f"shipped {_n_starv} vs old {_o_starv}")
+    check(f"{_pn}: the smaller gate really is cheaper",
+          _n_lat is not None and _n_lat < _o_lat,
+          f"{_n_lat:.0f}ms vs {_o_lat:.0f}ms")
+    check(f"{_pn}: trimming the source margin instead costs dropouts",
+          _m_starv > _n_starv,
+          f"margin3 {_m_starv} vs shipped {_n_starv}")
 
 # unit checks on the real margin math
+# Normal voice chat's cushion: one frame on a clean link (the latency the
+# ear pays on every frame of the burst), grown only by measured jitter.
 vc._speaker_jitter_ms["u"] = 0.0
-check("adaptive margin = 2 frames at 0ms jitter",
-      vc._adaptive_margin_frames("u") == 2)
+check("adaptive margin = 1 frame at 0ms jitter (normal voice)",
+      vc._adaptive_margin_frames("u") == 1)
 vc._speaker_jitter_ms["u"] = 45.0
-check("adaptive margin = 4 frames at 45ms jitter",
-      vc._adaptive_margin_frames("u") == 4)
+check("adaptive margin = 3 frames at 45ms jitter",
+      vc._adaptive_margin_frames("u") == 3)
 vc._speaker_jitter_ms["u"] = 500.0
 check("adaptive margin capped at 6 frames",
       vc._adaptive_margin_frames("u") == 6)
-check("PA margin fixed at v1.6 six-frame reserve",
-      vc._megaphone_margin_frames("u") == 6)
+check("PA margin holds the six-frame reserve for a LEGACY sender",
+      vc._megaphone_margin_frames("u") == vc.MEGAPHONE_MARGIN_LEGACY == 6)
+# ... and the small one for a sender whose frames carry their position, which
+# is the case the loss table accepts below (a concealed hole, not a bigger
+# reserve, is what pays for the 80 ms pair).
+vc._megaphone_sequenced_senders.add("u")
+check("PA margin pays the two-frame reserve for a SEQUENCED sender",
+      vc._megaphone_margin_frames("u") == vc.MEGAPHONE_MARGIN_SEQUENCED == 2)
+vc._megaphone_sequenced_senders.discard("u")
+check("the loss table's sequenced rows use the shipping reserve",
+      _SEQ_RESERVE == vc.MEGAPHONE_MARGIN_SEQUENCED,
+      f"table {_SEQ_RESERVE} vs shipped {vc.MEGAPHONE_MARGIN_SEQUENCED}")
+
+# The shipped pre-buffer must stay small enough that the two cushions are not
+# one reserve counted twice, yet large enough to keep an arrival-jitter
+# reserve in the queue. 0 starvations on the steady and jittery patterns is
+# the condition for accepting it.
+vc._jitter_buffers.pop("__cand__", None)
+pre = vc.MegaphoneJitterBuffer.PRE_BUFFER_FRAMES
+check("PA pre-buffer is one 20ms frame or two, not a second six-frame reserve",
+      pre in (1, 2), f"{pre} frames")
+
+# The loss table is the acceptance test for the sequence + PLC work: it must
+# show that the reserve is what an unconcealed hole costs, and that concealment
+# - not a smaller number - is what makes the smaller pair survivable.
+_shipped_holes = sum(loss_cells["v1.6 pre6+m6 (240ms)"])
+_now_holes = sum(loss_cells["now pre2+m6 (160ms)"])
+_cheap_holes = sum(loss_cells["pre2+m2, no PLC (80ms)"])
+_plc_holes = sum(loss_cells["pre2+m2 + PLC (80ms)"])
+check("holes: cutting the reserve without concealment costs dropouts",
+      _cheap_holes > _shipped_holes,
+      f"pre2+m2 {_cheap_holes} vs v1.6 {_shipped_holes}")
+check("holes: concealment keeps the smaller reserve as fed as the shipped pair",
+      _plc_holes <= _shipped_holes,
+      f"pre2+m2+PLC {_plc_holes} vs v1.6 {_shipped_holes}")
+check("holes: the gate cut shipped on 2026-09-30 does not cost dropouts",
+      _now_holes <= _shipped_holes,
+      f"pre2+m6 {_now_holes} vs v1.6 {_shipped_holes}")
+for _pn, _pat in (("steady", patterns["steady (exact 20ms)"]),
+                  ("jittery", patterns["jittery (+/-12ms)"])):
+    _lat, _starv = run(_pat, pre, f"fixed:{vc._megaphone_margin_frames('production')}")
+    check(f"{_pn}: shipped pair does not starve with a small pre-buffer",
+          _starv == 0, f"{_starv} starvation(s)")
 
 print()
 print(f"RESULT: {passed} passed, {failed} failed")

@@ -870,7 +870,7 @@ class RoomOnlyChannelTests(unittest.TestCase):
         game.gameplay.megaphone = manager
         received = []
         compression = SimpleNamespace(
-            recieve=lambda *args: received.append(args))
+            recieve=lambda *args, **kwargs: received.append(args))
         handler = event_module.EventHandeler.__new__(event_module.EventHandeler)
         handler.game = game
         handler.gameplay = game.gameplay
@@ -957,7 +957,7 @@ class PaTestModeTests(unittest.TestCase):
         game = make_game()
         received = []
         channel = SimpleNamespace(vc_compression=SimpleNamespace(
-            recieve=lambda *args: received.append(args)))
+            recieve=lambda *args, **kwargs: received.append(args)))
         game.gameplay.megaphone = SimpleNamespace(
             get_megaphone_player_sources=mock.Mock(return_value=None),
             megaphone_channel=mock.Mock(return_value=channel),
@@ -993,6 +993,9 @@ class MegaphoneDrainTests(unittest.TestCase):
             }
         }
         voice._megaphone_decoders = {sender_id: object()}
+        # Legacy streams carry no position, so nothing is concealed for them;
+        # the drain still reads the map when the stream goes stale.
+        voice._megaphone_timeline = {}
         if sources:
             # A talker the map's PA is already carrying: the stream counts as
             # live through those sources.

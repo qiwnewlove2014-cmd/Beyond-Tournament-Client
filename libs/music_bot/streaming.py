@@ -14,12 +14,38 @@ from collections import deque
 import cyal
 import cyal.exceptions
 
+from .. import consts
 from .. import logger
+from .. import voice_chat
 from ..audio_diagnostics import probe
 from ..jukebox_clock import PAIR_KEY, SpotClock, mono_ms
 from ..party_sync import stereo_upload_eligible
 from ..speech import speak
 from .media import FFMPEG_PATH, YouTubeSearcher
+
+
+def sequence_pa_frame(sender, channel, encoded):
+    """Return ``(channel, payload)`` for one outgoing PA frame of ``sender``.
+
+    The PA's listener leg can only conceal a MISSING frame if the frame says
+    where it sits in the stream, so a broadcast aimed at the megaphone is
+    re-framed for channel 31 (version + epoch + frameSeq in front of the same
+    Opus frame) and ``sender`` remembers the sequence in ``_pa_epoch`` /
+    ``_pa_seq``. Both network senders in this module hand their frame here -
+    the streamer's paced loop and the live relay - so the music bot's PA audio
+    travels the same wire as a player's own (voice_chat.pa_timeline_upload).
+
+    A Server that has not advertised ``pa_timeline_v1``, and every channel that
+    is not the megaphone, keep the legacy payload on their own channel.
+    """
+    if (channel != consts.CHANNEL_MEGAPHONE
+            or not getattr(sender.game, 'pa_timeline_supported', False)):
+        return channel, encoded
+    sender._pa_epoch = voice_chat.pa_timeline_epoch(sender._pa_epoch)
+    payload = voice_chat.pa_timeline_upload(
+        encoded, sender._pa_epoch, sender._pa_seq)
+    sender._pa_seq = (sender._pa_seq + 1) & 0xFFFFFFFF
+    return consts.CHANNEL_MEGAPHONE_TIMELINE, payload
 
 
 class AudioStreamer(threading.Thread):
@@ -35,6 +61,11 @@ class AudioStreamer(threading.Thread):
     # mode flags need class defaults for the shared playback paths to work.
     cinema = None
     spatial_pair = None
+    # The music bot's PA sequence (channel 31). Class defaults for the same
+    # reason as the flags above; the send site stamps the epoch on first use
+    # (voice_chat.pa_timeline_epoch), so a hand-built instance streams too.
+    _pa_epoch = None
+    _pa_seq = 0
 
     @property
     def spatial_active(self):
@@ -763,7 +794,6 @@ class AudioStreamer(threading.Thread):
                 except Exception:
                     pass
 
-            from .. import consts
             target_channel = consts.CHANNEL_MUSICBOT
             # A Party Sync session shares the bot privately with its guests:
             # always use the private MUSICBOT leg (never the PA megaphone),
@@ -861,6 +891,14 @@ class AudioStreamer(threading.Thread):
                 ) + bytes(encoded)
                 with self._timeline_lock:
                     self._timeline_last_sent_seq = int(timeline_seq) & 0xFFFFFFFF
+
+            # The PA's SEQUENCED upload (channel 31): the same broadcast with
+            # the frame's position in front of it, so a listener conceals a
+            # lost frame (Opus PLC) instead of holding the 120 ms reserve the
+            # legacy payload needs (tools/megaphone_latency_sim.py measured
+            # both). A Server that has not advertised the channel keeps 30.
+            target_channel, encoded = sequence_pa_frame(
+                self, target_channel, encoded)
 
             self.game.network.send(target_channel, "n/a", encoded, reliable=False)
         except Exception:
@@ -1967,6 +2005,11 @@ class AudioStreamer(threading.Thread):
 
 class LiveRelayStreamer(threading.Thread):
     """Stand-alone streaming thread for live instrument (guitar/mic) PCM when no MP3 audio is playing."""
+    # The live relay's own PA sequence (channel 31), same shape as the music
+    # bot's: one epoch per relay, stamped on the first PA frame sent.
+    _pa_epoch = None
+    _pa_seq = 0
+
     def __init__(self, game, bot):
         super().__init__(daemon=True)
         self.game = game
@@ -1984,7 +2027,6 @@ class LiveRelayStreamer(threading.Thread):
 
     def run(self):
         import audioop
-        from .. import consts
         while self.running and self.bot and (
             getattr(self.bot, 'broadcast_enabled', False)
             or getattr(self.bot, 'broadcast_to_megaphone', False)
@@ -2064,6 +2106,11 @@ class LiveRelayStreamer(threading.Thread):
                 self.last_send_time = time.perf_counter()
 
                 encoded = self.encoder.encode(bytearray(mono_data))
+                # The PA's sequenced upload (channel 31), the live counterpart
+                # of the music bot's: position on the frame, so a listener
+                # conceals a hole rather than holding the legacy reserve.
+                target_channel, encoded = sequence_pa_frame(
+                    self, target_channel, encoded)
                 if self.game and self.game.network:
                     self.game.network.send(target_channel, "n/a", encoded, reliable=False)
             except Exception:
