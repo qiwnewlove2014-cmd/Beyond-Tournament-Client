@@ -183,6 +183,8 @@ class InstrumentInput(threading.Thread):
         super().__init__(daemon=True)
         self.game = game
         self.capture_ext = cyal.CaptureExtension()
+        self._voice_lock = threading.Lock()
+        self._capture_lock = threading.RLock()
         self.audio_input = None
         self.stereo = False
         self._open(options.get("audio_instrument_input_device", "system default"))
@@ -232,12 +234,20 @@ class InstrumentInput(threading.Thread):
         """Switch to another capture device (called from the in-game menu).
 
         ``device`` must already be resolved (the raw name, or the default
-        device's name for "system default").
+        device's name for "system default"). A session that was capturing when
+        the device changed captures again on the new handle: the player picked
+        a device while the guitar was on, and a switch that leaves the light on
+        but the capture stopped is heard as a guitar that "just went quiet".
         """
         if self.audio_input is not None and getattr(self.audio_input, "name", None) == device:
             return
-        self.audio_input = None
+        resuming = bool(self.recording)
+        self.stop_recording()
+        self.release_device()
         self._open(device)
+        self.device_error = None
+        if resuming and self.audio_input is not None:
+            self.start_recording()
 
     def start_recording(self):
         """Begin capturing into the ring buffer. False if it could not start.
@@ -252,22 +262,41 @@ class InstrumentInput(threading.Thread):
         if self.audio_input is None:
             return False
         try:
-            self.audio_input.start()
+            with getattr(self, "_capture_lock", contextlib.nullcontext()):
+                capture = self.audio_input
+                if capture is None:
+                    return False
+                capture.start()
+                if capture is not self.audio_input:
+                    return False
+                self.recording = True
         except cyal.exceptions.CyalError as exc:
             self._device_died(exc, "start")
             return False
-        self.recording = True
         return True
 
     def stop_recording(self):
-        """Stop capturing; a device that died on the way out is let go."""
-        self.recording = False
-        if self.audio_input is None:
-            return
-        try:
-            self.audio_input.stop()
-        except cyal.exceptions.CyalError as exc:
-            self._device_died(exc, "stop")
+        """Stop capture and retire this session's encoder without stale PCM."""
+        capture_lock = getattr(self, "_capture_lock", contextlib.nullcontext())
+        with capture_lock:
+            self.recording = False
+            capture = self.audio_input
+            if capture is not None:
+                try:
+                    capture.stop()
+                except cyal.exceptions.CyalError as exc:
+                    self._device_died(exc, "stop")
+        voice_lock = getattr(self, "_voice_lock", contextlib.nullcontext())
+        with voice_lock:
+            voice, self._guitar_voice = getattr(self, "_guitar_voice", None), None
+        self.frames.clear()
+        self.notes.clear()
+        getattr(self, "_monitor_pending", bytearray()).clear()
+        getattr(self, "_relay_pending", bytearray()).clear()
+        if voice is not None:
+            with contextlib.suppress(Exception):
+                close = getattr(voice, "close", None)
+                close() if callable(close) else voice.put(None)
 
     def release_device(self):
         """Let go of the capture handle without caring whether it still lives.
@@ -276,8 +305,14 @@ class InstrumentInput(threading.Thread):
         ``stop()`` on a handle that may already be dead (see
         :meth:`_device_died`). Safe to call from the main thread at any time.
         """
-        device, self.audio_input = self.audio_input, None
-        self.recording = False
+        lock = getattr(self, "_capture_lock", contextlib.nullcontext())
+        with lock:
+            device, self.audio_input = self.audio_input, None
+            self.recording = False
+        self.frames.clear()
+        self.notes.clear()
+        getattr(self, "_monitor_pending", bytearray()).clear()
+        getattr(self, "_relay_pending", bytearray()).clear()
         if device is not None:
             with contextlib.suppress(Exception):
                 device.stop()
@@ -309,11 +344,24 @@ class InstrumentInput(threading.Thread):
 
     def run(self):
         while self.running:
-            time.sleep(0.0005)
             if not self.recording or self.audio_input is None:
+                time.sleep(0.01)
+                continue
+            time.sleep(0.0005)
+            capture = self.audio_input
+            if not self.recording or capture is None:
                 continue
             try:
-                ready = self.audio_input.available_samples
+                with getattr(self, "_capture_lock", contextlib.nullcontext()):
+                    if capture is not self.audio_input or not self.recording:
+                        continue
+                    ready = capture.available_samples
+                    if ready >= self.MIN_READ_SAMPLES:
+                        take = min(ready, self.MONITOR_CHUNK_SAMPLES)
+                        buf = bytearray(take * (4 if self.stereo else 2))
+                        capture.capture_samples(buf)
+                    else:
+                        buf = None
             except cyal.exceptions.CyalError as exc:
                 # The handle is good only for the call that used it. Retire it
                 # and stay alive: this thread is what every later session needs,
@@ -322,20 +370,13 @@ class InstrumentInput(threading.Thread):
                 # take_device_error).
                 self._device_died(exc, "capture")
                 continue
-            if ready >= self.MIN_READ_SAMPLES:
-                # One monitor chunk at most per read; a read that finds a
-                # backlog still hands it over 10 ms at a time and the rest is
-                # drained on the next pass, half a millisecond later. The ear
-                # wants the newest audio, never a large block of old audio.
-                # cyal counts frames for both formats: mono16 frames are 2
-                # bytes, stereo16 frames are 4 bytes (L+R pairs).
-                take = min(ready, self.MONITOR_CHUNK_SAMPLES)
-                buf = bytearray(take * (4 if self.stereo else 2))
-                try:
-                    self.audio_input.capture_samples(buf)
-                except cyal.exceptions.CyalError as exc:
-                    self._device_died(exc, "capture")
-                    continue
+            if buf is not None and self.recording:
+                # One read, one chunk: the read that just happened is handed
+                # on even if the session is already being taken down, because
+                # ``stop_recording``/``release_device`` clear these buffers
+                # themselves - dropping it here would leave the newest audio
+                # of the session on the floor (and a 4-read capture loop one
+                # frame short).
                 if self.stereo:
                     raw = _downmix_stereo(buf)
                 else:
@@ -385,6 +426,17 @@ class InstrumentInput(threading.Thread):
         # music bot menu - the megaphone routing is an independent
         # toggle (same rule piano and drums follow), so the guitar
         # reaches the PA speakers just like the other instruments.
+        #
+        # A cinema room is reached through those two legs and never by a
+        # third, per-frame route of its own: a room plays a live note by
+        # spawning one sample per speaker (``live.route_to_room``), which is
+        # a per-note contract - a continuous 20 ms capture stream has no note
+        # to spawn and no release to retire, so every frame would build a
+        # source and a buffer that nothing owns (the thread-and-buffer bloat a
+        # strummed hall was reported as). With the megaphone on, the frame
+        # reaches the room through ``voice_chat._feed_local_megaphone_direct``
+        # / the PA playout's room leg; through the broadcast it reaches the
+        # room the bot itself is feeding.
         music_bot = self._find_music_bot()
         route_to_bot = bool(music_bot and (
             getattr(music_bot, "broadcast_enabled", False)
@@ -416,32 +468,35 @@ class InstrumentInput(threading.Thread):
             self.notes.append(result)
 
     def _feed_guitar_voice(self, raw, force_mega=False):
-        """Stream the raw guitar audio out on the normal 3D voice channel.
-
-        Uses the game's own voice compression (Opus, CHANNEL_VOICECHAT); the
-        server relays it on this player's voice channel so nearby players
-        hear the strums/chords spatially - no music bot broadcast needed.
-        """
-        if self._guitar_voice is None:
-            if self.game is None:
+        """Stream guitar PCM through a bounded, session-owned encoder worker."""
+        lock = getattr(self, "_voice_lock", contextlib.nullcontext())
+        with lock:
+            if not self.running or not self.recording or self.game is None:
                 return
-            from . import consts, voice_chat
-            try:
-                self._guitar_voice = voice_chat.voice_chat_compression(
-                    self.game, consts.CHANNEL_VOICECHAT)
-            except Exception:
-                self._guitar_voice = None
-                
-        if self._guitar_voice is not None:
+            if self._guitar_voice is None:
+                from . import consts, voice_chat
+                try:
+                    self._guitar_voice = voice_chat.voice_chat_compression(
+                        self.game, consts.CHANNEL_VOICECHAT,
+                        max_pending_frames=2)
+                except Exception:
+                    self._guitar_voice = None
+
+            voice = self._guitar_voice
+            if voice is None:
+                return
             from . import consts
-            target_channel = consts.CHANNEL_MEGAPHONE if force_mega else consts.CHANNEL_VOICECHAT
-            if getattr(self._guitar_voice, 'channel', None) != target_channel:
-                if hasattr(self._guitar_voice, 'set_channel'):
-                    self._guitar_voice.set_channel(target_channel)
+            target_channel = (
+                consts.CHANNEL_MEGAPHONE if force_mega
+                else consts.CHANNEL_VOICECHAT
+            )
+            if getattr(voice, "channel", None) != target_channel:
+                setter = getattr(voice, "set_channel", None)
+                if callable(setter):
+                    setter(target_channel)
                 else:
-                    self._guitar_voice.channel = target_channel
-                    
-            self._guitar_voice.put(bytearray(raw))
+                    voice.channel = target_channel
+            voice.put(bytearray(raw))
 
     def drain_raw_frames(self):
         """Pop and return all raw mono16 chunks captured since last call.
@@ -461,13 +516,31 @@ class InstrumentInput(threading.Thread):
         return notes
 
     def close(self):
-        self.running = False
-        if self._guitar_voice is not None:
+        """Stop this session's capture and encoder workers; safe to call twice."""
+        if (not getattr(self, "running", False)
+                and getattr(self, "_guitar_voice", None) is None
+                and getattr(self, "audio_input", None) is None):
+            return
+        capture_lock = getattr(self, "_capture_lock", contextlib.nullcontext())
+        with capture_lock:
+            self.running = False
+            self.recording = False
+        lock = getattr(self, "_voice_lock", contextlib.nullcontext())
+        with lock:
+            voice, self._guitar_voice = getattr(self, "_guitar_voice", None), None
+        self.frames.clear()
+        self.notes.clear()
+        getattr(self, "_monitor_pending", bytearray()).clear()
+        getattr(self, "_relay_pending", bytearray()).clear()
+        if voice is not None:
             try:
-                self._guitar_voice.put(None)  # stop its encode/send thread
+                close = getattr(voice, "close", None)
+                if callable(close):
+                    close()
+                else:
+                    voice.put(None)
             except Exception:
                 pass
-            self._guitar_voice = None
         self.release_device()
 
 
@@ -492,8 +565,10 @@ def _probe_device_signal(device, seconds=SIGNAL_SCAN_SECONDS):
 
     Returns (rms, stereo) or None if the device cannot be opened. Tries mono
     first and falls back to stereo (downmixed for the measurement), matching
-    the instrument input's own open strategy.
+    the instrument input's own open strategy. This serial helper remains the
+    deterministic seam for tests; real scans use a shared parallel window.
     """
+
     try:
         cap = cyal.CaptureExtension()
         for fmt, stereo in ((cyal.BufferFormat.MONO16, False),
@@ -501,7 +576,7 @@ def _probe_device_signal(device, seconds=SIGNAL_SCAN_SECONDS):
             try:
                 inp = cap.open_device(name=device.encode(),
                                       sample_rate=48000, format=fmt)
-            except (cyal.exceptions.DeviceNotFoundError, TypeError):
+            except (cyal.exceptions.CyalError, TypeError):
                 continue
             try:
                 inp.start()
@@ -517,6 +592,10 @@ def _probe_device_signal(device, seconds=SIGNAL_SCAN_SECONDS):
                         arr = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
                         peak = max(peak, float(np.sqrt(np.mean(arr ** 2))))
                         frames += 1
+                    else:
+                        # A signal scan runs off the game thread, but must not
+                        # spin a CPU core while waiting for the device period.
+                        time.sleep(0.002)
                 if frames > 0:
                     return peak, stereo
             finally:
@@ -529,15 +608,88 @@ def _probe_device_signal(device, seconds=SIGNAL_SCAN_SECONDS):
     return None
 
 
+def _scan_capture_devices(devices, seconds=SIGNAL_SCAN_SECONDS):
+    """Listen to all devices during one shared window on the calling worker.
+
+
+    Opening devices one after another made a short strum easy to miss: a player
+    could play on the spoken prompt while the scan was still checking a
+    different microphone. Keeping each opened handle for the same short window
+    means any device can be identified while the player plays, without creating
+    a worker thread per device.
+    """
+    opened = []
+    try:
+        for device in devices:
+            capture_ext = cyal.CaptureExtension()
+            inp = None
+            for fmt, stereo in ((cyal.BufferFormat.MONO16, False),
+                                (cyal.BufferFormat.STEREO16, True)):
+                try:
+                    inp = capture_ext.open_device(
+                        name=device.encode(), sample_rate=48000, format=fmt)
+                    inp.start()
+                    opened.append({
+                        "device": device, "input": inp,
+                        "capture_ext": capture_ext, "stereo": stereo,
+                        "peak": 0.0, "frames": 0,
+                    })
+                    break
+                except (cyal.exceptions.CyalError, TypeError):
+                    if inp is not None:
+                        with contextlib.suppress(Exception):
+                            inp.stop()
+                        inp = None
+            # Unavailable devices do not prevent the rest of the scan.
+
+        deadline = time.perf_counter() + max(0.0, float(seconds))
+        while time.perf_counter() < deadline:
+            for item in opened:
+                inp = item["input"]
+                if inp is None:
+                    continue
+                try:
+                    ready = inp.available_samples
+                    if ready < 48:
+                        continue
+                    take = min(ready, 960)
+                    channels_bytes = 4 if item["stereo"] else 2
+                    buf = bytearray(take * channels_bytes)
+                    inp.capture_samples(buf)
+                    if item["stereo"]:
+                        buf = bytearray(_downmix_stereo(buf))
+                    arr = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
+                    rms = float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0
+                    item["peak"] = max(item["peak"], rms)
+                    item["frames"] += 1
+                except Exception:
+                    item["frames"] = 0
+                    item["peak"] = 0.0
+                    with contextlib.suppress(Exception):
+                        inp.stop()
+                    item["input"] = None
+            time.sleep(0.002)
+    finally:
+        for item in opened:
+            if item["input"] is not None:
+                with contextlib.suppress(Exception):
+                    item["input"].stop()
+
+    return {
+        item["device"]: (item["peak"], item["stereo"])
+        for item in opened if item["input"] is not None and item["frames"]
+    }
+
+
 def scan_for_signal_devices(devices=None, threshold=SIGNAL_SCAN_THRESHOLD):
     """Probe every capture device and return the ones carrying real signal.
 
-    ``devices`` may be a list of device-name strings (for tests); otherwise the
-    real cyal capture device list is used. Returns dicts
-    ``{device, name, rms, stereo, guitar_pedal}`` sorted loudest-first with
-    named guitar/pedal devices ranked ahead of equally loud generic ones, so a
-    generic-named pedal ("USB Audio Device") is still found when the player
-    strums during the scan.
+    Real scans open available devices together for one shared listening window,
+    so a short strum is not missed while earlier microphones are inspected.
+    ``devices`` is the deterministic serial-probe seam used by offline tests.
+    Returns dicts ``{device, name, rms, stereo, guitar_pedal}`` sorted
+    loudest-first with named guitar/pedal devices ranked ahead of equally loud
+    generic ones.
     """
     if devices is None:
         try:
@@ -545,12 +697,16 @@ def scan_for_signal_devices(devices=None, threshold=SIGNAL_SCAN_THRESHOLD):
             devices = list(cap.devices)
         except Exception:
             return []
+        measurements = _scan_capture_devices(devices)
+    else:
+        measurements = {}
+        for device in devices:
+            result = _probe_device_signal(device)
+            if result is not None:
+                measurements[device] = result
+
     found = []
-    for device in devices:
-        result = _probe_device_signal(device)
-        if result is None:
-            continue
-        rms, stereo = result
+    for device, (rms, stereo) in measurements.items():
         if rms >= threshold:
             found.append({
                 "device": device,

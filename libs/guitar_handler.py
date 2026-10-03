@@ -32,6 +32,10 @@ class GuitarHandler:
         self.active = False
         self.monitor = None          # GuitarLocalMonitor
         self.instrument_input = None  # InstrumentInput instance
+        self._scan_generation = 0
+        self._scan_pending = False
+        self._scan_worker = None
+        self._cleaned_up = False
 
     @property
     def _game(self):
@@ -127,6 +131,8 @@ class GuitarHandler:
         and an "on" light. Toggling again reopens the device (see
         _start_recording).
         """
+        if self.instrument_input is None:
+            return
         failure = self.instrument_input.take_device_error()
         if failure:
             self.active = False
@@ -152,6 +158,8 @@ class GuitarHandler:
         samples ship); it plays a piano placeholder locally and broadcasts a
         play_guitar_note event like the piano path.
         """
+        if self.instrument_input is None:
+            return
         for note, velocity in self.instrument_input.drain_notes():
             self.play_local_note(note, velocity)
             packet = {"note": note}
@@ -167,6 +175,16 @@ class GuitarHandler:
     def toggle(self):
         """Toggle the line-in guitar: capture pitch from the instrument input
         device and broadcast detected notes like the piano."""
+        if self._cleaned_up:
+            return
+        if self._scan_pending:
+            self._scan_pending = False
+            self._scan_generation += 1
+            speak("Instrument signal scan cancelled")
+            return
+        if self._scan_worker is not None and self._scan_worker.is_alive():
+            speak("Instrument signal scan is still closing. Please try again shortly.")
+            return
         if self.active:
             self.active = False
             if self.instrument_input:
@@ -200,30 +218,49 @@ class GuitarHandler:
                 # Let go of the current handle before the scan opens devices
                 # of its own; a dead one must not stop the switch either.
                 self.instrument_input.release_device()
+                self._scan_pending = True
+                self._scan_generation += 1
+                generation = self._scan_generation
                 speak("No guitar or pedal name detected. Scanning for signal, play a note.")
                 import threading as _threading
-                _threading.Thread(
-                    target=self._run_signal_scan, daemon=True
-                ).start()
+                self._scan_worker = _threading.Thread(
+                    target=self._run_signal_scan,
+                    args=(generation,),
+                    name="InstrumentSignalScan",
+                    daemon=True,
+                )
+                self._scan_worker.start()
                 return
 
         self._start_recording()
 
-    def _run_signal_scan(self):
-        """Probe every capture device off the main thread, then finish the
-        toggle on the main thread with the result."""
+    def _run_signal_scan(self, generation=None):
+        """Probe devices off-thread; only the current request may finish it."""
         from . import instrument_input as _instr
         try:
             found = _instr.scan_for_signal_devices()
         except Exception:
             found = []
-        self._game.put(lambda: self._on_signal_scan_done(found))
+        if generation is None:
+            generation = self._scan_generation
+        self._game.put(
+            lambda gen=generation, result=found:
+            self._on_signal_scan_done(result, gen)
+        )
 
-    def _on_signal_scan_done(self, found):
-        """Complete the guitar-mode toggle after a signal scan."""
+    def _on_signal_scan_done(self, found, generation=None):
+        """Complete a signal scan only if it still belongs to this toggle."""
         from . import instrument_input as _instr
+        if generation is not None and generation != self._scan_generation:
+            return
+        if getattr(self, "_cleaned_up", False) or not self._scan_pending:
+            return
+        self._scan_pending = False
         if found:
             device = _instr.pick_best_signal_device(found)
+            if not device or self.instrument_input is None:
+                speak("No signal found. Choose the input device manually in Options.")
+                return
             options.set("audio_instrument_input_device", device)
             self.instrument_input.reopen(device)
             speak(f"Signal detected on {device[14:]}, from {len(found)} device.")
@@ -240,6 +277,8 @@ class GuitarHandler:
         name. Only a device that cannot be opened at all is unavailable.
         """
         from . import instrument_input as _instr
+        if getattr(self, "_cleaned_up", False) or self.instrument_input is None:
+            return
         if self.instrument_input.audio_input is None:
             self.instrument_input.reopen(
                 options.get("audio_instrument_input_device", "system default"))
@@ -259,10 +298,20 @@ class GuitarHandler:
     # ------------------------------------------------------------------
 
     def cleanup(self):
-        """Close the guitar monitor on exit."""
+        """Invalidate scans and release this gameplay's capture/encode workers."""
+        if self._cleaned_up:
+            return
+        self._cleaned_up = True
+        self._scan_pending = False
+        self._scan_generation += 1
+        self.active = False
         if self.monitor:
             self.monitor.close()
             self.monitor = None
+        if self.instrument_input:
+            self.instrument_input.close()
+            self.instrument_input = None
+        self._scan_worker = None
 
     # ------------------------------------------------------------------
     # compatibility shims — kept so Gameplay can still delegate directly
@@ -285,25 +334,6 @@ class GuitarHandler:
 
     def toggle_guitar_mode(self, mod=None):
         self.toggle()
-
-    def _run_signal_scan(self):
-        from . import instrument_input as _instr
-        try:
-            found = _instr.scan_for_signal_devices()
-        except Exception:
-            found = []
-        self._game.put(lambda: self._on_signal_scan_done(found))
-
-    def _on_signal_scan_done(self, found):
-        from . import instrument_input as _instr
-        if found:
-            device = _instr.pick_best_signal_device(found)
-            options.set("audio_instrument_input_device", device)
-            self.instrument_input.reopen(device)
-            speak(f"Signal detected on {device[14:]}, from {len(found)} device.")
-            self._start_recording()
-        else:
-            speak("No signal found. Choose the input device manually in Options.")
 
     def _start_guitar_recording(self):
         self._start_recording()

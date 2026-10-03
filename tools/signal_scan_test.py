@@ -7,7 +7,9 @@ keeps the device that actually carries signal.
 
 Tests the scan ranking/filtering with simulated probe results, the pick
 helper, the gameplay fallback wiring, and runs a real probe on this machine's
-capture devices.
+capture devices. The real path opens every device for ONE shared window
+(tests/test_instrument_relay_bounds.py pins that, and the serial probe seam
+this tool fakes).
 
 Usage:
     python signal_scan_test.py
@@ -149,7 +151,9 @@ check("no name, no signal -> manual selection requested",
 
 # --------------------------------------------- 3. real probe on this machine
 print()
-print("[real scan] probing this machine's capture devices (0.5s each)...")
+print("[real scan] listening to this machine's capture devices "
+      "(one shared 0.5s window - a short strum is not missed while "
+      "another device is checked)...")
 try:
     found = ii.scan_for_signal_devices()
     if found:

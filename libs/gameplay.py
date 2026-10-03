@@ -788,6 +788,8 @@ class Gameplay(state.State):
 
     def exit(self):
         super().exit()
+        if getattr(self, "guitar", None):
+            self.guitar.cleanup()
         if getattr(self, "piano_mode", False):
             self.piano.stop(notify_server=False)
         if getattr(self, "drum_mode", False):

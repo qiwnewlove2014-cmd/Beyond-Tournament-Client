@@ -441,6 +441,96 @@ class TestCrossfadeStateMachine(unittest.TestCase):
         self.assertEqual(len(bot.next_up_queue), 1)
 
 
+class TestWideLiveInputMix(unittest.TestCase):
+    """Live music + guitar/mic frames are summed before the one limiter."""
+
+    @staticmethod
+    def _mono_frame(value, samples=960):
+        return struct.pack("<h", value) * samples
+
+    def test_wide_mix_limits_without_intermediate_int16_saturation(self):
+        frame = self._mono_frame(20000)
+        mixed = stream_mod.voice_chat.mix_audio_frames(
+            [(frame, 0.85), (frame, 0.85)],
+            state_key=None,
+        )
+        samples = struct.unpack("<960h", mixed)
+        self.assertEqual(len(mixed), len(frame))
+        self.assertLess(max(abs(value) for value in samples), 32767)
+        # Two 20k sources would have saturated at 32767 if audioop.add ran
+        # before the limiter. The true wide sum is limited below that ceiling.
+        self.assertGreater(samples[0], 27000)
+        self.assertLess(samples[0], 30000)
+
+    def test_guitar_encoder_queue_stays_bounded_and_keeps_the_latest_frames(self):
+        encoder = stream_mod.voice_chat.voice_chat_compression.__new__(
+            stream_mod.voice_chat.voice_chat_compression)
+        encoder.queue = queue.Queue(maxsize=2)
+        encoder._max_pending_frames = 2
+        encoder.dropped_frames = 0
+        encoder.running = True
+        encoder.put(b"old")
+        encoder.put(b"middle")
+        encoder.put(b"new")
+        self.assertEqual(encoder.queue.qsize(), 2)
+        self.assertEqual(encoder.dropped_frames, 1)
+        self.assertEqual(encoder.queue.get_nowait(), b"middle")
+        self.assertEqual(encoder.queue.get_nowait(), b"new")
+        encoder.close()
+        self.assertIsNone(encoder.queue.get_nowait())
+
+
+class TestUploadGate(unittest.TestCase):
+    """Who may upload: the sender's own switches, never the listener's.
+
+    A regression pin for the cinema-era edit that ORed the *listener* switches
+    (`Instruments:`, `Cinema rooms:`) into `_send_to_network_actual`'s gate.
+    Those are on by default and say how this client HEARS a cabinet, so reading
+    one of them here turned every private Music Bot into a map-wide broadcast.
+    """
+
+    @staticmethod
+    def _streamer(sent, **bot_flags):
+        streamer = stream_mod.AudioStreamer.__new__(stream_mod.AudioStreamer)
+        streamer.game = SimpleNamespace(
+            network=SimpleNamespace(
+                send=lambda *args, **kwargs: sent.append(args)),
+        )
+        flags = {
+            "broadcast_enabled": False,
+            "broadcast_to_megaphone": False,
+            "duck_multiplier": 1.0,
+            "mic_pcm_queue": None,
+            "guitar_pcm_queue": None,
+        }
+        flags.update(bot_flags)
+        streamer.bot = SimpleNamespace(**flags)
+        streamer.encoder = SimpleNamespace(encode=lambda _pcm: b"opus")
+        streamer.volume = 100
+        return streamer
+
+    def test_a_listener_switch_never_makes_a_private_bot_upload(self):
+        sent = []
+        streamer = self._streamer(
+            sent,
+            instruments_cinema_active=True,
+            instrument_cinema_active=True,
+            cinema_speakers=True,
+            cinema_force_upload=False,
+        )
+        streamer._send_to_network_actual(b"\x00" * 3840)
+        self.assertEqual(sent, [])
+
+    def test_the_sender_own_switches_still_upload(self):
+        for flags in ({"broadcast_enabled": True},
+                      {"broadcast_to_megaphone": True},
+                      {"cinema_force_upload": True}):
+            sent = []
+            streamer = self._streamer(sent, **flags)
+            streamer._send_to_network_actual(b"\x00" * 3840)
+            self.assertEqual(len(sent), 1, flags)
+
+
 class TestBroadcastMixBlend(unittest.TestCase):
     """PCM blend math behind the party-audible network crossfade."""
 

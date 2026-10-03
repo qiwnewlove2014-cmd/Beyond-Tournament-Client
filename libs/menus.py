@@ -1413,7 +1413,16 @@ def set_input_device(game, device, func_call, parent, capture, in_game=False, ta
     if in_game:
         if target == "instrument":
             from . import instrument_input
-            owner = getattr(parent, "instrument_input", None)
+            # The guitar mode owns this capture device (one handle, one
+            # worker). Picking a device here has to reach that very object:
+            # a second session of its own would open the same pedal and leave
+            # the guitar holding the old handle, which is how a manual pick
+            # ended up changing nothing until the next toggle. The throwaway
+            # session is kept only for a state with no guitar handler at all.
+            handler = getattr(parent, "guitar", None)
+            owner = getattr(handler, "instrument_input", None) if handler else None
+            if owner is None:
+                owner = getattr(parent, "instrument_input", None)
             if owner is None:
                 owner = parent.instrument_input = instrument_input.InstrumentInput(parent.game)
             owner.reopen(device)

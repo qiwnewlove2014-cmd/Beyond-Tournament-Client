@@ -30,6 +30,75 @@ import struct
 # packet from its own peak stepped the gain at 20 ms boundaries ('kee-kee'
 # ticking on loud continuous content); smoothing removes the 50 Hz pumping.
 _limiter_gain_state = {}
+_limiter_gain_lock = threading.Lock()
+
+
+def audio_limiter_key(namespace, owner):
+    """A stable, per-owner limiter key shared by that owner's audio paths."""
+    return (str(namespace), id(owner))
+
+
+def reset_audio_limiter(state_key):
+    """Forget smoothing state when the owner of a limited stream is closed."""
+    with _limiter_gain_lock:
+        _limiter_gain_state.pop(state_key, None)
+
+
+def _smoothed_limiter_gain(state_key, target_gain):
+    if state_key is None:
+        return target_gain
+    with _limiter_gain_lock:
+        prev = _limiter_gain_state.get(state_key, 1.0)
+        if target_gain < prev:
+            gain = prev + (target_gain - prev) * 0.6
+        else:
+            gain = prev + (target_gain - prev) * 0.02
+        _limiter_gain_state[state_key] = gain
+    return gain
+
+
+def mix_audio_frames(frames, threshold=0.85, ratio=8.0, state_key=None):
+    """Sum equally sized mono16 frames in wide precision, then limit once.
+
+    ``audioop.add`` saturates at int16 on every addition, so a limiter applied
+    afterwards cannot undo clipping that already occurred in the mix. Keeping
+    the sum in Python precision lets the limiter see the true peak first.
+    ``frames`` contains ``(pcm_bytes, gain)`` pairs.
+    """
+    try:
+        frames = [(bytes(pcm), float(gain)) for pcm, gain in frames if pcm]
+        if not frames:
+            return b""
+        sample_count = min(len(pcm) // 2 for pcm, _gain in frames)
+        if sample_count <= 0:
+            return b""
+        mixed = [0.0] * sample_count
+        for pcm, gain in frames:
+            samples = struct.unpack(f"<{sample_count}h", pcm[:sample_count * 2])
+            for index, sample in enumerate(samples):
+                mixed[index] += sample * gain
+
+        peak = max((abs(sample) for sample in mixed), default=0.0)
+        threshold = max(0.0, min(1.0, float(threshold)))
+        ratio = max(1.0, float(ratio))
+        threshold_val = 32767 * threshold
+        if peak > threshold_val:
+            target_peak = threshold_val + (peak - threshold_val) / ratio
+            target_gain = min(target_peak / peak, 1.0)
+        else:
+            target_gain = 1.0
+        gain = _smoothed_limiter_gain(state_key, target_gain)
+        # The smoothed attack is deliberately gradual, but an instantaneous
+        # ceiling still prevents a single transient from wrapping/clipping.
+        if peak > 0:
+            gain = min(gain, 32767 / peak)
+        limited = [max(-32768, min(32767, int(sample * gain)))
+                   for sample in mixed]
+        return struct.pack(f"<{sample_count}h", *limited)
+    except Exception:
+        # Malformed frames are not allowed to kill the audio worker.
+        return b""
+
 
 def soft_limit_audio(audio_bytes, threshold=0.85, ratio=8.0, state_key=None):
     """Soft limiter with a smoothed per-stream gain.
@@ -52,17 +121,7 @@ def soft_limit_audio(audio_bytes, threshold=0.85, ratio=8.0, state_key=None):
         else:
             target_gain = 1.0
 
-        if state_key is not None:
-            prev = _limiter_gain_state.get(state_key, 1.0)
-            if target_gain < prev:
-                # Fast attack toward the (lower) target.
-                gain = prev + (target_gain - prev) * 0.6
-            else:
-                # Slow release back to unity (~1s, no pumping).
-                gain = prev + (target_gain - prev) * 0.02
-            _limiter_gain_state[state_key] = gain
-        else:
-            gain = target_gain
+        gain = _smoothed_limiter_gain(state_key, target_gain)
 
         # Apply the smoothed gain to every sample (uniform scaling, no
         # per-sample knee steps that create harmonic distortion).
@@ -641,12 +700,21 @@ def update_active_speakers(count):
 
 
 class voice_chat_compression(threading.Thread):
-    def __init__(self, game, channel=None):
+    def __init__(self, game, channel=None, max_pending_frames=None):
         try:
             super().__init__(daemon=True)
             self.game = game
             self.channel = channel if channel is not None else consts.CHANNEL_VOICECHAT
-            self.queue = queue.SimpleQueue()
+            self._max_pending_frames = (
+                max(1, int(max_pending_frames))
+                if max_pending_frames is not None else None
+            )
+            self.queue = (
+                queue.Queue(maxsize=self._max_pending_frames)
+                if self._max_pending_frames is not None
+                else queue.SimpleQueue()
+            )
+            self.dropped_frames = 0
             self.encoder = OpusEncoder()
             self.encoder.set_application('voip')
             self.encoder.set_channels(1)
@@ -696,11 +764,45 @@ class voice_chat_compression(threading.Thread):
         return consts.CHANNEL_MEGAPHONE_TIMELINE, payload
 
     def put(self, value):
-        if getattr(self, 'running', True):
+        if not getattr(self, 'running', True):
+            return
+        try:
             self.queue.put_nowait(value)
+            return
+        except queue.Full:
+            pass
+        # A guitar is a live edge: if encoding/networking stalls, old frames
+        # are less useful than the current strum. Keep its handoff bounded and
+        # replace the oldest queued PCM without blocking the capture thread.
+        if (getattr(self, "_max_pending_frames", None) is None
+                or not isinstance(value, (bytes, bytearray))):
+            return
+        try:
+            self.queue.get_nowait()
+        except queue.Empty:
+            pass
+        else:
+            self.dropped_frames = getattr(self, "dropped_frames", 0) + 1
+        try:
+            self.queue.put_nowait(value)
+        except queue.Full:
+            self.dropped_frames = getattr(self, "dropped_frames", 0) + 1
+
+    def discard_pending(self):
+        """Drop queued live PCM while keeping the reusable worker alive."""
+        if getattr(self, "_max_pending_frames", None) is None:
+            return
+        while True:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                break
 
     def close(self):
+        if not getattr(self, 'running', True):
+            return
         self.running = False
+        self.discard_pending()
         self.queue.put_nowait(None)
 
     def _megaphone_decoder(self, sender_id):

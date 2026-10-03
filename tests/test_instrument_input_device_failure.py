@@ -99,6 +99,18 @@ class StartStopTests(unittest.TestCase):
         self.assertTrue(device.started)
         self.assertIs(rec.audio_input, device)
 
+    def test_stopping_discards_partial_and_queued_audio(self):
+        rec = make_input(live_device())
+        rec.frames.extend((b"queued",))
+        rec.notes.extend((("A4", 100),))
+        rec._monitor_pending = bytearray(b"monitor")
+        rec._relay_pending = bytearray(b"relay")
+        rec.stop_recording()
+        self.assertFalse(rec.frames)
+        self.assertFalse(rec.notes)
+        self.assertEqual(rec._monitor_pending, b"")
+        self.assertEqual(rec._relay_pending, b"")
+
     def test_a_handle_that_will_not_stop_does_not_raise_on_the_way_out(self):
         rec = make_input(dead_device())
         rec.recording = True
@@ -225,6 +237,27 @@ class GuitarModeTests(unittest.TestCase):
         self.assertIsNone(handler.monitor)
         monitor.close.assert_called_once()
         self.assertIn("stopped working", str(speak.call_args_list))
+
+    def test_scan_cancel_ignores_a_late_worker_callback(self):
+        handler = self.handler(live_device())
+        handler._scan_pending = True
+        handler._scan_generation = 8
+        with mock.patch.object(guitar_handler, "speak"), \
+                mock.patch.object(handler, "_start_recording") as start:
+            handler._on_signal_scan_done(
+                [{"device": "OpenAL Soft on Boss GT-1"}], generation=7)
+        start.assert_not_called()
+
+    def test_cancelled_scan_callback_cannot_restart_capture(self):
+        handler = self.handler(live_device())
+        handler._scan_pending = False
+        handler._scan_generation = 8
+        with mock.patch.object(guitar_handler, "speak") as speak, \
+                mock.patch.object(handler, "_start_recording") as start:
+            handler._on_signal_scan_done(
+                [{"device": "OpenAL Soft on Boss GT-1"}], generation=7)
+        start.assert_not_called()
+        speak.assert_not_called()
 
     def test_switching_the_device_never_touches_a_dead_handle(self):
         handler = self.handler(dead_device())

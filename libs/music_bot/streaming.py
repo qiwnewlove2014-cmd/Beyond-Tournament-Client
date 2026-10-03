@@ -760,6 +760,7 @@ class AudioStreamer(threading.Thread):
 
     def _send_to_network_actual(self, data, timeline_epoch=None, timeline_seq=None):
         """Downmix Stereo to Mono, scale volume, encode as Opus, and send to network."""
+        mix_limiter_key = voice_chat.audio_limiter_key("musicbot-mix", self)
         try:
             if not self.game or not self.game.network:
                 return
@@ -822,20 +823,27 @@ class AudioStreamer(threading.Thread):
                     pass
             if mic_data is not None or guitar_data is not None:
                 try:
-                    def _align(b):
-                        if len(b) > len(mono_data):
-                            return b[:len(mono_data)]
-                        if len(b) < len(mono_data):
-                            return b + b'\x00' * (len(mono_data) - len(b))
-                        return b
-                    # Scale down before mixing to prevent 16-bit overflow clipping
-                    mono_data = audioop.mul(mono_data, 2, 0.75)
+                    def _align(frame):
+                        if len(frame) > len(mono_data):
+                            return frame[:len(mono_data)]
+                        if len(frame) < len(mono_data):
+                            return frame + b'\x00' * (len(mono_data) - len(frame))
+                        return frame
+
+                    # Sum music and live inputs in wide precision, then apply
+                    # one limiter. audioop.add saturates at each intermediate
+                    # addition, so limiting its result cannot repair clipping.
+                    mix = [(mono_data, 0.75)]
                     if mic_data is not None:
-                        mono_data = audioop.add(
-                            mono_data, audioop.mul(_align(mic_data), 2, 0.85), 2)
+                        mix.append((_align(mic_data), 0.85))
                     if guitar_data is not None:
-                        mono_data = audioop.add(
-                            mono_data, audioop.mul(_align(guitar_data), 2, 0.85), 2)
+                        mix.append((_align(guitar_data), 0.85))
+                    mixed = voice_chat.mix_audio_frames(
+                        mix,
+                        state_key=mix_limiter_key,
+                    )
+                    if mixed:
+                        mono_data = mixed
                 except Exception:
                     pass
 
@@ -847,7 +855,6 @@ class AudioStreamer(threading.Thread):
                 try:
                     gp = self.bot._find_gameplay()
                     if gp is not None:
-                        from .. import voice_chat
                         if hasattr(voice_chat, '_feed_local_megaphone_direct'):
                             local_pcm = bytes(mono_data)
                             voice_chat._feed_local_megaphone_direct(
@@ -1951,6 +1958,8 @@ class AudioStreamer(threading.Thread):
                 self.network_queue.get_nowait()
             except Exception:
                 pass
+        voice_chat.reset_audio_limiter(
+            voice_chat.audio_limiter_key("musicbot-mix", self))
 
     def stop(self):
         self.running = False
@@ -2024,6 +2033,8 @@ class LiveRelayStreamer(threading.Thread):
 
     def stop(self):
         self.running = False
+        voice_chat.reset_audio_limiter(
+            voice_chat.audio_limiter_key("live-relay-mix", self))
 
     def run(self):
         import audioop
@@ -2053,20 +2064,29 @@ class LiveRelayStreamer(threading.Thread):
                 time.sleep(0.010)
                 continue
 
-            # Base silent mono PCM buffer (20ms at 48kHz = 960 samples * 2 bytes = 1920 bytes)
+            # One 20ms mono16 output frame; live inputs are aligned and added
+            # in wide precision before compression, never saturating mid-mix.
             mono_data = b'\x00' * 1920
             try:
-                def _align(b, length=1920):
-                    if len(b) > length:
-                        return b[:length]
-                    if len(b) < length:
-                        return b + b'\x00' * (length - len(b))
-                    return b
+                def _align(frame, length=1920):
+                    if len(frame) > length:
+                        return frame[:length]
+                    if len(frame) < length:
+                        return frame + b'\x00' * (length - len(frame))
+                    return frame
 
+                mix = []
                 if guitar_data is not None:
-                    mono_data = audioop.add(mono_data, audioop.mul(_align(guitar_data), 2, 0.85), 2)
+                    mix.append((_align(guitar_data), 0.85))
                 if mic_data is not None:
-                    mono_data = audioop.add(mono_data, audioop.mul(_align(mic_data), 2, 0.85), 2)
+                    mix.append((_align(mic_data), 0.85))
+                mixed = voice_chat.mix_audio_frames(
+                    mix,
+                    state_key=voice_chat.audio_limiter_key(
+                        "live-relay-mix", self),
+                )
+                if mixed:
+                    mono_data = mixed
 
                 current_volume_scale = (self.bot.volume / 100.0) * getattr(self.bot, 'duck_multiplier', 1.0)
                 if current_volume_scale != 1.0:
@@ -2086,7 +2106,6 @@ class LiveRelayStreamer(threading.Thread):
                     try:
                         gp = self.bot._find_gameplay()
                         if gp is not None:
-                            from .. import voice_chat
                             if hasattr(voice_chat, '_feed_local_megaphone_direct'):
                                 local_pcm = bytes(mono_data)
                                 voice_chat._feed_local_megaphone_direct(gp, local_pcm, producer='music')
@@ -2115,5 +2134,5 @@ class LiveRelayStreamer(threading.Thread):
                     self.game.network.send(target_channel, "n/a", encoded, reliable=False)
             except Exception:
                 time.sleep(0.010)
-
-
+        voice_chat.reset_audio_limiter(
+            voice_chat.audio_limiter_key("live-relay-mix", self))
