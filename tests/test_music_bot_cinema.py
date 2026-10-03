@@ -209,10 +209,10 @@ class CinemaMenuTests(unittest.TestCase):
         map_obj.spawn_jukebox(minx=9, maxx=10, miny=19, maxy=20, minz=0, maxz=1,
                               id="box_a")
         bot = make_bot(game)
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch("libs.music_bot.controller.options.set"):
             bot.set_cinema_target("box_a")
-        label = bot.cinema_target_label()
+            label = bot.cinema_target_label()
         self.assertIn("box_a", label)
         self.assertIn("front_only", label)
 
@@ -222,7 +222,7 @@ class CinemaMenuTests(unittest.TestCase):
         map_obj.spawn_jukebox(minx=9, maxx=10, miny=19, maxy=20, minz=0, maxz=1,
                               id="box_a")
         bot = make_bot(game)
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch("libs.music_bot.controller.options.set") as store:
             bot.set_cinema_target("box_a")
         store.assert_called_once_with("music_bot_cinema_target", "box_a")
@@ -234,7 +234,9 @@ class CinemaMenuTests(unittest.TestCase):
                               id="box_a")
         game.gameplay.map = map_obj
         bot = make_bot(game)
-        with mock.patch("libs.music_bot.controller.speak") as speech, \
+        # The routing talks: set_cinema_target is the handler's now, so its
+        # speech is silenced where the handler imports speak.
+        with mock.patch("libs.music_bot.cinema_handler.speak") as speech, \
                 mock.patch("libs.music_bot.controller.options.set"):
             bot.set_cinema_target("box_a")
         self.assertIsNone(bot._ensure_cinema_bank())
@@ -308,7 +310,7 @@ class CinemaOutputTests(unittest.TestCase):
 
     def routed_bot(self, cabinet="box_a"):
         bot = make_bot(self.game)
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch("libs.music_bot.controller.options.set"):
             bot.set_cinema_target(cabinet)
         return bot
@@ -481,7 +483,7 @@ class CinemaOutputTests(unittest.TestCase):
 
     def test_without_a_target_the_bot_is_untouched(self):
         bot = make_bot(self.game)
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch("libs.music_bot.controller.options.set"):
             bot.set_cinema_target(None)
         bot._new_bot_source = lambda: FakeSource(self.game.audio_mngr.context)
@@ -497,7 +499,7 @@ class CinemaOutputTests(unittest.TestCase):
         bot.playing = True
         bot.track_position = lambda: 12.0
         bot._seek_restart = lambda position: restarts.append(position)
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch("libs.music_bot.controller.options.set"):
             bot.set_cinema_target(None)
         self.assertIsNone(bot.cinema_bank)
@@ -624,7 +626,7 @@ class LiveInstrumentRoutingTests(unittest.TestCase):
         from libs.audio.cinema import live as cinema_live
         game = self.routed_game()
         bot = make_bot(game)
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch.object(options, "save"):
             bot.toggle_instruments_cinema()                 # turn it off
         # The key the instruments read, written by the line that flipped it.
@@ -632,7 +634,7 @@ class LiveInstrumentRoutingTests(unittest.TestCase):
         self.assertFalse(cinema_live.live_instruments_enabled())
         self.assertFalse(bot.instruments_cinema_active())
         self.assertIn("OFF", bot.instruments_cinema_label())
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch.object(options, "save"):
             bot.toggle_instruments_cinema()                 # and back on
         self.assertTrue(cinema_live.live_instruments_enabled())
@@ -714,13 +716,13 @@ class LiveInstrumentRoutingTests(unittest.TestCase):
         bot = make_bot(FakeGame())
         self.assertTrue(cinema_speech.speech_enabled())
         self.assertIn("cabinet", bot.speech_cinema_label())
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch.object(options, "save"):
             bot.toggle_speech_cinema()                       # back to the PA
         self.assertFalse(options.get(cinema_speech.OPTION_ENABLED))
         self.assertFalse(cinema_speech.speech_enabled())
         self.assertIn("PA", bot.speech_cinema_label())
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch.object(options, "save"):
             bot.toggle_speech_cinema()                       # and through the room
         self.assertTrue(cinema_speech.speech_enabled())
@@ -734,14 +736,14 @@ class LiveInstrumentRoutingTests(unittest.TestCase):
         host = SimpleNamespace(calls=[],
                                set_enabled=lambda enabled: host.calls.append(enabled))
         with mock.patch.object(cinema_plugin, "host_for", return_value=host), \
-                mock.patch("libs.music_bot.controller.speak"), \
+                mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch.object(options, "save"):
             bot.toggle_cinema_rooms()
         self.assertEqual(host.calls, [False])
         self.assertFalse(options.get("cinema_speakers"))
         self.assertIn("OFF", bot.cinema_rooms_label())
         with mock.patch.object(cinema_plugin, "host_for", return_value=host), \
-                mock.patch("libs.music_bot.controller.speak"), \
+                mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch.object(options, "save"):
             bot.toggle_cinema_rooms()
         self.assertEqual(host.calls, [False, True])
@@ -754,7 +756,7 @@ class LiveInstrumentRoutingTests(unittest.TestCase):
         from libs.audio.cinema import plugin as cinema_plugin
         game = self.routed_game()
         bot = make_bot(game)
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch.object(options, "save"):
             bot.toggle_cinema_rooms()
         self.assertIsNone(cinema_plugin.host_for(game, create=False))
@@ -821,7 +823,7 @@ class OwnSoundLineTests(unittest.TestCase):
         _game, _gp, bot = self._bot()
         menu = self._open_menu(bot)
         with mock.patch("libs.music_bot.controller.options.set") as store, \
-                mock.patch("libs.music_bot.controller.speak") as speech:
+                mock.patch("libs.music_bot.cinema_handler.speak") as speech:
             item = next(action for label, action in menu.items
                         if norm(label).startswith("Your sound:"))
             item()
@@ -837,7 +839,7 @@ class OwnSoundLineTests(unittest.TestCase):
         self.assertEqual(bot.own_sound_label(),
                          "Your sound: heard from jukebox j3, towards the left "
                          "of the room")
-        with mock.patch("libs.music_bot.controller.speak") as speech:
+        with mock.patch("libs.music_bot.cinema_handler.speak") as speech:
             bot.announce_own_sound()
         # One sentence, built by the pan module, said both here and at the
         # moment a pan lands (pan.own_notice): the menu and the announcement

@@ -1701,7 +1701,7 @@ class MusicBotLiveRoomTests(unittest.TestCase):
 
     def routed(self):
         bot = make_bot(self.game)
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch("libs.music_bot.controller.options.set"):
             bot.set_cinema_target("box_a")
         bot._create_stream_source()
@@ -2044,7 +2044,7 @@ class WallOcclusionTests(unittest.TestCase):
         game = self.walled()
         set_enabled(game, True)
         bot = make_bot(game)
-        with mock.patch("libs.music_bot.controller.speak"), \
+        with mock.patch("libs.music_bot.cinema_handler.speak"), \
                 mock.patch("libs.music_bot.controller.options.set"):
             bot.set_cinema_target("j1")
         bot._create_stream_source()

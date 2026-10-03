@@ -25,7 +25,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from libs.music_bot import controller as bot_module
+# The crossfade machine lives in crossfade_handler.py (extracted from the
+# controller), and that is where its candidate streamer is built -- so the fake
+# below is patched there, not on the module the machine used to live in.
+from libs.music_bot import crossfade_handler as crossfade_module
 from libs.music_bot import subtitles
 from libs.music_bot import MapMusicBot
 from libs.music_bot import streaming as stream_mod
@@ -363,7 +366,7 @@ class TestCrossfadeStateMachine(unittest.TestCase):
                               "target": "C:\\next.mp3", "source": "local"}]
         old_streamer = bot.streamer
         old_source = bot.stream_source
-        with mock.patch.object(bot_module, "AudioStreamer",
+        with mock.patch.object(crossfade_module, "AudioStreamer",
                                FakeStreamer) as streamer_cls:
             # Far from the end: pre-roll starts but nothing launches yet.
             bot._update_crossfade()
@@ -412,7 +415,7 @@ class TestCrossfadeStateMachine(unittest.TestCase):
         bot = self._playing_bot(position=4.0, duration=10.0)
         bot.next_up_queue = [{"title": "Next", "target": "C:\\next.mp3",
                               "source": "local"}]
-        with mock.patch.object(bot_module, "AudioStreamer", FakeStreamer):
+        with mock.patch.object(crossfade_module, "AudioStreamer", FakeStreamer):
             bot._update_crossfade()
             bot._position[0] = 7.5
             bot._update_crossfade()
@@ -429,7 +432,7 @@ class TestCrossfadeStateMachine(unittest.TestCase):
         bot = self._playing_bot(position=4.0, duration=10.0)
         bot.next_up_queue = [{"title": "Next", "target": "C:\\next.mp3",
                               "source": "local"}]
-        with mock.patch.object(bot_module, "AudioStreamer", FakeStreamer):
+        with mock.patch.object(crossfade_module, "AudioStreamer", FakeStreamer):
             bot._update_crossfade()
             bot.streamer.alive = False  # current song died mid-roll
             bot._update_crossfade()
