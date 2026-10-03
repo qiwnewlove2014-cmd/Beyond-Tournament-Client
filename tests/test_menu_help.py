@@ -36,9 +36,16 @@ HELP_A = "Places one speaker of a cinema room, which is not a jukebox."
 HELP_B = "How loud this one speaker plays, 0 to 200 percent."
 
 
+class _SoundGroup:
+    """Enough of a sound group for `Menu.enter`, which plays the open sound."""
+
+    def play(self, *args, **kwargs):
+        return None
+
+
 class _Game:
     def __init__(self):
-        self.direct_soundgroup = object()
+        self.direct_soundgroup = _SoundGroup()
 
 
 def make_menu(items=None, menu_type="normal", game=None, parent=None):
@@ -212,6 +219,59 @@ class ServerPayloadTests(unittest.TestCase):
         m.pos = 0
         m.update([tab()])
         self.speak.assert_not_called()
+
+    def test_an_intro_is_read_from_the_payload_and_speaks_with_the_title(self):
+        """A menu whose lines do not explain themselves says how it is driven on
+        the way in. The difficulty menu is four words and nothing on it says Tab
+        answers "what does Harder mean", so the Server sends the sentence and the
+        client speaks it *with* the title, in one utterance -- a second speak()
+        call would cut the title off mid-word."""
+        handler = self.handler()
+        captured = []
+        handler.gameplay = SimpleNamespace(states=[],
+                                           add_substate=lambda s: captured.append(s),
+                                           pop_last_substate=lambda: None,
+                                           in_minigame_match=False)
+        handler.make_menu({
+            "event": "mainmenu",
+            "title": "Choose a difficulty",
+            "menu_type": "normal",
+            "intro": "Up and Down move between the levels, Tab reads out what the "
+                     "level you are on does, and Enter creates the match at it.",
+            "options": [
+                {"title": "Normal", "value": {"action": "create", "difficulty": "normal"},
+                 "close": True, "help": HELP_A},
+            ],
+        })
+        m = captured[-1]
+        self.assertIn("Up and Down", m.intro)
+        self.assertIn("Tab", m.intro)
+        with mock.patch.object(menu_module.speech, "speak") as speak:
+            m.enter()
+        self.assertEqual(speak.call_count, 1)
+        self.assertEqual(speak.call_args.args[0], f"Choose a difficulty {m.intro}")
+
+    def test_a_menu_with_no_intro_opens_exactly_as_before(self):
+        """The field is optional, like the description: a payload without one
+        builds the menu it always built and says its title and nothing else."""
+        handler = self.handler()
+        captured = []
+        handler.gameplay = SimpleNamespace(states=[],
+                                           add_substate=lambda s: captured.append(s),
+                                           pop_last_substate=lambda: None,
+                                           in_minigame_match=False)
+        handler.make_menu({
+            "event": "mainmenu",
+            "title": "Choose a map",
+            "menu_type": "normal",
+            "options": [{"title": "base (published)", "value": {"action": "create"},
+                         "close": True}],
+        })
+        m = captured[-1]
+        self.assertEqual(m.intro, "")
+        with mock.patch.object(menu_module.speech, "speak") as speak:
+            m.enter()
+        self.assertEqual(speak.call_args.args[0], "Choose a map")
 
     def test_a_description_is_sent_as_text_and_survives_a_long_one(self):
         """The Server's paragraphs are spoken whole, not clipped."""

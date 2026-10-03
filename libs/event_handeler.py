@@ -1373,7 +1373,12 @@ class EventHandeler:
             if top_event.startswith("builder_") or top_event.startswith("edit_") or top_event == "element_action_select":
                 self.gameplay.pop_last_substate()
 
-        m = menu.Menu(self.game, data["title"], autoclose=False, parrent=self.gameplay)
+        # A menu whose lines do not explain themselves sends the sentence it
+        # needs on the way in (see Menu.intro): spoken together with the title,
+        # in one utterance. A menu that sends none opens exactly as it always
+        # did -- the client's Tab then does nothing at all in it.
+        m = menu.Menu(self.game, data["title"], autoclose=False, parrent=self.gameplay,
+                      intro=data.get("intro", ""))
         m.menu_event = data.get("event", "")
         m.menu_type = data.get("menu_type", "normal")
         options = []
