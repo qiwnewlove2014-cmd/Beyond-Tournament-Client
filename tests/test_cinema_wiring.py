@@ -914,6 +914,7 @@ class CabinetCinemaMenuTests(unittest.TestCase):
         self.assertIn("Off", jukebox._cinema_mode_label("off"))
         self.assertIn("Auto", jukebox._cinema_mode_label("auto"))
         self.assertIn("theatre", jukebox._cinema_mode_label("theatre"))
+        self.assertIn("Custom", jukebox._cinema_mode_label("custom"))
 
     def test_the_detail_says_what_the_room_is_without_building_one(self):
         game = self.room_game()
@@ -936,6 +937,37 @@ class CabinetCinemaMenuTests(unittest.TestCase):
         game = self.room_game(speakers=())
         detail = jukebox._cinema_detail(game, self.state("theatre"), "j1")
         self.assertIn("ring of speakers", detail)
+
+    def test_the_detail_says_custom_plays_exactly_what_was_placed(self):
+        """One lone wall speaker is enough in custom, and the room says so."""
+        game = self.room_game(speakers=(('side_l', -90),))
+        detail = jukebox._cinema_detail(game, self.state("custom"), "j1")
+        self.assertIn("plays exactly the speakers placed for it", detail)
+        self.assertIn("side_l", detail)
+        # Answering the question must not acquire a speaker: preview only.
+        self.assertEqual(len(game.audio_mngr.context.created), 0)
+
+    def test_the_detail_says_a_custom_cabinet_with_no_speakers_plays_nothing(self):
+        game = self.room_game(speakers=())
+        detail = jukebox._cinema_detail(game, self.state("custom"), "j1")
+        self.assertIn("plays nothing", detail)
+        self.assertIn("none are placed yet", detail)
+
+    def test_the_mode_picker_offers_custom_once_and_not_as_a_shape(self):
+        """Custom is a way to play, not another fixed room shape."""
+        game = self.room_game(speakers=(('front_l', -30), ('front_r', 30)))
+        _current, choices = jukebox._cinema_mode_choices(
+            game, self.state("custom"), "j1")
+        customs = [label for value, label in choices if value == "custom"]
+        self.assertEqual(len(customs), 1)
+        self.assertIn("however they are set up", customs[0])
+        # It never appears in the "Force the ... room shape" list, which is for
+        # shapes that are played even with no speaker placed around them.
+        self.assertFalse(any("Force the" in label and "custom" in label.lower()
+                             for _value, label in choices))
+        # The reserved modes come first, and custom stands with them.
+        self.assertEqual([value for value, _label in choices][:3],
+                         ["auto", "off", "custom"])
 
     def test_the_read_out_names_the_speakers_a_forced_shape_will_not_use(self):
         """A requested shape is a shape: it can leave a placed speaker silent.
@@ -1008,6 +1040,7 @@ class CabinetCinemaMenuTests(unittest.TestCase):
             self.assertEqual(opened[0].title, "Jukebox Cinema Mode")
             self.assertTrue(any(label.startswith("Auto -") for label in labels))
             self.assertTrue(any(label.startswith("Off -") for label in labels))
+            self.assertTrue(any(label.startswith("Custom -") for label in labels))
             self.assertTrue(any("theatre" in label for label in labels))
             self.assertTrue(any("mono_spread" in label for label in labels))
             self.assertTrue(any("(now)" in label for label in labels))

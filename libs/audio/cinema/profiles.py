@@ -155,6 +155,26 @@ PROFILES = {
         equal_power_surrounds=True,
         protect_image=False,
     ),
+    # The custom mode: exactly the speakers someone placed, each playing the
+    # channel of its own position. It is a profile so the renderer, the
+    # read-outs and the menus read it like every other shape, but nothing here
+    # asks for a pair and nothing is filled from the ring: a room with a single
+    # side speaker plays that single side speaker. A declared label is the
+    # truth in this mode (the geometry never overrules it), which is what makes
+    # it the one shape a lone speaker can be.
+    "custom": CinemaProfile(
+        "custom",
+        "Exactly the speakers you place",
+        {
+            "front_l": (1.0, 0.0),
+            "front_c": (0.5, 0.5),
+            "front_r": (0.0, 1.0),
+            "side_l": (0.5, -0.5),
+            "side_r": (-0.5, 0.5),
+            "rear_l": (0.15, 0.35),
+            "rear_r": (0.35, 0.15),
+        },
+    ),
 }
 
 

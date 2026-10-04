@@ -29,7 +29,8 @@ from .audio_diagnostics import probe as audio_probe
 # speakers a builder placed around it. What a cabinet plays through is the map's
 # decision (the element's cinema_mode: auto / off / a profile), so a cabinet with
 # no room around it is the two-source playback below, untouched.
-from .audio.cinema import (CINEMA_AUTO, CINEMA_OFF, ROOM_MAX_DISTANCE,
+from .audio.cinema import (CINEMA_AUTO, CINEMA_CUSTOM, CINEMA_OFF,
+                           ROOM_MAX_DISTANCE,
                            ROOM_REFERENCE_DISTANCE, acquire_bank, cabinet_anchor,
                            cabinet_area, cabinet_reach, cinema_room,
                            neighbour_line, neighbour_note, preview_room,
@@ -42,6 +43,10 @@ from .audio.cinema.crossover import hz_label, mark_of
 # The profile ids a cabinet's mode may name, and the shape every jukebox
 # caller can rely on (see plugin.CINEMA_AUTO / CINEMA_OFF).
 CINEMA_PROFILES = frozenset(profile_names())
+
+# The one answer from _acquire_cinema that means "no output at all": a cabinet
+# in custom mode with no speaker placed for it is silent, not plain.
+_CINEMA_SILENT = object()
 
 # Shared wall occlusion tiers used by every playback site below.
 # 0 = clear path · 1 = thin obstacle (a lone pillar tile): light lowpass ·
@@ -475,6 +480,15 @@ class JukeboxPlayer:
                                requested)
             if plan is None:
                 return None
+            if getattr(plan, "silent", False) is True:
+                # Custom mode, and the map has no speaker for this cabinet: the
+                # mode says "only the speakers I placed", and silence is that
+                # answer. The callers must not fall back to the plain pair.
+                # ``is True`` and not merely truthy: a plan-shaped stand-in that
+                # answers to anything must never silence a cabinet.
+                log_line(f"[Jukebox] cinema room {jukebox_id}: custom mode "
+                         f"with no speakers placed; the cabinet is silent")
+                return _CINEMA_SILENT
             self.cinema_profiles[jukebox_id] = plan.profile
             # Map mistakes are worth reporting once, not once per song: a room
             # that is resolved the same way again has nothing new to say.
@@ -658,6 +672,13 @@ class JukeboxPlayer:
             else:
                 keep = running
             reshaped = self._acquire_cinema(jukebox_id, x, y, z, volume, kwargs, keep=keep)
+            if reshaped is _CINEMA_SILENT:
+                # The mode became custom and no speaker is placed for it: this
+                # output goes away rather than becoming the plain pair. The next
+                # map write re-offers the song, and whatever room then resolves
+                # is what plays it.
+                self._retire_or_stop(jukebox_id)
+                return True
             if reshaped is None:
                 # The mode names a room and the map no longer resolves one. A room that is playing is
                 # not yanked out from under the song for that: the cabinet keeps what it has (its mode
@@ -993,6 +1014,13 @@ class JukeboxPlayer:
         # default -- this is None and the block below is the same two-source
         # playback it has always been.
         bank = self._acquire_cinema(jukebox_id, x, y, z, effective_volume, _kwargs)
+        if bank is _CINEMA_SILENT:
+            # Nothing placed for a custom cabinet: no sources at all, so the
+            # song is silent here. The next map write re-offers it, and the
+            # room it then resolves is what plays.
+            log_line(f"[Jukebox] play({jukebox_id}) silent: custom mode, "
+                     f"no speakers placed")
+            return
         if bank is not None:
             # The bank already created, positioned and spatialised one source
             # per speaker around the cabinet.
@@ -2191,6 +2219,8 @@ def _cinema_mode_label(mode):
         return "Off - the cabinet's own stereo"
     if mode == CINEMA_AUTO:
         return "Auto - the speakers around it, if any"
+    if mode == CINEMA_CUSTOM:
+        return "Custom - exactly the speakers placed for it"
     return f"{mode} - that room shape, speakers or not"
 
 
@@ -2235,6 +2265,18 @@ def _cinema_room_sentence(game, gp, jukebox_id, mode=None):
     if mode == CINEMA_OFF:
         return ("This cabinet plays its own stereo: the map turned its cinema "
                 "room off." + reach)
+    if mode == CINEMA_CUSTOM:
+        anchor = cabinet_anchor(game, jukebox_id)
+        if anchor is None:
+            return ("This cabinet has no cinema room: it is not on the map (or "
+                    "its position is not known yet).")
+        plan, _silent = room_plan(game, anchor, requested=mode, room_id=jukebox_id)
+        if plan is None or getattr(plan, "silent", False):
+            return ("This cabinet plays exactly the speakers placed for it, and "
+                    "none are placed yet, so it plays nothing: "
+                    + room_diagnosis(game, anchor, room_id=jukebox_id) + reach)
+        return (f"This cabinet plays exactly the speakers placed for it "
+                f"({plan.summary()})." + _cinema_band_note(plan) + reach)
     anchor = cabinet_anchor(game, jukebox_id)
     if anchor is None:
         return ("This cabinet has no cinema room: it is not on the map (or its "
@@ -2412,9 +2454,11 @@ def _cinema_mode_choices(game, gp, jukebox_id):
         (CINEMA_AUTO, "Auto - use the speakers placed around this cabinet"
          + _note(CINEMA_AUTO) + code_note),
         (CINEMA_OFF, "Off - always this cabinet's own stereo" + code_note),
+        (CINEMA_CUSTOM, "Custom - play exactly the speakers placed for this "
+         "cabinet, however they are set up" + _note(CINEMA_CUSTOM) + code_note),
     ]
     choices.extend((name, f"Force the {name} room shape{_note(name)}{code_note}")
-                   for name in profile_names())
+                   for name in profile_names() if name != CINEMA_CUSTOM)
     return current, choices
 
 

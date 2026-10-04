@@ -17,9 +17,10 @@ from .channel import AUTO
 from .listener import ListenerPose, facing_report
 from .layout import (MAX_ROOM_REACH, MIN_ROOM_REACH, ROOM_MAX_DISTANCE,
                      ROOM_REFERENCE_DISTANCE, coerce_spec)
-from .placement import (AUTO_PROFILE, ROOM_RADIUS, RoomPlan, claims_point,
-                        claims_speaker, exclusive_speakers, inside_area,
-                        resolve_room, room_profile)
+from .placement import (AUTO_PROFILE, CUSTOM_PROFILE, ROOM_RADIUS, RoomPlan,
+                        claims_point, claims_speaker, exclusive_speakers,
+                        inside_area, resolve_custom_room, resolve_room,
+                        room_profile)
 from .profiles import DEFAULT_PROFILE, get_profile
 from .router import CinemaRenderer, renderer_for
 
@@ -40,6 +41,7 @@ DEFAULT_ENABLED = True
 # profile id (see ``profiles.py``).
 CINEMA_OFF = "off"
 CINEMA_AUTO = AUTO_PROFILE
+CINEMA_CUSTOM = CUSTOM_PROFILE
 
 
 def _option_enabled():
@@ -205,6 +207,26 @@ class CinemaSpeakerHost:
             # cabinet, taken once, not a per-listener preference.
             return None
         room_id = self._key(room_id if room_id is not None else jukebox_id)
+        if requested == CINEMA_CUSTOM:
+            # Custom: exactly the speakers the map placed, however it placed
+            # them -- no front pair, no pairs at all, nothing invented from the
+            # ring (see placement.resolve_custom_room). A map with no speaker
+            # for this cabinet is silence, not a fallback: that is the mode's
+            # whole meaning, which is why the silent plan exists.
+            scope_reasons = []
+            candidates, reach = cabinet_candidates(self.game, room_id, anchor,
+                                                   default=self.room_radius,
+                                                   report=scope_reasons)
+            room_reasons = []
+            placement = resolve_custom_room(candidates, anchor, radius=reach,
+                                            room=room_id,
+                                            report=room_reasons)
+            if placement is None:
+                return RoomPlan(CINEMA_CUSTOM, None, None, fill=False,
+                                reach=reach,
+                                notes=[*scope_reasons, *room_reasons],
+                                silent=True)
+            return _plan_from(placement, requested, reach)
         scope_reasons = []
         candidates, reach = cabinet_candidates(self.game, room_id, anchor,
                                               default=self.room_radius,
@@ -1000,7 +1022,11 @@ def _plan_from(placement, requested, reach=None):
     requested = "" if requested is None else str(requested).strip().lower()
     return RoomPlan(room_profile(placement, requested), placement.specs,
                     placement,
-                    fill=requested not in ("", AUTO_PROFILE),
+                    # Custom is a map room like auto: only the speakers someone
+                    # placed, never a ring. Every other requested profile may
+                    # pad itself out, which is what makes a shape usable before
+                    # anyone places a speaker.
+                    fill=requested not in ("", AUTO_PROFILE, CUSTOM_PROFILE),
                     reach=reach)
 
 
@@ -1036,6 +1062,21 @@ def room_plan(game, anchor, *, requested=None, room_id=None, radius=None):
     candidates, reach = cabinet_candidates(game, room_id or "", anchor,
                                           radius=radius, report=scope_reasons)
     room_reasons = []
+    if requested == CINEMA_CUSTOM:
+        placement = resolve_custom_room(candidates, anchor, radius=reach,
+                                        room=room_id, report=room_reasons)
+        if placement is None:
+            return RoomPlan(CINEMA_CUSTOM, None, None, fill=False, reach=reach,
+                            notes=[*scope_reasons, *room_reasons],
+                            silent=True), []
+        plan = _plan_from(placement, requested, reach)
+        room = renderer_for(anchor, plan.profile, specs=plan.specs, fill=plan.fill)
+        placed = [(placed.spec.name, slot)
+                  for slot, placed in placement.speakers.items()]
+        fed = set(room.slots)
+        silent = sorted(((name, slot) for name, slot in placed if slot not in fed),
+                        key=lambda item: (item[1], str(item[0])))
+        return plan, silent
     placement = resolve_room(candidates, anchor, radius=reach, room=room_id,
                              profile=requested or AUTO_PROFILE,
                              report=room_reasons)

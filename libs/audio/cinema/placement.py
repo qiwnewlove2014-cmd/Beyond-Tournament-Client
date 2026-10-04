@@ -62,6 +62,12 @@ MAX_ROOM_SPEAKERS = 12
 # Requested-profile sentinel: let the room's own slots choose.
 AUTO_PROFILE = "auto"
 
+# The custom mode: play exactly the speakers the map placed, however it
+# placed them (see resolve_custom_room below). It is a profile id like any
+# other, because the renderer, the read-outs and the menus all read a mode
+# through the profile it names.
+CUSTOM_PROFILE = "custom"
+
 
 def angular_delta(first, second):
     """Signed shortest angle from ``first`` to ``second``, in degrees."""
@@ -338,6 +344,67 @@ def resolve_room(speakers, anchor, *, radius=ROOM_RADIUS, room=None, area=None,
                          candidates)
 
 
+def resolve_custom_room(speakers, anchor, *, radius=ROOM_RADIUS, room=None,
+                        area=None, max_speakers=MAX_ROOM_SPEAKERS, report=None):
+    """The speakers a custom cabinet plays: exactly the ones someone placed.
+
+    The custom mode is the one shape with no rules about what a room must
+    contain. A stereo front pair is not required, a wall speaker does not need
+    its partner, and a declared label is never overruled by geometry -- the
+    builder's own channels are the truth, so a room set up wrong plays wrong,
+    which is the point of the mode. An auto speaker still takes the slot its
+    position falls in, because working the role out from the position is what
+    that label itself asks for.
+
+    Every speaker standing in this cabinet's own room is fed, one per slot the
+    map declares; a speaker whose slot is already taken falls back to the slot
+    its bearing names, and is dropped only when no slot is free. Nothing is
+    filled from the ring: a map with no speaker for this cabinet resolves to
+    None, and the caller plays silence rather than a shape nobody built.
+    """
+    anchor = (float(anchor[0]), float(anchor[1]), float(anchor[2]))
+    candidates = []
+    for raw in speakers or ():
+        speaker = coerce_spec(raw)
+        if speaker is None:
+            continue
+        if not _in_room(speaker, anchor, radius, room, area):
+            continue
+        candidates.append(speaker)
+    if not candidates:
+        _report(report, f"no cinema speaker within {float(radius):.0f}m of it")
+        return None
+
+    yaw = _room_yaw(candidates, anchor)
+    placed = {}
+    warnings = []
+    dropped = []
+    for speaker in _ordered(candidates):
+        declared = speaker.declared if speaker.declared in IDEAL_BEARING else None
+        measured = rebase(bearing_from(anchor, speaker.position), yaw)
+        if declared is not None and declared not in placed:
+            slot, source = declared, "label"
+        else:
+            slot = slot_for_bearing(measured)
+            if slot in placed:
+                slot = _free_slot_for(measured, placed)
+            source = "geometry"
+        if slot is None:
+            dropped.append(speaker)
+            warnings.append(
+                f"{_name_of(speaker)}: every slot is taken, so this speaker "
+                f"is ignored"
+            )
+            continue
+        speaker.slot = slot
+        placed[slot] = PlacedSpeaker(slot, speaker, declared, source)
+    if not placed:
+        _report(report, "the speakers here fill no slot of the room")
+        return None
+    return RoomPlacement(anchor, yaw, placed, CUSTOM_PROFILE, warnings, dropped,
+                         candidates)
+
+
 def nearest_anchor(position, anchors, limit=None):
     """``(index, distance)`` of the closest anchor, or None when out of range.
 
@@ -609,10 +676,11 @@ class RoomPlan:
     claims the speaker used it already.
     """
 
-    __slots__ = ("profile", "specs", "placement", "fill", "reach", "notes")
+    __slots__ = ("profile", "specs", "placement", "fill", "reach", "notes",
+                 "silent")
 
     def __init__(self, profile, specs=None, placement=None, fill=False,
-                 reach=None, notes=()):
+                 reach=None, notes=(), silent=False):
         self.profile = profile
         self.specs = specs
         self.placement = placement
@@ -623,6 +691,10 @@ class RoomPlan:
         # so the fallback is never the silent one. A plan built from a
         # placement keeps its placement's own warnings and adds these.
         self.notes = tuple(str(note) for note in notes or ())
+        # A plan that plays nothing at all: the custom mode's answer when the
+        # map has no speaker for this cabinet. Nothing is fed, nothing is
+        # invented, and the caller must not fall back to the plain pair.
+        self.silent = bool(silent)
 
     @property
     def profile_name(self):

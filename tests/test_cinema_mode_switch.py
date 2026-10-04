@@ -564,5 +564,65 @@ class StreamHandsItsOutputOverTests(unittest.TestCase):
         self.assertEqual(detach[0].buffers_queued, before + 1)
 
 
+class CustomModePlaybackTests(unittest.TestCase):
+    """Custom: exactly what the map placed, and silence when it placed nothing.
+
+    The mode's own promise has two ends, and both are playback decisions:
+    a lone wall speaker plays on its own (no front pair required), and a
+    cabinet with no speaker placed for it makes no sound at all -- not the
+    plain pair, not a ring behind it.
+    """
+
+    def build(self, entries):
+        game = FakeGame()
+        set_enabled(game, True)
+        build_map(game, entries=entries)
+        player = jukebox.JukeboxPlayer(game)
+        return game, player
+
+    def test_a_lone_wall_speaker_plays_with_custom(self):
+        game, player = self.build([("side_l", -90)])
+        streamer = play_song(player, cinema_mode="custom")
+        bank = streamer.call_args.kwargs.get("cinema")
+        self.assertIsNotNone(bank)
+        self.assertEqual(bank.renderer.profile.name, "custom")
+        self.assertEqual(set(bank.renderer.slots), {"side_l"})
+        self.assertEqual(player.cinema_mode("j1"), "custom")
+
+    def test_a_custom_cabinet_with_no_speakers_plays_nothing(self):
+        game, player = self.build([])
+        streamer = play_song(player, cinema_mode="custom")
+        # No stream, no plain pair, no sources: the cabinet is silent until a
+        # speaker is placed for it.
+        self.assertFalse(streamer.called)
+        self.assertNotIn("j1", player.players)
+        self.assertEqual(len(game.audio_mngr.context.created), 0)
+
+    def test_becoming_custom_stops_a_song_with_nothing_to_play(self):
+        game, player = self.build(ROOM)
+        play_song(player, cinema_mode="auto")
+        entry = player.players["j1"]
+        streamer = FakeStreamer(cinema=entry["cinema"])
+        entry["streamer"] = streamer
+        # The map loses its speakers while the song plays, and the mode pick
+        # that arrives with the new map says custom.
+        game.gameplay.map = SimpleNamespace()
+
+        play_song(player, cinema_mode="custom")
+
+        # The output goes away rather than falling back to a shape nobody
+        # placed -- no plain pair, no ring, and no room left playing.
+        self.assertNotIn("j1", player.players)
+        self.assertEqual(player.cinema_mode("j1"), "custom")
+
+        # The mode outlives the map: the next song, on a map that placed a
+        # speaker for this cabinet, plays exactly that speaker.
+        build_map(game, entries=[("side_l", -90)])
+        streamer = play_song(player, cinema_mode="custom")
+        bank = streamer.call_args.kwargs.get("cinema")
+        self.assertIsNotNone(bank)
+        self.assertEqual(set(bank.renderer.slots), {"side_l"})
+
+
 if __name__ == "__main__":
     unittest.main()

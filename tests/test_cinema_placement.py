@@ -19,8 +19,9 @@ from libs.audio.cinema.layout import (AUTO_SLOT, CinemaLayout, CinemaSpeakerSpec
                                       bearing_from, coerce_spec, slot_for_bearing)
 from libs.audio.cinema.listener import (ListenerPose, aim_vector, cone_gain,
                                         facing_report)
-from libs.audio.cinema.placement import (AUTO_PROFILE, RoomPlan, auto_profile,
-                                         exclusive_speakers, nearest_anchor,
+from libs.audio.cinema.placement import (AUTO_PROFILE, CUSTOM_PROFILE, RoomPlan,
+                                         auto_profile, exclusive_speakers,
+                                         nearest_anchor, resolve_custom_room,
                                          resolve_room, room_profile)
 from libs.audio.cinema.profiles import get_profile
 from libs.audio.cinema.router import PARITY_PLAN, CinemaRenderer
@@ -212,6 +213,94 @@ class RoomResolutionTests(unittest.TestCase):
         self.assertEqual(len(room.slots), 3)
         self.assertIn("front_l", room.slots)
         self.assertIn("front_r", room.slots)
+
+
+class CustomRoomTests(unittest.TestCase):
+    """The custom mode: exactly the speakers the map placed, however it made them.
+
+    Every rule an ordinary room enforces -- a stereo front pair, a wall speaker
+    with its partner, a label the geometry is allowed to overrule -- is absent
+    here on purpose. The mode's promise is that a builder hears what they
+    built: set it up wrong and it plays wrong, set it up right and it plays
+    right, and a cabinet with nothing placed for it plays nothing at all
+    rather than falling back to the plain jukebox pair.
+    """
+
+    def test_a_lone_speaker_is_a_custom_room(self):
+        speakers = [speaker("side_l", -90)]
+        # The ordinary room drops a single wall speaker -- there is no stereo
+        # image to protect, and the plain pair is the better answer there.
+        self.assertIsNone(resolve_room(speakers, ANCHOR))
+        room = resolve_custom_room(speakers, ANCHOR)
+        self.assertIsNotNone(room)
+        self.assertEqual(set(room.slots), {"side_l"})
+        self.assertEqual(room.profile_name, CUSTOM_PROFILE)
+        self.assertEqual(room.speakers["side_l"].source, "label")
+
+    def test_a_custom_room_needs_no_front_pair(self):
+        room = resolve_custom_room([speaker("front_l", -30)], ANCHOR)
+        self.assertEqual(set(room.slots), {"front_l"})
+        room = resolve_custom_room([speaker("rear_r", 150)], ANCHOR)
+        self.assertEqual(set(room.slots), {"rear_r"})
+
+    def test_the_builders_label_is_the_truth_here(self):
+        """A hand-set channel is never overruled by the geometry.
+
+        The very speaker the normal resolver corrects -- labelled front_r and
+        standing on the audience's left -- keeps the channel its builder typed,
+        because moving it would be the mode lying about what the map says.
+        """
+        misplaced = [speaker("front_r", -30), speaker("front_l", 30)]
+        corrected = resolve_room(misplaced, ANCHOR)
+        self.assertLess(corrected.speakers["front_l"].position[0], 0.0)
+        room = resolve_custom_room(misplaced, ANCHOR)
+        self.assertEqual(set(room.slots), {"front_l", "front_r"})
+        self.assertEqual(room.speakers["front_l"].source, "label")
+        # The label stands: the speaker that says front_l is still where the
+        # map put it, on the audience's right.
+        self.assertGreater(room.speakers["front_l"].position[0], 0.0)
+
+    def test_an_auto_speaker_takes_the_slot_it_stands_in(self):
+        room = resolve_custom_room([speaker(AUTO_SLOT, -90)], ANCHOR)
+        self.assertEqual(set(room.slots), {"side_l"})
+        self.assertEqual(room.speakers["side_l"].source, "geometry")
+
+    def test_a_duplicate_label_does_not_silence_the_second_speaker(self):
+        first = speaker("front_l", -30, name="a")
+        second = speaker("front_l", 30, name="b")
+        room = resolve_custom_room([first, second], ANCHOR)
+        self.assertEqual(room.slot_of("a"), "front_l")
+        # The second speaker cannot also be front_l, but it is not dropped:
+        # it takes the slot its own position gives it in the room's frame.
+        self.assertIsNotNone(room.slot_of("b"))
+        self.assertNotEqual(room.slot_of("b"), "front_l")
+        self.assertEqual(room.speakers[room.slot_of("b")].source, "geometry")
+
+    def test_every_speaker_placed_here_is_fed(self):
+        room = resolve_custom_room(
+            [speaker("front_l", -30), speaker("side_l", -90),
+             speaker("rear_r", 150)], ANCHOR)
+        self.assertEqual(set(room.slots), {"front_l", "side_l", "rear_r"})
+        self.assertEqual({spec.slot for spec in room.specs},
+                         {"front_l", "side_l", "rear_r"})
+
+    def test_a_speaker_beyond_every_free_slot_is_dropped_not_faked(self):
+        seven = [speaker("front_l", -30), speaker("front_c", 0),
+                 speaker("front_r", 30), speaker("side_l", -90),
+                 speaker("side_r", 90), speaker("rear_l", -150),
+                 speaker("rear_r", 150)]
+        room = resolve_custom_room(seven + [speaker(AUTO_SLOT, -90, distance=9.0)],
+                                   ANCHOR)
+        self.assertEqual(len(room.slots), 7)
+        self.assertEqual(len(room.dropped), 1)
+        self.assertTrue(any("every slot is taken" in warning
+                            for warning in room.warnings))
+
+    def test_no_speaker_at_all_is_not_a_room_and_says_so(self):
+        report = []
+        self.assertIsNone(resolve_custom_room([], ANCHOR, report=report))
+        self.assertTrue(any("no cinema speaker within" in line for line in report))
+        self.assertIsNone(resolve_custom_room([], ANCHOR))
 
 
 class SpeakerOwnershipTests(unittest.TestCase):
