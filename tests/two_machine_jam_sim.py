@@ -72,7 +72,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs.event_handeler import EventHandeler
 from libs.gameplay import Gameplay
-from libs.jukebox_relay import JukeboxRelayReceiver
+from libs.jukebox.relay import JukeboxRelayReceiver
 from libs.music_bot.streaming import AudioStreamer
 
 CABINET = "cabinet"

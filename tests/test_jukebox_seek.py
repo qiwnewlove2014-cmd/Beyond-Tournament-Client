@@ -25,6 +25,7 @@ import pygame
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import jukebox
+from libs.jukebox import view, widgets
 from libs import menu as menu_module
 
 
@@ -139,11 +140,11 @@ def playing_gp(needle=40.0, duration=240, received_at=1000.0):
 class NeedleTests(unittest.TestCase):
     def test_nothing_playing_is_nothing_to_scrub(self):
         gp = FakeGameplay({"jukeboxes": {}})
-        self.assertIsNone(jukebox._scrub_spot(gp, "box-1"))
+        self.assertIsNone(view._scrub_spot(gp, "box-1"))
 
     def test_a_livestream_has_no_length_to_scrub(self):
         gp = FakeGameplay(cabinet_state(current=song(duration=0)))
-        self.assertIsNone(jukebox._scrub_spot(gp, "box-1"))
+        self.assertIsNone(view._scrub_spot(gp, "box-1"))
 
     def test_a_playing_cabinet_is_read_from_this_machines_own_ears(self):
         # The anchor is the direct path's own arithmetic: where the play event
@@ -151,21 +152,21 @@ class NeedleTests(unittest.TestCase):
         clock = FakeClock(1020.0)
         gp = playing_gp(needle=40.0, received_at=1000.0)
         with mock.patch("time.monotonic", clock):
-            spot = jukebox._scrub_spot(gp, "box-1")
+            spot = view._scrub_spot(gp, "box-1")
         self.assertEqual(spot, (60.0, 240))
 
     def test_a_paused_cabinet_is_read_from_the_servers_own_needle(self):
         gp = FakeGameplay(cabinet_state(current=song(), paused=True, position=91.5))
-        self.assertEqual(jukebox._scrub_spot(gp, "box-1"), (91.5, 240))
+        self.assertEqual(view._scrub_spot(gp, "box-1"), (91.5, 240))
 
     def test_a_cabinet_this_machine_is_not_playing_falls_back_to_the_needle(self):
         gp = FakeGameplay(cabinet_state(current=song(), paused=False, position=12.0))
-        self.assertEqual(jukebox._scrub_spot(gp, "box-1"), (12.0, 240))
+        self.assertEqual(view._scrub_spot(gp, "box-1"), (12.0, 240))
 
     def test_the_line_reads_the_needle_and_the_song(self):
         gp = FakeGameplay(cabinet_state(current=song(duration=252), paused=True,
                                         position=83.0))
-        self.assertEqual(jukebox._scrub_menu_label(gp, "box-1"),
+        self.assertEqual(view._scrub_menu_label(gp, "box-1"),
                          "Scrub playback (now: 1:23 of 4:12)")
 
     def test_a_control_that_is_holding_a_scrub_reads_its_own_needle(self):
@@ -173,7 +174,7 @@ class NeedleTests(unittest.TestCase):
         # knows the needle (the Server is told about a move only now and then).
         gp = FakeGameplay(cabinet_state(current=song(), paused=True, position=83.0))
         self.assertEqual(
-            jukebox._scrub_menu_label(gp, "box-1", spot=(150.0, 240)),
+            view._scrub_menu_label(gp, "box-1", spot=(150.0, 240)),
             "Scrub playback (now: 2:30 of 4:00)")
 
 
@@ -207,7 +208,7 @@ def open_menu(gp, game=None):
     game = game or FakeGame()
     with mock.patch("libs.menu.Menu", FakeMenu), \
             mock.patch("libs.menus.set_default_sounds"), \
-            mock.patch("libs.jukebox.speak"):
+            mock.patch("libs.jukebox.widgets.speak"):
         jukebox.open_jukebox_menu(game, gp)
     return game, FakeMenu.last
 
@@ -238,13 +239,13 @@ class CabinetLineTests(unittest.TestCase):
         with mock.patch("time.monotonic", FakeClock()):
             _game, menu = open_menu(gp)
             action = menu.action("Scrub playback (now: 0:40 of 4:00)")
-        self.assertIsInstance(action, jukebox._JukeboxScrubControl)
+        self.assertIsInstance(action, widgets._JukeboxScrubControl)
         self.assertTrue(callable(getattr(action, "arrow", None)))
 
     def test_enter_on_the_line_says_what_it_does_and_where_it_is(self):
         gp = playing_gp(needle=40.0)
         with mock.patch("time.monotonic", FakeClock()), \
-                mock.patch("libs.jukebox.speak") as spoken:
+                mock.patch("libs.jukebox.widgets.speak") as spoken:
             _game, menu = open_menu(gp)
             menu.action("Scrub playback (now: 0:40 of 4:00)")()
         line = spoken.call_args.args[0]
@@ -267,12 +268,12 @@ class ScrubControlTests(unittest.TestCase):
 
     def control(self, game, gp, needle=40.0, duration=240):
         with mock.patch("time.monotonic", FakeClock(1000.0)):
-            return jukebox._JukeboxScrubControl(game, gp, "box-1")
+            return widgets._JukeboxScrubControl(game, gp, "box-1")
 
     def test_the_first_arrow_freezes_the_cabinet_and_moves_ten_seconds(self):
         game, gp = FakeGame(), playing_gp()
         with mock.patch("time.monotonic", FakeClock()), \
-                mock.patch("libs.jukebox.speak"):
+                mock.patch("libs.jukebox.widgets.speak"):
             control = self.control(game, gp)
             control.arrow(1, 0)
         self.assertEqual(game.network.events("jukebox_seek_start"),
@@ -282,7 +283,7 @@ class ScrubControlTests(unittest.TestCase):
         self.assertEqual(control.needle, 50.0)
         # The hold is armed, and cancelling it is what closes the scrub later.
         self.assertEqual([tick["ms"] for tick in game.scheduled],
-                         [int(jukebox._JukeboxScrubControl.TICK_INTERVAL_S * 1000)])
+                         [int(widgets._JukeboxScrubControl.TICK_INTERVAL_S * 1000)])
 
     def test_the_three_steps_are_ten_thirty_and_sixty_seconds(self):
         for mod, expected in ((0, 50.0), (pygame.KMOD_SHIFT, 70.0),
@@ -291,7 +292,7 @@ class ScrubControlTests(unittest.TestCase):
             with self.subTest(mod=mod):
                 game, gp = FakeGame(), playing_gp()
                 with mock.patch("time.monotonic", FakeClock()), \
-                        mock.patch("libs.jukebox.speak"):
+                        mock.patch("libs.jukebox.widgets.speak"):
                     control = self.control(game, gp)
                     control.arrow(1, mod)
                 self.assertEqual(control.needle, expected)
@@ -301,7 +302,7 @@ class ScrubControlTests(unittest.TestCase):
     def test_a_needle_stops_at_both_ends_of_the_song(self):
         game, gp = FakeGame(), playing_gp(needle=3.0)
         with mock.patch("time.monotonic", FakeClock()), \
-                mock.patch("libs.jukebox.speak"):
+                mock.patch("libs.jukebox.widgets.speak"):
             control = self.control(game, gp, needle=3.0)
             control.arrow(-1, 0)
             self.assertEqual(control.needle, 0.0)
@@ -317,7 +318,7 @@ class ScrubControlTests(unittest.TestCase):
         game, gp = FakeGame(), playing_gp()
         clock = FakeClock()
         with mock.patch("time.monotonic", clock), \
-                mock.patch("libs.jukebox.speak"):
+                mock.patch("libs.jukebox.widgets.speak"):
             control = self.control(game, gp)
             control.arrow(1, 0)                      # 40 -> 50, freezes once
             clock.tick(1.0)
@@ -337,11 +338,11 @@ class ScrubControlTests(unittest.TestCase):
         game, gp = FakeGame(), playing_gp()
         clock = FakeClock()
         with mock.patch("time.monotonic", clock), \
-                mock.patch("libs.jukebox.speak") as spoken:
+                mock.patch("libs.jukebox.widgets.speak") as spoken:
             control = self.control(game, gp)
             control.arrow(1, pygame.KMOD_CTRL)       # 40 -> 100
             spoken.reset_mock()
-            clock.tick(jukebox._JukeboxScrubControl.SCRUB_HOLD_S + 0.01)
+            clock.tick(widgets._JukeboxScrubControl.SCRUB_HOLD_S + 0.01)
             game.run_next_tick()
         self.assertEqual(game.network.events("jukebox_seek_end"),
                          [{"id": "box-1", "position": 100.0}])
@@ -355,10 +356,10 @@ class ScrubControlTests(unittest.TestCase):
         game, gp = FakeGame(), playing_gp()
         clock = FakeClock()
         with mock.patch("time.monotonic", clock), \
-                mock.patch("libs.jukebox.speak"):
+                mock.patch("libs.jukebox.widgets.speak"):
             control = self.control(game, gp)
             control.arrow(1, 0)
-            clock.tick(jukebox._JukeboxScrubControl.SCRUB_HOLD_S + 0.01)
+            clock.tick(widgets._JukeboxScrubControl.SCRUB_HOLD_S + 0.01)
             game.run_next_tick()                     # hold expired, song plays on
             control.arrow(1, 0)                      # a new hand on the arrows
         self.assertEqual(len(game.network.events("jukebox_seek_start")), 2)
@@ -369,7 +370,7 @@ class ScrubControlTests(unittest.TestCase):
         clock, held = FakeClock(), HeldKeys()
         with mock.patch("time.monotonic", clock), \
                 mock.patch("pygame.key.get_pressed", lambda: held), \
-                mock.patch("libs.jukebox.speak"):
+                mock.patch("libs.jukebox.widgets.speak"):
             control = self.control(game, gp)
             held[pygame.K_RIGHT] = True
             control.arrow(1, 0)                      # 40 -> 50
@@ -383,7 +384,7 @@ class ScrubControlTests(unittest.TestCase):
             self.assertAlmostEqual(control.needle, 60.0)
             # A held arrow is a hand still on the key however long it runs, so
             # the hold cannot expire under a skim.
-            clock.tick(jukebox._JukeboxScrubControl.SCRUB_HOLD_S + 1.0)
+            clock.tick(widgets._JukeboxScrubControl.SCRUB_HOLD_S + 1.0)
             game.run_next_tick()
             self.assertGreater(control.needle, 60.0)
         self.assertEqual(game.network.events("jukebox_seek_end"), [])
@@ -393,7 +394,7 @@ class ScrubControlTests(unittest.TestCase):
         clock, held = FakeClock(), HeldKeys()
         with mock.patch("time.monotonic", clock), \
                 mock.patch("pygame.key.get_pressed", lambda: held), \
-                mock.patch("libs.jukebox.speak"):
+                mock.patch("libs.jukebox.widgets.speak"):
             control = self.control(game, gp)
             held[pygame.K_LEFT] = True
             control.arrow(-1, 0)
@@ -412,7 +413,7 @@ class ScrubControlTests(unittest.TestCase):
         game, gp = FakeGame(), playing_gp()
         clock = FakeClock()
         with mock.patch("time.monotonic", clock), \
-                mock.patch("libs.jukebox.speak"):
+                mock.patch("libs.jukebox.widgets.speak"):
             control = self.control(game, gp)
             control.arrow(1, 0)
             clock.tick(0.05)
@@ -427,8 +428,8 @@ class ScrubControlTests(unittest.TestCase):
     def test_a_cabinet_with_nothing_to_scrub_is_told_so_and_freezes_nothing(self):
         game, gp = FakeGame(), FakeGameplay(cabinet_state())
         with mock.patch("time.monotonic", FakeClock()), \
-                mock.patch("libs.jukebox.speak") as spoken:
-            control = jukebox._JukeboxScrubControl(game, gp, "box-1")
+                mock.patch("libs.jukebox.widgets.speak") as spoken:
+            control = widgets._JukeboxScrubControl(game, gp, "box-1")
             control.arrow(1, 0)
         self.assertIn("nothing to scrub", spoken.call_args.args[0])
         self.assertEqual(game.network.sent, [])
@@ -441,10 +442,10 @@ class ScrubControlTests(unittest.TestCase):
         game, gp = FakeGame(), playing_gp()
         clock = FakeClock()
         with mock.patch("time.monotonic", clock), \
-                mock.patch("libs.jukebox.speak"):
+                mock.patch("libs.jukebox.widgets.speak"):
             control = self.control(game, gp)
             control.arrow(1, pygame.KMOD_SHIFT)      # 40 -> 70
-            clock.tick(jukebox._JukeboxScrubControl.SCRUB_HOLD_S + 0.01)
+            clock.tick(widgets._JukeboxScrubControl.SCRUB_HOLD_S + 0.01)
             game.run_next_tick()
         self.assertEqual(game.network.events("jukebox_seek_end"),
                          [{"id": "box-1", "position": 70.0}])
@@ -521,7 +522,7 @@ class MenuArrowTests(unittest.TestCase):
         game.match_history = []
         game.audio_mngr = SimpleNamespace(volume_categories={"ui": [100]})
         with mock.patch("time.monotonic", FakeClock()), \
-                mock.patch("libs.jukebox.speak"), \
+                mock.patch("libs.jukebox.widgets.speak"), \
                 mock.patch("libs.menus.set_default_sounds"):
             jukebox.open_jukebox_menu(game, gp)
             menu = gp.substates[-1]
@@ -563,7 +564,7 @@ class DirectRebuildTests(unittest.TestCase):
         # travels with them, so the direct stream it starts can re-resolve too.
         _game, player = self.player()
         with mock.patch("libs.music_bot.AudioStreamer") as streamer, \
-                mock.patch("libs.jukebox.JukeboxRelayReceiver"):
+                mock.patch("libs.jukebox.player.JukeboxRelayReceiver"):
             player.play("box-1", 0.0, 0.0, 0.0, "Song", self.SIGNED, 240,
                         transport="relay", relay_id=1, stream_epoch=2,
                         canonical_url=self.PAGE)

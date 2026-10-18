@@ -29,6 +29,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import jukebox
+from libs.audio.cinema import CINEMA_AUTO, CINEMA_OFF
+from libs.jukebox import cinema, view
 
 
 class FakeNetwork:
@@ -66,32 +68,32 @@ class CabinetLockReadTests(unittest.TestCase):
 
     def test_no_lock_is_no_lock(self):
         gp = make_game(state_with()).gameplay
-        self.assertIsNone(jukebox._cabinet_cinema_lock(gp, "cab1"))
+        self.assertIsNone(cinema._cabinet_cinema_lock(gp, "cab1"))
 
     def test_a_lock_reads_as_its_owner_and_that_a_code_exists(self):
         gp = make_game(state_with({"owner": "stone", "coded": True})).gameplay
-        self.assertEqual(jukebox._cabinet_cinema_lock(gp, "cab1"), ("stone", True))
+        self.assertEqual(cinema._cabinet_cinema_lock(gp, "cab1"), ("stone", True))
 
     def test_an_owner_with_no_coded_flag_still_counts_as_coded(self):
         # A Server that predates the flag has only ever written locks with a
         # code, so the safe reading of a missing flag is "a code exists".
         gp = make_game(state_with({"owner": "stone"})).gameplay
-        self.assertEqual(jukebox._cabinet_cinema_lock(gp, "cab1"), ("stone", True))
+        self.assertEqual(cinema._cabinet_cinema_lock(gp, "cab1"), ("stone", True))
 
     def test_junk_is_not_a_lock(self):
         for junk in ({}, "stone", 7, {"owner": ""}, {"owner": None}, []):
             gp = make_game(state_with(junk)).gameplay
-            self.assertIsNone(jukebox._cabinet_cinema_lock(gp, "cab1"), junk)
+            self.assertIsNone(cinema._cabinet_cinema_lock(gp, "cab1"), junk)
 
     def test_a_state_with_no_boxes_is_no_lock(self):
         gp = make_game({}).gameplay
-        self.assertIsNone(jukebox._cabinet_cinema_lock(gp, "cab1"))
+        self.assertIsNone(cinema._cabinet_cinema_lock(gp, "cab1"))
 
     def test_the_hash_the_server_must_never_send_would_not_be_read_as_one(self):
         # If a Server ever did ship the record itself, the client still reads
         # only the owner out of it -- there is nowhere for a code to land.
         gp = make_game(state_with({"owner": "stone", "password": "deadbeef"})).gameplay
-        self.assertEqual(jukebox._cabinet_cinema_lock(gp, "cab1"), ("stone", True))
+        self.assertEqual(cinema._cabinet_cinema_lock(gp, "cab1"), ("stone", True))
 
 
 class RankTests(unittest.TestCase):
@@ -99,25 +101,25 @@ class RankTests(unittest.TestCase):
 
     def test_no_flag_means_no_line(self):
         gp = make_game(state_with()).gameplay
-        self.assertFalse(jukebox._may_lock_cinema_mode(gp))
+        self.assertFalse(cinema._may_lock_cinema_mode(gp))
 
     def test_the_flag_is_the_only_thing_read(self):
         gp = make_game(state_with(), can_lock=True).gameplay
         gp.is_staff = True
         gp.is_builder = True
         gp.is_technician = True
-        self.assertTrue(jukebox._may_lock_cinema_mode(gp))
+        self.assertTrue(cinema._may_lock_cinema_mode(gp))
         gp2 = make_game(state_with()).gameplay
         gp2.is_staff = True
         gp2.is_builder = True
         gp2.is_technician = True
-        self.assertFalse(jukebox._may_lock_cinema_mode(gp2))
+        self.assertFalse(cinema._may_lock_cinema_mode(gp2))
 
     def test_our_own_name_comes_from_login(self):
         gp = make_game(state_with(), name="memo").gameplay
-        self.assertEqual(jukebox._own_name(gp), "memo")
+        self.assertEqual(view._own_name(gp), "memo")
         gp2 = make_game(state_with(), name="").gameplay
-        self.assertEqual(jukebox._own_name(gp2), "")
+        self.assertEqual(view._own_name(gp2), "")
 
 
 class ModeChoicesTests(unittest.TestCase):
@@ -126,7 +128,7 @@ class ModeChoicesTests(unittest.TestCase):
     def choices(self, gp, jukebox_id="cab1"):
         # No game: the room preview is a separate question, and this test is
         # about the words the lock puts on the lines.
-        return jukebox._cinema_mode_choices(None, gp, jukebox_id)[1]
+        return cinema._cinema_mode_choices(None, gp, jukebox_id)[1]
 
     def test_an_unlocked_cabinet_says_nothing_about_codes(self):
         gp = make_game(state_with()).gameplay
@@ -157,8 +159,8 @@ class ModeChoicesTests(unittest.TestCase):
         # look like a broken menu, and the Server is what refuses or asks.
         gp = make_game(state_with({"owner": "stone", "coded": True})).gameplay
         values = [value for value, _label in self.choices(gp)]
-        self.assertIn(jukebox.CINEMA_AUTO, values)
-        self.assertIn(jukebox.CINEMA_OFF, values)
+        self.assertIn(CINEMA_AUTO, values)
+        self.assertIn(CINEMA_OFF, values)
 
 
 class CabinetMenuTests(unittest.TestCase):
@@ -237,7 +239,7 @@ class LockRequestTests(unittest.TestCase):
 
     def test_asking_for_the_lock_menu_names_one_cabinet(self):
         game = make_game(state_with(), can_lock=True)
-        jukebox._open_cinema_lock_menu(game, game.gameplay, "cab1")
+        cinema._open_cinema_lock_menu(game, game.gameplay, "cab1")
         channel, event, data = game.network.sent[-1]
         self.assertEqual(event, "builder_cinema_mode_lock")
         self.assertEqual(data, {"elementId": "cab1"})
@@ -246,7 +248,7 @@ class LockRequestTests(unittest.TestCase):
         # A code is answered in the Server's own box (builder_lock_input), so
         # nothing on this path may carry one.
         game = make_game(state_with(), can_lock=True)
-        jukebox._open_cinema_lock_menu(game, game.gameplay, "cab1")
+        cinema._open_cinema_lock_menu(game, game.gameplay, "cab1")
         _channel, _event, data = game.network.sent[-1]
         self.assertNotIn("code", data)
         self.assertNotIn("password", data)

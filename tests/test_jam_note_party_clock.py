@@ -37,7 +37,7 @@ from libs import party_sync_audio
 from libs import voice_chat
 from libs.event_handeler import EventHandeler
 from libs.gameplay import Gameplay
-from libs.jukebox_relay import JukeboxRelayReceiver
+from libs.jukebox.relay import JukeboxRelayReceiver
 from libs.voice_chat import MusicCompression
 
 from test_jam_note_pair_clock import PairSource, at

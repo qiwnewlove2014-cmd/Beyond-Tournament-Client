@@ -14,7 +14,7 @@ import threading
 import time
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from .youtube_resolver import _valid_url, _validated_info
+from ..youtube_resolver import _valid_url, _validated_info
 
 
 _MAX_ENTRIES = 8

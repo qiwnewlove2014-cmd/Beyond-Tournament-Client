@@ -8,7 +8,10 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import pygame
+
 from libs import jukebox
+from libs.jukebox import menu, view, widgets
 from libs.music_bot import streaming as mb_stream
 from libs.music_bot import controller as mb_ctrl
 
@@ -34,11 +37,11 @@ class FakeGameplay:
 class TestClosestJukebox(unittest.TestCase):
     def test_no_state_returns_none(self):
         gp = FakeGameplay()
-        self.assertIsNone(jukebox._closest_jukebox(gp))
+        self.assertIsNone(view._closest_jukebox(gp))
 
     def test_empty_jukeboxes_returns_none(self):
         gp = FakeGameplay({"jukeboxes": {}})
-        self.assertIsNone(jukebox._closest_jukebox(gp))
+        self.assertIsNone(view._closest_jukebox(gp))
 
     def test_picks_nearest(self):
         state = {
@@ -48,7 +51,7 @@ class TestClosestJukebox(unittest.TestCase):
             }
         }
         gp = FakeGameplay(state)
-        jb = jukebox._closest_jukebox(gp)
+        jb = view._closest_jukebox(gp)
         self.assertEqual(jb.get("id"), "near")
 
     def test_uses_player_position(self):
@@ -60,34 +63,34 @@ class TestClosestJukebox(unittest.TestCase):
         }
         gp = FakeGameplay(state)
         gp.player.x = 5
-        jb = jukebox._closest_jukebox(gp)
+        jb = view._closest_jukebox(gp)
         self.assertEqual(jb.get("id"), "b")
 
 
 class TestCurrentState(unittest.TestCase):
     def test_missing_state_defaults(self):
         gp = FakeGameplay()
-        self.assertEqual(jukebox._current_state(gp), {"jukeboxes": {}})
+        self.assertEqual(view._current_state(gp), {"jukeboxes": {}})
 
     def test_passes_through_valid_state(self):
         state = {"jukeboxes": {"x": {"id": "x"}}}
         gp = FakeGameplay(state)
-        self.assertIs(jukebox._current_state(gp), state)
+        self.assertIs(view._current_state(gp), state)
 
     def test_non_dict_state_defaults(self):
         gp = FakeGameplay("garbage")
-        self.assertEqual(jukebox._current_state(gp), {"jukeboxes": {}})
+        self.assertEqual(view._current_state(gp), {"jukeboxes": {}})
 
     def test_pause_label_follows_cached_server_state(self):
         gp = FakeGameplay({"jukeboxes": {"box": {"id": "box", "paused": False}}})
-        self.assertEqual(jukebox._pause_menu_label(gp, "box"), "Pause playback")
+        self.assertEqual(view._pause_menu_label(gp, "box"), "Pause playback")
         gp.jukebox_state["jukeboxes"]["box"]["paused"] = True
-        self.assertEqual(jukebox._pause_menu_label(gp, "box"), "Resume playback")
+        self.assertEqual(view._pause_menu_label(gp, "box"), "Resume playback")
 
     def test_pause_button_sends_authoritative_toggle(self):
         game = FakeGameNetwork()
         gp = FakeGameplay({"jukeboxes": {"box": {"id": "box", "paused": True}}})
-        jukebox._toggle_pause(game, gp, "box")
+        menu._toggle_pause(game, gp, "box")
         args, _ = game.network.sent[-1]
         self.assertEqual(args[1], "jukebox_toggle_pause")
         self.assertEqual(args[2], {"id": "box"})
@@ -107,7 +110,7 @@ class _FakeJukeboxAudioPlayer:
 
 class TestAccessibleJukeboxSliders(unittest.TestCase):
     def _event(self, key, mod=0):
-        return SimpleNamespace(type=jukebox.pygame.KEYDOWN, key=key, mod=mod)
+        return SimpleNamespace(type=pygame.KEYDOWN, key=key, mod=mod)
 
     def _make(self, box):
         gp = FakeGameplay({"jukeboxes": {"box-1": {"id": "box-1", **box}}})
@@ -122,12 +125,12 @@ class TestAccessibleJukeboxSliders(unittest.TestCase):
             "eq_profile": "custom",
             "eq_values": {"bass": 61, "mid": 42, "treble": 73},
         })
-        slider = jukebox._JukeboxEqSlider(game, gp, "box-1")
+        slider = widgets._JukeboxEqSlider(game, gp, "box-1")
         self.assertEqual(slider.values, {"bass": 61, "mid": 42, "treble": 73})
 
-        with mock.patch("libs.jukebox.speak") as spoken:
+        with mock.patch("libs.jukebox.widgets.speak") as spoken:
             slider.enter()
-            slider.update([self._event(jukebox.pygame.K_TAB)])
+            slider.update([self._event(pygame.K_TAB)])
         self.assertEqual(slider.current_index, 1)
         self.assertIn("Mid. Slider: 42%", [call.args[0] for call in spoken.call_args_list])
 
@@ -135,11 +138,11 @@ class TestAccessibleJukeboxSliders(unittest.TestCase):
         from unittest import mock
 
         game, gp = self._make({"eq_profile": "normal"})
-        slider = jukebox._JukeboxEqSlider(game, gp, "box-1")
-        with mock.patch("libs.jukebox.speak"), \
-                mock.patch("libs.jukebox.open_jukebox_menu"):
-            slider.update([self._event(jukebox.pygame.K_UP)])
-            slider.update([self._event(jukebox.pygame.K_RETURN)])
+        slider = widgets._JukeboxEqSlider(game, gp, "box-1")
+        with mock.patch("libs.jukebox.widgets.speak"), \
+                mock.patch("libs.jukebox.menu.open_jukebox_menu"):
+            slider.update([self._event(pygame.K_UP)])
+            slider.update([self._event(pygame.K_RETURN)])
 
         self.assertEqual(gp.jukebox_player.eq_calls[0], (
             "box-1", "custom", {"bass": 51, "mid": 50, "treble": 50},
@@ -153,14 +156,14 @@ class TestAccessibleJukeboxSliders(unittest.TestCase):
         from unittest import mock
 
         game, gp = self._make({"volume": 73})
-        slider = jukebox._JukeboxVolumeSlider(game, gp, "box-1")
+        slider = widgets._JukeboxVolumeSlider(game, gp, "box-1")
         self.assertEqual(slider.value, 73)
 
-        with mock.patch("libs.jukebox.speak") as spoken, \
-                mock.patch("libs.jukebox.open_jukebox_menu"):
+        with mock.patch("libs.jukebox.widgets.speak") as spoken, \
+                mock.patch("libs.jukebox.menu.open_jukebox_menu"):
             slider.enter()
-            slider.update([self._event(jukebox.pygame.K_DOWN)])
-            slider.update([self._event(jukebox.pygame.K_RETURN)])
+            slider.update([self._event(pygame.K_DOWN)])
+            slider.update([self._event(pygame.K_RETURN)])
 
         self.assertIn("Volume. Slider: 73%", [call.args[0] for call in spoken.call_args_list])
         self.assertEqual(gp.jukebox_player.volume_calls[0], ("box-1", 72))
@@ -237,8 +240,8 @@ class TestStableQueuedUrl(unittest.TestCase):
             "url": "https://rr.example.googlevideo.com/expired-signed-stream",
             "webpage_url": "https://www.youtube.com/watch?v=stable123",
         }
-        with mock.patch("libs.jukebox.speak"):
-            jukebox._pick_song(game, gp, "box-1", result)
+        with mock.patch("libs.jukebox.menu.speak"):
+            menu._pick_song(game, gp, "box-1", result)
 
         self.assertEqual(gp.pop_count, 1)
         args, _ = game.network.sent[-1]
@@ -439,7 +442,7 @@ class TestJukeboxRelayProtocol(unittest.TestCase):
             audio_mngr = Audio()
 
         game = Game()
-        with mock.patch("libs.jukebox.JukeboxRelayReceiver") as recv_cls:
+        with mock.patch("libs.jukebox.player.JukeboxRelayReceiver") as recv_cls:
             recv_cls.return_value.start = lambda: None
             recv_cls.return_value.stop = lambda: None
             recv_cls.return_value.join = lambda timeout: None
@@ -478,7 +481,7 @@ class TestJukeboxRelayProtocol(unittest.TestCase):
             audio_mngr = Audio()
 
         game = Game()
-        with mock.patch("libs.jukebox.JukeboxRelayReceiver") as recv_cls:
+        with mock.patch("libs.jukebox.player.JukeboxRelayReceiver") as recv_cls:
             recv_cls.return_value.start = lambda: None
             recv_cls.return_value.stop = lambda: None
             recv_cls.return_value.join = lambda timeout: None
@@ -720,7 +723,9 @@ class TestReloadSurvival(unittest.TestCase):
         plays = []
         player.play = lambda *a, **k: plays.append((a, k))
 
-        with mock.patch("libs.jukebox.speak"):
+        # The direct-fallback line is spoken by the watchdog, which owns it in
+        # recovery.py: a patch on libs.jukebox.player.speak would not reach it.
+        with mock.patch("libs.jukebox.recovery.speak"):
             for _ in range(3):
                 player.players["box"] = {
                     "source": None,
@@ -955,7 +960,7 @@ class TestReloadSurvival(unittest.TestCase):
                 "frame_rate_check": [now - 10, 996],
             }
 
-        with mock.patch("libs.jukebox.speak"):
+        with mock.patch("libs.jukebox.recovery.speak"):
             for _ in range(3):
                 trickling_box()
                 player._last_recovery_request_at = 0.0
@@ -1091,12 +1096,12 @@ class TestReloadSurvival(unittest.TestCase):
             "duration": 180,
             "url": "https://rr.example.googlevideo.com/signed-stream",
         }
-        with mock.patch("libs.jukebox.speak") as speak_mock, \
-                mock.patch("libs.jukebox.threading.Thread",
+        with mock.patch("libs.jukebox.menu.speak") as speak_mock, \
+                mock.patch("libs.jukebox.menu.threading.Thread",
                            side_effect=lambda *a, **k: (_ for _ in ()).throw(
                                AssertionError("background resolve started"))):
             with self.assertRaises(AssertionError):
-                jukebox._pick_song(game, gp, "box-1", result)
+                menu._pick_song(game, gp, "box-1", result)
         # Nothing queued synchronously with the expiring URL.
         self.assertEqual(game.network.sent, [])
         self.assertEqual(gp.pop_count, 1)
@@ -1112,8 +1117,8 @@ class TestReloadSurvival(unittest.TestCase):
             "url": "https://rr.example.googlevideo.com/signed",
             "id": "abc123XYZ",
         }
-        with mock.patch("libs.jukebox.speak"):
-            jukebox._pick_song(game, gp, "box-1", result)
+        with mock.patch("libs.jukebox.menu.speak"):
+            menu._pick_song(game, gp, "box-1", result)
         args, _ = game.network.sent[-1]
         self.assertEqual(args[2]["url"], "https://www.youtube.com/watch?v=abc123XYZ")
 

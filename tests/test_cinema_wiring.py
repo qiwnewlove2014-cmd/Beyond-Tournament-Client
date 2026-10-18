@@ -18,6 +18,7 @@ import cyal
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import jukebox
+from libs.jukebox import cinema
 from libs.audio.cinema import (ROOM_MAX_DISTANCE, ROOM_RADIUS,
                                ROOM_REFERENCE_DISTANCE, CinemaRenderer,
                                CinemaSpeakerBank, CinemaSpeakerSpec, host_for,
@@ -564,7 +565,7 @@ class CinemaRelayTests(unittest.TestCase):
         game = FakeGame()
         set_enabled(game, True)
         player = jukebox.JukeboxPlayer(game)
-        with mock.patch("libs.jukebox.JukeboxRelayReceiver") as receiver:
+        with mock.patch("libs.jukebox.player.JukeboxRelayReceiver") as receiver:
             player.play("j1", 10, 20, 0, "Song", "http://example.com/a.mp3", 60,
                         transport="relay", relay_id=4, stream_epoch=2,
                         cinema_profile="surround")
@@ -573,7 +574,7 @@ class CinemaRelayTests(unittest.TestCase):
         self.assertEqual(len(receiver.call_args.kwargs["cinema"].sources), 5)
 
     def test_receiver_drops_the_pair_and_pumps_the_room(self):
-        from libs.jukebox_relay import JukeboxRelayReceiver
+        from libs.jukebox.relay import JukeboxRelayReceiver
         game = FakeGame()
         renderer = CinemaRenderer((10.0, 20.0, 0.0), "surround")
         bank = CinemaSpeakerBank(game, renderer, occlusion_provider=lambda *a: 0)
@@ -599,7 +600,7 @@ class CinemaRelayTests(unittest.TestCase):
         for a moment sometimes" into a number a report can carry; the routine
         line is rate-limited so a bad channel cannot fill the log with it.
         """
-        from libs.jukebox_relay import JukeboxRelayReceiver
+        from libs.jukebox.relay import JukeboxRelayReceiver
         game = FakeGame()
         renderer = CinemaRenderer((10.0, 20.0, 0.0), "front_only")
         bank = CinemaSpeakerBank(game, renderer, occlusion_provider=lambda *a: 0)
@@ -898,50 +899,50 @@ class CabinetCinemaMenuTests(unittest.TestCase):
         return game
 
     def test_the_menu_reads_the_mode_from_the_server_state(self):
-        self.assertEqual(jukebox._cabinet_cinema_mode(self.state("off"), "j1"), "off")
-        self.assertEqual(jukebox._cabinet_cinema_mode(self.state("theatre"), "j1"), "theatre")
-        self.assertEqual(jukebox._cabinet_cinema_mode(self.state("auto"), "j1"), "auto")
+        self.assertEqual(cinema._cabinet_cinema_mode(self.state("off"), "j1"), "off")
+        self.assertEqual(cinema._cabinet_cinema_mode(self.state("theatre"), "j1"), "theatre")
+        self.assertEqual(cinema._cabinet_cinema_mode(self.state("auto"), "j1"), "auto")
 
     def test_a_state_without_a_mode_reads_as_auto(self):
-        self.assertEqual(jukebox._cabinet_cinema_mode(self.state(None), "j1"), "auto")
-        self.assertEqual(jukebox._cabinet_cinema_mode(SimpleNamespace(), "j1"), "auto")
+        self.assertEqual(cinema._cabinet_cinema_mode(self.state(None), "j1"), "auto")
+        self.assertEqual(cinema._cabinet_cinema_mode(SimpleNamespace(), "j1"), "auto")
 
     def test_an_unknown_mode_in_the_state_reads_as_auto(self):
-        self.assertEqual(jukebox._cabinet_cinema_mode(self.state("front_left"), "j1"), "auto")
-        self.assertEqual(jukebox._cabinet_cinema_mode(self.state(""), "j1"), "auto")
+        self.assertEqual(cinema._cabinet_cinema_mode(self.state("front_left"), "j1"), "auto")
+        self.assertEqual(cinema._cabinet_cinema_mode(self.state(""), "j1"), "auto")
 
     def test_the_menu_line_names_the_mode(self):
-        self.assertIn("Off", jukebox._cinema_mode_label("off"))
-        self.assertIn("Auto", jukebox._cinema_mode_label("auto"))
-        self.assertIn("theatre", jukebox._cinema_mode_label("theatre"))
-        self.assertIn("Custom", jukebox._cinema_mode_label("custom"))
+        self.assertIn("Off", cinema._cinema_mode_label("off"))
+        self.assertIn("Auto", cinema._cinema_mode_label("auto"))
+        self.assertIn("theatre", cinema._cinema_mode_label("theatre"))
+        self.assertIn("Custom", cinema._cinema_mode_label("custom"))
 
     def test_the_detail_says_what_the_room_is_without_building_one(self):
         game = self.room_game()
-        detail = jukebox._cinema_detail(game, self.state("auto"), "j1")
+        detail = cinema._cinema_detail(game, self.state("auto"), "j1")
         self.assertIn("room speakers", detail)
         # Answering the question must not acquire a speaker: preview only.
         self.assertEqual(len(game.audio_mngr.context.created), 0)
 
     def test_the_detail_explains_a_cabinet_with_no_room(self):
         game = self.room_game(speakers=())
-        detail = jukebox._cinema_detail(game, self.state("auto"), "j1")
+        detail = cinema._cinema_detail(game, self.state("auto"), "j1")
         self.assertIn("own stereo", detail)
 
     def test_the_detail_says_when_the_map_turned_the_room_off(self):
         game = self.room_game()
-        detail = jukebox._cinema_detail(game, self.state("off"), "j1")
+        detail = cinema._cinema_detail(game, self.state("off"), "j1")
         self.assertIn("turned its cinema room off", detail)
 
     def test_the_detail_says_a_forced_shape_needs_no_speakers(self):
         game = self.room_game(speakers=())
-        detail = jukebox._cinema_detail(game, self.state("theatre"), "j1")
+        detail = cinema._cinema_detail(game, self.state("theatre"), "j1")
         self.assertIn("ring of speakers", detail)
 
     def test_the_detail_says_custom_plays_exactly_what_was_placed(self):
         """One lone wall speaker is enough in custom, and the room says so."""
         game = self.room_game(speakers=(('side_l', -90),))
-        detail = jukebox._cinema_detail(game, self.state("custom"), "j1")
+        detail = cinema._cinema_detail(game, self.state("custom"), "j1")
         self.assertIn("plays exactly the speakers placed for it", detail)
         self.assertIn("side_l", detail)
         # Answering the question must not acquire a speaker: preview only.
@@ -949,14 +950,14 @@ class CabinetCinemaMenuTests(unittest.TestCase):
 
     def test_the_detail_says_a_custom_cabinet_with_no_speakers_plays_nothing(self):
         game = self.room_game(speakers=())
-        detail = jukebox._cinema_detail(game, self.state("custom"), "j1")
+        detail = cinema._cinema_detail(game, self.state("custom"), "j1")
         self.assertIn("plays nothing", detail)
         self.assertIn("none are placed yet", detail)
 
     def test_the_mode_picker_offers_custom_once_and_not_as_a_shape(self):
         """Custom is a way to play, not another fixed room shape."""
         game = self.room_game(speakers=(('front_l', -30), ('front_r', 30)))
-        _current, choices = jukebox._cinema_mode_choices(
+        _current, choices = cinema._cinema_mode_choices(
             game, self.state("custom"), "j1")
         customs = [label for value, label in choices if value == "custom"]
         self.assertEqual(len(customs), 1)
@@ -979,7 +980,7 @@ class CabinetCinemaMenuTests(unittest.TestCase):
         """
         game = self.room_game(speakers=(('front_l', -30), ('front_r', 30),
                                         ('rear_l', -150), ('rear_r', 150)))
-        detail = jukebox._cinema_detail(game, self.state("surround"), "j1")
+        detail = cinema._cinema_detail(game, self.state("surround"), "j1")
         self.assertIn("surround", detail)
         self.assertIn("does not use", detail)
         self.assertIn("spk2", detail)
@@ -991,7 +992,7 @@ class CabinetCinemaMenuTests(unittest.TestCase):
         """The same four speakers, read as the map itself reads them."""
         game = self.room_game(speakers=(('front_l', -30), ('front_r', 30),
                                         ('rear_l', -150), ('rear_r', 150)))
-        detail = jukebox._cinema_detail(game, self.state("auto"), "j1")
+        detail = cinema._cinema_detail(game, self.state("auto"), "j1")
         self.assertIn("room speakers", detail)
         self.assertNotIn("does not use", detail)
 
@@ -999,7 +1000,7 @@ class CabinetCinemaMenuTests(unittest.TestCase):
         """The mistake is choosing a mode, so the warning sits on the choice."""
         game = self.room_game(speakers=(('front_l', -30), ('front_r', 30),
                                         ('rear_l', -150), ('rear_r', 150)))
-        _current, choices = jukebox._cinema_mode_choices(
+        _current, choices = cinema._cinema_mode_choices(
             game, self.state("surround"), "j1")
         labels = {value: label for value, label in choices}
         self.assertIn("spk2", labels["surround"])
@@ -1034,8 +1035,8 @@ class CabinetCinemaMenuTests(unittest.TestCase):
 
         with mock.patch("libs.menu.Menu", FakeMenu), \
                 mock.patch("libs.menus.set_default_sounds"), \
-                mock.patch("libs.jukebox.speak"):
-            jukebox._open_cinema_mode_menu(game, game.gameplay, "j1")
+                mock.patch("libs.jukebox.cinema.speak"):
+            cinema._open_cinema_mode_menu(game, game.gameplay, "j1")
             labels = [item[0] for item in opened[0].items]
             self.assertEqual(opened[0].title, "Jukebox Cinema Mode")
             self.assertTrue(any(label.startswith("Auto -") for label in labels))

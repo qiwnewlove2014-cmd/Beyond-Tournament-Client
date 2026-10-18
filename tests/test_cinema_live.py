@@ -29,7 +29,8 @@ import cyal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from libs import jukebox, jukebox_relay
+from libs import jukebox
+from libs.jukebox import relay as jukebox_relay
 from libs.audio.cinema import (AUTO_PROFILE, CinemaRenderer, CinemaSpeakerBank,
                                host_for, set_enabled)
 from libs.audio.cinema.layout import CinemaSpeakerSpec

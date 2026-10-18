@@ -31,6 +31,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import jukebox
+from libs.jukebox import cinema
 from libs.audio.cinema import neighbour_line
 from libs.audio.cinema.layout import CinemaLayout
 from libs.audio.cinema.profiles import get_profile, profile_names
@@ -113,22 +114,22 @@ class APlainCabinetKeepsThePlainNameTests(unittest.TestCase):
 
     def test_a_cabinet_the_map_turned_off_is_a_music_jukebox(self):
         game = cabinet_game(speakers=FRONT_ROOM, modes={"j1": "off"})
-        self.assertEqual(jukebox._cabinet_title(game, game.gameplay, "j1"),
+        self.assertEqual(cinema._cabinet_title(game, game.gameplay, "j1"),
                          "Music Jukebox")
         self.assertEqual(open_cabinet_menu(game).title, "Music Jukebox")
 
     def test_a_cabinet_whose_position_is_not_known_is_a_music_jukebox(self):
         game = cabinet_game(speakers=FRONT_ROOM, modes={"j1": "theatre"})
         game.gameplay.map = None
-        self.assertEqual(jukebox._cabinet_title(game, game.gameplay, "j1"),
+        self.assertEqual(cinema._cabinet_title(game, game.gameplay, "j1"),
                          "Music Jukebox")
 
     def test_a_map_that_breaks_the_resolver_is_still_a_music_jukebox(self):
         # A title is read out the moment a menu opens, so no map data is worth
         # breaking that for: the plain name is the safe answer.
         game = cabinet_game(speakers=FRONT_ROOM)
-        with mock.patch.object(jukebox, "room_plan", side_effect=RuntimeError):
-            self.assertEqual(jukebox._cabinet_title(game, game.gameplay, "j1"),
+        with mock.patch.object(cinema, "room_plan", side_effect=RuntimeError):
+            self.assertEqual(cinema._cabinet_title(game, game.gameplay, "j1"),
                              "Music Jukebox")
 
 
@@ -136,7 +137,7 @@ class ARoomNamesItselfTests(unittest.TestCase):
     """A cabinet that plays through a room says so, in somebody else's words."""
 
     def title(self, game, mode=None):
-        return jukebox._cabinet_title(game, game.gameplay, "j1", mode)
+        return cinema._cabinet_title(game, game.gameplay, "j1", mode)
 
     def test_auto_with_a_room_says_auto(self):
         game = cabinet_game(speakers=FRONT_ROOM)
@@ -168,7 +169,7 @@ class ARoomNamesItselfTests(unittest.TestCase):
         # on the title, so a mode renamed anywhere else cannot leave the title
         # pointing at a shape the cabinet is not set to.
         game = cabinet_game(speakers=FRONT_ROOM)
-        values = [value for value, _label in jukebox._cinema_mode_choices(
+        values = [value for value, _label in cinema._cinema_mode_choices(
             game, game.gameplay, "j1")[1]]
         self.assertTrue(values)
         for value in values:

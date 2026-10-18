@@ -10,8 +10,8 @@ import unittest
 from unittest import mock
 import weakref
 
-from libs.jukebox_relay import JukeboxRelayReceiver
-from libs import jukebox_relay
+from libs.jukebox.relay import JukeboxRelayReceiver
+from libs.jukebox import relay as jukebox_relay
 
 
 class Buffer:

@@ -41,6 +41,7 @@ from libs.audio.cinema import plugin as cinema_plugin
 from libs.audio.cinema.placement import inside_area
 from libs.audio.cinema.router import renderer_for
 from libs import jukebox
+from libs.jukebox import cinema
 from test_cinema_wiring import FakeGame, play_song
 
 
@@ -432,32 +433,32 @@ class TheCabinetMenuReadOutTests(unittest.TestCase):
 
     def test_the_detail_names_the_reach_and_the_area(self):
         game, gp = self.build(reaches={"j1": 90})
-        said = jukebox._cinema_detail(game, gp, "j1")
+        said = cinema._cinema_detail(game, gp, "j1")
         self.assertIn("Its reach is 90 m", said)
         self.assertIn("'Main Hall' area", said)
 
     def test_a_map_with_no_zone_says_only_the_distance(self):
         game, gp = self.build(zones=())
-        said = jukebox._cinema_detail(game, gp, "j1")
+        said = cinema._cinema_detail(game, gp, "j1")
         self.assertIn("Its reach is 60 m", said)
         self.assertNotIn("area", said)
 
     def test_a_reach_the_map_never_set_reads_the_default(self):
         game, gp = self.build()
-        self.assertEqual(jukebox._cabinet_cinema_reach(gp, "j1"), ROOM_MAX_DISTANCE)
+        self.assertEqual(cinema._cabinet_cinema_reach(gp, "j1"), ROOM_MAX_DISTANCE)
 
     def test_the_choices_are_labelled_with_their_number(self):
-        for value, _description in jukebox.CINEMA_REACHES:
+        for value, _description in cinema.CINEMA_REACHES:
             with self.subTest(value=value):
                 self.assertTrue(
-                    jukebox._cinema_reach_label(value).startswith(f"{value} m"))
+                    cinema._cinema_reach_label(value).startswith(f"{value} m"))
         # A value the map set by hand is shown as such rather than hidden.
-        self.assertIn("set by the map", jukebox._cinema_reach_label(75))
+        self.assertIn("set by the map", cinema._cinema_reach_label(75))
 
     def test_the_read_out_reads_the_state_the_server_sent(self):
         game, gp = self.build()
         game.gameplay.jukebox_state = {"jukeboxes": {"j1": {"cinema_reach": 140}}}
-        self.assertEqual(jukebox._cabinet_cinema_reach(gp, "j1"), 140.0)
+        self.assertEqual(cinema._cabinet_cinema_reach(gp, "j1"), 140.0)
 
 
 class TheCabinetsAroundACabinetTests(unittest.TestCase):
@@ -558,14 +559,14 @@ class TheCabinetsAroundACabinetTests(unittest.TestCase):
         self.assertIn(label, self.labels(game))
         action = dict((label() if callable(label) else label, act)
                       for label, act in game.gameplay.substates[-1].items)[label]
-        with mock.patch("libs.jukebox.speak") as said:
+        with mock.patch("libs.jukebox.menu.speak") as said:
             action()
         self.assertIn("shared out by distance", said.call_args.args[0])
 
     def test_the_cabinets_own_description_ends_with_its_neighbours(self):
         game, _map = build(cabinets=((10.0, 20.0), (50.0, 20.0)),
                            speakers=pair(10.0, 26.0))
-        said = jukebox._cinema_detail(game, game.gameplay, "j1")
+        said = cinema._cinema_detail(game, game.gameplay, "j1")
         self.assertIn("Its reach is 60 m", said)
         self.assertIn("shared out by distance", said)
 
@@ -747,22 +748,22 @@ class TheReachMenuKnowsTheRoomsGeometryTests(unittest.TestCase):
         gp.pop_last_substate = lambda: None
         with mock.patch("libs.menu.Menu", FakeMenu), \
                 mock.patch("libs.menus.set_default_sounds"):
-            jukebox._open_cinema_reach_menu(game, gp, "j1")
+            cinema._open_cinema_reach_menu(game, gp, "j1")
         labels = {str(label)[:5]: str(label) for label, _call in opened[0].items}
         # 20 m is the menu's first preset and it is below this room's own edge,
         # so its line says so; 60 m covers the room and its line stays short.
         self.assertIn("far end of this room is silent", labels["20 m "])
         self.assertNotIn("far end of this room is silent", labels["60 m "])
         self.assertIn("Measured from the cabinet",
-                      jukebox._cinema_reach_note(game, gp, "j1"))
-        self.assertIn("reaches 27 m", jukebox._cinema_reach_note(game, gp, "j1"))
+                      cinema._cinema_reach_note(game, gp, "j1"))
+        self.assertIn("reaches 27 m", cinema._cinema_reach_note(game, gp, "j1"))
 
     def test_the_band_each_fed_speaker_keeps_is_said_next_to_the_room(self):
         """A sub and a tweeter and nothing between them is a hole, not a room."""
         speakers = [dict(x=0.0, y=20.0, channel="front_l", crossover=-1500),
                     dict(x=20.0, y=20.0, channel="front_r", crossover=80)]
         game, gp, _extent = self.extent(speakers)
-        said = jukebox._cinema_room_sentence(game, gp, "j1", mode="front_only")
+        said = cinema._cinema_room_sentence(game, gp, "j1", mode="front_only")
         self.assertIn("Speakers here keep:", said)
         self.assertIn("above 1.5 kHz", said)
         self.assertIn("below 80 Hz", said)
@@ -770,7 +771,7 @@ class TheReachMenuKnowsTheRoomsGeometryTests(unittest.TestCase):
 
     def test_a_room_of_full_range_speakers_says_nothing_about_bands(self):
         game, gp, _extent = self.extent()
-        said = jukebox._cinema_room_sentence(game, gp, "j1", mode="front_only")
+        said = cinema._cinema_room_sentence(game, gp, "j1", mode="front_only")
         self.assertNotIn("Speakers here keep:", said)
 
 
@@ -825,7 +826,7 @@ class TheBandsTheRoomKeepsTests(unittest.TestCase):
         return plan
 
     def note(self, speakers):
-        return jukebox._cinema_band_note(self.plan(speakers))
+        return cinema._cinema_band_note(self.plan(speakers))
 
     def test_a_room_of_full_range_speakers_says_nothing_at_all(self):
         said = self.note([dict(x=0.0, y=20.0, channel="front_l"),

@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 import threading
 import unittest
 
-from libs.jukebox_media_cache import JukeboxMediaCache
+from libs.jukebox.media_cache import JukeboxMediaCache
 
 
 class JukeboxMediaCacheTests(unittest.TestCase):

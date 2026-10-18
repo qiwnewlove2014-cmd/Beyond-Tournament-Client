@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from libs.jukebox_media_cache import JukeboxMediaCache
+from libs.jukebox.media_cache import JukeboxMediaCache
 from libs.music_bot import AudioStreamer, YouTubeSearcher
 
 
@@ -275,7 +275,7 @@ class JukeboxMediaOwnerTests(unittest.TestCase):
         entry = player._media_cache.put(PAGE, media())
         handler = EventHandeler.__new__(EventHandeler)
         handler.gameplay = SimpleNamespace(jukebox_player=player)
-        with patch("libs.music_bot.AudioStreamer") as stream, patch("libs.jukebox.log_line"):
+        with patch("libs.music_bot.AudioStreamer") as stream, patch("libs.jukebox.player.log_line"):
             player.play("box", 0, 0, 0, "Song", PAGE, 60, playback_id=1)
             first = player.players["box"]
             self.assertIs(stream.call_args.kwargs["media_cache"], player._media_cache)

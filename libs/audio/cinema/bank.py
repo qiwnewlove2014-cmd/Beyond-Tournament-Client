@@ -392,7 +392,7 @@ class CinemaSpeakerBank:
         # still filling, and the whole frames of a trim's hold (its delay IS those frames). The
         # depth then never reaches wanted_for_start ("cinema mode went quiet"), or the speaker
         # starts on the newest frame and the dialled delay is heard as the wrong number.
-        # A transport that reclaims every pump (jukebox_relay, AudioStreamer) must therefore leave
+        # A transport that reclaims every pump (jukebox/relay.py, AudioStreamer) must therefore leave
         # a room that is not playing alone; drain_stopped is the teardown path only.
         reclaimed = False
         for slot, source in list(self.slot_sources.items()):

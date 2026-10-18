@@ -28,20 +28,20 @@ class JukeboxSpatialWorkTests(unittest.TestCase):
 
     def test_same_tile_ray_reused_but_movement_and_expiry_refresh(self):
         player, world = self.make()
-        with patch("libs.jukebox.time.monotonic", return_value=10):
+        with patch("libs.jukebox.player.time.monotonic", return_value=10):
             for _ in range(100):
                 self.assertEqual(player.occlusion_tier((0, 0, 0), (10.1, 0, 0)), 1)
             player.occlusion_tier((0, 0, 0), (10.9, 0, 0))
             self.assertEqual(world.occlusion_tier.call_count, 1)
             player.occlusion_tier((0, 0, 0), (11, 0, 0))
             self.assertEqual(world.occlusion_tier.call_count, 2)
-        with patch("libs.jukebox.time.monotonic", return_value=10.16):
+        with patch("libs.jukebox.player.time.monotonic", return_value=10.16):
             player.occlusion_tier((0, 0, 0), (10, 0, 0))
         self.assertEqual(world.occlusion_tier.call_count, 3)
 
     def test_new_map_and_geometry_list_invalidate_cache(self):
         player, world = self.make()
-        with patch("libs.jukebox.time.monotonic", return_value=10):
+        with patch("libs.jukebox.player.time.monotonic", return_value=10):
             player.occlusion_tier((0, 0, 0), (10, 0, 0))
             world.tile_list.append(object())
             player.occlusion_tier((0, 0, 0), (10, 0, 0))
@@ -78,7 +78,7 @@ class JukeboxSpatialWorkTests(unittest.TestCase):
         world.occlusion_tier.assert_not_called()
         self.assertEqual(stream.spatial_src_l.gain, 0)
         player.game.audio_mngr.position = (10, 0, 0)
-        with patch("libs.jukebox.time.monotonic", return_value=10):
+        with patch("libs.jukebox.player.time.monotonic", return_value=10):
             for _ in range(20):
                 stream._update_spatial_gain()
         world.occlusion_tier.assert_called_once()
@@ -147,9 +147,9 @@ class JukeboxRelayLifecycleIntegrationTests(unittest.TestCase):
         self.audio.volume_categories = {"jukebox": [100]}
         self.audio.efx = SimpleNamespace(send=Mock())
         self.player = JukeboxPlayer(SimpleNamespace(audio_mngr=self.audio))
-        self.start_patch = patch("libs.jukebox.JukeboxRelayReceiver.start")
+        self.start_patch = patch("libs.jukebox.player.JukeboxRelayReceiver.start")
         self.start_mock = self.start_patch.start()
-        self.log_patch = patch("libs.jukebox.log_line")
+        self.log_patch = patch("libs.jukebox.player.log_line")
         self.log_patch.start()
         self.addCleanup(self.start_patch.stop)
         self.addCleanup(self.log_patch.stop)

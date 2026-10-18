@@ -32,7 +32,7 @@ from libs.event_handeler import EventHandeler
 from libs.jukebox_clock import (JAM_WAIT_EARLY_FRAMES, PAIR_KEY, SpotClock,
                                 mono_ms)
 from libs.piano import PianoAudio
-from libs.jukebox_relay import JukeboxRelayReceiver
+from libs.jukebox.relay import JukeboxRelayReceiver
 from libs.music_bot.streaming import AudioStreamer
 
 from test_jam_note_room_clock import Clock

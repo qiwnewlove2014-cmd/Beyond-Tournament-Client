@@ -12,9 +12,9 @@ import threading
 import time
 
 import cyal
-from .audio_diagnostics import probe as audio_probe
-from .deferred_log import log_deferred as log_line
-from .jukebox_clock import PAIR_KEY, SpotClock, mono_ms
+from ..audio_diagnostics import probe as audio_probe
+from ..deferred_log import log_deferred as log_line
+from ..jukebox_clock import PAIR_KEY, SpotClock, mono_ms
 
 
 class JukeboxRelayReceiver(threading.Thread):
@@ -617,7 +617,7 @@ class JukeboxRelayReceiver(threading.Thread):
             if callable(provider):
                 tier = provider(self.box_pos, listener, self.max_distance)
             else:
-                from .jukebox import wall_occlusion_tier
+                from .player import wall_occlusion_tier
                 gameplay = getattr(self.game, "gameplay", None)
                 current_map = getattr(gameplay, "map", None)
                 tier = wall_occlusion_tier(current_map, self.box_pos, listener)

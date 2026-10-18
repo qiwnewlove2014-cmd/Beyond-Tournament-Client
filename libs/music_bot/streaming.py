@@ -394,7 +394,7 @@ class AudioStreamer(threading.Thread):
                 gp = getattr(self.game, "gameplay", None)
                 cur_map = getattr(gp, "map", None) if gp is not None else None
                 if cur_map is not None and hasattr(cur_map, "valid_straight_path"):
-                    # Wall-thickness tiers (same 0/1/2 scale as jukebox.py):
+                    # Wall-thickness tiers (same 0/1/2 scale as jukebox/player.py):
                     # a lone pillar tile only slightly dulls the song, while
                     # thick walls keep the full standard muffle.
                     tier = 0
@@ -550,7 +550,7 @@ class AudioStreamer(threading.Thread):
             pass
         if reclaimed and getattr(self, "jukebox_player", None) is not None:
             # A buffer finished on the speaker: audible progress. Only
-            # jukebox direct streams feed the jukebox watchdog (jukebox.py
+            # jukebox direct streams feed the jukebox watchdog (jukebox/player.py
             # reads this stamp); personal Music Bot streams never set
             # jukebox_player, so their output is not watched here.
             self.last_output_at = time.monotonic()

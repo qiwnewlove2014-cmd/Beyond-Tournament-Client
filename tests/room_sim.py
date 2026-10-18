@@ -437,7 +437,7 @@ class RoomRig:
         if self.update_output:
             self.bank.update_output()
         if start and not self.bank.playing():
-            # The relay's own start rule (jukebox_relay.py, the pump's tail):
+            # The relay's own start rule (jukebox/relay.py, the pump's tail):
             # the room is only asked to play once the shallowest speaker holds
             # `wanted_for_start` frames. Asking earlier starts the room a
             # pre-buffer shallow -- which is what makes a trim look like it was
@@ -461,7 +461,7 @@ class RoomRig:
         return self.run(ticks, **kwargs)
 
     def relay_pump(self, pumps=1, max_frames=4):
-        """The server relay's own pump shape (`jukebox_relay.pump_audio`).
+        """The server relay's own pump shape (`jukebox/relay.py`'s pump).
 
         It reclaims **once at the top** and then hands the room up to
         ``max_frames`` decoded frames before it asks it to start -- which is

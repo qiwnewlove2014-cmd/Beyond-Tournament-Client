@@ -227,7 +227,7 @@ class ATrimSurvivesTheTransport(unittest.TestCase):
 
         A trimmed speaker waits out its hold as the frames of its own queue
         (``hold_frames``), and a transport reclaims on every pump
-        (``jukebox_relay``, ``AudioStreamer``). OpenAL reports a source that is
+        (``jukebox/relay.py``, ``AudioStreamer``). OpenAL reports a source that is
         not playing as having processed everything it holds, so a reclaim that
         read a waiting speaker handed its whole hold back into the pool: the
         depth never reached ``wanted_for_start`` (silence), or the speaker

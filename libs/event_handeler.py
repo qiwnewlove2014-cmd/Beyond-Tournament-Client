@@ -219,7 +219,7 @@ class EventHandeler:
             )
             # Locking a cabinet's cinema mode is the other rank rule a cabinet
             # menu line hangs off: the Server owns it, the menu behind it does
-            # not exist for anyone else (libs/jukebox.py).
+            # not exist for anyone else (libs/jukebox/).
             self.gameplay.can_lock_cinema_mode = bool(
                 data.get("can_lock_cinema_mode", False)
             )

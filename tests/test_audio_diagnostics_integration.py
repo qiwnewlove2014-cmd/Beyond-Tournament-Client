@@ -97,7 +97,7 @@ class AudioDiagnosticIntegrationTests(unittest.TestCase):
         self.assertIn("audio.body", self.lines[0])
 
     def test_first_relay_play_is_measured_without_extra_native_play_calls(self):
-        from libs.jukebox_relay import JukeboxRelayReceiver
+        from libs.jukebox.relay import JukeboxRelayReceiver
         from test_jukebox_relay_audio import Source, Buffer
         owner = threading.get_ident()
         left, right = Source(owner, (-2.5, 0, 0)), Source(owner, (2.5, 0, 0))
