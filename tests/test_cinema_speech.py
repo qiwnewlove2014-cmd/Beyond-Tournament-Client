@@ -735,6 +735,51 @@ class RoomAcousticsTests(unittest.TestCase):
         self.assertEqual({send[2] for send in self.sends(efx, cinema_speech.REVERB_SEND)},
                          {None})
 
+    def test_the_pa_voice_chain_carries_into_the_room(self):
+        # A room's speakers are tuned for a song, so a bare mono voice played
+        # through them has no body: the two things the PA gives a voice -- its
+        # cabinet EQ's bass shelf (what makes it thick) and its compressor (what
+        # keeps a shout from going flat) -- were simply not sent, and the report
+        # was "it spreads, but there is no thickness and no bass".
+        game, efx = self.make(reverb=self.REVERB)
+        game.gameplay.megaphone = SimpleNamespace(
+            player_sources={}, eq_slot="pa-eq", compressor_slot="pa-compressor")
+        self.feed(game)
+        leg = game.audio_mngr.cinema_speech.legs[7]
+        self.assertEqual(
+            {send[2] for send in self.sends(efx, cinema_speech.VOICE_EQ_SEND)},
+            {"pa-eq"})
+        self.assertEqual(
+            {send[2] for send in self.sends(efx, cinema_speech.VOICE_COMPRESSOR_SEND)},
+            {"pa-compressor"})
+        # One send per speaker of the room, on that speaker's own source.
+        for index in (cinema_speech.VOICE_EQ_SEND,
+                      cinema_speech.VOICE_COMPRESSOR_SEND):
+            self.assertEqual({send[0] for send in self.sends(efx, index)},
+                             set(leg.sources.values()))
+
+    def test_a_map_with_no_voice_chain_clears_those_sends(self):
+        # No megaphone (or one whose effects could not be made): the two sends
+        # are *cleared*, never left holding whatever a previous map put there.
+        game, efx = self.make()
+        self.feed(game)
+        for index in (cinema_speech.VOICE_EQ_SEND,
+                      cinema_speech.VOICE_COMPRESSOR_SEND):
+            self.assertEqual({send[2] for send in self.sends(efx, index)}, {None})
+
+    def test_the_voice_chain_is_muffled_by_the_wall_too(self):
+        game, efx = self.make(reverb=self.REVERB, tier=2)
+        game.gameplay.megaphone = SimpleNamespace(
+            player_sources={}, eq_slot="pa-eq", compressor_slot="pa-compressor")
+        self.feed(game)
+        leg = game.audio_mngr.cinema_speech.legs[7]
+        source = leg.sources["front_l"]
+        for index in (cinema_speech.VOICE_EQ_SEND,
+                      cinema_speech.VOICE_COMPRESSOR_SEND):
+            keep = [send for send in self.sends(efx, index) if send[0] is source]
+            self.assertTrue(keep, efx.sends)
+            self.assertIs(keep[-1][3], source.direct_filter)
+
     def test_the_reverb_is_looked_up_where_the_cabinet_stands(self):
         """The listener standing in a reverb zone does not give the room one."""
         game, efx = self.make(listener=(70.0, 20.0, 0.0))

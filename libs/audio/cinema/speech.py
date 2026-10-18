@@ -82,6 +82,16 @@ BUFFER_POOL_LIMIT = 64
 # is one room in the room.
 REVERB_SEND = 0
 EQ_SEND = 1
+# ...and the two the PA leaves free are the voice's *own* tone chain, which a
+# room's speakers never carried: the cabinet EQ a megaphone is tuned with (a bass
+# shelf and a presence lift -- what gives a voice a body) and its compressor
+# (what keeps a shout from going flat). A room of good speakers aimed at a music
+# spectrum plays a bare mono voice dry, and the report was exactly that: it
+# spreads, but it has no thickness and no bass, and shouting sounds flat. Same
+# effect objects the megaphone owns, asked rather than rebuilt, so one voice does
+# not have two shapes depending on which speakers it came out of.
+VOICE_EQ_SEND = 2
+VOICE_COMPRESSOR_SEND = 3
 
 
 def speech_enabled():
@@ -216,6 +226,22 @@ def _pan_target(game, gameplay, sender_id):
     if room is None:
         return None
     return (room[0], room[1], direction)
+
+
+def voice_tone(gameplay):
+    """``(eq_slot, compressor_slot)``: the tone a voice is tuned with on the PA.
+
+    The megaphone owns both (``MegaphoneManager.eq_slot`` / ``compressor_slot``);
+    this asks it instead of building a second, differently-shaped voice. A
+    gameplay with no megaphone -- and a map whose megaphone could not make its
+    effects -- answers ``(None, None)``, which the caller sends as "clear that
+    send" like every other slot here.
+    """
+    megaphone = getattr(gameplay, "megaphone", None)
+    if megaphone is None:
+        return (None, None)
+    return (getattr(megaphone, "eq_slot", None),
+            getattr(megaphone, "compressor_slot", None))
 
 
 def _target_parts(target):
@@ -571,8 +597,8 @@ class RoomSpeechLeg:
         # *speaker*, because each one is a stream of its own.
         self.crossovers = {}
         self.filters = {}
-        self.environments = {}  # slot -> the (reverb, EQ) pair last applied
-        self._environment_value = (None, None)
+        self.environments = {}  # slot -> the (reverb, EQ, tone, dynamics) last applied
+        self._environment_value = (None, None, None, None)
         self._environment_at = 0.0
         self.last_feed = 0.0
 
@@ -714,31 +740,40 @@ class RoomSpeechLeg:
             self._send_environment(source, environment, filt)
 
     def _environment(self):
-        """The room's reverb and EQ (see :func:`room_environment`).
+        """The room's reverb and EQ, plus the voice's own tone chain.
 
         Re-read on a timer rather than remembered forever: a player who changes the
         cabinet's EQ, or a reload that moves the reverb zone the cabinet stands in, has
         to reach a voice that is already playing. Never *invented*, either: a room with
         no reverb zone yields None, which the caller sends as "clear that send".
+
+        The last two are the PA's own voice chain (:func:`voice_tone`): a room's
+        speakers are tuned for a song, so a bare mono voice played through them has no
+        body -- the bass shelf and the compressor are what make a voice sound like a
+        voice rather than like a thin copy of one.
         """
         now = time.monotonic()
         if now - self._environment_at < self.ENVIRONMENT_INTERVAL_S:
             return self._environment_value
         self._environment_at = now
         try:
-            value = room_environment(self.holder.game, self.gameplay,
-                                     self.cabinet_id, self.plan)
+            value = tuple(room_environment(self.holder.game, self.gameplay,
+                                           self.cabinet_id, self.plan)) \
+                + tuple(voice_tone(self.gameplay))
         except Exception:
-            value = (None, None)
+            value = (None, None, None, None)
         self._environment_value = value
         return value
 
     def _send_environment(self, source, environment, filt):
-        """Route one speaker's voice through the room's reverb and its EQ.
+        """Route one speaker's voice through the room's reverb, its EQ, and a voice's tone.
 
-        The same sends the room's own speakers carry for the song, on the same slots and
-        with the wall filter as the send filter, so a voice behind a wall is muffled
-        *inside the reverb* exactly as much as it is dry.
+        The first two are the same sends the room's own speakers carry for the song, on
+        the same slots and with the wall filter as the send filter, so a voice behind a
+        wall is muffled *inside the reverb* exactly as much as it is dry. The last two
+        are the PA's voice chain (see :func:`voice_tone`), on the sends the PA leaves
+        free -- a room's speakers do not stop a voice needing the body and the
+        compression the megaphone gives it.
 
         A slot that is None is sent as None, which *clears* the send: the room the voice
         was in may have stopped having a reverb, and a voice left ringing in a room that
@@ -748,8 +783,11 @@ class RoomSpeechLeg:
         efx = getattr(audio, "efx", None)
         if efx is None:
             return
-        reverb_slot, eq_slot = environment
-        for index, slot in ((REVERB_SEND, reverb_slot), (EQ_SEND, eq_slot)):
+        reverb_slot, eq_slot, tone_slot, dynamics_slot = environment
+        for index, slot in ((REVERB_SEND, reverb_slot),
+                            (EQ_SEND, eq_slot),
+                            (VOICE_EQ_SEND, tone_slot),
+                            (VOICE_COMPRESSOR_SEND, dynamics_slot)):
             with suppress(Exception):
                 efx.send(source, index, slot, filter=filt)
 
