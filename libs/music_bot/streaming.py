@@ -53,7 +53,11 @@ class AudioStreamer(threading.Thread):
 
                 YouTube URL -> ffmpeg (s16le mono 48 kHz) -> OpenAL buffer queue, and the same PCM ->
                 Opus -> network broadcast rate-limited to real time (one 20 ms frame per ~20 ms) so
-                receivers are not bursted. Rules: .agents/skills/music_bot_integration/ and
+                receivers are not bursted. One song runs as one phase per method, in `run`'s order:
+                `_resolve_input` -> `_build_cmd` -> `_prepare_output` -> `_prebuffer_flight` (the
+                flight loop that retries a dead link and re-aims a late start, see the jam-note-timing
+                skill) -> `_begin_playback` -> `_feed_and_drain` -> `_classify_end`.
+                Rules: .agents/skills/music_bot_integration/ and
                 .agents/skills/jukebox-system/.
                 """
 
@@ -1493,6 +1497,13 @@ class AudioStreamer(threading.Thread):
         self._pair_clock_reset()
 
     def run(self):
+        """One song, in phases: resolve -> ffmpeg argv -> pre-buffer -> feed.
+
+        The worker thread body: every phase below is its own method, in the order it
+        runs, so the flight loop that retries a dead link and aims a late start at the
+        room (`_prebuffer_flight`) reads on its own instead of inside a 400-line
+        method. What each phase does is what it always did.
+        """
         if not FFMPEG_PATH:
             print("[MusicBot] ffmpeg not found!")
             speak("ffmpeg not found.")
@@ -1501,7 +1512,50 @@ class AudioStreamer(threading.Thread):
             self._cleanup()
             return
 
-        # Resolve the stream URL if target_url is not already a direct stream.
+        resolved = self._resolve_input()
+        if resolved is None:
+            return
+        target_url, input_headers, canonical_url = resolved
+
+        try:
+            cmd = self._build_cmd(target_url, input_headers)
+        except Exception as ex:
+            logger.log_exception(ex, "AudioStreamer.run command")
+            self.failure_reason = "playback command error"
+            self.running = False
+            self._cleanup()
+            return
+
+        self._prepare_output()
+
+        pre_buffered, leftover, error_detail = self._prebuffer_flight(
+            target_url, input_headers, canonical_url, cmd)
+        if not self.running:
+            # Intentional cancellation (map change, newer playback generation,
+            # or stop) is not a load failure and must stay silent.
+            self._cleanup()
+            return
+        if pre_buffered == 0:
+            self._report_no_audio(error_detail)
+            return
+        if not self._begin_playback(pre_buffered):
+            return
+
+        self._feed_and_drain(leftover)
+
+        if self.running:
+            self._classify_end()
+
+        # Cleanup
+        self._cleanup()
+
+    def _resolve_input(self):
+        """The direct stream URL and the headers to read it with.
+
+        Returns ``(target_url, input_headers, canonical_url)``, or ``None`` when
+        the worker was cancelled or the link could not be resolved -- in which case
+        it has already cleaned itself up and ``run`` returns.
+        """
         canonical_url = self.canonical_url
         target_url = self.audio_url
         input_headers = dict(self.http_headers)
@@ -1512,7 +1566,7 @@ class AudioStreamer(threading.Thread):
             fresh = self._resolve_playback_info(canonical_url, use_cache=True)
             if not self.running:
                 self._cleanup()
-                return
+                return None
             if fresh:
                 target_url = fresh['url']
                 input_headers = fresh.get('http_headers') or {}
@@ -1521,102 +1575,101 @@ class AudioStreamer(threading.Thread):
                 # extraction or launch ffmpeg with an empty input URL.
                 self.failure_reason = "audio link resolution failed"
                 self._cleanup()
-                return
+                return None
+        return target_url, input_headers, canonical_url
 
-        def _build_cmd():
-            cmd = [FFMPEG_PATH]
-            if target_url.startswith(("http://", "https://")):
-                # Reconnect on mid-stream drops for EVERY network source, including googlevideo: a CDN connection
-                # close near the end of a song used to kill ffmpeg outright (no reconnect flags) and the song ended
-                # early - verified locally: ffmpeg exits with an I/O error on a dropped connection, but with
-                # reconnect flags it reconnects at the last byte offset (range requests) and the full song plays out.
-                if "googlevideo.com" in target_url.lower():
-                    # Shorter budget: the startup 403 path (stale signed URL)
-                    # must re-resolve a fresh URL quickly instead of burning
-                    # the full backoff window before giving up.
-                    cmd.extend([
-                        '-reconnect', '1',
-                        '-reconnect_streamed', '1',
-                        '-reconnect_on_http_error', '403,429,5xx',
-                        '-reconnect_delay_max', '2',
-                        '-reconnect_delay_total_max', '6',
-                    ])
-                else:
-                    cmd.extend([
-                        '-reconnect', '1',
-                        '-reconnect_streamed', '1',
-                        '-reconnect_on_http_error', '403,429,5xx',
-                        '-reconnect_delay_max', '5',
-                        '-reconnect_delay_total_max', '12',
-                    ])
-            user_agent = next(
-                (str(value).strip() for name, value in input_headers.items()
-                 if str(name).lower() == 'user-agent'),
-                '',
-            )
-            if user_agent and '\r' not in user_agent and '\n' not in user_agent:
-                # ffmpeg has a dedicated option for User-Agent. Using it avoids
-                # a built-in Lavf agent overriding the yt-dlp authorization UA.
-                cmd.extend(['-user_agent', user_agent])
-            header_block = self._ffmpeg_header_block({
-                name: value for name, value in input_headers.items()
-                if str(name).lower() != 'user-agent'
-            })
-            if header_block:
-                cmd.extend(['-headers', header_block])
-            effective_offset = getattr(self, "start_offset", 0.0)
-            # Timeline anchoring (jukebox direct only): a fresh song keeps position 0 and waits out
-            # the shared lead-in (adding resolve time here is what used to skip the intro), while a
-            # mid-song join seeks PAST the projected audible start and waits the exact residual at
-            # prebuffer-complete. Non-anchored workers (personal music bot, livestreams) keep legacy.
-            if self.start_offset_received_at is not None:
-                if self._join_playing_room:
-                    # Joining a room that is already playing (the per-listener direct fallback, or this
-                    # stream's own one catch-up after a late start): always seek. The seek formula cancels
-                    # the offset entirely and lands this machine on the room's clock.
-                    effective_offset = max(0.001, effective_offset)
+    def _build_cmd(self, target_url, input_headers):
+        """The ffmpeg argv for one flight of this stream (see each flag above).
+
+        ``target_url``/``input_headers`` are whatever the last resolve produced, so a
+        command rebuilt after a re-resolve reads the fresh signed URL.
+        """
+        cmd = [FFMPEG_PATH]
+        if target_url.startswith(("http://", "https://")):
+            # Reconnect on mid-stream drops for EVERY network source, including googlevideo: a CDN connection
+            # close near the end of a song used to kill ffmpeg outright (no reconnect flags) and the song ended
+            # early - verified locally: ffmpeg exits with an I/O error on a dropped connection, but with
+            # reconnect flags it reconnects at the last byte offset (range requests) and the full song plays out.
+            if "googlevideo.com" in target_url.lower():
+                # Shorter budget: the startup 403 path (stale signed URL)
+                # must re-resolve a fresh URL quickly instead of burning
+                # the full backoff window before giving up.
+                cmd.extend([
+                    '-reconnect', '1',
+                    '-reconnect_streamed', '1',
+                    '-reconnect_on_http_error', '403,429,5xx',
+                    '-reconnect_delay_max', '2',
+                    '-reconnect_delay_total_max', '6',
+                ])
+            else:
+                cmd.extend([
+                    '-reconnect', '1',
+                    '-reconnect_streamed', '1',
+                    '-reconnect_on_http_error', '403,429,5xx',
+                    '-reconnect_delay_max', '5',
+                    '-reconnect_delay_total_max', '12',
+                ])
+        user_agent = next(
+            (str(value).strip() for name, value in input_headers.items()
+             if str(name).lower() == 'user-agent'),
+            '',
+        )
+        if user_agent and '\r' not in user_agent and '\n' not in user_agent:
+            # ffmpeg has a dedicated option for User-Agent. Using it avoids
+            # a built-in Lavf agent overriding the yt-dlp authorization UA.
+            cmd.extend(['-user_agent', user_agent])
+        header_block = self._ffmpeg_header_block({
+            name: value for name, value in input_headers.items()
+            if str(name).lower() != 'user-agent'
+        })
+        if header_block:
+            cmd.extend(['-headers', header_block])
+        effective_offset = getattr(self, "start_offset", 0.0)
+        # Timeline anchoring (jukebox direct only): a fresh song keeps position 0 and waits out
+        # the shared lead-in (adding resolve time here is what used to skip the intro), while a
+        # mid-song join seeks PAST the projected audible start and waits the exact residual at
+        # prebuffer-complete. Non-anchored workers (personal music bot, livestreams) keep legacy.
+        if self.start_offset_received_at is not None:
+            if self._join_playing_room:
+                # Joining a room that is already playing (the per-listener direct fallback, or this
+                # stream's own one catch-up after a late start): always seek. The seek formula cancels
+                # the offset entirely and lands this machine on the room's clock.
+                effective_offset = max(0.001, effective_offset)
+                effective_offset = self.direct_seek_seconds(
+                    effective_offset, self.start_offset_received_at, time.monotonic(),
+                    aim_ahead_s=self._join_aim_ahead_s,
+                    lead_in=self.room_lead_in_s)
+            elif effective_offset > 0.0:
+                if self._direct_anchor and effective_offset <= self.DIRECT_FRESH_MAX_S:
+                    effective_offset = 0.0
+                elif self._direct_anchor:
                     effective_offset = self.direct_seek_seconds(
-                        effective_offset, self.start_offset_received_at, time.monotonic(),
-                        aim_ahead_s=self._join_aim_ahead_s,
-                        lead_in=self.room_lead_in_s)
-                elif effective_offset > 0.0:
-                    if self._direct_anchor and effective_offset <= self.DIRECT_FRESH_MAX_S:
-                        effective_offset = 0.0
-                    elif self._direct_anchor:
-                        effective_offset = self.direct_seek_seconds(
-                            effective_offset, self.start_offset_received_at, time.monotonic())
-                    else:
-                        # Only compensate the client's resolve delay when RESUMING
-                        # mid-song (start_offset > 0). A fresh song must start at 0:
-                        # adding the yt-dlp resolve time here made the jukebox skip
-                        # past the intro every time the direct fallback was used.
-                        effective_offset += max(0.0, time.monotonic() - self.start_offset_received_at)
-            self._direct_seek_to = effective_offset if effective_offset > 0.5 else 0.0
-            # Input authorization must precede seek. YouTube's signed range
-            # request can return 403 when -ss is placed before these headers.
-            if effective_offset > 0.5:
-                cmd.extend(['-ss', f"{effective_offset:.2f}"])
-            cmd.extend([
-                '-re',  # Read/decode at media rate; network and OpenAL consume 20 ms frames.
-                '-i', target_url,
-                '-vn',  # Video containers (mp4/mkv/...) must decode audio only.
-                '-f', 's16le',
-                '-ar', '48000',
-                '-ac', str(self.channels),
-                '-loglevel', 'error',
-                'pipe:1'
-            ])
-            return cmd
+                        effective_offset, self.start_offset_received_at, time.monotonic())
+                else:
+                    # Only compensate the client's resolve delay when RESUMING
+                    # mid-song (start_offset > 0). A fresh song must start at 0:
+                    # adding the yt-dlp resolve time here made the jukebox skip
+                    # past the intro every time the direct fallback was used.
+                    effective_offset += max(0.0, time.monotonic() - self.start_offset_received_at)
+        self._direct_seek_to = effective_offset if effective_offset > 0.5 else 0.0
+        # Input authorization must precede seek. YouTube's signed range
+        # request can return 403 when -ss is placed before these headers.
+        if effective_offset > 0.5:
+            cmd.extend(['-ss', f"{effective_offset:.2f}"])
+        cmd.extend([
+            '-re',  # Read/decode at media rate; network and OpenAL consume 20 ms frames.
+            '-i', target_url,
+            '-vn',  # Video containers (mp4/mkv/...) must decode audio only.
+            '-f', 's16le',
+            '-ar', '48000',
+            '-ac', str(self.channels),
+            '-loglevel', 'error',
+            'pipe:1'
+        ])
+        return cmd
 
-        try:
-            cmd = _build_cmd()
-        except Exception as ex:
-            logger.log_exception(ex, "AudioStreamer.run command")
-            self.failure_reason = "playback command error"
-            self.running = False
-            self._cleanup()
-            return
-
+    def _prepare_output(self):
+        """The local buffer pool and the paced network sender, before any decode."""
         # Initialize buffer pool
         self._diagnostic_startup_call("direct.buffers", self._init_buffer_pool)
 
@@ -1627,6 +1680,16 @@ class AudioStreamer(threading.Thread):
             self.sender_thread = threading.Thread(target=self._network_sender_loop, daemon=True)
             self.sender_thread.start()
 
+    def _prebuffer_flight(self, target_url, input_headers, canonical_url, cmd):
+        """Launch ffmpeg, fill the local pre-buffer, and aim this flight at the room.
+
+        A flight is one ffmpeg launch, its pre-buffer and its hold. A link that fails
+        (403, a stall) is retried and re-resolved; a flight that became audible past
+        the shared deadline is dropped for one aimed at the room. Returns
+        ``(pre_buffered, leftover, error_detail)``: the frames the local buffers hold,
+        the bytes read past a packet boundary, and what ffmpeg said when it produced
+        nothing.
+        """
         # === Pre-buffer phase: fill LOCAL buffers before starting playback ===
         # Some fresh googlevideo URLs briefly return 403 while their CDN edge authorization propagates:
         # retry, first with the same URL+headers, then with a freshly RE-RESOLVED URL (a stale signed URL
@@ -1634,6 +1697,7 @@ class AudioStreamer(threading.Thread):
         #
         # A flight is one ffmpeg launch, its pre-buffer and its hold; the loop below re-aims a machine whose
         # own resolve+startup outran the shared deadline once, at the room's position.
+
         catch_up_attempts = 0
         pre_buffered = 0
         _pre_leftover = b''
@@ -1699,7 +1763,7 @@ class AudioStreamer(threading.Thread):
                         break
                     target_url = fresh['url']
                     input_headers = fresh.get('http_headers') or {}
-                    cmd = _build_cmd()
+                    cmd = self._build_cmd(target_url, input_headers)
                     continue
 
                 retryable = stalled or any(tok in error_detail for tok in ("403", "429", "503", "connection", "timeout", "reset"))
@@ -1719,7 +1783,7 @@ class AudioStreamer(threading.Thread):
                         target_url = fresh['url']
                         input_headers = fresh.get('http_headers') or {}
                         try:
-                            cmd = _build_cmd()
+                            cmd = self._build_cmd(target_url, input_headers)
                         except Exception:
                             pass
                 time.sleep(1.0 + attempt)
@@ -1742,40 +1806,42 @@ class AudioStreamer(threading.Thread):
                     catch_up_attempts += 1
                     self._reaim_at_the_room(aim)
                     try:
-                        cmd = _build_cmd()
+                        cmd = self._build_cmd(target_url, input_headers)
                     except Exception as ex:
                         logger.log_exception(ex, "AudioStreamer.run catch-up")
                         break
                     continue
             break
+        return pre_buffered, _pre_leftover, error_detail
 
-        if not self.running:
-            # Intentional cancellation (map change, newer playback generation,
-            # or stop) is not a load failure and must stay silent.
-            self._cleanup()
-            return
-
-        if pre_buffered == 0:
-            if self.failure_reason is None:
-                self.failure_reason = "stream produced no audio"
-            error_summary = ""
-            if error_detail:
-                error_summary = next(
-                    (line.strip() for line in reversed(error_detail.splitlines())
-                     if line.strip()),
-                    "",
-                )
-            logger.log(
-                "[AudioStreamer] stream produced no audio (channels="
-                f"{self.channels}, url={self.audio_url[:80]!r}, "
-                f"ffmpeg={error_summary[-240:]!r})"
+    def _report_no_audio(self, error_detail):
+        """The pre-buffer produced nothing: say why, then shut this worker down."""
+        if self.failure_reason is None:
+            self.failure_reason = "stream produced no audio"
+        error_summary = ""
+        if error_detail:
+            error_summary = next(
+                (line.strip() for line in reversed(error_detail.splitlines())
+                 if line.strip()),
+                "",
             )
-            if self.bot is None:
-                speak("The jukebox song could not be loaded. Try another song.")
-            self.running = False
-            self._cleanup()
-            return
+        logger.log(
+            "[AudioStreamer] stream produced no audio (channels="
+            f"{self.channels}, url={self.audio_url[:80]!r}, "
+            f"ffmpeg={error_summary[-240:]!r})"
+        )
+        if self.bot is None:
+            speak("The jukebox song could not be loaded. Try another song.")
+        self.running = False
+        self._cleanup()
+        return
 
+    def _begin_playback(self, pre_buffered):
+        """Announce the pre-buffer and start local playback, frame zero included.
+
+        Called once the pre-buffer holds audio; returns ``False`` when the worker was
+        cancelled while starting, so ``run`` stops exactly where it always did.
+        """
         # Start local playback after pre-buffering (spatial pairs also need
         # their distance fade computed before the first audible sample).
         if pre_buffered > 0:
@@ -1783,7 +1849,7 @@ class AudioStreamer(threading.Thread):
             self._remember_prebuffered_media()
             if not self.running:
                 self._cleanup()
-                return
+                return False
             # The shared-timeline hold, and the one re-aim a late start may
             # take, both belong to the flight loop above: either one can end
             # the decode that is running and start another.
@@ -1798,10 +1864,17 @@ class AudioStreamer(threading.Thread):
                 self._route_aligned_network_frame()
             # A stream created paused (seek while paused) holds its prebuffer
             # silently; set_pause(False) starts it and announces it later.
+        return True
 
+    def _feed_and_drain(self, leftover):
+        """The streaming loop (decode -> OpenAL -> network), then the tail drain.
+
+        ``leftover`` is what the pre-buffer read past one packet boundary, carried
+        into the first frame of the song.
+        """
         # === Streaming loop ===
         eof = False
-        _leftover = _pre_leftover  # Carry over any leftover bytes from pre-buffer
+        _leftover = leftover  # Carry over any leftover bytes from pre-buffer
         while self.running:
             if self.paused:
                 time.sleep(0.05)
@@ -1899,6 +1972,8 @@ class AudioStreamer(threading.Thread):
             except Exception:
                 pass
 
+    def _classify_end(self):
+        """A finished song or an early death, before this worker cleans up."""
         if self.running:
             # Distinguish a natural song end from a mid-song ffmpeg death (403 on a CDN reconnect, connection
             # reset, ...): ffmpeg exits 0 on a clean EOF, so any other exit code after audio already started
@@ -1915,9 +1990,6 @@ class AudioStreamer(threading.Thread):
                 self._invalidate_cached_media()
             else:
                 self.completed_normally = True
-
-        # Cleanup
-        self._cleanup()
 
     def _cleanup(self):
         """Clean up ffmpeg process and buffers"""
