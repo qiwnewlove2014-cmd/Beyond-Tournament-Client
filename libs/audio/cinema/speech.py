@@ -53,6 +53,13 @@ SAMPLE_RATE = 48000
 # timer is late -- heard as clicks. Frames, never silence: the room has audio to
 # wait for.
 START_FRAMES = 3
+# ...except the talker's own monitor, which is one frame of lag they listen to
+# on every sentence. The mic hands this path a 10 ms chunk every 10 ms from a
+# worker that polls every 0.5 ms, so two frames still leave a chunk of slack for
+# a late worker, and the owner hears themselves 10 ms sooner. A remote talker
+# keeps three: their frames arrive in network bursts, which is what the third
+# frame is for.
+MONITOR_START_FRAMES = 2
 # A speaker's trim is an installer's alignment offset. For a voice it is worth
 # honouring up to a point and no further: past ~60 ms a talker hears the room
 # answering them late, which reads as lag rather than as depth.
@@ -809,7 +816,8 @@ class RoomSpeechLeg:
             import cyal
             if source.state in (cyal.SourceState.STOPPED, cyal.SourceState.INITIAL):
                 self.fresh[slot] = self.fresh.get(slot, 0) + 1
-                if source.buffers_queued < START_FRAMES:
+                start_frames = MONITOR_START_FRAMES if self.monitor else START_FRAMES
+                if source.buffers_queued < start_frames:
                     # Give it real frames to start on (see START_FRAMES).
                     return
                 source.play()

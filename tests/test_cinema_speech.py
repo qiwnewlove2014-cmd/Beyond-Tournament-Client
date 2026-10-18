@@ -792,6 +792,30 @@ class OwnerMonitorTests(unittest.TestCase):
         self.assertEqual(set(leg.sources), {"front_l", "front_r"})
         self.assertEqual(len(leg.sources["front_l"].queued), 1)
 
+    def test_the_monitor_starts_one_frame_sooner_than_a_remote_talker(self):
+        """The talker's own ears are the one place one frame of lag is audible.
+
+        The mic hands this leg a 10 ms chunk every 10 ms from a worker that
+        polls every 0.5 ms, so two frames still leave a chunk of slack; remote
+        frames arrive in network bursts and keep three (``START_FRAMES``).
+        """
+        self.assertEqual(cinema_speech.MONITOR_START_FRAMES + 1, cinema_speech.START_FRAMES)
+        game = make_game()
+        self.feed_local(game)                       # first 10 ms chunk
+        leg = game.audio_mngr.cinema_speech.legs["7:mic"]
+        source = leg.sources["front_l"]
+        self.assertEqual(source.state, cyal.SourceState.INITIAL)
+        self.feed_local(game)                       # second chunk: starts here
+        self.assertEqual(source.state, cyal.SourceState.PLAYING)
+
+        remote = make_game()
+        for _ in range(cinema_speech.START_FRAMES - 1):
+            self.assertTrue(cinema_speech.feed(remote, remote.gameplay, 7, FRAME))
+        remote_source = remote.audio_mngr.cinema_speech.legs[7].sources["front_l"]
+        self.assertEqual(remote_source.state, cyal.SourceState.INITIAL)
+        self.assertTrue(cinema_speech.feed(remote, remote.gameplay, 7, FRAME))
+        self.assertEqual(remote_source.state, cyal.SourceState.PLAYING)
+
     def test_the_owners_monitor_skips_the_installers_trim(self):
         """That trim is an offset for the people out there, not for their own ears."""
         game = make_game(speakers=(("front_l", 6.5, 26.5, 100.0, 40.0),
