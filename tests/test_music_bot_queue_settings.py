@@ -22,10 +22,12 @@ Covers:
 No game, OpenAL, ffmpeg, or network is required.
 """
 
+import ast
 import os
 import sys
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -408,7 +410,7 @@ class TestQueueMenu(unittest.TestCase):
         bot = make_bot()
         bot.next_up_queue = [{"title": "Song A", "target": "t1"}]
         self._open(bot)
-        with mock.patch("libs.music_bot.controller.speak") as speak:
+        with mock.patch("libs.music_bot.menus.speak") as speak:
             for label, cb in last_menu().items:
                 if norm(label) == "1. Song A":
                     cb()
@@ -424,7 +426,7 @@ class TestQueueMenu(unittest.TestCase):
         # constructs another Menu instance.
         with patch_menu()[0], patch_menu()[1]:
             bot._open_queue_menu()
-            with mock.patch("libs.music_bot.controller.speak") as speak:
+            with mock.patch("libs.music_bot.menus.speak") as speak:
                 for label, cb in last_menu().items:
                     if norm(label) == "Clear Queue":
                         cb()
@@ -515,8 +517,8 @@ class TestSettings(unittest.TestCase):
             filter=[None, object()]))
         with patch_menu()[0], patch_menu()[1]:
             bot._open_settings_menu()
-        with mock.patch("libs.music_bot.controller.options.set") as opt_set, \
-                mock.patch("libs.music_bot.controller.speak") as speak:
+        with mock.patch("libs.music_bot.menus.options.set") as opt_set, \
+                mock.patch("libs.music_bot.menus.speak") as speak:
             for label, cb in last_menu().items:
                 if norm(label).startswith("Underwater Muffle"):
                     cb()
@@ -536,8 +538,8 @@ class TestSettings(unittest.TestCase):
             efx=SimpleNamespace(send=lambda *a: None)))
         with patch_menu()[0], patch_menu()[1]:
             bot._open_settings_menu()
-        with mock.patch("libs.music_bot.controller.options.set") as opt_set, \
-                mock.patch("libs.music_bot.controller.speak") as speak:
+        with mock.patch("libs.music_bot.menus.options.set") as opt_set, \
+                mock.patch("libs.music_bot.menus.speak") as speak:
             for label, cb in last_menu().items:
                 if norm(label).startswith("Room Reverb"):
                     cb()
@@ -580,6 +582,64 @@ class TestCameraWaterFilterGate(unittest.TestCase):
             jukebox_player=None))
         _apply_music_water_filter(game, flt)
         self.assertIs(bot_src.direct_filter, flt)
+
+
+class TestTheMenuModule(unittest.TestCase):
+    """Every menu the bot opens is built in libs/music_bot/menus.py.
+
+    The menus moved out of controller.py together on 2026-10-18 and MapMusicBot
+    kept a one-line shim for each one, because gameplay's key bindings, the event
+    handler and cinema_handler's "Back to Music Bot" line all call the bot. A menu
+    that loses its shim -- or a shim with nothing behind it -- breaks only when a
+    player presses the key, so the two sets are pinned equal here, together with
+    the one rule the move hinges on: `self.` inside the handler is the handler and
+    the bot is always named `self._bot.`, because a menu that quietly used the
+    handler where the bot goes still runs until somebody presses the key.
+    """
+
+    def _modules(self):
+        root = Path(__file__).resolve().parents[1] / "libs" / "music_bot"
+        controller = (root / "controller.py").read_text(encoding="utf-8")
+        menus = (root / "menus.py").read_text(encoding="utf-8")
+        return controller, menus, ast.parse(controller), ast.parse(menus)
+
+    def test_every_menu_has_a_shim_and_every_shim_a_menu(self):
+        controller, menus, ctree, mtree = self._modules()
+        bot = next(n for n in ctree.body
+                   if isinstance(n, ast.ClassDef) and n.name == "MapMusicBot")
+        builder = next(n for n in mtree.body
+                       if isinstance(n, ast.ClassDef) and n.name == "MusicBotMenus")
+        handler = {n.name for n in builder.body if isinstance(n, ast.FunctionDef)}
+        handler.discard("__init__")
+        shims = {n.name for n in bot.body
+                 if isinstance(n, ast.FunctionDef) and len(n.body) == 1
+                 and isinstance(n.body[0], ast.Return)
+                 and "self._menus()" in ast.unparse(n.body[0].value)}
+        self.assertTrue(handler)
+        self.assertEqual(shims, handler)
+        self.assertNotIn("menu_mod.Menu(", controller)
+        self.assertTrue(menus.count("menu_mod.Menu(") >= 20)
+
+    def test_a_menu_never_passes_the_handler_where_the_bot_goes(self):
+        _controller, menus, _ctree, mtree = self._modules()
+        builder = next(n for n in mtree.body
+                       if isinstance(n, ast.ClassDef) and n.name == "MusicBotMenus")
+        for method in builder.body:
+            if not isinstance(method, ast.FunctionDef) or method.name == "__init__":
+                continue
+            # `self._bot.game` holds a plain `self`, but only as the owner of an
+            # attribute; a `self` used as a value is the handler where the code
+            # means the bot (`_MusicBotEqSlider(game, self)` handed the slider
+            # the handler, and only opening the slider found it).
+            owners = {id(node.value) for node in ast.walk(method)
+                      if isinstance(node, ast.Attribute)
+                      and isinstance(node.value, ast.Name)}
+            bare = [(method.name, node.lineno) for node in ast.walk(method)
+                    if isinstance(node, ast.Name) and node.id == "self"
+                    and id(node) not in owners]
+            self.assertEqual(bare, [], f"plain `self` used as a value in {method.name}")
+        # The slider takes the bot as its own argument, so it is handed the bot.
+        self.assertIn("_MusicBotEqSlider(self._bot.game, self._bot)", menus)
 
 
 if __name__ == "__main__":

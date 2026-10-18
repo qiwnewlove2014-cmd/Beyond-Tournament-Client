@@ -301,7 +301,7 @@ class TestThePicker(unittest.TestCase):
         bot, gp = make_bot()
         picked = []
         open_menu(bot, "r3", self.ITEMS, "a song", on_pick=picked.append)
-        with mock.patch("libs.music_bot.controller.speak") as said:
+        with mock.patch("libs.music_bot.menus.speak") as said:
             for label, callback in FakeMenu.instances[-1].items:
                 if label == "Live":
                     callback()
@@ -329,7 +329,7 @@ class TestThePicker(unittest.TestCase):
 
     def test_nothing_to_choose_says_so_instead_of_opening_an_empty_menu(self):
         bot, gp = make_bot()
-        with mock.patch("libs.music_bot.controller.speak") as said:
+        with mock.patch("libs.music_bot.menus.speak") as said:
             menu = open_menu(bot, "r3", [], "a song")
         self.assertIsNone(menu)
         self.assertEqual(gp.substates, [])
@@ -424,14 +424,14 @@ class TestWiring(unittest.TestCase):
     def test_one_wording_for_a_result_line(self):
         # The host's own search menu and an asker's picker show the same
         # results, so both ask song_requests for the line.
-        controller = self._source("libs", "music_bot", "controller.py")
-        results = self._function(controller, "_show_results_menu")
+        menus = self._source("libs", "music_bot", "menus.py")
+        results = self._function(menus, "_show_results_menu")
         self.assertIn("song_requests.choice_line", results)
         # And neither menu invents a position number of its own: the reader
         # hears the song, and the pick travels as the menu position.
         self.assertNotIn("i + 1", results)
         self.assertNotIn("index + 1", results)
-        picker = self._function(controller, "open_song_pick_menu")
+        picker = self._function(menus, "open_song_pick_menu")
         self.assertIn("song_requests.choice_line", picker)
         self.assertNotIn("index + 1", picker)
         self.assertIn("song_requests.NO_CHOICES", picker)

@@ -528,6 +528,18 @@ def source_of(name):
     return inspect.getsource(getattr(MapMusicBot, name))
 
 
+def menu_source_of(name):
+    """The source body of one MusicBotMenus method (how a menu is placed).
+
+    The menus moved to libs/music_bot/menus.py on 2026-10-18; MapMusicBot
+    keeps a one-line shim, and a shim on its own says nothing about what
+    the menu offers.
+    """
+    import inspect
+    from libs.music_bot.menus import MusicBotMenus
+    return inspect.getsource(getattr(MusicBotMenus, name))
+
+
 class TheSwitchTests(unittest.TestCase):
     def test_the_label_says_which_way_the_switch_is(self):
         bot = make_bot()
@@ -716,8 +728,8 @@ class TheSubtitleMenuTests(unittest.TestCase):
         self.assertIn("Back", labels)
 
     def test_the_mode_menu_offers_the_one_line_onto_it(self):
-        body = source_of("_show_mode_menu")
-        self.assertIn("self.subtitle_label, self._open_subtitle_menu", body)
+        body = menu_source_of("_show_mode_menu")
+        self.assertIn("self._bot.subtitle_label, self._open_subtitle_menu", body)
 
     def test_a_language_pick_is_persisted_and_re_reads_the_track(self):
         bot = make_bot(subtitles_enabled=True)

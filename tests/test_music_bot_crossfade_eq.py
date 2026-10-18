@@ -280,6 +280,76 @@ class TestEqProfilePersistence(unittest.TestCase):
         self.assertIn(slot1, audio.released)
 
 
+class TestTheCustomEqSlider(unittest.TestCase):
+    """The Bass/Mid/Treble slider -- the one Music Bot menu item that is a State.
+
+    It moved to music_bot/menus.py with the menus on 2026-10-18. The working copy
+    of the three bands is the slider's own (`values`, `current_index`, `_closed`)
+    and only the committed profile reaches the bot, so a mechanical
+    `self.` -> `self._bot.` rewrite of the moved code (which turns those into the
+    bot's attributes) breaks Custom EQ with nothing else in the suite opening it.
+    """
+
+    def _open(self, eq_values=None):
+        from libs.music_bot import menus as menus_module
+
+        bot = make_bot(eq_values=dict(eq_values or {
+            "bass": 61, "mid": 42, "treble": 73}))
+        audio = FakeAudio()
+        gp = SimpleNamespace(substates=[])
+        gp.add_substate = lambda substate: gp.substates.append(substate)
+        gp.pop_last_substate = lambda: gp.substates.pop()
+        bot.game = SimpleNamespace(audio_mngr=audio, keyconfig={})
+        bot._find_gameplay = lambda: gp
+        # The commit reopens the profile menu; that menu is pinned elsewhere.
+        bot._open_eq_menu = lambda: None
+        persisting = mock.patch("libs.music_bot.controller.options.set")
+        persisting.start()
+        self.addCleanup(persisting.stop)
+        with mock.patch.object(menus_module, "speak"):
+            bot._open_custom_eq_sliders()
+        return bot, gp, menus_module, audio
+
+    def _press(self, menus_module, key, mod=0):
+        return SimpleNamespace(type=menus_module.pygame.KEYDOWN, key=key, mod=mod)
+
+    def test_the_slider_holds_its_own_three_bands(self):
+        bot, gp, menus_module, _audio = self._open()
+        slider = gp.substates[-1]
+        self.assertIsInstance(slider, menus_module._MusicBotEqSlider)
+        self.assertEqual(slider.values,
+                         {"bass": 61, "mid": 42, "treble": 73})
+        self.assertEqual(slider.current_index, 0)
+        self.assertFalse(hasattr(slider, "_bot"))
+        # The bot keeps its own copy, untouched until Enter.
+        self.assertEqual(bot.eq_values,
+                         {"bass": 61, "mid": 42, "treble": 73})
+
+    def test_a_band_moves_on_the_slider_and_only_enter_closes_it(self):
+        bot, gp, menus_module, audio = self._open()
+        slider = gp.substates[-1]
+        applied = len(audio.sends)
+        with mock.patch.object(menus_module, "speak"):
+            slider.enter()
+            slider.update([self._press(menus_module, menus_module.pygame.K_TAB)])
+            slider.update([self._press(menus_module, menus_module.pygame.K_UP)])
+            self.assertEqual(slider.current_index, 1)
+            self.assertEqual(slider.values["mid"], 43)
+            # A tick is heard at once (the custom slot is mutated in place),
+            # while the slider is still open.
+            self.assertEqual(bot.eq_profile, "custom")
+            self.assertEqual(bot.eq_values["mid"], 43)
+            self.assertFalse(slider._closed)
+            self.assertGreater(len(audio.sends), applied)
+            applied = len(audio.sends)
+            slider.update([self._press(menus_module,
+                                       menus_module.pygame.K_RETURN)])
+        self.assertTrue(slider._closed)
+        self.assertEqual(bot.eq_values["mid"], 43)
+        self.assertEqual(gp.substates, [])
+        self.assertGreater(len(audio.sends), applied)
+
+
 class TestRemainingSeconds(unittest.TestCase):
     def test_remaining_uses_duration_and_position(self):
         bot = make_bot(current_duration=10.0)

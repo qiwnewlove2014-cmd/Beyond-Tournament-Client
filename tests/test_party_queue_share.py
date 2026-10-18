@@ -218,7 +218,7 @@ class TestOneWording(unittest.TestCase):
         bot = make_bot(host=True, playing=True, title="Now Playing",
                        queue=self.QUEUE)
         menu = open_host_queue(bot)
-        with mock.patch("libs.music_bot.controller.speak") as speak:
+        with mock.patch("libs.music_bot.menus.speak") as speak:
             for label, callback in menu.items:
                 if label.startswith("1."):
                     callback()
@@ -232,6 +232,7 @@ class TestNoSecondWording(unittest.TestCase):
     OWNER = os.path.join("libs", "music_bot", "song_requests.py")
     #: Every client module that speaks for the music bot's queue.
     READERS = (
+        os.path.join("libs", "music_bot", "menus.py"),
         os.path.join("libs", "music_bot", "controller.py"),
         os.path.join("libs", "party_sync.py"),
         os.path.join("libs", "gameplay.py"),
@@ -266,10 +267,11 @@ class TestNoSecondWording(unittest.TestCase):
                                  f"{path} composes '{phrase}' itself")
 
     def test_both_menus_ask_the_shared_builders(self):
+        menus = self._source("libs", "music_bot", "menus.py")
         controller = self._source("libs", "music_bot", "controller.py")
-        host = self._function(controller, "_open_queue_menu")
-        listener = self._function(controller, "open_party_queue_view")
-        mode = self._function(controller, "_show_mode_menu")
+        host = self._function(menus, "_open_queue_menu")
+        listener = self._function(menus, "open_party_queue_view")
+        mode = self._function(menus, "_show_mode_menu")
         for body in (host, listener):
             self.assertIn("song_requests.queue_lines", body)
         self.assertIn("song_requests.queue_label", host)
@@ -527,8 +529,8 @@ class TestWiring(unittest.TestCase):
         self.assertIn("ps.queue", body)
 
     def test_a_listener_reads_the_queue_without_touching_it(self):
-        controller = self._source("libs", "music_bot", "controller.py")
-        view = self._function(controller, "open_party_queue_view")
+        menus = self._source("libs", "music_bot", "menus.py")
+        view = self._function(menus, "open_party_queue_view")
         self.assertIn("song_requests.queue_lines", view)
         self.assertIn('("Close"', view)
         # Read-only: every line is a report, so nothing is added that acts.
@@ -536,8 +538,8 @@ class TestWiring(unittest.TestCase):
         self.assertNotIn("next_up_queue", view)
 
     def test_both_of_a_listeners_party_menus_offer_it(self):
-        controller = self._source("libs", "music_bot", "controller.py")
-        party = self._function(controller, "_open_party_sync_menu")
+        menus = self._source("libs", "music_bot", "menus.py")
+        party = self._function(menus, "_open_party_sync_menu")
         self.assertIn("party_queue_label", party)
         self.assertIn("open_party_queue_view", party)
         quick = self._function(

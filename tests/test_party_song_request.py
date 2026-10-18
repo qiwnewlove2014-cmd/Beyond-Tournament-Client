@@ -611,16 +611,16 @@ class TestWiring(unittest.TestCase):
         # the bot's own settings, read like a bot setting: it belongs with the
         # session controls instead.
         body = self._function(
-            self._source("libs", "music_bot", "controller.py"),
+            self._source("libs", "music_bot", "menus.py"),
             "_show_mode_menu")
         self.assertNotIn("Song Requests:", body)
 
     def test_the_host_sets_it_in_the_party_menus(self):
         # Both doors onto the session -- the Party Sync menu inside the Music
         # Bot menu and the Ctrl+F8 quick menu -- offer the host's switch.
-        controller = self._source("libs", "music_bot", "controller.py")
+        menus = self._source("libs", "music_bot", "menus.py")
         self.assertIn("song_requests_switch_item",
-                      self._function(controller, "_open_party_sync_menu"))
+                      self._function(menus, "_open_party_sync_menu"))
         quick = self._function(
             self._source("libs", "gameplay.py"),
             "_open_party_sync_quick_menu")
@@ -635,7 +635,7 @@ class TestWiring(unittest.TestCase):
 
     def test_a_guest_reads_whether_requests_are_open(self):
         body = self._function(
-            self._source("libs", "music_bot", "controller.py"),
+            self._source("libs", "music_bot", "menus.py"),
             "_open_party_sync_menu")
         self.assertIn("song_requests_label", body)
 
