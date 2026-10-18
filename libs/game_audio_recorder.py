@@ -23,6 +23,7 @@ import wave
 
 from . import folder_dialog
 from . import options
+from . import recording_watch
 
 
 # Microsoft's own docs list AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS as available
@@ -1303,6 +1304,14 @@ class GameAudioRecorderManager:
                         should_announce = True
                 if should_announce:
                     self._announce("Recording.")
+                    # Developers hear that the in-game recorder started.  This
+                    # is telemetry, not a rule: the recording carries on even
+                    # if the Server cannot be told (libs/recording_watch.py).
+                    recording_watch.report_in_game_recording(
+                        self.game,
+                        include_microphone=include_microphone,
+                        include_computer_audio=include_computer_audio,
+                    )
 
             result = backend.record(
                 output_path,
