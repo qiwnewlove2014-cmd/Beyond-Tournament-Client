@@ -2320,6 +2320,12 @@ class EventHandeler:
                                epoch=None, frame_seq=None):
         """Play one PA frame through that sender's own speaker sources."""
         if not opus_data: return
+        # Same rule as ``process_voice_data``: the PA payload names its sender by
+        # voice channel, so our own broadcast can only arrive here if a Server
+        # echoed it back. The local monitor is the copy we hear.
+        own_channel = getattr(self.gameplay, "own_voice_channel", None)
+        if own_channel is not None and sender_id == own_channel:
+            return
         # Stamp remote PA activity for music-bot ducking. The Server never echoes a broadcast back to its
         # sender, so every frame arriving here is another player's voice (or live band): the music bot
         # owner ducks the broadcast while anyone else talks, and every listener hears the dip in the
@@ -2350,6 +2356,16 @@ class EventHandeler:
 
     def process_voice_data(self, data, channelID):
         if not options.get("voice_chat", True): return
+        # Our own voice never comes from the network. The Client plays its own
+        # microphone locally, so a frame the Server sends back on our own channel
+        # is that same line one round trip late: silent beside a local Server,
+        # a slap-back echo on a hosted one. The Server is fixed too (it skips
+        # the sender on the voice, megaphone and Music Bot relays), but a Server
+        # that predates that, or a packet that slipped through, must not be
+        # heard as a second copy of ourselves.
+        own_channel = getattr(self.gameplay, "own_voice_channel", None)
+        if own_channel is not None and channelID == own_channel:
+            return
         if channelID == consts.CHANNEL_MEGAPHONE:
             # Per-player megaphone: first byte = sender's voice_channel ID.
             # This is the LEGACY payload -- it carries no position for the
