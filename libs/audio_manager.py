@@ -1008,6 +1008,15 @@ class AudioManager():
         that dealloc unreachable no matter what reference-counting bug occurs elsewhere.
         The finalize callback only fires if the armor somehow fails, and names the
         creation site.
+
+        It must also tell that apart from the *exit sweep*: ``weakref.finalize``
+        runs every still-registered finalizer when the interpreter exits, whether
+        or not the referent was collected (that is ``_exitfunc``, registered with
+        ``atexit``).  Without the aliveness check below, a perfectly clean quit
+        wrote one false "was garbage collected" line per armored wrapper -- all of
+        them in the same second, one per pooled slot, effect and filter -- which is
+        a roster of what the armor is holding rather than a breach of it, and a
+        player reading their own log would take it for the reverb pool dying.
         """
         try:
             import ctypes
@@ -1015,8 +1024,12 @@ class AudioManager():
             ctypes.pythonapi.Py_IncRef.argtypes = [ctypes.py_object]
             ctypes.pythonapi.Py_IncRef(ctypes.py_object(filter_obj))
 
-            def _armor_broken(f_id=id(filter_obj), s=site, lbl=label):
+            alive = weakref.ref(filter_obj)
+
+            def _armor_broken(f_id=id(filter_obj), s=site, lbl=label, ref=alive):
                 try:
+                    if ref() is not None:
+                        return  # still alive: the exit sweep, not a breach
                     import sys
                     _report_efx_armor_breach(f_id, s, lbl, sys.is_finalizing())
                 except Exception:

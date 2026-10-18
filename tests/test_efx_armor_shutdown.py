@@ -4,11 +4,20 @@ A weakref finalizer that logs during interpreter shutdown must never block
 on the logger's lock+fsync path — an fsync stalled behind an antivirus
 scan at process exit once hung the quit until the watchdog reported a
 native deadlock (fatal report, player icesound 2026-08-29).
+
+The same finalizer must not mistake the *exit sweep* for a breach either:
+``weakref.finalize`` runs every still-registered finalizer at interpreter exit,
+whether or not the referent was collected, so a live wrapper there is proof the
+armor held, not that a slot was freed (a clean quit once wrote one false
+"was garbage collected" line per armored slot, effect and filter).
 """
 
+import ctypes
+import gc
 import os
 import sys
 import unittest
+import weakref
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -63,6 +72,58 @@ class ArmorBreachReportingTests(unittest.TestCase):
             # Both paths must swallow their own failures silently.
             audio_manager._report_efx_armor_breach(1, "s", "l", True)
             audio_manager._report_efx_armor_breach(1, "s", "l", False)
+
+
+class _Wrapper:
+    """Stands in for a cyal EFX wrapper; only weak-referenceability matters here."""
+
+
+class ArmorFinalizerAlivenessTests(unittest.TestCase):
+    """The armor's finalizer reports a breach only when the referent is gone."""
+
+    @staticmethod
+    def _manager():
+        # No __init__: the armor itself needs no device, and offline there is none.
+        return audio_manager.AudioManager.__new__(audio_manager.AudioManager)
+
+    @staticmethod
+    def _finalizer_for(obj):
+        """The finalizer ``_armor_filter`` registered for ``obj`` (None if none)."""
+        for fin, info in list(weakref.finalize._registry.items()):
+            if info.weakref() is obj:
+                return fin
+        return None
+
+    def test_the_exit_sweep_over_live_wrappers_reports_nothing(self):
+        manager = self._manager()
+        wrappers = [_Wrapper() for _ in range(3)]
+        with mock.patch("libs.audio_manager._report_efx_armor_breach") as breach:
+            for wrapper in wrappers:
+                manager._armor_filter(wrapper, "slot_pool_init", label="slot")
+            finalizers = [self._finalizer_for(wrapper) for wrapper in wrappers]
+            self.assertTrue(all(fin is not None for fin in finalizers),
+                            "the armor must register one finalizer per wrapper")
+            # Exactly what weakref.finalize._exitfunc does at interpreter exit.
+            for finalizer in finalizers:
+                finalizer()
+        breach.assert_not_called()
+
+    def test_a_wrapper_that_really_is_freed_still_reports(self):
+        manager = self._manager()
+        wrapper = _Wrapper()
+        with mock.patch("libs.audio_manager._report_efx_armor_breach") as breach, \
+                mock.patch.object(ctypes.pythonapi, "Py_IncRef", lambda *a, **k: None):
+            # Py_IncRef neutered: the armor fails exactly as the report describes.
+            # (A Mock here would hold the wrapper through its recorded call args
+            # and keep the finalizer from ever firing.)
+            manager._armor_filter(wrapper, "audio_manager.py:1 (gen_filter)")
+            del wrapper
+            gc.collect()
+        breach.assert_called_once()
+        args = breach.call_args.args
+        self.assertEqual(args[1], "audio_manager.py:1 (gen_filter)")
+        self.assertEqual(args[2], "filter")
+        self.assertIs(args[3], False)
 
 
 class LogFsyncGuardTests(unittest.TestCase):
