@@ -14,6 +14,7 @@ for a listener who turned rooms off, still takes the shipped path untouched.
 import contextlib
 import os
 import queue
+import struct
 import sys
 import time
 import unittest
@@ -504,6 +505,53 @@ class ReceivePathTests(unittest.TestCase):
         handler.process_music_timeline_data(packet)
         self.assertEqual(recorded, [None])
 
+    def one_frame(self, routed=True, party_direct=False, timeline=True):
+        """Play one music frame through the receive path and report the decisions."""
+        game = make_game()
+        handler = self.make_handler(game)
+        if routed:
+            handler.music_bot_cinema({"channel": 7, "cabinet": "j1"})
+        channels = []
+        formats = []
+        compression = SimpleNamespace(recieve=lambda *args: None,
+                                      recieve_timeline=lambda *args: None)
+        compression.set_cinema_channel = channels.append
+        compression.set_output_stereo = formats.append
+        entity = SimpleNamespace(music_source=object(), music_compression=compression,
+                                 _party_sync_direct=party_direct)
+        handler.gameplay.voice_channels[7] = entity
+        if timeline:
+            packet = (bytes([1, 7]) + (5).to_bytes(4, "big") + (6).to_bytes(4, "big")
+                      + b"opus")
+            handler.process_music_timeline_data(packet)
+        else:
+            handler.process_music_data(bytes([7]) + b"opus")
+        return channels, formats
+
+    def test_a_routed_stream_decodes_both_sides(self):
+        """The sender uploads two sides for a room, so the leg has to decode two.
+
+        A decoder left on mono downmixed them back into one, and the room -- which
+        spreads a frame by its mid and its side -- was handed the same signal for
+        every speaker: no image at all, heard as one centre in the middle of the
+        cabinet. Pinned on both music paths, because both decide it.
+        """
+        for timeline in (True, False):
+            channels, formats = self.one_frame(timeline=timeline)
+            self.assertEqual(channels, [7])
+            self.assertEqual(formats, [True], f"timeline={timeline}")
+
+    def test_a_plain_stream_still_decodes_mono(self):
+        for timeline in (True, False):
+            channels, formats = self.one_frame(routed=False, timeline=timeline)
+            self.assertEqual(channels, [None])
+            self.assertEqual(formats, [False], f"timeline={timeline}")
+
+    def test_a_party_guest_keeps_stereo_and_stays_out_of_the_room(self):
+        channels, formats = self.one_frame(party_direct=True)
+        self.assertEqual(channels, [None])
+        self.assertEqual(formats, [True])
+
     def test_an_old_entity_without_the_seam_is_left_alone(self):
         """A compression object from another build must not be an error."""
         game = make_game()
@@ -730,6 +778,43 @@ class FakeBot:
         return None
 
 
+class MixedBuildTests(unittest.TestCase):
+    """A routed song is uploaded stereo, so both builds have to meet in the middle.
+
+    The codec carries the mismatch: Opus says in the packet how many channels it is, and
+    a decoder set to the other count converts instead of failing. A listener who has not
+    updated still plays a routed song (downmixed), and an updated listener still plays a
+    song from a sender who has not (duplicated) -- neither side is left silent, which is
+    what "the room carries two sides now" would otherwise cost for a mixed map.
+    """
+
+    def packet(self, channels):
+        from pyogg import OpusEncoder
+        encoder = OpusEncoder()
+        encoder.set_application("audio")
+        encoder.set_channels(channels)
+        encoder.set_sampling_frequency(48000)
+        if channels == 2:
+            frame = b"".join(struct.pack("<hh", 8000, 800) for _ in range(960))
+        else:
+            frame = struct.pack("<h", 4000) * 960
+        return bytes(encoder.encode(bytearray(frame)))
+
+    def decode(self, packet, channels):
+        from pyogg import OpusDecoder
+        decoder = OpusDecoder()
+        decoder.set_channels(channels)
+        decoder.set_sampling_frequency(48000)
+        return bytes(decoder.decode(bytearray(packet)))
+
+    def test_a_stereo_frame_survives_a_mono_leg_and_the_other_way_round(self):
+        stereo = self.packet(2)
+        self.assertLess(len(stereo), 1275, "a music frame has to fit the wire")
+        self.assertEqual(len(self.decode(stereo, 1)), 1920)   # an old listener
+        self.assertEqual(len(self.decode(self.packet(1), 2)), 3840)  # an old sender
+        self.assertEqual(len(self.decode(stereo, 2)), 3840)
+
+
 class UploadGateTests(unittest.TestCase):
     """The frames reach a room even with the bot in private mode."""
 
@@ -751,6 +836,106 @@ class UploadGateTests(unittest.TestCase):
         streamer, game = self.make(cinema=False)
         streamer._send_to_network_actual(b"\x00" * 3840)
         self.assertEqual(game.network.sent, [])
+
+    def handed_to_encoders(self, streamer, data):
+        """One frame through the sender, and what each encoder was handed.
+
+        (channels, bytes) per call, so a stream that carried one side by mistake is
+        visible in the size of the payload as well as in the encoder that took it.
+        """
+        handed = []
+
+        class Encoder:
+            def __init__(self, channels):
+                self.channels = channels
+
+            def encode(self, payload):
+                handed.append((self.channels, len(bytes(payload))))
+                return b"opus"
+
+        streamer.encoder = Encoder(1)
+        streamer.encoder_stereo = Encoder(2)
+        streamer._send_to_network_actual(data)
+        return handed
+
+    def test_a_routed_song_uploads_both_sides(self):
+        """A room rebuilds the image from the two sides of a frame.
+
+        It splits one decoded frame into its mid and its side and spreads those over
+        the room's speakers, so a MONO upload left every speaker repeating one signal:
+        the room heard a single centre while the person who started the song -- whose
+        own machine feeds its room from the stereo decode -- heard it properly.
+        """
+        streamer, _game = self.make(cinema=True)
+        self.assertEqual(self.handed_to_encoders(streamer, b"\x01\x02" * 1920),
+                         [(2, 3840)])
+
+    def test_an_unrouted_broadcast_stays_mono(self):
+        streamer, _game = self.make(cinema=False)
+        streamer.bot.broadcast_enabled = True
+        self.assertEqual(self.handed_to_encoders(streamer, b"\x01\x02" * 1920),
+                         [(1, 1920)])
+
+    def uploaded(self, streamer, data):
+        """One frame through the sender, and the bytes each encoder was given."""
+        got = []
+
+        class Encoder:
+            def __init__(self, channels):
+                self.channels = channels
+
+            def encode(self, payload):
+                got.append((self.channels, bytes(payload)))
+                return b"opus"
+
+        streamer.encoder = Encoder(1)
+        streamer.encoder_stereo = Encoder(2)
+        streamer._send_to_network_actual(data)
+        return got
+
+    @staticmethod
+    def sides(payload):
+        """(left, right) mean-square of an interleaved s16le frame."""
+        samples = struct.unpack("<%dh" % (len(payload) // 2), payload)
+        left = samples[0::2]
+        right = samples[1::2]
+        return (sum(s * s for s in left) / len(left),
+                sum(s * s for s in right) / len(right))
+
+    def test_a_solo_over_a_routed_song_keeps_the_rooms_two_sides(self):
+        """A guitar over the song is added to both sides, not mixed into one.
+
+        The live input used to cut the whole upload to mono, so for as long as
+        somebody played over a routed song the room had no side to spread and
+        every speaker of the cabinet played the same thing -- heard as a solo
+        arriving from the whole room at once. A mono source belongs in the
+        centre: it is mixed into the left and the right alike, and the song
+        keeps the image it was uploaded with.
+        """
+        import collections
+        streamer, _game = self.make(cinema=True)
+        # A hard-left song, and one mono guitar frame over it.
+        song = struct.pack("<hh", 8000, 0) * 960
+        streamer.bot.guitar_pcm_queue = collections.deque(
+            [struct.pack("<h", 3000) * 960])
+        got = self.uploaded(streamer, song)
+        self.assertEqual(len(got), 1)
+        channels, payload = got[0]
+        self.assertEqual(channels, 2, "the solo must not turn the leg mono")
+        self.assertEqual(len(payload), 3840)
+        left, right = self.sides(payload)
+        self.assertGreater(right, 0, "the solo never reached the centre")
+        self.assertGreater(left, right * 2,
+                           "the song lost its image to the solo")
+
+    def test_a_solo_over_a_plain_broadcast_stays_mono(self):
+        streamer, _game = self.make(cinema=False)
+        streamer.bot.broadcast_enabled = True
+        import collections
+        streamer.bot.guitar_pcm_queue = collections.deque(
+            [struct.pack("<h", 3000) * 960])
+        got = self.uploaded(streamer, struct.pack("<hh", 8000, 0) * 960)
+        self.assertEqual([channels for channels, _payload in got], [1])
 
 
 class TimelineMarkerTests(unittest.TestCase):

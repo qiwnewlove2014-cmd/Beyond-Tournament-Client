@@ -575,7 +575,10 @@ class TestUploadGate(unittest.TestCase):
         }
         flags.update(bot_flags)
         streamer.bot = SimpleNamespace(**flags)
-        streamer.encoder = SimpleNamespace(encode=lambda _pcm: b"opus")
+        streamer.encoder = SimpleNamespace(encode=lambda _pcm: b"mono-opus")
+        # A bot-backed streamer always has the stereo encoder too (streaming.AudioStreamer
+        # builds both), and a party/cinema leg picks it.
+        streamer.encoder_stereo = SimpleNamespace(encode=lambda _pcm: b"stereo-opus")
         streamer.volume = 100
         return streamer
 
@@ -599,6 +602,20 @@ class TestUploadGate(unittest.TestCase):
             streamer = self._streamer(sent, **flags)
             streamer._send_to_network_actual(b"\x00" * 3840)
             self.assertEqual(len(sent), 1, flags)
+
+    def test_a_streamer_without_a_stereo_encoder_still_uploads_mono(self):
+        """The stereo branch must never go silent on a streamer that lacks one.
+
+        The frame is still owed to the room; falling through to the mono
+        encoder keeps the song playing (one centre, as before this change)
+        instead of dropping every frame of it.
+        """
+        sent = []
+        streamer = self._streamer(sent, cinema_force_upload=True)
+        del streamer.encoder_stereo
+        streamer._send_to_network_actual(b"\x00" * 3840)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][2], b"mono-opus")
 
 
 class TestBroadcastMixBlend(unittest.TestCase):

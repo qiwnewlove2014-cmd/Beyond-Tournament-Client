@@ -271,14 +271,15 @@ class TestDirectMode(unittest.TestCase):
 
 
 class TestStereoUpload(unittest.TestCase):
-    def bot(self, party=False, mega=False, broadcast=False):
+    def bot(self, party=False, mega=False, broadcast=False, cinema=False):
         return SimpleNamespace(
             broadcast_enabled=broadcast,
             broadcast_to_megaphone=mega,
             party_sync_force_upload=party,
+            cinema_force_upload=cinema,
         )
 
-    def test_stereo_only_on_party_private_leg(self):
+    def test_stereo_on_the_party_leg(self):
         self.assertTrue(stereo_upload_eligible(self.bot(party=True)))
         # Public-only or megaphone uploads stay mono.
         self.assertFalse(stereo_upload_eligible(self.bot(broadcast=True)))
@@ -286,11 +287,34 @@ class TestStereoUpload(unittest.TestCase):
         self.assertFalse(stereo_upload_eligible(self.bot(party=True, mega=True)))
         self.assertFalse(stereo_upload_eligible(None))
 
-    def test_stereo_needs_stereo_decode_and_no_live_input(self):
-        self.assertFalse(stereo_upload_eligible(self.bot(party=True), channels=1))
+    def test_a_song_routed_into_a_room_carries_both_sides(self):
+        # The room spreads a frame by its mid and its side (libs/audio/cinema/peer.py),
+        # so a mono upload handed every speaker the same signal -- reported as the
+        # song sounding mono, from the middle of the cabinet, to everyone in the room
+        # while the person who started it heard their own stereo room.
+        self.assertTrue(stereo_upload_eligible(self.bot(cinema=True)))
+        self.assertTrue(stereo_upload_eligible(self.bot(cinema=True, broadcast=True)))
+        # What the PA carries stays mono.
+        self.assertFalse(stereo_upload_eligible(self.bot(cinema=True, mega=True)))
         self.assertFalse(
-            stereo_upload_eligible(self.bot(party=True), live_input_pending=True)
+            stereo_upload_eligible(self.bot(cinema=True), channels=1)
         )
+
+    def test_a_solo_over_the_song_does_not_collapse_the_room(self):
+        """A live input used to make the WHOLE upload mono, so a solo was flat.
+
+        A guitar played over a routed song turned every speaker of the cabinet
+        into the same thing for as long as it played (reported as the room
+        having no image during a solo). The leg stays stereo now and the mono
+        live input is added to both sides by the sender instead --
+        ``streaming._mix_live_into_stereo``, pinned by
+        ``test_cinema_peer_room``.
+        """
+        self.assertTrue(stereo_upload_eligible(self.bot(cinema=True)))
+        self.assertTrue(stereo_upload_eligible(self.bot(party=True)))
+
+    def test_stereo_needs_a_two_channel_decode(self):
+        self.assertFalse(stereo_upload_eligible(self.bot(party=True), channels=1))
         self.assertTrue(
             stereo_upload_eligible(self.bot(party=True), channels=2)
         )

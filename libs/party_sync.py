@@ -371,17 +371,34 @@ def upload_should_send(bot):
     )
 
 
-def stereo_upload_eligible(bot, channels=2, live_input_pending=False):
-    # Whether the music-bot upload may carry true stereo this frame: only the private Party
-    # Sync leg may, never through the (mono) PA megaphone path, and only when the decode
-    # really is two channels and no live-input (mic/guitar) mono mix is pending.
+def stereo_upload_eligible(bot, channels=2):
+    # Whether the music-bot upload may carry true stereo this frame: the private Party Sync
+    # leg may, and so may a song routed into a cabinet's room, both because the listener
+    # rebuilds the image from the two sides. The room is the louder case of the two: a room
+    # splits one decoded frame into its mid and its side and spreads those over its
+    # speakers (libs/audio/cinema/peer.py), so a MONO upload leaves it with no side to
+    # spread -- every speaker repeats one signal and the room is heard as a single centre,
+    # while the person who started the song hears their own room fed by the stereo decode.
+    # Never through the (mono) PA megaphone path, and only when the decode really is two
+    # channels.
+    #
+    # A mic or line-in playing over the song is deliberately NOT a reason to switch this
+    # off. It used to be one, and the whole upload went mono for as long as somebody
+    # played: the song's image collapsed with the solo, so a room heard a lone guitar
+    # arrive from every speaker at once ("during the solo the cabinet is the same
+    # everywhere"). The live input is one mono source and belongs in the centre -- the
+    # sender mixes it into BOTH sides instead (streaming._mix_live_into_stereo), which
+    # leaves the song's two sides exactly where they were.
     if bot is None:
         return False
-    return bool(
+    stereo_leg = bool(
         getattr(bot, "party_sync_force_upload", False)
+        or getattr(bot, "cinema_force_upload", False)
+    )
+    return bool(
+        stereo_leg
         and not getattr(bot, "broadcast_to_megaphone", False)
         and channels == 2
-        and not live_input_pending
     )
 
 

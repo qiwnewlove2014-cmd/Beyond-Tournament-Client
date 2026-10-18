@@ -29,15 +29,27 @@ def _route_music_to_room(game, entity, channel_id):
     # out of that same room, resolved from the listener's own map, not out of a 3D speaker
     # on the sender's back. Only the routing is decided here -- the room is built on the
     # main thread, because it creates OpenAL sources and this runs on the receive thread.
+    #
+    # The DECODER FORMAT belongs to the same question and is decided in the same place: the
+    # sender uploads two sides for a Party Sync session and for a song routed into a room
+    # (see party_sync.stereo_upload_eligible), and a leg left on the mono decoder would
+    # downmix them back to one -- which is exactly how a song that is clearly stereo to the
+    # person who started it reached the room as a single centre: every speaker of the room
+    # was handed the same signal, so there was no side to spread. A plain peer song stays
+    # mono, because that is what its sender uploads.
     compression = getattr(entity, "music_compression", None)
-    if compression is None or not hasattr(compression, "set_cinema_channel"):
+    if compression is None:
         return
     room = cinema_peer.routing_for(game, channel_id)
-    if room and getattr(entity, "_party_sync_direct", False):
+    party_direct = bool(getattr(entity, "_party_sync_direct", False))
+    if room and party_direct:
         # A Party Sync guest hears the host privately, on purpose: that leg is
         # never put in a shared room, whoever routed what.
         room = None
-    compression.set_cinema_channel(channel_id if room else None)
+    if hasattr(compression, "set_cinema_channel"):
+        compression.set_cinema_channel(channel_id if room else None)
+    if hasattr(compression, "set_output_stereo"):
+        compression.set_output_stereo(party_direct or room is not None)
 
 
 class EventHandeler:
@@ -2465,10 +2477,6 @@ class EventHandeler:
                 # Stamp the last receive time so entity.loop() can avoid pushing
                 # silent keep-alive buffers that would interleave with real audio.
                 entity._music_last_recv = time.time()
-                if hasattr(entity.music_compression, "set_output_stereo"):
-                    entity.music_compression.set_output_stereo(
-                        bool(getattr(entity, "_party_sync_direct", False))
-                    )
                 _route_music_to_room(self.game, entity, entity_channel_id)
                 try:
                     entity.music_compression.recieve(opus_data, music_src, None, entity_channel_id, self.gameplay)
@@ -2504,10 +2512,6 @@ class EventHandeler:
         if not getattr(entity, "music_compression", None):
             from .voice_chat import MusicCompression
             entity.music_compression = MusicCompression(self.game)
-        if hasattr(entity.music_compression, "set_output_stereo"):
-            entity.music_compression.set_output_stereo(
-                bool(getattr(entity, "_party_sync_direct", False))
-            )
         entity._music_last_recv = time.time()
         _route_music_to_room(self.game, entity, entity_channel_id)
         entity.music_compression.recieve_timeline(

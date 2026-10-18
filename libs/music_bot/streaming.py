@@ -343,6 +343,40 @@ class AudioStreamer(threading.Thread):
         samples.frombytes(data)
         return samples[0::2].tobytes(), samples[1::2].tobytes()
 
+    @staticmethod
+    def _mix_live_into_stereo(payload, live_frames, state_key):
+        """Add the mono mic/line-in mix to BOTH sides of a stereo frame.
+
+        A mic or a guitar is one source with no sides of its own, so it belongs
+        in the centre -- mixed into the left and the right alike -- while the
+        song keeps the two sides it was uploaded with. Downmixing the song to
+        carry the solo (what this path did before) left a room with no side to
+        spread, and every speaker of the cabinet played the same thing for as
+        long as somebody played: the report was that a solo arrives from the
+        whole cabinet at once. The music keeps its own 0.75 weight and each
+        live source its 0.85, exactly as the mono mix balances them, and each
+        side is limited on its own so a loud solo cannot pull the image down.
+        """
+        if not payload or not live_frames:
+            return bytes(payload) if payload else b""
+        try:
+            import audioop
+            left, right = AudioStreamer._split_stereo_16(bytes(payload))
+            sides = []
+            for side, suffix in ((left, ":l"), (right, ":r")):
+                mixed = voice_chat.mix_audio_frames(
+                    [(side, 0.75)] + list(live_frames),
+                    state_key=f"{state_key}{suffix}",
+                )
+                sides.append(mixed or side)
+            return audioop.add(
+                audioop.tostereo(sides[0], 2, 1.0, 0.0),
+                audioop.tostereo(sides[1], 2, 0.0, 1.0),
+                2,
+            )
+        except Exception:
+            return bytes(payload)
+
     def set_cabinet_volume(self, volume):
         self.cabinet_gain = max(0.0, min(1.0, float(volume) / 100.0))
         if self.cinema is not None:
@@ -825,6 +859,10 @@ class AudioStreamer(threading.Thread):
                         guitar_data = self.bot.guitar_pcm_queue.popleft()
                 except Exception:
                     pass
+            # The live input is kept as its own list as well as being mixed into
+            # mono_data: the stereo branch needs to place it in the centre
+            # without downmixing the song with it (see _mix_live_into_stereo).
+            live_frames = []
             if mic_data is not None or guitar_data is not None:
                 try:
                     def _align(frame):
@@ -834,22 +872,21 @@ class AudioStreamer(threading.Thread):
                             return frame + b'\x00' * (len(mono_data) - len(frame))
                         return frame
 
+                    if mic_data is not None:
+                        live_frames.append((_align(mic_data), 0.85))
+                    if guitar_data is not None:
+                        live_frames.append((_align(guitar_data), 0.85))
                     # Sum music and live inputs in wide precision, then apply
                     # one limiter. audioop.add saturates at each intermediate
                     # addition, so limiting its result cannot repair clipping.
-                    mix = [(mono_data, 0.75)]
-                    if mic_data is not None:
-                        mix.append((_align(mic_data), 0.85))
-                    if guitar_data is not None:
-                        mix.append((_align(guitar_data), 0.85))
                     mixed = voice_chat.mix_audio_frames(
-                        mix,
+                        [(mono_data, 0.75)] + live_frames,
                         state_key=mix_limiter_key,
                     )
                     if mixed:
                         mono_data = mixed
                 except Exception:
-                    pass
+                    live_frames = []
 
             # When routing through the megaphone, feed the mixed stream into the local PA sidechain (main
             # thread) so the broadcaster hears their own music/instruments with zero latency - the server no
@@ -871,21 +908,29 @@ class AudioStreamer(threading.Thread):
             # left/right separation instead of the mono downmix; public
             # broadcasts and the PA megaphone keep the proven mono path.
             # Live-input (mic/guitar) mixes stay mono (built as one channel).
+            # A live input no longer turns this off: the solo is one source and
+            # goes in the centre of the pair, so the song keeps its image for
+            # everyone in the room while somebody plays over it (see
+            # party_sync.stereo_upload_eligible and _mix_live_into_stereo).
             use_stereo = stereo_upload_eligible(
                 self.bot,
                 getattr(self, "channels", 2),
-                live_input_pending=bool(
-                    mic_data is not None or guitar_data is not None
-                ),
             )
             if use_stereo:
-                enc = self.encoder_stereo or self.encoder
+                # A streamer built without a bot never reaches here (the gate above needs one),
+                # and that is also the only streamer with no stereo encoder: ask for it so an
+                # object missing one -- a hand-built streamer, an older one -- still uploads
+                # through its mono encoder instead of going silent on this branch.
+                enc = getattr(self, "encoder_stereo", None) or self.encoder
                 payload = bytes(data) if data is not None else b""
                 if current_volume_scale != 1.0 and payload:
                     try:
                         payload = audioop.mul(payload, 2, current_volume_scale)
                     except Exception:
                         pass
+                if payload and live_frames:
+                    payload = self._mix_live_into_stereo(
+                        payload, live_frames, mix_limiter_key)
             else:
                 enc = self.encoder
                 payload = mono_data
