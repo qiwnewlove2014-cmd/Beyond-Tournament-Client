@@ -601,11 +601,52 @@ def _get_buffer_from_pool(audio_mngr):
     return None
 
 
-def _reclaim_source_buffers(src):
-    """Unqueue processed OpenAL buffers and return them to the shared pool."""
+def _reclaim_source_buffers(src, drain_stopped=False):
+    """Return the buffers a *playing* source has finished to the shared pool.
+
+    A STOPPED (or never started) source reports **every** buffer it holds as
+    processed -- OpenAL counts a buffer as done the instant its source is not
+    playing it -- so reading that number on a quiet source hands back audio
+    nobody has heard. That is not an edge case on the PA: a frame is queued only
+    after the main thread has drained the audio inbox, so one late render frame
+    lets a speaker run dry with frames still waiting, and the next call used to
+    reclaim them as "finished" and start again from a hole. Heard as a live
+    instrument cutting in and out (`tools/instrument_pa_continuity_sim.py`
+    measures the frames lost on a hitchy main thread).
+
+    The cinema room's own legs (``audio/cinema/bank.reclaim``,
+    ``audio/cinema/speech._publish``) already refuse to read a stopped source for
+    exactly this reason; the PA path now applies the same rule. Teardown passes
+    ``drain_stopped=True``, where throwing the queue away is the point.
+    """
     try:
+        if not drain_stopped:
+            if src.state not in (cyal.SourceState.PLAYING, cyal.SourceState.PAUSED):
+                return
         while src.buffers_processed > 0:
             _recycle_buffers(src.unqueue_buffers())
+    except Exception:
+        pass
+
+
+def _drop_source_queue(src):
+    """Throw away the frames a stopped speaker still holds, unreplayed.
+
+    A stopped source's queue is audio the ear never got: the stream went quiet for
+    a frame or two and those buffers never played. Restarting on top of them would
+    replay the past; leaving them to the next reclaim would be read as finished
+    audio. So they are handed back to the pool here, before this frame is queued.
+    Bounded by the queue's own length so a driver that keeps reporting an unqueue
+    nobody asked for cannot spin this loop on the main thread.
+    """
+    try:
+        for _ in range(int(src.buffers_queued) + 1):
+            if int(src.buffers_queued) <= 0:
+                break
+            taken = src.unqueue_buffers()
+            if not taken:
+                break
+            _recycle_buffers(taken)
     except Exception:
         pass
 
@@ -700,11 +741,26 @@ def update_active_speakers(count):
 
 
 class voice_chat_compression(threading.Thread):
-    def __init__(self, game, channel=None, max_pending_frames=None):
+    def __init__(self, game, channel=None, max_pending_frames=None, application='voip'):
+        """One Opus send worker.
+
+        ``application`` is the codec's own mode, and it is the one thing here a
+        microphone and an instrument cannot share. Opus's ``voip`` mode is
+        speech-tuned on purpose -- it high-passes the input and emphasises
+        formants and harmonics, so "even at high bitrates the output may sound
+        different from the input" (opus's own words): a guitar sent through it
+        arrives thin and bright, without the body of the instrument. ``audio``
+        is the mode for music and for anything that has to sound like what was
+        played, and it is what the music bot's own live relay already asks for
+        (``LiveRelayStreamer``). A line-in instrument therefore gets its own
+        worker in ``audio`` mode (``InstrumentInput._feed_guitar_voice``) while
+        the microphone keeps ``voip``.
+        """
         try:
             super().__init__(daemon=True)
             self.game = game
             self.channel = channel if channel is not None else consts.CHANNEL_VOICECHAT
+            self.application = application
             self._max_pending_frames = (
                 max(1, int(max_pending_frames))
                 if max_pending_frames is not None else None
@@ -716,7 +772,7 @@ class voice_chat_compression(threading.Thread):
             )
             self.dropped_frames = 0
             self.encoder = OpusEncoder()
-            self.encoder.set_application('voip')
+            self.encoder.set_application(application)
             self.encoder.set_channels(1)
             self.encoder.set_sampling_frequency(48000)
             self.decoder = OpusDecoder()
@@ -735,7 +791,8 @@ class voice_chat_compression(threading.Thread):
             self._pa_seq = 0
             self.running = True
             self.start()
-            logger.log(f"VoiceChatCompression initialized for channel {self.channel}")
+            logger.log(f"VoiceChatCompression initialized for channel {self.channel} "
+                       f"(opus {self.application})")
         except Exception as e:
             logger.log_exception(e, "voice_chat_compression.__init__")
             
@@ -1228,7 +1285,15 @@ def _feed_local_megaphone_main(gameplay, raw_buf, producer='producer'):
             sources,
             raw_buf,
             margin_frames=0,
-            real_prebuffer_frames=3 if producer == 'music' else None,
+            # A LIVE INSTRUMENT is a continuous stream like the song: 20 ms on, 20 ms
+            # off, forever. Started on the legacy "one real frame + trailing silence"
+            # cushion it began with a 20 ms hole and re-created that hole after every
+            # underrun -- the starting order the music producer was already moved off
+            # ("heard as a repeating stutter"). It now starts on three real frames
+            # like the music monitor. The microphone keeps the legacy path on purpose:
+            # it hands this path a 10 ms chunk every 10 ms, so it never has to wait for
+            # a second frame to begin, and speech values the first syllable.
+            real_prebuffer_frames=3 if producer in ('music', 'guitar') else None,
             ignore_speaker_delay=True,
         )
     except Exception:
@@ -2121,6 +2186,18 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet,
         pass
 
     _reclaim_source_buffers(src)
+    try:
+        stopped_now = src.state == cyal.SourceState.STOPPED
+    except Exception:
+        stopped_now = False
+    if stopped_now:
+        # A source that has stopped still holds the frames of the moment it went
+        # quiet: they were never heard, so they cannot be reclaimed as finished, and
+        # they must not be replayed in front of this frame either (the stream would
+        # restart 20-60 ms in the past). Drop that queue deliberately, so this frame
+        # is the next thing the speaker plays. INITIAL is deliberately left alone:
+        # that is a source filling its real-frame pre-buffer (`real_prebuffer_frames`).
+        _drop_source_queue(src)
     if real_prebuffer_frames is not None:
         try:
             if src.state == cyal.SourceState.STOPPED:

@@ -237,10 +237,12 @@ class FrameRoutingTests(unittest.TestCase):
 class FakeVoiceWorker:
     made = []
 
-    def __init__(self, game, channel=None, max_pending_frames=None):
+    def __init__(self, game, channel=None, max_pending_frames=None,
+                 application=None):
         self.game = game
         self.channel = channel
         self.max_pending_frames = max_pending_frames
+        self.application = application
         self.frames = collections.deque()
         self.closed = 0
         FakeVoiceWorker.made.append(self)
@@ -281,6 +283,9 @@ class VoiceLegTests(unittest.TestCase):
         worker = FakeVoiceWorker.made[0]
         self.assertEqual(worker.max_pending_frames, 2)
         self.assertEqual(len(worker.frames), 1)
+        # Music, not a speech call: the instrument has to arrive sounding like
+        # itself (see tests/test_instrument_output_quality.py).
+        self.assertEqual(worker.application, "audio")
 
     def test_one_worker_serves_the_whole_session(self):
         for _ in range(5):

@@ -10,6 +10,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import cyal
+
 from libs import voice_chat as vc
 from libs.voice_chat import MegaphoneJitterBuffer
 
@@ -238,6 +240,10 @@ class TestMegaphoneJitterBuffer(unittest.TestCase):
 
         class Source:
             def __init__(self):
+                # Only a playing source's finished buffers are reclaimed: a stopped
+                # one reports its whole queue as processed, and reading that would
+                # hand back audio nobody heard (see _reclaim_source_buffers).
+                self.state = cyal.SourceState.PLAYING
                 self.processed = [first, second]
 
             @property

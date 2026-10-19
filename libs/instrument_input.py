@@ -476,9 +476,15 @@ class InstrumentInput(threading.Thread):
             if self._guitar_voice is None:
                 from . import consts, voice_chat
                 try:
+                    # ``application='audio'``, not the voice chat's ``voip``: an
+                    # instrument has to arrive sounding like itself. Opus's voip
+                    # mode high-passes the input and emphasises formants, which
+                    # is what made a line-in guitar sound thin and bright on the
+                    # voice channel while the same guitar on the music bot's
+                    # relay (already 'audio') sounded right.
                     self._guitar_voice = voice_chat.voice_chat_compression(
                         self.game, consts.CHANNEL_VOICECHAT,
-                        max_pending_frames=2)
+                        max_pending_frames=2, application='audio')
                 except Exception:
                     self._guitar_voice = None
 
