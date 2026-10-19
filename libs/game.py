@@ -40,6 +40,11 @@ from . import (
 from .speech import speak
 from .logger import log, log_exception
 from .audio_diagnostics import probe as audio_probe
+from .audio_health import (
+    GameAudioView,
+    probe as audio_health,
+    recovery as audio_recovery,
+)
 
 # The agreement players read before creating an account. Written to be
 # polite and short — spoken aloud by the screen reader, so each line is a
@@ -834,6 +839,41 @@ class Game:
                 # Keep anti-cheat verification outside this handler on purpose.
                 self.recover_from_exception(e, "Game main loop")
 
+    def _pump_audio(self):
+        """One frame of audio; one AL fault must not cost the whole frame.
+
+        This used to be a bare call, so a single dead source handle abandoned the
+        rest of the frame and threw the player back to the main menu
+        (``recover_from_exception``) -- losing the match over an audio handle. The
+        fault is counted and the frame continues; the next frame re-asserts the
+        routing the owner systems hold.
+        """
+        try:
+            self.audio_mngr.loop()
+        except Exception as audio_error:
+            audio_health.note_loop_fault(type(audio_error).__name__)
+        self._tick_audio_recovery()
+
+    def _tick_audio_recovery(self):
+        """At most once a second: let a dead room be put back by itself.
+
+        The checks are a handful of reads (a room's slot, that slot's ``gain``)
+        and, only when something is actually wrong, the game's own
+        ``ensure_slot`` / ``slot.reload`` / ``sync_reverb``.  A healthy frame
+        pays one clock comparison.  Nothing here may cost a frame, so a fault
+        in the recovery itself is counted and dropped.
+        """
+        if not getattr(audio_recovery, "enabled", False):
+            return
+        now = time.monotonic()
+        if now < getattr(self, "_next_audio_recovery", 0.0):
+            return
+        self._next_audio_recovery = now + 1.0
+        try:
+            audio_recovery.tick(GameAudioView(self))
+        except Exception as error:
+            audio_health.note_swallowed("game.audio_recovery", type(error).__name__)
+
     def recover_from_exception(self, error, context):
         """Return to a safe menu after a recoverable Python exception."""
         if self._recovery_in_progress:
@@ -908,7 +948,7 @@ class Game:
                         and get_os() == consts.OS_LINUX
                     ):
                         speak("", True)
-                self.audio_mngr.loop()
+                self._pump_audio()
                 for automation_task in self.automations:
                     audio_probe.call("game.automation", automation_task.loop)
                 if self.title_clock.elapsed >= 2500:
@@ -918,8 +958,10 @@ class Game:
                     device = options.get("audio_device", cyal.util.get_default_all_device_specifier())
                     if device == "system default":
                         device = cyal.util.get_default_all_device_specifier()
+                    reopen_reason = None
                     try:
                         if not self.audio_mngr.context.is_connected:
+                            reopen_reason = "reconnect"
                             try:
                                 self.audio_mngr.context.device.reopen(name=device)
                             except Exception:
@@ -928,12 +970,29 @@ class Game:
                                     with contextlib.suppress(Exception):
                                         self.audio_mngr.context.device.reopen(name=default_dev)
                         elif self.audio_mngr.context.device.output_name != device:
+                            reopen_reason = "switch"
                             try:
                                 self.audio_mngr.context.device.reopen(name=device)
                             except Exception:
                                 pass
                     except Exception as e:
                         log(f"[AUDIO] Device reopen watchdog skipped: {e}")
+                    if reopen_reason is not None:
+                        # The one measurement that would settle whether an EFX slot
+                        # survives a device reopen: the pool line and its connection
+                        # state, before the next map load overwrites the picture.
+                        try:
+                            audio_health.note_device_reopen(
+                                reopen_reason,
+                                bool(self.audio_mngr.context.is_connected),
+                                self.audio_mngr.slot_report_line(),
+                            )
+                        except Exception:
+                            pass
+                        # A reopened device is a new driver state: a slot the
+                        # recovery gave up on may answer again now.
+                        with contextlib.suppress(Exception):
+                            audio_recovery.reset_incident()
                     self.device_clock.restart()
                 if options.get("mute_on_focus_loss", False):
                     if pygame.key.get_focused() and self.audio_mngr.context.device.paused: 

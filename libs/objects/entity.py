@@ -12,6 +12,7 @@ from .. import movement, consts, path_utils
 from .object import Object
 
 from ..audio import sound
+from ..audio_health import probe as audio_health
 
 class Entity(Object):
     # Armor a listener hears on this entity's steps. Locally it comes from the
@@ -181,6 +182,7 @@ class Entity(Object):
                             self.game.audio_mngr.efx.send(self.music_source, 0, slot, filter=flt)
             return True
         except Exception as e:
+            audio_health.note_swallowed("entity.sync_reverb", type(e).__name__)
             log(f"[ENTITY.AUDIO] Reverb sync skipped for {self.name!r}: {e}")
             return False
 

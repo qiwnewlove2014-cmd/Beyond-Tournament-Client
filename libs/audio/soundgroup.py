@@ -6,6 +6,7 @@ import weakref
 
 import cyal.exceptions
 from .sound import Sound
+from ..audio_health import probe as audio_health
 from ..movement import get_3d_distance
 
 class SoundGroup:
@@ -162,8 +163,8 @@ class SoundGroup:
             
             self.labeled_sources[id] = snd
         self.mute_if_far()
-        for i in self.sends:
-            try: self.parent.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+        for index, i in enumerate(self.sends):
+            try: self.parent.efx.send(source, index, i, filter=self.filter[-1] if len(self.filter) > 0 else None)
             except cyal.exceptions.InvalidOperationError as e: pass
         if self.filter is not None and len(self.filter) > 0: source.direct_filter=self.filter[-1]
         # mute_if_far may restore a zero gain on spatial sources. A newly
@@ -216,15 +217,31 @@ class SoundGroup:
         self.labeled_sources.clear()
     
     def apply_effect(self, slot, sendnum: int=0, filter=None):
+        """Route one aux send on every sound of this group.
+
+        Each source is sent on its own: a handle that died since the last frame
+        raises out of ``efx.send``, and letting that abort the loop left the rest
+        of the group on the previous room -- or dry -- with nothing recording it.
+        ``self.sends`` still records the intended routing, because it is what a
+        *new* sound is given in ``play()``.
+        """
         if self.direct: return
         self.sends[sendnum] = slot
+        send_filter = self.filter[-1] if len(self.filter) > 0 else None
         with self.context.batch():
-                for source in self.unlabeled_sources:
-                    if source.source is None: continue
-                    self.parent.efx.send(source.source, sendnum, slot, filter=self.filter[-1] if len(self.filter) > 0 else None)
-                for source in self.labeled_sources.values():
-                    if source.source is None: continue
-                    self.parent.efx.send(source.source, sendnum, slot, filter=self.filter[-1] if len(self.filter) > 0 else None)
+            for source in list(self.unlabeled_sources):
+                self._send_effect(source, sendnum, slot, send_filter)
+            for source in list(self.labeled_sources.values()):
+                self._send_effect(source, sendnum, slot, send_filter)
+
+    def _send_effect(self, sound, sendnum, slot, send_filter):
+        source = getattr(sound, "source", None)
+        if source is None:
+            return
+        try:
+            self.parent.efx.send(source, sendnum, slot, filter=send_filter)
+        except Exception as error:
+            audio_health.note_send_failure("group", type(error).__name__)
 
     def apply_filter(self, filter, replace = False, clear=False):
         if not self.filterable and self.direct: return

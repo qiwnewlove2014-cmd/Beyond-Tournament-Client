@@ -20,6 +20,7 @@ from .audio.cinema import sound_test as cinema_sound_test
 from .audio.cinema import speech as cinema_speech
 from pyogg import OpusDecoder
 from .audio_diagnostics import probe as audio_probe
+from .audio_health import probe as audio_health, recovery as audio_recovery
 
 
 def _route_music_to_room(game, entity, channel_id):
@@ -500,6 +501,39 @@ class EventHandeler:
         reclaim = getattr(audio_mngr, 'reclaim_orphaned_slots', None)
         if callable(reclaim):
             audio_probe.call("map.reclaim_slots", reclaim)
+        # One line per rebuild: what the map asked for and what the pool had
+        # left. Faults are counted regardless; this read-out is opt-in because
+        # it is written on every load (BT_AUDIO_HEALTH=1).
+        audio_probe.call("map.health", self._record_audio_health, gp, audio_mngr)
+        # A new map is a new baseline for the recovery: a room it gave up on
+        # belonged to the map that just went away.
+        reset = getattr(audio_recovery, "reset_incident", None)
+        if callable(reset):
+            with contextlib.suppress(Exception):
+                reset()
+
+    @staticmethod
+    def _record_audio_health(gp, audio_mngr):
+        """Snapshot the rebuilt map against the pool it has to fit in."""
+        try:
+            map_obj = getattr(gp, "map", None)
+            if map_obj is None:
+                # A successful reload always has a map; `load=N` counts loads,
+                # so a call without one must not spend a number on itself.
+                return
+            zones = list(getattr(map_obj, "reverb_list", ()) or ())
+            report = audio_mngr.slot_report() if audio_mngr is not None else {}
+            audio_health.map_load(
+                name=getattr(gp, "map_name", None),
+                rooms=len(zones),
+                dry_rooms=sum(1 for zone in zones
+                              if getattr(zone, "reverb", None) is None),
+                slots_used=report.get("used", 0),
+                slots_total=report.get("total", 0),
+                leases=report.get("shared", 0),
+            )
+        except Exception:
+            pass
 
     def map_renamed(self, data):
         # The map this client is standing in was renamed on the Server. A map's name is its file

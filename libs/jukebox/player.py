@@ -16,6 +16,7 @@ from ..audio.cinema import (CINEMA_AUTO, CINEMA_OFF, ROOM_REFERENCE_DISTANCE,
                             acquire_bank, cabinet_anchor, cinema_room,
                             release_renderer)
 from ..audio_diagnostics import probe as audio_probe
+from ..audio_health import probe as audio_health
 from ..deferred_log import log_deferred as log_line
 
 from .constants import (CINEMA_PROFILES, OCCLUSION_CLEAR, OCCLUSION_FULL,
@@ -1801,7 +1802,9 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
                         bank.set_reverb(reverb)
                         bank.touch_environment()
                         bank.update_output()
-                    except Exception:
+                    except Exception as error:
+                        audio_health.note_swallowed("jukebox.sync_reverb.cinema",
+                                                   type(error).__name__)
                         healthy = False
                     continue
                 src_l = p.get("source")
@@ -1827,7 +1830,9 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
                             )
                     audio.efx.send(src_l, 0, reverb, filter=filt)
                     audio.efx.send(src_r, 0, reverb, filter=filt)
-                except Exception:
+                except Exception as error:
+                    audio_health.note_swallowed("jukebox.sync_reverb.stereo",
+                                               type(error).__name__)
                     healthy = False
         return healthy
 

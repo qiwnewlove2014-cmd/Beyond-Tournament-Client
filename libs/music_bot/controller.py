@@ -35,6 +35,7 @@ from .crossfade_handler import CrossfadeHandler
 from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager
 from ..speech import speak
+from ..audio_health import probe as audio_health
 from . import song_requests
 from . import subtitles
 from .media import (FFMPEG_PATH, DEFAULT_MAP_MUSIC, FALLBACK_PLAYLIST,
@@ -2251,7 +2252,9 @@ class MapMusicBot:
                     )
                     self._current_reverb_slot = None
             return True
-        except Exception:
+        except Exception as error:
+            audio_health.note_swallowed("music_bot._sync_map_reverb",
+                                       type(error).__name__)
             return False
 
     def _detach_map_reverb(self):

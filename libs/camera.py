@@ -250,19 +250,8 @@ class Camera:
         """
         # change reverb if required.
         reverb = self._listener_map().get_reverb_at(x, y, z)
-        if reverb != self.reverb and not self.focus_object.dead:
-            self.reverb = reverb
-            if reverb is None:
-                self.focus_object.soundgroup.apply_effect(None, 0)
-            else:
-                # A zone whose slot could not be borrowed (momentary effect-slot
-                # pool exhaustion) retries on a cooldown, so the current room
-                # recovers its reverb in place instead of staying dry until a
-                # client restart.
-                slot = reverb.reverb
-                if slot is None and hasattr(reverb, "ensure_slot"):
-                    slot = reverb.ensure_slot()
-                self.focus_object.soundgroup.apply_effect(slot, 0)
+        if not self.focus_object.dead:
+            self._sync_listener_reverb(reverb)
 
         # enter/leave zones
         zone = self._listener_map().get_zone_at(x, y, z)
@@ -289,6 +278,36 @@ class Camera:
             i.enter()
         for i in musics_to_pause:
             i.leave()
+
+    def _sync_listener_reverb(self, reverb):
+        """Bind the ears to the room at their feet, and keep trying while it is dry.
+
+        ``self.reverb`` means "the room this listener is actually routed to", not
+        "the room the map named at this position". A zone whose slot could not be
+        borrowed yet (the pool was momentarily empty, or a rebuild outran the
+        recycle) is left un-recorded, so the next step asks ``ensure_slot`` again
+        -- the zone keeps its own 1.5 s cooldown, so a step inside it costs one
+        comparison. Recording it as done was how a room stayed dry until the
+        player walked out and back in.
+        """
+        group = getattr(self.focus_object, "soundgroup", None)
+        if group is None:
+            self.reverb = reverb
+            return
+        if reverb is None:
+            if self.reverb is not None:
+                group.apply_effect(None, 0)
+            self.reverb = None
+            return
+        slot = getattr(reverb, "reverb", None)
+        if reverb is self.reverb and slot is not None:
+            return
+        if slot is None and hasattr(reverb, "ensure_slot"):
+            slot = reverb.ensure_slot()
+        if slot is None:
+            return
+        group.apply_effect(slot, 0)
+        self.reverb = reverb
 
     def move(self, x, y, z):
         previous = (self.x, self.y, self.z)

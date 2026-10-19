@@ -19,6 +19,7 @@ from .instrument_samples import InstrumentSampleCache
 from .crossed_samples import CrossedSampleCache
 from .map_sound_cache import MapSoundCache
 from .audio_diagnostics import probe as audio_probe
+from .audio_health import probe as audio_health
 from . import options
 from . import path_utils
 from . import consts
@@ -572,8 +573,8 @@ class AudioManager():
                 source.direct_filter = direct_filter
             elif len(self.filter) > 0 and self.filter[-1] is not None:
                 source.direct_filter = self.filter[-1]
-            for i in self.sends:
-                try: self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+            for index, i in enumerate(self.sends):
+                try: self.efx.send(source, index, i, filter=self.filter[-1] if len(self.filter) > 0 else None)
                 except cyal.exceptions.InvalidOperationError as e: print(e)
             source.play()
         except Exception:
@@ -764,10 +765,10 @@ class AudioManager():
                     # attack never leaks through at full brightness.
                     src_l.direct_filter = direct_filter
                     src_r.direct_filter = direct_filter
-                for i in self.sends:
+                for index, i in enumerate(self.sends):
                     with contextlib.suppress(Exception):
-                        self.efx.send(src_l, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
-                        self.efx.send(src_r, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+                        self.efx.send(src_l, index, i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+                        self.efx.send(src_r, index, i, filter=self.filter[-1] if len(self.filter) > 0 else None)
                 src_l.play()
                 src_r.play()
             except Exception:
@@ -855,9 +856,9 @@ class AudioManager():
                 source.direct_filter = self.filter[-1]
             if direct_filter is not None:
                 source.direct_filter = direct_filter
-            for i in self.sends:
+            for index, i in enumerate(self.sends):
                 with contextlib.suppress(Exception):
-                    self.efx.send(source, self.sends.index(i), i, filter=self.filter[-1] if len(self.filter) > 0 else None)
+                    self.efx.send(source, index, i, filter=self.filter[-1] if len(self.filter) > 0 else None)
             source.play()
         except Exception:
             with contextlib.suppress(Exception):
@@ -967,8 +968,8 @@ class AudioManager():
     def create_soundgroup(self, direct=False, radius=0.5, filterable=False):
         sg = SoundGroup(self.context, self, direct, radius=radius, filterable=filterable)
         for i in self.filter: sg.apply_filter(i)
-        for i in self.sends:
-            sg.apply_effect(i, self.sends.index(i))
+        for index, i in enumerate(self.sends):
+            sg.apply_effect(i, index)
         
         self.soundgroups.add(sg)
         return sg
@@ -976,11 +977,28 @@ class AudioManager():
 
 
     def apply_effect(self, slot, sendnum=0, filter=None):
+        """Route one aux send on every sound this manager owns.
+
+        A dead source handle must not abort the routing of everything after it:
+        cyal raises out of ``efx.send`` on an invalid name, and a single failure
+        used to leave the listener's own group on the old room while ``sends``
+        already recorded the new one -- not dry, *wrong*, and never retried. Each
+        send is reported and skipped now, so every owner still gets the room the
+        map says it is standing in.
+        """
         self.sends[sendnum] = slot
-        for source in self.unbound_sources:
-            self.efx.send(source.source, sendnum, slot, filter=self.filter[-1] if len(self.filter) > 0 else None)
-        for sg in self.soundgroups:
-            sg.apply_effect(slot, sendnum, filter=filter)
+        filters = getattr(self, "filter", ())
+        send_filter = filters[-1] if len(filters) > 0 else None
+        for source in list(self.unbound_sources):
+            try:
+                self.efx.send(source.source, sendnum, slot, filter=send_filter)
+            except Exception as error:
+                audio_health.note_send_failure("unbound", type(error).__name__)
+        for sg in list(self.soundgroups):
+            try:
+                sg.apply_effect(slot, sendnum, filter=filter)
+            except Exception as error:
+                audio_health.note_send_failure("group-owner", type(error).__name__)
         
     def apply_filter(self, filter, exclude=[], replace=True, clear=False):
         if clear: self.filter.clear()
