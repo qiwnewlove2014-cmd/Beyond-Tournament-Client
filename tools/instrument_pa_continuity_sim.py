@@ -115,8 +115,11 @@ class _ClockSource:
         self.state = cyal.SourceState.STOPPED
 
     def rewind(self):
+        # Only ever called on an empty queue (the price of replaying the past is
+        # not paid here); the play head may not move backwards, or the next
+        # buffer would be heard twice.
         self.state = cyal.SourceState.INITIAL
-        self.play_head = self.now
+        self.play_head = max(self.play_head, self.now)
 
     # -- the driver's own clock ------------------------------------------
     def advance(self, now):
@@ -188,6 +191,7 @@ def run(seconds=10.0, distance=12.0, producer="guitar",
     source = _ClockSource()
     key = f"player-1:{producer}"
     gameplay = _gameplay(speaker_x=distance, source=source, key=key)
+
     frame = b"\x10\x00" * FRAME_SAMPLES
 
     tick = 1000.0 / render_hz if render_hz else 0.0
@@ -299,8 +303,7 @@ def describe(result):
         f"silence={result['silence_ms']:6.1f}ms  "
         f"holes={len(result['holes']):3d} totalling {result['hole_ms']:7.1f}ms "
         f"(longest {result['longest_hole_ms']:5.0f}ms)  "
-        f"still queued={result['pending_frames']:2d}  "
-        f"lost={result['lost_frames']:3d} frame(s)  "
+        f"lost={result['lost_frames']:2d}  still queued={result['pending_frames']:2d}  "
         f"drift={result['drift_ms']:7.1f}ms"
     )
 
@@ -336,8 +339,9 @@ def main():
         result = run(spike_every_ms=1500.0, spike_ms=60.0, jitter_ms=6.0, **kwargs)
         print(f"{label}\n  {describe(result)}")
     print("-" * 100)
-    print("real% is the share of wall time that carried the instrument; "
-          "silence frames are the padded ones and every hole is heard as a dropout.")
+    print("real% is the share of wall time that carried the instrument (above 100% "
+          "means a frame was played twice, which is a stutter too); silence frames are "
+          "the padded ones, and every hole is dead air between two real frames.")
 
 
 if __name__ == "__main__":
