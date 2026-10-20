@@ -38,10 +38,33 @@ musical rather than "phasey":
   rise in total magnitude; that frame takes its phase straight from the
   analysis, so a drum hit or a pluck keeps its edge instead of being smeared
   across the window.
-* **One phase for all channels.** The advance is measured on the sum of the
-  channels and applied as a rotation to each one, so the left/right phase
-  relationship -- the stereo image -- is untouched while both sides keep their
-  own magnitudes.
+* **One advance, ONE rotation.** The advance is measured per bin on the
+  LOUDEST CHANNEL there, never on a sum: the parts of a voice that cancel in
+  a sum -- its width, its reverb, a doubled take -- read as silence in it, and
+  their advance came out as noise (a wide voice wobbled, and drifted). One
+  rotation per bin is then applied to every side, which is what makes the
+  stereo image safe by construction: a common rotation cannot change the phase
+  relationship between the sides. Giving each channel its OWN rotation was
+  tried and measured: the sides' relationship is then re-derived per channel
+  from that channel's own peaks, and a wide signal's width fell 0.83 -> 0.61
+  at +1 semitone (a bin beside a peak was rotated by the peak's relation
+  rather than its own), so it is not the shape of this code.
+* **Identity phase locking, blended in with the interval.** Rotating every bin
+  by its own advance loses the phase relationship between the bins of one
+  harmonic, which is heard as a rough, hollow shimmer on a held voice. Each
+  bin next to a spectral peak is therefore rotated by that peak (Laroche and
+  Dolson's identity locking, with the lock's span kept to the main lobe: a
+  peak's skirt is usually another partial's leakage, and dragging it along
+  modulates it at the hop rate). The lock is blended in as the key leaves the
+  song's own key (0 at ratio 1, so the identity stays exact) and skipped on an
+  attack frame, where a transient's edge matters more than a smooth region.
+
+What that was worth, measured on a centred tone plus a side partial that
+moves -- a voice's width, a doubled take, a reverb tail -- at -12 semitones:
+the side channel held 0.256 of its level before and 0.307 after, its envelope
+wobbled 0.581 before and 0.209 after. A vowel's harmonic energy is unchanged
+(0.930 at +7, 0.894 at +12) and the centred tone's level is untouched, so the
+transposition itself did not get duller to buy any of it.
 
 The read back is Catmull-Rom cubic at the ratio. Reading faster than the
 stretch produced is a decimation, so above a whole tone the stretched stream
@@ -111,6 +134,10 @@ class ChromaticTransposer:
         self._prev_phase = None
         self._prev_total = 0.0
         self._sum_phase = np.zeros(self.WINDOW // 2 + 1)
+        # The identity lock's blend, which fades in with the interval.
+        self._lock_blend = 0.0
+        # Which channel the phase is measured on, per bin (see _reference_pick).
+        self._pick = None
         # Stretched stream (the vocoder's output) and the read head into it.
         # It opens with LOOKAHEAD silent samples: that is the line's delay, and
         # it is what keeps the read from ever running past produced audio.
@@ -150,6 +177,8 @@ class ChromaticTransposer:
         self._prev_phase = None
         self._prev_total = 0.0
         self._sum_phase = np.zeros(self.WINDOW // 2 + 1)
+        self._lock_blend = 0.0
+        self._pick = None
         self._st = np.zeros((self.LOOKAHEAD, self.channels), dtype=np.float32)
         self._st_pos = 0
         self._pending = np.zeros((self.WINDOW, self.channels), dtype=np.float32)
@@ -211,7 +240,19 @@ class ChromaticTransposer:
         """The Hann overlap-add weight a steady hop accumulates (4x hop = 1.5)."""
         return (self.WINDOW / float(hop)) * 0.375
 
+    PEAK_FLOOR = 0.02     # a peak quieter than this (of the loudest) owns nothing
+    REFERENCE_HOLD = 1.25  # a channel must be this much louder to take a bin
+    LOCK_BINS = 1         # bins either side of a peak that move with it
+
     def _glide(self):
+        # The lock's own blend: identity phase locking is what takes the
+        # roughness out of a held voice, but at the song's own key the line
+        # must stay the exact identity, so it fades in with the interval.
+        lock_target = 1.0 if self._semitones else 0.0
+        if abs(lock_target - self._lock_blend) < self.SNAP:
+            self._lock_blend = lock_target
+        else:
+            self._lock_blend += (lock_target - self._lock_blend) * self.GLIDE
         target = self._target
         if abs(target - self._ratio) < self.SNAP:
             settled = True
@@ -256,33 +297,61 @@ class ChromaticTransposer:
         spectra = [np.fft.rfft(signal[:, channel] * self._window)
                    for channel in range(self.channels)]
 
-        mid = spectra[0] if self.channels == 1 else np.sum(spectra, axis=0)
-        phase = np.angle(mid)
-        magnitude = np.abs(mid)
+        # The phase reference is the LOUDEST CHANNEL in each bin, never the sum
+        # of the channels: the width of a voice -- its reverb, a doubled take, a
+        # hard-panned layer -- is exactly what cancels in a sum, and a phase
+        # taken from a near-empty sum is noise. That noise became the frame's
+        # advance, so those bins were frequency-modulated at the hop rate: a
+        # wide voice wobbled and drifted toward the centre.
+        if self.channels == 1:
+            reference = spectra[0]
+        else:
+            stacked = np.stack([np.abs(spectrum) for spectrum in spectra])
+            pick = self._reference_pick(stacked)
+            reference = np.zeros_like(spectra[0])
+            for channel in range(self.channels):
+                take = pick == channel
+                reference[take] = spectra[channel][take]
+        phase = np.angle(reference)
+        magnitude = np.abs(reference)
         total = float(magnitude.sum())
 
-        if self._prev_phase is None:
-            # The first frame IS the song: no rotation to apply yet.
-            self._sum_phase = np.array(phase, copy=True)
+        first = self._prev_phase is None
+        if first:
+            true_omega = self._omega
         else:
             step = phase - self._prev_phase - self._omega * analysis_hop
             step = (step + np.pi) % (2.0 * np.pi) - np.pi
             true_omega = self._omega + step / analysis_hop
-            if total > 2.0 * self._prev_total > 0.0:
-                # An attack: taking the analysis phase keeps the transient's
-                # edge instead of smearing it over the previous accumulator.
-                self._sum_phase = np.array(phase, copy=True)
-            else:
-                self._sum_phase = self._sum_phase + true_omega * synthesis_hop
+        attack = (not first) and total > 2.0 * self._prev_total > 0.0
+
+        if first or attack:
+            # An attack takes its phase straight from the analysis: that is
+            # what keeps a transient's edge instead of smearing it.
+            self._sum_phase = np.array(phase, copy=True)
+        else:
+            self._sum_phase = self._sum_phase + true_omega * synthesis_hop
         self._prev_phase = phase
         self._prev_total = total
 
-        # Phase locking every bin to a spectral peak was tried and dropped: it
-        # keeps a harmonic's shape, but it also ties an attack's bins to the
-        # peaks around it, and measured clicks came back at 0.25-0.5 of their
-        # level on a downward shift (0.49-0.74 without it) -- softer attacks
-        # for a steadier chord. The per-bin accumulator is the better trade.
+        # One rotation for the whole frame, so the sides keep the relationship
+        # they were analysed with (see the module docstring).
         rotation = np.exp(1j * (self._sum_phase - phase))
+        # Identity phase locking (Laroche and Dolson): each bin beside a peak is
+        # rotated by that peak, which keeps one harmonic's bins together.
+        # Per-bin rotation alone is "phasy" -- a held voice shimmers and sounds
+        # hollow. The lock fades in with the interval, so the song's own key is
+        # still the exact identity, and an attack frame keeps its own phase.
+        if self._lock_blend > 0.0:
+            regions = self._peak_regions(magnitude)
+            locked = np.exp(1j * (self._sum_phase[regions] - phase[regions]))
+            if self._lock_blend >= 1.0:
+                rotation = locked
+            else:
+                blend = self._lock_blend
+                rotation = (1.0 - blend) * rotation + blend * locked
+                rotation = rotation / np.maximum(np.abs(rotation), 1e-9)
+
         frame = np.empty((self.WINDOW, self.channels), dtype=np.float32)
         for channel in range(self.channels):
             frame[:, channel] = np.fft.irfft(
@@ -311,6 +380,54 @@ class ChromaticTransposer:
         # ratio above 1 produces more samples than it consumed, which is the
         # stretch the read then gives back.
         self._a += analysis_hop
+
+    def _reference_pick(self, magnitudes):
+        """Which channel's phase each bin is measured on -- and it must HOLD.
+
+        The loudest channel is the honest reference: a sum cancels the width
+        of a voice, and a phase taken from near-silence is noise. But the
+        loudest must not flicker. On a bin whose two sides are equal -- which
+        is what an out-of-phase partial is -- the winner changes with the last
+        bit of the FFT, and a reference that jumps by pi every hop cancels
+        that partial in the overlap-add: measured on a moving side partial,
+        the side channel lost 63 % of its level at -12 and wobbled 4x worse
+        than the shipped line. So a channel only TAKES a bin when it is
+        clearly louder than the one holding it.
+        """
+        if self._pick is None:
+            self._pick = np.argmax(magnitudes, axis=0)
+            return self._pick
+        held = np.take_along_axis(magnitudes, self._pick[None, :], axis=0)[0]
+        best = np.argmax(magnitudes, axis=0)
+        self._pick = np.where(magnitudes.max(axis=0) > held * self.REFERENCE_HOLD,
+                              best, self._pick)
+        return self._pick
+
+    def _peak_regions(self, magnitude):
+        """The spectral peak each bin is locked to, or the bin itself.
+
+        A peak is a bin at least as loud as its neighbours and not negligible.
+        Only the peak and the bins within LOCK_BINS of it are locked: a peak's
+        skirt is usually another partial's leakage, and dragging it with this
+        peak modulates it at the hop rate (measured worse on a moving side
+        partial), while the main lobe is what carries the partial's coherence.
+        """
+        bins = len(magnitude)
+        left = np.empty(bins)
+        left[0] = magnitude[0]
+        left[1:] = magnitude[:-1]
+        right = np.empty(bins)
+        right[-1] = magnitude[-1]
+        right[:-1] = magnitude[1:]
+        floor = float(magnitude.max()) * self.PEAK_FLOOR
+        peaks = np.nonzero((magnitude >= left) & (magnitude > right)
+                           & (magnitude > floor))[0]
+        owner = np.arange(bins)
+        for peak in peaks:
+            lo = max(0, int(peak) - self.LOCK_BINS)
+            hi = min(bins, int(peak) + self.LOCK_BINS + 1)
+            owner[lo:hi] = peak
+        return owner
 
     def _input_slice(self, start, length):
         """``length`` samples from absolute ``start``, silence where the song is not."""

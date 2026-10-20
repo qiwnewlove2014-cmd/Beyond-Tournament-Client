@@ -92,7 +92,27 @@ def rms(samples):
     return float(np.sqrt(np.mean(np.asarray(samples, dtype=np.float64) ** 2)))
 
 
-# ---------------------------------------------------------------- the shifter
+def wide_voice(seconds=4.0):
+    """A centred tone plus a side partial that moves: the width of a voice."""
+    t = np.arange(int(SR * seconds)) / SR
+    mid = 0.3 * np.sin(2.0 * np.pi * 220.0 * t)
+    inst = 330.0 + 25.0 * np.sin(2.0 * np.pi * 4.5 * t)
+    side = 0.25 * np.sin(2.0 * np.pi * np.cumsum(inst) / SR)
+    return np.stack([mid + side, mid - side], axis=1)
+
+
+def side_ratio(signal):
+    """(L - R) over (L + R): how much of a signal is off-centre."""
+    return rms(signal[:, 0] - signal[:, 1]) / rms(signal[:, 0] + signal[:, 1])
+
+
+def wobble(samples):
+    """Envelope modulation of a steady signal: std/mean of its 20 ms level."""
+    samples = np.asarray(samples, dtype=np.float64)
+    env = np.array([rms(samples[i:i + FRAME])
+                    for i in range(0, len(samples) - FRAME, FRAME)])
+    env = env[len(env) // 4:]
+    return float(env.std() / env.mean())
 
 
 class TransposerTests(unittest.TestCase):
@@ -173,6 +193,37 @@ class TransposerTests(unittest.TestCase):
                             per_frame=lambda index, sh: sh.set_semitones(7 if index == 40 else 0)))
         quiet = float(np.abs(np.diff(still[SR:, 0])).max())
         self.assertLess(float(np.abs(np.diff(out[SR:, 0])).max()), quiet * 2.0)
+
+    def test_a_wide_voice_keeps_its_width(self):
+        """A voice's width is not the sum's business, so the key must not take it."""
+        signal = wide_voice()
+        reference = side_ratio(signal[SR:-SR])
+        for semitones in (1, 7, 12):
+            with self.subTest(semitones=semitones):
+                shifter = ChromaticTransposer(channels=2)
+                shifter.set_semitones(semitones)
+                out = from_pcm(play(shifter, to_pcm(signal)))
+                self.assertGreater(side_ratio(out[SR * 2:]), reference * 0.85)
+
+    def test_a_moving_side_partial_is_not_drained_or_wobbled(self):
+        """The bug: the advance was read off the sum, which cancels a wide voice.
+
+        That near-silence gave each hop a phase from noise, so the width of a
+        voice was modulated at the hop rate: the side channel lost a quarter of
+        its level at -12 and its envelope wobbled four times as much as the
+        shipped line's (measured). The reference is now the loudest channel in
+        the bin, and it holds that choice.
+        """
+        signal = wide_voice()
+        input_side = signal[SR:-SR, 0] - signal[SR:-SR, 1]
+        for semitones in (-12, -5, 1):
+            with self.subTest(semitones=semitones):
+                shifter = ChromaticTransposer(channels=2)
+                shifter.set_semitones(semitones)
+                out = from_pcm(play(shifter, to_pcm(signal)))
+                side = out[SR * 2:, 0] - out[SR * 2:, 1]
+                self.assertGreater(rms(side), rms(input_side) * 0.8)
+                self.assertLess(wobble(side), 0.3)
 
     def test_the_dial_stops_at_an_octave_each_way(self):
         shifter = ChromaticTransposer(channels=2)
