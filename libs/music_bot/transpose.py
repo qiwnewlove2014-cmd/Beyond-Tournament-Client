@@ -80,12 +80,33 @@ runs faster. A streaming shifter cannot avoid that delay, and it is not
 audible at the start of a song; ``flush`` hands it back at the end so the
 last note is not clipped.
 
+**The overlap-add counts a partial's level and a noise's level differently.**
+The published hop is divided by the sum of the squared windows, which is right
+for a sustained partial (the frames of a partial add in phase) and wrong for
+everything else: a voice's breath, a consonant, a snare, a diffuse reverb tail
+is rotated frame to frame, so its frames add in power, and the line published
+only `sqrt(sum w^4) / sum w^2` of it -- measured **0.61-0.68** of white noise's
+level at every interval while a tone kept 1.00. That is a voice that has lost
+its body and its air while the instruments around it kept theirs: the report of
+"the vocal goes thin, sunk and mono, the music is fine" (2026-10-21). So each
+written hop is level-matched to the audio it was read from, lifting only (up to
+`LEVEL_MAX`, the worst measured deficit being 1.6 an octave down): noise then
+holds **0.86-1.00** at every interval (0.973 at +7, 0.997 at +12, 0.888 at -7,
+0.857 at -12), a voice 1.00-1.02, a diffuse room's wet 0.95-1.00, with a tone at
+1.00-1.02 and the stereo image untouched. At the song's own key the match holds
+unity, so zero semitones stays the byte-exact identity.
+
 A key change glides over a handful of frames rather than jumping: the ratio
 walks toward its target once per frame, so the pitch bends into the new key
 instead of clicking into it. Zero semitones means the original key; a stream
 that never engaged the shifter is byte-for-byte untouched (the streamer never
 builds one), and a stream that glides back to zero keeps its delay until the
-song ends rather than jumping forward mid-line.
+song ends rather than jumping forward mid-line. Once it has arrived it takes
+its synthesis phase from the analysis every frame, which drops the phase the
+shifted passage had accumulated: the song is then handed back exactly as it
+came in, not as a phase-rotated copy of itself. That is the promise "Original
+Key" makes -- the body returns with the key, in a tenth of a second, rather
+than fading back over the seconds a stale accumulator would take.
 
 Pinned by ``client/tests/test_music_bot_transpose.py``.
 """
@@ -111,6 +132,11 @@ class ChromaticTransposer:
     FILTER_FROM = 1.02   # below this the read is an interpolation, not a decimation
     GLIDE = 0.55         # per-frame approach to a new ratio (~5 frames to settle)
     SNAP = 0.002         # stop gliding this close: a ratio this small is inaudible
+    # The level the overlap-add loses on everything that is not a sustained
+    # partial (see the module docstring), and how fast it is put back.
+    LEVEL_MATCH = 0.12   # per 43 ms of written audio
+    LEVEL_MAX = 2.0      # the worst measured deficit is 1.6 (an octave down)
+    LEVEL_RELEASE = 0.9  # back to unity (3 hops, ~130 ms) at the song's own key
     # The read cannot ask for a stretched sample the vocoder has not produced,
     # and the vocoder cannot produce a frame before the window after it exists:
     # one read step plus the window, at the largest ratio the dial allows (2x).
@@ -127,6 +153,10 @@ class ChromaticTransposer:
         self._semitones = 0
         self._target = 1.0
         self._ratio = 1.0
+        # True once the line is back at the song's own key: the synthesis phase
+        # is then taken from the analysis every frame, so the output is the
+        # song itself rather than a phase-rotated copy of it (see _emit_hop).
+        self._identity = True
         # Input ring: the samples this line has been handed but not yet used.
         self._in = np.zeros((0, self.channels), dtype=np.float32)
         self._in_pos = 0
@@ -151,6 +181,11 @@ class ChromaticTransposer:
         self._q = 0.0
         self._fir = None
         self._fir_ratio = 0.0
+        # The level match's running gain and the power of the hops it is
+        # measuring (see _level_match).
+        self._gain = 1.0
+        self._out_power = 0.0
+        self._out_samples = 0
         # Diagnostic: input samples the line had to invent as silence because
         # the song had not produced them yet. Zero once it is running is the
         # whole contract of LOOKAHEAD (pinned by the test suite).
@@ -178,6 +213,7 @@ class ChromaticTransposer:
         self._prev_total = 0.0
         self._sum_phase = np.zeros(self.WINDOW // 2 + 1)
         self._lock_blend = 0.0
+        self._identity = True
         self._pick = None
         self._st = np.zeros((self.LOOKAHEAD, self.channels), dtype=np.float32)
         self._st_pos = 0
@@ -186,6 +222,9 @@ class ChromaticTransposer:
         self._q = 0.0
         self._fir = None
         self._fir_ratio = 0.0
+        self._gain = 1.0
+        self._out_power = 0.0
+        self._out_samples = 0
         self.padded_samples = 0
 
     # ------------------------------------------------------------- one frame
@@ -260,6 +299,7 @@ class ChromaticTransposer:
         else:
             settled = False
             self._ratio += (target - self._ratio) * self.GLIDE
+        self._identity = settled and not self._semitones
         # The low-pass is only touched once the bend has arrived: replacing its
         # carry-over in the middle of a bend is a step at a frame boundary.
         if not settled:
@@ -325,7 +365,7 @@ class ChromaticTransposer:
             true_omega = self._omega + step / analysis_hop
         attack = (not first) and total > 2.0 * self._prev_total > 0.0
 
-        if first or attack:
+        if first or attack or self._identity:
             # An attack takes its phase straight from the analysis: that is
             # what keeps a transient's edge instead of smearing it.
             self._sum_phase = np.array(phase, copy=True)
@@ -372,6 +412,7 @@ class ChromaticTransposer:
             (self._wsum[synthesis_hop:], np.zeros(synthesis_hop)), axis=0)
         if self._fir is not None:
             published = self._lowpass(published)
+        published = self._level_match(published, signal)
         if len(self._st):
             self._st = np.concatenate((self._st, published), axis=0)
         else:
@@ -380,6 +421,41 @@ class ChromaticTransposer:
         # ratio above 1 produces more samples than it consumed, which is the
         # stretch the read then gives back.
         self._a += analysis_hop
+
+    def _level_match(self, published, signal):
+        """Put back the level the overlap-add loses on noise, breath and air.
+
+        The divisor above assumes the frames of a hop add in phase, which is
+        true of a sustained partial and false of everything else: a frame of
+        noise is rotated against the one before it, so its frames add in
+        power and the written hop is `sqrt(sum w^4) / sum w^2` of what it was
+        read from -- measured 0.61-0.68 of white noise at every interval, and
+        heard as a voice that lost its body while the instruments kept
+        theirs. Lifting the written hop to the level of the audio it came from
+        restores it (see the module docstring for the table), and it only ever
+        lifts: a hop that is already as loud as its source is left alone.
+
+        At the song's own key the gain is on its way back to unity, so the
+        identity stays byte for byte. The measurement is per 43 ms of written
+        audio -- long enough that one broadband hit cannot move the gain, short
+        enough that a swell is followed rather than averaged.
+        """
+        self._out_power += float((published ** 2).sum())
+        self._out_samples += published.size
+        # Counted across every channel, so the window is 43 ms of audio for a
+        # mono voice and for a stereo song alike.
+        if self._out_samples < self.WINDOW * self.channels:
+            return (published * self._gain).astype(np.float32)
+        heard = float(np.sqrt(self._out_power / self._out_samples))
+        source = float(np.sqrt((signal ** 2).mean()))
+        self._out_power = 0.0
+        self._out_samples = 0
+        if self._semitones and heard > 1e-6 and source > 1e-6:
+            want = min(self.LEVEL_MAX, max(1.0, source / heard))
+            self._gain += (want - self._gain) * self.LEVEL_MATCH
+        else:
+            self._gain += (1.0 - self._gain) * self.LEVEL_RELEASE
+        return (published * self._gain).astype(np.float32)
 
     def _reference_pick(self, magnitudes):
         """Which channel's phase each bin is measured on -- and it must HOLD.

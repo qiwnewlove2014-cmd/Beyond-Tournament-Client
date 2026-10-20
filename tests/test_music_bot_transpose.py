@@ -106,6 +106,43 @@ def side_ratio(signal):
     return rms(signal[:, 0] - signal[:, 1]) / rms(signal[:, 0] + signal[:, 1])
 
 
+def noise(seconds=2.0, amplitude=0.15, seed=7):
+    """White noise: the breath, the consonant, the snare -- no partial to lock."""
+    rng = np.random.default_rng(seed)
+    mono = (amplitude * rng.standard_normal(int(SR * seconds))).astype(np.float32)
+    return np.stack([mono, mono], axis=1)
+
+
+def breathy_voice(seconds=2.0, seed=7):
+    """A sung note with breath over it: what a voice is and a tone is not."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(int(SR * seconds)) / SR
+    mono = sum((1.0 / h) * np.sin(2.0 * np.pi * 220.0 * h * t) for h in range(1, 9)) / 8.0
+    mono = 0.4 * mono + 0.05 * rng.standard_normal(len(t))
+    mono = mono.astype(np.float32)
+    return np.stack([mono, mono], axis=1)
+
+
+def wet_voice(seconds=2.0, seed=3):
+    """A voice in a room: the wet is diffuse, so it adds in power, not in phase."""
+    rng = np.random.default_rng(seed)
+    dry = breathy_voice(seconds, seed)[:, 0]
+
+    def impulse(length):
+        shape = np.exp(-np.arange(length) / (length / 4.0))
+        grain = rng.standard_normal(length) * shape
+        return (grain / np.sqrt((grain ** 2).sum())).astype(np.float32)
+
+    taps = int(0.09 * SR)
+    left, right = impulse(taps), impulse(taps)
+    size = 1 << (len(dry) + taps - 1).bit_length()
+    wet = []
+    for side in (left, right):
+        room = np.fft.irfft(np.fft.rfft(dry, size) * np.fft.rfft(side, size), size)[:len(dry)]
+        wet.append(0.75 * dry + 0.6 * room)
+    return np.stack(wet, axis=1).astype(np.float32)
+
+
 def wobble(samples):
     """Envelope modulation of a steady signal: std/mean of its 20 ms level."""
     samples = np.asarray(samples, dtype=np.float64)
@@ -224,6 +261,120 @@ class TransposerTests(unittest.TestCase):
                 side = out[SR * 2:, 0] - out[SR * 2:, 1]
                 self.assertGreater(rms(side), rms(input_side) * 0.8)
                 self.assertLess(wobble(side), 0.3)
+
+    def test_a_voice_s_breath_survives_the_key(self):
+        """The bug the players heard: the body of a voice went missing.
+
+        The overlap-add normalises by the sum of the squared windows, which is
+        the coherent sum a sustained partial makes. Noise is rotated frame to
+        frame, so its frames add in power instead, and the line published
+        0.61-0.68 of the breath's level at every interval while a tone kept
+        1.00 -- a voice that lost its body and its air while the instruments
+        around it kept theirs. The written hop is now level-matched to the
+        audio it was read from (transpose._level_match).
+        """
+        signal = noise()
+        base = rms(signal[SR:2 * SR, 0])
+        for semitones in (-12, -7, -5, 1, 5, 7, 12):
+            with self.subTest(semitones=semitones):
+                shifter = ChromaticTransposer(channels=2)
+                shifter.set_semitones(semitones)
+                out = from_pcm(play(shifter, to_pcm(signal)))
+                self.assertAlmostEqual(rms(out[SR:2 * SR, 0]) / base, 1.0, delta=0.18)
+
+    def test_a_voice_keeps_its_body_and_air(self):
+        """A sung note with breath over it keeps 96-99 % of its level."""
+        signal = breathy_voice()
+        base = rms(signal[SR:2 * SR, 0])
+        for semitones in (-12, -7, 7, 12):
+            with self.subTest(semitones=semitones):
+                shifter = ChromaticTransposer(channels=2)
+                shifter.set_semitones(semitones)
+                out = from_pcm(play(shifter, to_pcm(signal)))
+                self.assertAlmostEqual(rms(out[SR:2 * SR, 0]) / base, 1.0, delta=0.10)
+
+    def test_a_wet_voice_does_not_sink_under_a_key_change(self):
+        """A diffuse room adds in power too, which is what made a voice read mono.
+
+        The dry voice is centred and the room's tail is off-centre: when only
+        the coherent part kept its level, the wet fell away and the voice sank
+        toward its bare centre -- the "it turns mono and jm" report. Both the
+        level and the width must come through now.
+        """
+        signal = wet_voice()
+        reference = side_ratio(signal[SR // 2:3 * SR // 2])
+        base = rms(signal[SR:2 * SR, 0])
+        for semitones in (-7, 7, 12):
+            with self.subTest(semitones=semitones):
+                shifter = ChromaticTransposer(channels=2)
+                shifter.set_semitones(semitones)
+                out = from_pcm(play(shifter, to_pcm(signal)))
+                self.assertAlmostEqual(rms(out[SR:2 * SR, 0]) / base, 1.0, delta=0.10)
+                self.assertGreater(side_ratio(out[SR:]), reference * 0.9)
+
+    def test_silence_stays_silent_and_the_match_never_runs_away(self):
+        """The level match may only lift, and only as far as the measured deficit."""
+        quiet = np.zeros((int(SR * 1.5), 2), dtype=np.float32)
+        shifter = ChromaticTransposer(channels=2)
+        shifter.set_semitones(7)
+        out = from_pcm(play(shifter, to_pcm(quiet)))
+        self.assertEqual(float(np.abs(out).max()), 0.0)
+        self.assertLessEqual(shifter._gain, ChromaticTransposer.LEVEL_MAX)
+
+    def test_original_key_comes_back_within_a_quarter_second(self):
+        """The song's own samples again, quickly: what "Original Key" promises.
+
+        A tuned line walks its gain back to unity at 0 semitones, so the
+        identity is reached in well under the look-ahead the line already
+        holds -- not the ten seconds the players had to wait before the body
+        came back (2026-10-21).
+        """
+        signal = breathy_voice(3.0)
+        shifter = ChromaticTransposer(channels=2)
+        shifter.set_semitones(7)
+        pcm = to_pcm(signal)
+        out = from_pcm(play(shifter, pcm,
+                            per_frame=lambda index, sh: sh.set_semitones(0 if index >= 75 else 7)))
+        released = 75 * FRAME
+
+        def best_offset(start):
+            """The delay the line is at, and how exactly it is the song."""
+            window = out[start:start + FRAME, 0]
+            best = (None, None)
+            for offset in range(2000, 12000):
+                if start - offset < 0:
+                    break
+                error = float(np.abs(window - signal[start - offset:start - offset + FRAME, 0]).max())
+                if best[1] is None or error < best[1]:
+                    best = (offset, error)
+            return best
+
+        def same_timbre(start, offset):
+            """Level and shape of the window against the song it is reading.
+
+            The line's delay is fractional, so the waveforms differ by a
+            fraction of a sample; the song is still there, band for band, in
+            both its level and its shape.
+            """
+            heard = out[start:start + FRAME, 0]
+            source = signal[start - offset:start - offset + FRAME, 0]
+            window = np.hanning(FRAME)
+            heard_spectrum = np.abs(np.fft.rfft(heard * window))
+            source_spectrum = np.abs(np.fft.rfft(source * window))
+            ratio = rms(heard) / rms(source)
+            shaped = float(np.dot(heard_spectrum, source_spectrum)
+                           / (np.linalg.norm(heard_spectrum) * np.linalg.norm(source_spectrum)))
+            return ratio, shaped
+
+        first = best_offset(released + SR // 4)      # 250 ms after the release
+        second = best_offset(released + SR)          # a second later
+        # It is the song, not a re-timed copy of it: the delay stopped moving.
+        self.assertEqual(first[0], second[0])
+        # And it is the song's own level and colour, not a thin version of it.
+        for start in (released + SR // 4, released + SR):
+            ratio, shaped = same_timbre(start, first[0])
+            self.assertAlmostEqual(ratio, 1.0, delta=0.02)
+            self.assertGreater(shaped, 0.999)
 
     def test_the_dial_stops_at_an_octave_each_way(self):
         shifter = ChromaticTransposer(channels=2)
