@@ -18,6 +18,16 @@ if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--bt-file-di
     from libs.folder_dialog import worker_main
     raise SystemExit(worker_main(sys.argv[2:]))
 
+# The Music Bot's own output device is played by a child too: an OpenAL context
+# is bound to one device, so "the song on the speakers, the game in the headset"
+# is a second context -- one the game's own audio threads and EFX sends are not
+# built to share. Spawned by libs/music_bot/output_device.py, and this branch
+# sits above pygame, the VFS and the instance lock for the same reason the two
+# above do.
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--bt-music-device":
+    from libs.music_bot.device_worker import main as music_device_main
+    raise SystemExit(music_device_main(sys.argv[2:]))
+
 
 def _configure_compiled_output():
     """Redirect only the real game, never a resolver child, to its usual log."""

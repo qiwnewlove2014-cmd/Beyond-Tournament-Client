@@ -75,6 +75,9 @@ def make_bot(**overrides):
     bot.queue_mode = False
     bot.water_muffle_enabled = True
     bot.reverb_enabled = True
+    # Where this bot's own stream is heard: empty is the game's own device.
+    bot.output_device = ""
+    bot._output_process = None
     bot.broadcast_enabled = False
     bot.broadcast_to_megaphone = False
     bot.eq_profile = "normal"
@@ -508,6 +511,8 @@ class TestSettings(unittest.TestCase):
         self.assertNotIn("Broadcast to Others: OFF", labels)
         self.assertIn("Underwater Muffle: ON", labels)
         self.assertIn("Room Reverb (Realism): ON", labels)
+        # The bot's own stream can be sent to another device from here.
+        self.assertIn("Music Output Device: Same as the game", labels)
 
     def test_water_toggle_persists_and_applies(self):
         gp = mock.MagicMock(spec=Gameplay)

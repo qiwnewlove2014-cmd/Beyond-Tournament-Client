@@ -119,6 +119,11 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
         # its natural EOF while the next song resolves and holds for its own
         # lead-in (see _retire_or_stop).
         self._retiring_direct = []
+        # Cabinets the Server says are playing while this machine has no output for them
+        # (see RecoveryWatchdog._adopt_unheard_cabinets): when each was first noticed, and
+        # the songs already rescued directly, so one song is rescued once.
+        self._unheard_since = {}
+        self._unheard_played = set()
 
     def occlusion_tier(self, box_pos, listener, max_distance=40.0):
         # Skip inaudible rays and briefly reuse exact tile-ray results. The main relay pump

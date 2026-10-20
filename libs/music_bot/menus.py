@@ -33,11 +33,15 @@ through `inspect.getsource` (`menu_source_of`), and test_music_bot_crossfade_eq.
 opens `_MusicBotEqSlider` itself. Rules: .agents/skills/music_bot_integration/.
 """
 
+import contextlib
+import functools
+
 import pygame
 
 from .. import options
 from .. import state
 from ..speech import speak
+from . import output_device
 from ..string_utils import friendly_key_name
 from . import song_requests
 from . import subtitles
@@ -61,6 +65,10 @@ class MusicBotMenus:
         def go_search():
             gp.pop_last_substate()
             self._bot._open_search_input()
+
+        def go_link():
+            gp.pop_last_substate()
+            self._bot._open_link_input()
 
         def go_local():
             gp.pop_last_substate()
@@ -115,6 +123,9 @@ class MusicBotMenus:
         m = menu_mod.Menu(self._bot.game, "Music Bot Mode", parrent=gp)
         items = [
             ("Search YouTube", go_search),
+            # Right beside the search: staff who already hold the link should not
+            # have to search for the song they are looking at.
+            ("Play a YouTube link", go_link),
             ("Choose Local File", go_local),
             ("My Playlists & Favorites", go_playlists),
             ("Personal Music Feed", go_personal_feed),
@@ -798,7 +809,12 @@ class MusicBotMenus:
         gp.add_substate(m)
 
     def _open_settings_menu(self):
-        """Music Bot settings: underwater muffle and room reverb.
+        """Music Bot settings: output device first, then reverb, crossfade, EQ, muffle.
+
+                    The output line leads because it is what a player comes here to change;
+                    the underwater muffle sits last (just above Back) so the two are never
+                    neighbours on the list. `test_the_output_line_leads_and_the_muffle_sits_last`
+                    pins that order.
 
                     Broadcast to Others is deliberately NOT here - it has its own shortcut, and
                     duplicating it caused confusion about which is the source of truth. Every toggle here
@@ -856,14 +872,60 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._open_eq_menu()
 
+        def get_output_label():
+            return f"Music Output Device: {self._bot.output_device_label()}"
+
+        def go_output():
+            gp.pop_last_substate()
+            self._open_output_device_menu()
+
         m = menu_mod.Menu(self._bot.game, "Music Bot Settings", parrent=gp)
         m.add_items([
-            (get_water_label, toggle_water),
+            (get_output_label, go_output),
             (get_reverb_label, toggle_reverb),
             (get_crossfade_label, toggle_crossfade),
             (get_eq_label, go_eq),
+            (get_water_label, toggle_water),
             ("Back", go_back),
         ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_output_device_menu(self):
+        """Where this bot's own song is heard: the game's device, or another one.
+
+        The game keeps playing where it always did; this sends the Music Bot's
+        own stream somewhere else (the speakers while the game stays in the
+        headset). A chosen device is played by a child process of its own
+        (`music_bot/output_device.py` says why a process is the honest way to
+        do it at all), so the equalizer and the room reverb -- the game's own
+        audio engine -- stay on the game's device and the line says so.
+        """
+        from .. import menu as menu_mod, menus
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def choose(specifier):
+            self._bot.select_output_device(specifier)
+            with contextlib.suppress(Exception):
+                m.speak_current_item()
+
+        items = [
+            ("Same as the game", lambda: choose("")),
+        ]
+        for device in output_device.available_devices():
+            label = output_device.short_name(device)
+            if device == self._bot.output_device:
+                label = f"{label} (current)"
+            items.append((label, functools.partial(choose, device)))
+        items.append(("Back", go_back))
+        m = menu_mod.Menu(self._bot.game, "Music Output Device", parrent=gp)
+        m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
 

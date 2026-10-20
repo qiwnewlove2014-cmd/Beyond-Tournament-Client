@@ -71,8 +71,15 @@ class FakeStreamer:
                  http_headers=None, start_offset_received_at=None,
                  canonical_url=None, media_cache=None, timeline_anchor=None,
                  start_paused=False, room_lead_in_s=None,
-                 join_playing_room=False):
+                 join_playing_room=False, cinema=None, remote=None,
+                 remote_slot=0, remote_category=1.0):
         self.game = game
+        # The player's other device (music_bot/output_device.py); None is the
+        # game's own, which is what this state machine is tested against.
+        self.remote = remote
+        self.remote_slot = remote_slot
+        self.remote_category = remote_category
+        self.output_gains = []
         self.audio_url = audio_url
         self.source = source
         self.bot = bot
@@ -90,6 +97,13 @@ class FakeStreamer:
         self.stopped = False
         self.set_pause_calls = []
         self.instances.append(self)
+
+    def set_output_gain(self, gain):
+        # The real one writes the gain to its own source (or to the child on
+        # another device); the state machine must reach the source either way.
+        self.output_gains.append(gain)
+        if self.source is not None:
+            self.source.gain = gain
 
     def begin_network_crossfade(self, partner, seconds):
         self.crossfade_mix = (partner, seconds)

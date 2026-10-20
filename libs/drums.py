@@ -65,6 +65,67 @@ class DrumAudio:
             ("Cowbell", "drums/salamander/Drums.hit.Cowbell.ogg", 0.48, 6),
             ("Rim", "drums/salamander/Drums.hit.Rim.ogg", 0.62, 6),
         ),
+        # A three-piece hand percussion: a treble stroke, a bass stroke and the
+        # slap. The other fifteen pads are silent on purpose (the Salamander
+        # rule), because this kit is one drum's three voices, not a drum kit.
+        #
+        # Its samples are TRUE stereo -- hi leans left, lo leans right, the slap
+        # sits centred -- because the engine plays a kit's stereo image out of
+        # the file (local direct channels, remote split L/R) and has no per-hit
+        # pan. A dual-mono file therefore sounds centred however it is routed;
+        # these were re-recorded from dual-mono by tools/percussion_pan_bake.py.
+        # The scales are measured, not guessed: each one puts its pad at the
+        # default kick's own effective level (see tools/percussion_pan_bake.py).
+        "per": (
+            ("Per lo", "drums/per/per lo.ogg", 0.93, 6),
+            ("Per Hi", "drums/per/per Hi.ogg", 0.90, 6),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            ("Per P", "drums/per/per P.ogg", 1.14, 6),
+        ),
+        # The per drum tuned to A minor pentatonic: A3 C4 D4 E4 G4 from its own
+        # treble stroke, plus the untuned bass stroke and slap as rhythm pieces.
+        #
+        # These are baked files, not a runtime pitch: OpenAL's source pitch is
+        # varispeed, so a fifth down makes a 1.6 s hit 2.1 s long and a fifth up
+        # 1.2 s. `tools/percussion_tune_bake.py` stretches time and resamples
+        # instead, so every note here is still the source's own 1.594 s; measured
+        # intervals sit within 12 cents of equal temperament. The practical window
+        # is +/-6 semitones -- beyond it the drum's modes move far enough that it
+        # is a different drum, which is why this scale spans -3.9..+6.1.
+        "per_tuned": (
+            ("Per A3", "drums/per_tuned/per A3.ogg", 1.45, 6),
+            ("Per C4", "drums/per_tuned/per C4.ogg", 1.45, 6),
+            ("Per D4", "drums/per_tuned/per D4.ogg", 1.49, 6),
+            ("Per E4", "drums/per_tuned/per E4.ogg", 1.54, 6),
+            ("Per G4", "drums/per_tuned/per G4.ogg", 1.59, 6),
+            ("Per lo", "drums/per/per lo.ogg", 0.93, 6),
+            ("Per P", "drums/per/per P.ogg", 1.14, 6),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+            (None, None, 1.0, 1),
+        ),
         "diw": (
             ("Kick", "drums/DrumBy (Mr. Ling, Jik Jik)/Kick.ogg", 0.17, 6),
             ("Snare", "drums/DrumBy (Mr. Ling, Jik Jik)/snare1.ogg", 0.16, 6),
@@ -136,6 +197,11 @@ class DrumAudio:
         if kit is None or not cls.is_valid_kit(kit):
             return cls.KITS[cls.DEFAULT_KIT]
         return cls.KITS[kit]
+
+    @property
+    def active_kit(self):
+        """The kit the local performer hears. Read-only outside this class."""
+        return self._active_kit
 
     def set_active_kit(self, kit):
         """Set the kit used by the local performer and preload it if needed."""
@@ -285,9 +351,12 @@ class DrumAudio:
                 candidates.append((record["created"], key, record))
         return min(candidates, default=None, key=lambda item: item[0])
 
-    def _enforce_voice_limits(self, peer_id, pad):
+    def _enforce_voice_limits(self, peer_id, pad, kit=None):
+        # The limit is the *kit's* own: two kits may give one pad different
+        # polyphony, and the hit being capped belongs to the kit that played it
+        # (a remote hit carries its performer's kit with it).
         key = (str(peer_id), pad)
-        pad_limit = self.PAD_DEFS[pad][3]
+        pad_limit = self.pad_defs(kit)[pad][3]
         while len(self.active_voices.get(key, ())) > pad_limit:
             record = self.active_voices[key][0]
             self._remove_record(key, record, self.STEAL_SECONDS)
@@ -552,7 +621,7 @@ class DrumAudio:
         self.route_to_cinema_room(peer_id, pad, x, y, z, adjusted_volume, kit=kit,
                                   wanted=lambda: not record["retired"], sink=sounds)
 
-        self._enforce_voice_limits(peer_id, pad)
+        self._enforce_voice_limits(peer_id, pad, kit)
         return primary
 
     def note_spawn_ms(self):

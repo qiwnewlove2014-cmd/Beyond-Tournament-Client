@@ -69,6 +69,21 @@ class RecoveryWatchdog:
     # A pending relay route that never turns into a real receiver (play was
     # rejected, or the server switched relay identity) is swept after this.
     RELAY_PENDING_TTL = 10.0
+    # A deliberate hold is not a fault. A room that ran low pauses every speaker while it
+    # refills, and start_playback() re-forms it (realign, then _play_ready) before it is
+    # audible again -- for a frame or two every speaker is stopped with audio queued. One
+    # snapshot of that was read as a dead output and rebuilt a healthy room, which cut the
+    # song and restarted it at the room's position: heard as the song starting mid-way.
+    # The reading has to persist before it counts. A genuinely dead room is still caught
+    # in 1.5 s, with the packet/output ladders (8-12 s) behind it.
+    STOPPED_SOURCES_PERSIST = 1.5
+    # A cabinet the Server says is playing while this client has no output for it at all
+    # (the play event was missed, or a rebuild removed the entry) is the one failure no
+    # phase in _scan_outputs can see: every phase asks an existing entry how it is. Ask
+    # the Server for the authoritative play after this long, then play the song here
+    # directly rather than wait for a cabinet menu that may never open.
+    UNHEARD_RESYNC_AFTER = 5.0
+    UNHEARD_DIRECT_AFTER = 15.0
 
     def update(self):
         """One gameplay frame's health check, one phase per question.
@@ -91,6 +106,9 @@ class RecoveryWatchdog:
         self._refresh_cinema(now)
         self._pump_note_clocks()
         rebuilds, stalled_ids, needs_resync = self._scan_outputs(now)
+        # A cabinet the Server is playing that this client has nothing for has no entry
+        # for any phase above to ask about (see _adopt_unheard_cabinets).
+        needs_resync = self._adopt_unheard_cabinets(now) or needs_resync
         self._recover(rebuilds, stalled_ids, needs_resync)
 
     def _scan_outputs(self, now):
@@ -129,6 +147,122 @@ class RecoveryWatchdog:
         if rebuilds:
             needs_resync = True
         return rebuilds, stalled_ids, needs_resync
+
+    def _adopt_unheard_cabinets(self, now):
+        """Adopt a cabinet the Server is playing and this client has nothing for.
+
+        Every phase above asks a *known* output how it is; a cabinet whose play event
+        never reached play() (or whose entry a rebuild removed) has no entry to ask, so
+        nothing noticed it. The listener then sat in silence while the room heard the
+        song, and the only thing that ever brought it back was opening the cabinet menu
+        -- which re-offers the play event, now from the middle of the track -- or a full
+        requeue. Reconcile the Server's own cached state against this client's outputs
+        instead: ask for the authoritative play first, then play the song here directly
+        rather than wait for a menu that may never open.
+
+        Returns True when a resync is owed.
+        """
+        playing = self._server_playing_boxes()
+        with self._lock:
+            for jukebox_id in [jid for jid in self._unheard_since if jid not in playing]:
+                self._unheard_since.pop(jukebox_id, None)
+        needs_resync = False
+        for jukebox_id, box in playing.items():
+            if self._has_output_for(jukebox_id):
+                self._unheard_since.pop(jukebox_id, None)
+                continue
+            started = self._unheard_since.setdefault(jukebox_id, now)
+            age = now - float(started)
+            if age >= self.UNHEARD_DIRECT_AFTER:
+                self._play_unheard(jukebox_id, box)
+            elif age >= self.UNHEARD_RESYNC_AFTER:
+                needs_resync = True
+        return needs_resync
+
+    def _server_playing_boxes(self):
+        """The Server's own answer: which cabinets are playing a song right now."""
+        gp = getattr(self.game, "gameplay", None)
+        state = getattr(gp, "jukebox_state", None)
+        boxes = state.get("jukeboxes") if isinstance(state, dict) else None
+        if not isinstance(boxes, dict):
+            return {}
+        playing = {}
+        for jukebox_id, box in boxes.items():
+            if not isinstance(box, dict) or not box.get("current"):
+                continue
+            if box.get("paused"):
+                continue
+            playing[str(jukebox_id)] = box
+        return playing
+
+    def _has_output_for(self, jukebox_id):
+        """True while this cabinet has an entry, a reload's re-offer due, or a tail."""
+        with self._lock:
+            if jukebox_id in self.players:
+                return True
+            if jukebox_id in self._pending_map_change:
+                # A map reload is in flight; the Server re-offers every playing
+                # song right after it, and adoption must not race that.
+                return True
+            for entry in self._retiring_direct:
+                if entry.get("id") == jukebox_id:
+                    return True
+        return False
+
+    def _play_unheard(self, jukebox_id, box):
+        """Play this cabinet's song here, from where the Server says it is."""
+        current = box.get("current") or {}
+        url = str(current.get("url") or "")
+        key = (jukebox_id, url)
+        if not url or key in self._unheard_played:
+            return False
+        if len(self._unheard_played) >= 64:
+            self._unheard_played.clear()
+        self._unheard_played.add(key)
+        duration = int(current.get("duration") or 0)
+        position = self._dated_position(box)
+        if position is not None and duration > 0:
+            position = min(position, max(0.0, duration - 2.0))
+        # A needle the client can date is the room's own position and the song is
+        # joined there. One it cannot date may belong to the song that just
+        # ended -- joining there is exactly how a fresh song started in the
+        # middle -- so that song is played from its intro, which is the one thing
+        # that is always true of a song this machine has never heard.
+        join = position is not None
+        self._switch_to_direct(jukebox_id, {
+            "x": float(box.get("x") or 0.0),
+            "y": float(box.get("y") or 0.0),
+            "z": float(box.get("z") or 0.0),
+            "title": str(current.get("title") or ""),
+            "url": url,
+            "duration": duration,
+            "start_offset": float(position or 0.0),
+            "http_headers": None,
+            "canonical_url": url,
+            "received_at": time.monotonic(),
+        }, sticky=False, join_playing_room=join)
+        log_line(f"[Jukebox] {jukebox_id}: this machine had nothing playing while the "
+                 f"Server was playing {str(current.get('title') or '')!r}; "
+                 f"playing it directly from {float(position or 0.0):.0f}s")
+        return True
+
+    @staticmethod
+    def _dated_position(box):
+        """The song's position now, when the payload that carried it can be dated.
+
+        ``jukebox_state`` sends the needle with the song it belongs to and stamps
+        when it was read (``position_at``, written by the packet handler); a
+        ``jukebox_queue_update`` after a song change drops both. Without a stamp
+        the number may be the previous song's, so it is not used at all.
+        """
+        read_at = box.get("position_at")
+        if read_at is None:
+            return None
+        try:
+            return max(0.0, float(box.get("position") or 0.0)
+                       + max(0.0, time.monotonic() - float(read_at)))
+        except (TypeError, ValueError):
+            return None
 
     def _drop_stale_relay_routes(self, now):
         """Forget buffered routes whose play event never arrived.
@@ -237,12 +371,28 @@ class RecoveryWatchdog:
                 # A room is as healthy as its busiest speaker: any
                 # one of them playing with audio queued means the
                 # stream reached OpenAL.
-                if (any(source.buffers_queued > 0 for source in entry_sources)
-                        and not any(source.state == cyal.SourceState.PLAYING
-                                    for source in entry_sources)):
-                    stopped_sources = True
+                halted = (
+                    any(source.buffers_queued > 0 for source in entry_sources)
+                    and not any(source.state == cyal.SourceState.PLAYING
+                                for source in entry_sources)
+                )
             except Exception:
-                pass
+                halted = False
+            # A room that ended a refill hold re-forms before it is audible again
+            # (start_playback -> realign -> _play_ready); for a frame or two every
+            # speaker is stopped with audio queued, which is exactly this reading. Only
+            # a stop that PERSISTS is a dead room -- rebuilding on the snapshot cut a
+            # healthy song and restarted it at the room's own position.
+            if halted:
+                since = entry.get("stopped_since")
+                if since is None:
+                    entry["stopped_since"] = now
+                elif now - float(since) >= self.STOPPED_SOURCES_PERSIST:
+                    stopped_sources = True
+            else:
+                entry.pop("stopped_since", None)
+        else:
+            entry.pop("stopped_since", None)
         if (alive and not no_packets and not stuck_audio
                 and not starved_output and not starved_rate
                 and not stopped_sources
@@ -378,13 +528,17 @@ class RecoveryWatchdog:
             # looping rebuilds forever on a lost unreliable channel.
             self._switch_to_direct(jukebox_id, params)
 
-    def _switch_to_direct(self, jukebox_id, params):
+    def _switch_to_direct(self, jukebox_id, params, sticky=True, join_playing_room=True):
         # Emergency: play the current song locally over HTTP when the relay channel is chronically
         # unusable on this connection - direct playback does not depend on it at all, so it survives
         # exactly the cases resyncing cannot fix (where even the warm-up frames die). Other listeners
         # keep hearing the server relay unaffected.
         params = dict(params or {})
-        self._direct_fallback_until[jukebox_id] = time.monotonic() + self.DIRECT_FALLBACK_TTL
+        if sticky:
+            # Only a cabinet whose own relay keeps failing stays direct for the TTL. A
+            # song adopted because this machine never heard it start must not: the next
+            # relay offer (make-before-break) then brings it back onto the room's stream.
+            self._direct_fallback_until[jukebox_id] = time.monotonic() + self.DIRECT_FALLBACK_TTL
         if not params.get("url"):
             return
         # Continue from the song's current wall-clock position: the original
@@ -392,7 +546,14 @@ class RecoveryWatchdog:
         now = time.monotonic()
         offset = float(params.get("start_offset") or 0.0) + max(
             0.0, now - float(params.get("received_at") or now))
-        log_line(f"[Jukebox] auto-recovery: {jukebox_id} relay unusable — direct playback")
+        if not sticky:
+            # Adopted because this machine never heard the song start, not because
+            # its relay failed: the log has to say which, or a reader of it learns
+            # the wrong story about the cabinet.
+            log_line(f"[Jukebox] {jukebox_id}: no output for a song the Server is "
+                     f"playing; adopting it as direct playback")
+        else:
+            log_line(f"[Jukebox] auto-recovery: {jukebox_id} relay unusable — direct playback")
         speak("Jukebox playing directly.")
         self.play(
             jukebox_id, params["x"], params["y"], params["z"],
@@ -405,7 +566,7 @@ class RecoveryWatchdog:
             # (its own anchor says it started on time), and it must JOIN the playing room at its position,
             # never start from 0. Residual resolve/startup overrun is reported through direct_late_s.
             room_lead_in_s=0.0,
-            join_playing_room=True,
+            join_playing_room=join_playing_room,
         )
 
     def request_resync(self, reason="manual recovery", *, raise_errors=False):
@@ -415,8 +576,12 @@ class RecoveryWatchdog:
         now = time.monotonic()
         with self._lock:
             # A UI close needs no server round-trip when this map has no
-            # active jukebox playback known to the client.
-            if not self.players:
+            # active jukebox playback known to the client -- but "this client
+            # knows of none" is exactly the state a missed play event leaves,
+            # and refusing the request there made the recovery ladder
+            # unreachable in the one case it exists for. The Server's own
+            # cached answer decides.
+            if not self.players and not self._server_playing_boxes():
                 return False
             if now - self._last_recovery_request_at < self.RECOVERY_COOLDOWN:
                 return False

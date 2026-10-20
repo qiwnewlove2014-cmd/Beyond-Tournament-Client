@@ -153,6 +153,62 @@ class YouTubeSearcher:
             return []
 
     @staticmethod
+    def read_link(url):
+        """Read one pasted YouTube link: its title, length and canonical page.
+
+        The Music Bot's "Play a YouTube link" line needs what a search result
+        already carries, without the search: a pasted link may be a watch page, a
+        youtu.be short link or a livestream, and the caller then resolves the
+        *stream* from the canonical page exactly as a picked result does. Flat
+        extraction is deliberate: the page's own metadata is one request, and no
+        signed media URL is taken from here to expire before it is played.
+        Returns None when the link cannot be read (a dead video, yt-dlp missing).
+        """
+        try:
+            import yt_dlp
+        except ImportError:
+            speak("yt-dlp is not installed. Cannot read a link.")
+            return None
+
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            # A shared link with &list=... means the song it points at, not the
+            # whole playlist: the caller plays one track, not a queue.
+            'noplaylist': True,
+            'skip_download': True,
+            'extract_flat': 'in_playlist',
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            # A pure /playlist?list= link still resolves to the playlist even with
+            # noplaylist -- read its first video, the way the jukebox does.
+            if info and 'entries' in info:
+                entries = [entry for entry in (info.get('entries') or []) if entry]
+                if not entries:
+                    return None
+                info = entries[0]
+            if not info:
+                return None
+            video_id = info.get('id') or ''
+            webpage_url = info.get('webpage_url') or ""
+            if not webpage_url and video_id:
+                webpage_url = f"https://www.youtube.com/watch?v={video_id}"
+            if not webpage_url and _is_youtube_watch_url(info.get('url', '')):
+                webpage_url = info.get('url')
+            if not webpage_url:
+                return None
+            return {
+                'title': info.get('title') or 'YouTube Audio',
+                'duration': int(info.get('duration') or 0),
+                'webpage_url': webpage_url,
+            }
+        except Exception as ex:
+            logger.log_exception(ex, "YouTubeSearcher.read_link")
+            return None
+
+    @staticmethod
     def get_stream_info(webpage_url, *, cancelled=None):
         """Worker-only resolution, isolated from the game's Python runtime."""
         from ..youtube_resolver import resolve_stream_info

@@ -221,12 +221,13 @@ class DrumPadServerContractTests(unittest.TestCase):
 
     def test_every_configured_drum_key_is_a_pad_the_server_relays(self):
         low, high = self._schema_bounds()
-        for binding in drum_keyconfig.DRUM_BINDINGS:
-            self.assertGreaterEqual(binding.pad, low)
-            self.assertLessEqual(
-                binding.pad, high,
-                f"the {binding.label!r} key plays pad {binding.pad}, which the "
-                "Server drops before relaying it")
+        for _kit, _label, table in drum_keyconfig.binding_groups():
+            for binding in table:
+                self.assertGreaterEqual(binding.pad, low)
+                self.assertLessEqual(
+                    binding.pad, high,
+                    f"the {binding.label!r} key plays pad {binding.pad}, which the "
+                    "Server drops before relaying it")
 
     def test_the_server_guard_and_the_schema_agree(self):
         _, high = self._schema_bounds()
@@ -234,6 +235,237 @@ class DrumPadServerContractTests(unittest.TestCase):
             self._handler_max(), high,
             "the schema and the handler disagree about the last pad, so one of "
             "them silently drops a hit the other lets through")
+
+
+class PerKitTests(unittest.TestCase):
+    """The ``per`` kit: three strokes, three pads, three keys, real stereo.
+
+    It is one hand drum rather than a drum kit, so it sounds on three pads and
+    keeps its own key table (``drum_keyconfig.KIT_BINDINGS``). Its samples are
+    **true stereo** -- hi leans left, lo leans right, the slap sits centred --
+    because the engine has no per-hit pan: a kit's image is the file's own (the
+    local hit plays the file with ``direct_channels``, the remote one plays its
+    split L/R). The samples arrived dual-mono, which is heard as one point in the
+    middle however it is routed, so the pan is baked into the files by
+    ``tools/percussion_pan_bake.py`` and this is what says so.
+    """
+
+    SOUNDING = {0: "Per lo", 1: "Per Hi", 17: "Per P"}
+
+    def kit_root(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+    def test_the_kit_sounds_only_the_three_pads_it_has(self):
+        pads = DrumAudio.KITS["per"]
+        self.assertEqual(
+            len(pads), len(DrumAudio.PAD_DEFS),
+            "every kit must define the canonical pad count")
+        sounding = {index: pad[0] for index, pad in enumerate(pads) if pad[1]}
+        self.assertEqual(sounding, self.SOUNDING)
+
+    def test_every_sounding_pad_points_at_a_real_file(self):
+        root = self.kit_root()
+        for index, name in self.SOUNDING.items():
+            path = DrumAudio.KITS["per"][index][1]
+            full = os.path.join(root, "data", path.replace("/", os.sep))
+            self.assertTrue(os.path.exists(full), f"pad {index} ({name}): {full}")
+
+    def test_the_leaning_samples_are_true_stereo_not_dual_mono(self):
+        """Side channel at digital silence is the bug this kit was reported as."""
+        import audioop
+        import math
+        from libs.safe_vorbis import load_vorbis_pcm
+
+        root = self.kit_root()
+        for index in (0, 1):      # lo leans right, hi leans left; P is centred
+            path = DrumAudio.KITS["per"][index][1]
+            relative = os.path.relpath(
+                os.path.join(root, "data", path.replace("/", os.sep)))
+            pcm = load_vorbis_pcm(relative, max_pcm_bytes=32 * 1024 * 1024)
+            self.assertEqual(pcm.channels, 2)
+            left = audioop.tomono(pcm.buffer, 2, 1.0, 0.0)
+            right = audioop.tomono(pcm.buffer, 2, 0.0, 1.0)
+            side = audioop.add(left, audioop.mul(right, 2, -1.0), 2)
+            side_db = 20 * math.log10(max(audioop.rms(side, 2), 1) / 32768.0)
+            self.assertGreater(
+                side_db, -60.0,
+                f"pad {index} is dual-mono (side at {side_db:.1f} dBFS), so a "
+                "listener hears it centred however the room routes it")
+
+    def test_the_scales_sit_the_three_strokes_at_one_level(self):
+        """The three pieces must read as one instrument, not one quiet piece.
+
+        Measured by ``tools/percussion_pan_bake.py``; the values are stored in
+        the kit because the engine applies them per hit.
+        """
+        scales = {index: DrumAudio.KITS["per"][index][2] for index in self.SOUNDING}
+        self.assertGreater(scales[0], 0.0)
+        self.assertGreater(scales[1], 0.0)
+        self.assertGreaterEqual(scales[17], 1.0,
+                                "the slap lost ~9.5 LU to its longer tail")
+
+
+class PerTunedKitTests(unittest.TestCase):
+    """The tuned per drum: five notes of one stroke, same length, same drum.
+
+    OpenAL's source pitch is varispeed -- a fifth down makes a 1.6 s hit 2.1 s
+    long -- so the notes are baked files instead (``tools/percussion_tune_bake.py``
+    stretches time, then resamples). These tests pin what that buys: every note is
+    the source's own length, and the five notes rise in order with the pentatonic's
+    own span between A3 and G4 (a fifth up plus a tone, ~17.8 semitones).
+    """
+
+    NOTES = ((0, "Per A3"), (1, "Per C4"), (2, "Per D4"), (3, "Per E4"),
+             (4, "Per G4"), (5, "Per lo"), (6, "Per P"))
+    SOURCE = "drums/per/per Hi.ogg"
+
+    def root(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+    def decode(self, path):
+        from libs.safe_vorbis import load_vorbis_pcm
+
+        full = os.path.join(self.root(), "data", path.replace("/", os.sep))
+        pcm = load_vorbis_pcm(os.path.relpath(full), max_pcm_bytes=32 * 1024 * 1024)
+        return pcm
+
+    def test_the_kit_sounds_the_five_notes_and_two_rhythm_pieces(self):
+        pads = DrumAudio.KITS["per_tuned"]
+        self.assertEqual(len(pads), len(DrumAudio.PAD_DEFS))
+        sounding = {index: pad[0] for index, pad in enumerate(pads) if pad[1]}
+        self.assertEqual(sounding, dict(self.NOTES))
+
+    def test_every_sounding_pad_points_at_a_real_file(self):
+        root = self.root()
+        for index, _name in self.NOTES:
+            path = DrumAudio.KITS["per_tuned"][index][1]
+            full = os.path.join(root, "data", path.replace("/", os.sep))
+            self.assertTrue(os.path.exists(full), f"pad {index}: {full}")
+
+    def test_every_note_is_the_source_strokes_own_length(self):
+        source = self.decode(self.SOURCE)
+        source_seconds = len(source.buffer) / (2 * source.channels) / source.frequency
+        for index in range(5):
+            pcm = self.decode(DrumAudio.KITS["per_tuned"][index][1])
+            seconds = len(pcm.buffer) / (2 * pcm.channels) / pcm.frequency
+            self.assertAlmostEqual(
+                seconds, source_seconds, delta=0.02,
+                msg=f"pad {index} is {seconds:.3f}s of a {source_seconds:.3f}s "
+                    "stroke: the pitch change must not change the length")
+
+    def test_the_five_notes_rise_in_order(self):
+        import numpy as np
+
+        centroids = []
+        for index in range(5):
+            pcm = self.decode(DrumAudio.KITS["per_tuned"][index][1])
+            samples = np.frombuffer(pcm.buffer, dtype=np.int16)
+            mono = samples.reshape(-1, pcm.channels).mean(axis=1)[:8192]
+            spectrum = np.abs(np.fft.rfft(mono * np.hanning(len(mono))))
+            freqs = np.fft.rfftfreq(len(mono), 1.0 / pcm.frequency)
+            centroids.append(float(np.sum(freqs * spectrum) / np.sum(spectrum)))
+        self.assertEqual(centroids, sorted(centroids),
+                         "A3 C4 D4 E4 G4 must rise in pitch")
+        span_cents = 1200.0 * np.log2(centroids[-1] / centroids[0])
+        self.assertAlmostEqual(
+            span_cents, 1200.0 * np.log2(392.0 / 220.0), delta=250.0,
+            msg=f"the A3..G4 span measures {span_cents:.0f} cents")
+
+    def test_its_keys_are_the_number_row_one_to_seven(self):
+        table = drum_keyconfig.bindings("per_tuned")
+        self.assertEqual([binding.pad for binding in table],
+                         [index for index, _name in self.NOTES])
+        self.assertEqual([binding.default_key for binding in table],
+                         [pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
+                          pygame.K_5, pygame.K_6, pygame.K_7])
+
+
+class PerKeyBindingTests(unittest.TestCase):
+    """A kit that brings its own keys stores and validates only its own."""
+
+    def test_the_per_kit_brings_its_own_three_keys(self):
+        table = drum_keyconfig.bindings("per")
+        self.assertEqual([binding.pad for binding in table], [0, 1, 17])
+        self.assertEqual(
+            [binding.function for binding in table],
+            ["drum_per_lo", "drum_per_hi", "drum_per_p"])
+        self.assertEqual(
+            [binding.default_key for binding in table],
+            [pygame.K_3, pygame.K_1, pygame.K_2],
+            "1 is the left-hand treble, 2 the slap, 3 the right-hand bass")
+        self.assertIs(drum_keyconfig.bindings("default"),
+                      drum_keyconfig.DRUM_BINDINGS)
+        self.assertIs(drum_keyconfig.bindings(None), drum_keyconfig.DRUM_BINDINGS)
+
+    def test_a_per_binding_does_not_move_the_drum_kits_key(self):
+        keyconfig = FakeKeyconfig({"drum_per_hi": pygame.K_a})
+        drums = drum_keyconfig.key_to_pad(keyconfig)
+        self.assertEqual(drums[pygame.K_f], 1)
+        self.assertNotIn(pygame.K_a, drums)
+        per = drum_keyconfig.key_to_pad(keyconfig, kit="per")
+        self.assertEqual(per[pygame.K_a], 1)
+        self.assertNotIn(pygame.K_f, per)
+
+    def test_a_key_the_drum_kit_uses_is_free_in_the_per_kit(self):
+        """The two tables are never active together, so Space may be either's."""
+        keyconfig = FakeKeyconfig()
+        self.assertIsNone(drum_keyconfig.validate_key(
+            keyconfig, "drum_per_lo", pygame.K_SPACE, kit="per"))
+        self.assertIsNone(drum_keyconfig.validate_key(
+            keyconfig, "drum_kick", pygame.K_SPACE))
+
+    def test_the_conflict_check_is_scoped_to_the_one_kit(self):
+        error = drum_keyconfig.validate_key(
+            FakeKeyconfig(), "drum_per_lo", pygame.K_1, kit="per")
+        self.assertIn("Per Hi primary", error)
+        self.assertIsNone(drum_keyconfig.validate_key(
+            FakeKeyconfig(), "drum_per_lo", pygame.K_j, kit="per"),
+            "J plays a hi-hat in the drum kit, which is a different table")
+        self.assertIn("Closed Hi-Hat primary", drum_keyconfig.validate_key(
+            FakeKeyconfig(), "drum_kick", pygame.K_j))
+
+    def test_clearing_the_keys_clears_every_kit_in_one_write(self):
+        keyconfig = FakeKeyconfig({"drum_per_hi": pygame.K_a})
+        drum_keyconfig.clear_all(keyconfig)
+        self.assertEqual(keyconfig.save_count, 1)
+        self.assertEqual(drum_keyconfig.key_to_pad(keyconfig), {})
+        self.assertEqual(drum_keyconfig.key_to_pad(keyconfig, kit="per"), {})
+        self.assertTrue(all(
+            keyconfig.keys[binding.function] is None
+            for binding in drum_keyconfig.bindings("per")))
+
+    def test_restoring_defaults_reaches_the_per_keys_too(self):
+        keyconfig = FakeKeyconfig({
+            "drum_per_hi": pygame.K_a,
+            "drum_per_hi_alt": pygame.K_b,
+        })
+        drum_keyconfig.restore_defaults(keyconfig)
+        self.assertEqual(keyconfig.save_count, 1)
+        self.assertEqual(
+            drum_keyconfig.key_to_pad(keyconfig, kit="per"),
+            {pygame.K_3: 0, pygame.K_1: 1, pygame.K_2: 17})
+        self.assertNotIn("drum_per_hi_alt", keyconfig.keys)
+
+    def test_the_handler_asks_the_kit_being_played(self):
+        from types import SimpleNamespace
+        from libs.drum_handler import DrumHandler
+
+        game = SimpleNamespace(
+            keyconfig=FakeKeyconfig({"drum_per_hi": pygame.K_a}),
+            audio_mngr=SimpleNamespace(
+                drums=SimpleNamespace(active_kit="per")),
+        )
+        handler = DrumHandler(SimpleNamespace(game=game))
+        resolved = handler.get_key_to_pad()
+        self.assertEqual(resolved[pygame.K_a], 1, "the per kit's own F binding")
+        self.assertEqual(resolved[pygame.K_3], 0, "the bass stroke moved to 3")
+        self.assertNotIn(pygame.K_f, resolved,
+                         "the drum kit's snare key is not a per key")
+
+        game.audio_mngr.drums.active_kit = "default"
+        resolved = handler.get_key_to_pad()
+        self.assertEqual(resolved[pygame.K_f], 1)
+        self.assertNotIn(pygame.K_a, resolved)
 
 
 class DrumMidiCoverageTests(unittest.TestCase):

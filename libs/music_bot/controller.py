@@ -33,9 +33,10 @@ from ..audio.cinema import peer as cinema_peer
 from .cinema_handler import CinemaHandler
 from .crossfade_handler import CrossfadeHandler
 from ..game_audio_recorder import GameAudioRecorderManager
-from .music_downloader import MusicDownloadManager
+from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
 from ..audio_health import probe as audio_health
+from . import output_device
 from . import song_requests
 from . import subtitles
 from .media import (FFMPEG_PATH, DEFAULT_MAP_MUSIC, FALLBACK_PLAYLIST,
@@ -200,6 +201,17 @@ class MapMusicBot:
         self._cinema_handler = CinemaHandler(self)
 
         self.volume = options.get("music_bot_volume", 50)
+        # Where this bot's own stream is heard. Empty is the game's own audio
+        # device -- what every client did before this existed -- and anything
+        # else is a device played by a child process of its own
+        # (music_bot/output_device.py says why a process is the honest way:
+        # OpenAL binds a device to a context, so the game cannot send one
+        # source somewhere else).
+        self.output_device = str(options.get("music_bot_output_device", "") or "")
+        # The child that plays it while a device of its own is chosen, and the
+        # slots it hands out (one per stream, so a crossfade's two songs mix
+        # there exactly as they do on the game's own device).
+        self._output_process = None
         self.enabled = options.get("music_bot_enabled", True)
         self.broadcast_enabled = False  # Disabled by default (Private listening mode)
         self.broadcast_to_megaphone = False
@@ -384,6 +396,115 @@ class MapMusicBot:
         if self.stream_source:
             self._delete_source(self.stream_source)
             self.stream_source = None
+
+    # === The player's own output device for this bot's stream ===
+    # Rules and the reason for a child process: music_bot/output_device.py.
+
+    def output_device_label(self):
+        """The line Music Bot Settings reads for where the song is heard."""
+        device = getattr(self, "output_device", "")
+        if not device:
+            return "Same as the game"
+        return output_device.short_name(device)
+
+    def _music_output_category(self):
+        """The music category's own volume, which the ear source's gain carries."""
+        try:
+            audio = self.game.audio_mngr
+            return audio.volume_categories.get("music", [100])[0] / 100.0
+        except Exception:
+            return 1.0
+
+    def _music_output_process(self):
+        """The child playing this bot's own stream, or None to play on the game's.
+
+        Started on demand and kept across songs, so a new track is just more
+        frames in a queue that is already open. A device that has gone away
+        (a USB headset unplugged, a Bluetooth speaker switched off) is said
+        once and the bot returns to the game's own device rather than leaving
+        the player with a song they cannot hear.
+        """
+        if not getattr(self, "output_device", ""):
+            return None
+        process = self._output_process
+        if process is not None:
+            if process.alive():
+                return process
+            self._output_process = None
+            self._abandon_output_device(
+                "The Music Bot's output device stopped. Music plays on the "
+                "game's own device again."
+            )
+            return None
+        try:
+            self._output_process = output_device.MusicOutputProcess(
+                self.output_device).start()
+        except Exception as error:
+            from ..logger import log
+            log(f"[MUSIC-OUT] could not start '{self.output_device}': {error}")
+            self._output_process = None
+            self._abandon_output_device(
+                "The Music Bot's output device could not be opened. Music "
+                "plays on the game's own device."
+            )
+            return None
+        return self._output_process
+
+    def _abandon_output_device(self, message):
+        """Forget a device that will not play, and say so where the player is."""
+        self.output_device = ""
+        options.set("music_bot_output_device", "")
+        speak(message)
+
+    def _stream_remote(self):
+        """(process, slot) for one stream, or (None, 0) to play on the game's.
+
+        Only this bot's own playback: a song routed into a cinema room is
+        carried by that room's speakers, which are map objects and belong to
+        the game's device. Each stream leases its own slot, so a crossfade's
+        two songs mix in that process exactly as they do here.
+        """
+        if getattr(self, "cinema_bank", None) is not None:
+            return None, 0
+        process = self._music_output_process()
+        if process is None:
+            return None, 0
+        slot = process.lease_slot()
+        if slot is None:
+            return None, 0
+        return process, slot
+
+    def _close_output_process(self):
+        process = getattr(self, "_output_process", None)
+        self._output_process = None
+        if process is not None:
+            process.stop()
+
+    def select_output_device(self, specifier):
+        """Play this bot's own stream on `specifier` ('' for the game's device).
+
+        The switch is heard at once: a song that is playing is restarted at the
+        position it had reached, because a stream's frames belong to the
+        device they were opened on. The equalizer, the room reverb and the
+        underwater muffle are EFX on the game's own context and are said to be
+        the game's, not the device's.
+        """
+        specifier = str(specifier or "")
+        if specifier == self.output_device:
+            return
+        self._close_output_process()
+        self.output_device = specifier
+        options.set("music_bot_output_device", specifier)
+        if not specifier:
+            speak("Music plays on the game's own device.")
+        else:
+            speak(f"Music output: {output_device.short_name(specifier)}. "
+                  "The equalizer and room reverb apply on the game's own "
+                  "device.")
+        if self.playing and self.streamer is not None and self.streamer.is_alive():
+            position = self.track_position()
+            if position is not None:
+                self._seek_restart(position, announce=False)
 
     # === Cinema speakers (the room a cabinet's speakers make) ===
     # The room's behaviour lives in music_bot/cinema_handler.py; the state it
@@ -1169,6 +1290,9 @@ class MapMusicBot:
     def _open_eq_menu(self):
         return self._menus()._open_eq_menu()
 
+    def _open_output_device_menu(self):
+        return self._menus()._open_output_device_menu()
+
     def _open_custom_eq_sliders(self):
         return self._menus()._open_custom_eq_sliders()
 
@@ -1558,6 +1682,22 @@ class MapMusicBot:
                 handeler=self._on_search_submit
             ))
 
+    def _open_link_input(self):
+        """Open the text input for a pasted YouTube link.
+
+        The line beside "Search YouTube" for a link somebody already has in
+        hand (a chat message, a browser tab): no search, no result list, the
+        link is read and played -- or queued, when Queue Mode is on, exactly
+        as a picked search result would be. Music Bot Mode is staff-only, so
+        this is a staff shortcut rather than a new permission.
+        """
+        self._gp = self._find_gameplay()
+        if self._gp:
+            self._gp.add_substate(self.game.input.run(
+                "Paste a YouTube link or livestream:",
+                handeler=self._on_link_submit
+            ))
+
     def _find_gameplay(self):
         """Find the Gameplay state instance"""
         from .. import gameplay
@@ -1607,6 +1747,53 @@ class MapMusicBot:
 
         t = threading.Thread(target=do_search, daemon=True)
         t.start()
+
+    def _on_link_submit(self, raw_url):
+        """Called when a pasted link is submitted: read it, then play it."""
+        # Pop the input substate first, for the same reason as a search: it
+        # otherwise keeps every later key event.
+        gp = getattr(self, "_gp", None) or self._find_gameplay()
+        if gp:
+            gp.pop_last_substate()
+
+        url = (raw_url or "").strip()
+        if not url:
+            speak("Link cancelled.")
+            return
+        # Be kind to a link pasted without a scheme, and to an old http one:
+        # the bot resolves https YouTube pages only (is_supported_music_url).
+        if not url.lower().startswith(("http://", "https://")):
+            url = "https://" + url
+        if url.lower().startswith("http://"):
+            url = "https://" + url[len("http://"):]
+        if not is_supported_music_url(url):
+            speak("Only YouTube links can be played on the Music Bot.")
+            return
+
+        speak("Reading the link...")
+        self.searching = True
+
+        def do_read():
+            info = YouTubeSearcher.read_link(url)
+            self.searching = False
+            self.game.put(lambda: self._play_read_link(info))
+
+        threading.Thread(target=do_read, daemon=True).start()
+
+    def _play_read_link(self, info):
+        """What a pasted link becomes: a queued song in Queue Mode, else now."""
+        if not info or not info.get("webpage_url"):
+            speak("Could not read that YouTube link. Please check it.")
+            return
+        title = info.get("title") or "YouTube Audio"
+        webpage_url = info["webpage_url"]
+        # Queue Mode means "line it up": the same behaviour as pressing Enter
+        # on a search result, so the two ways of adding a song never diverge.
+        if self.queue_mode:
+            self._enqueue_track(title, webpage_url, "youtube",
+                                webpage_url=webpage_url)
+            return
+        self._start_youtube_stream_from_search(title, webpage_url, "")
 
     def _show_results_menu(self, results):
         return self._menus()._show_results_menu(results)
@@ -1704,6 +1891,10 @@ class MapMusicBot:
             self._known_durations.get(canonical_url)
             if canonical_url else None
         )
+        # The player's own device, when one is chosen and this song is not
+        # going into a room's speakers (those are map objects on the game's
+        # device). One slot per stream: a crossfade runs two at once.
+        remote, remote_slot = self._stream_remote()
         self.streamer = AudioStreamer(
             self.game, audio_url,
             self._output_source(),
@@ -1715,6 +1906,9 @@ class MapMusicBot:
             # A room replaces the ear source entirely: the same interleaved
             # stereo decode is rendered into one feed per speaker.
             cinema=self.cinema_bank,
+            remote=remote,
+            remote_slot=remote_slot or 0,
+            remote_category=self._music_output_category(),
         )
         self.streamer.start()
 
@@ -1765,8 +1959,13 @@ class MapMusicBot:
             return
         self._seek_restart(target)
 
-    def _seek_restart(self, position):
-        """Restart the current track at an absolute position (seconds)."""
+    def _seek_restart(self, position, announce=True):
+        """Restart the current track at an absolute position (seconds).
+
+        ``announce=False`` is a restart the player did not ask for by asking to
+        seek -- choosing an output device restarts the song where it stands, and
+        "Seeking to 1:23" over that decision is a sentence about the wrong thing.
+        """
         title = self.current_title
         target = self.current_target
         source = self.current_source
@@ -1786,7 +1985,8 @@ class MapMusicBot:
         seek_reuse_headers = dict(getattr(outgoing, "http_headers", None) or {})
 
         playback_generation = self._begin_playback_generation()
-        speak(f"Seeking to {format_track_position(position)}.")
+        if announce:
+            speak(f"Seeking to {format_track_position(position)}.")
         # Hard cut (no fade) so the new decode head starts at the target
         # position immediately; the track queue and feed survive the seek.
         self.stop(clear_queue=False, clear_feed=False, invalidate_pending=False)
@@ -1942,6 +2142,12 @@ class MapMusicBot:
         # A room fed by this bot goes quiet with it (the sources are the
         # room's, so they are deleted here rather than by _destroy_stream_source).
         self._release_cinema_bank()
+        # The player's other device keeps what it was already given when a song
+        # simply ends (a streamer's teardown must not clip the last frames), so
+        # the one place a stop really silences it is here. A fade-out is still
+        # playing on purpose.
+        if not fade and getattr(self, "_output_process", None) is not None:
+            self._output_process.flush()
         # Stop local playback
         self._stop_local()
         self.playing = False
@@ -2272,6 +2478,12 @@ class MapMusicBot:
         self.download_mgr.close()
         self.audio_recorder.close()
         self.stop()
+        # Leaving Music Bot mode hands the player's other device back. `stop`
+        # only flushes (the process is kept across songs), so without this a
+        # silent child would hold the device -- a Bluetooth speaker that never
+        # sleeps, an exclusive-mode card another app cannot open -- for a bot
+        # that is no longer there to feed it.
+        self._close_output_process()
         if getattr(self, 'live_relay_streamer', None):
             self.live_relay_streamer.stop()
             self.live_relay_streamer = None

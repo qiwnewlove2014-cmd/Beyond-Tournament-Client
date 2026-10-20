@@ -138,8 +138,22 @@ class DrumHandler:
     # ------------------------------------------------------------------
 
     def get_key_to_pad(self):
-        """Resolve configurable normalized keys to stable drum pad IDs."""
-        return drum_keyconfig.key_to_pad(self._game.keyconfig)
+        """Resolve configurable normalized keys to stable drum pad IDs.
+
+        The table belongs to the kit being played: a kit that brought its own
+        keys (``per``) resolves those, and every other kit keeps the drum kit's
+        own 18. Asking the audio owner here is what makes the per kit's Space
+        play the drum's bass stroke without touching the kick's Space.
+        """
+        return drum_keyconfig.key_to_pad(
+            self._game.keyconfig, kit=self._active_kit(),
+        )
+
+    def _active_kit(self):
+        """The kit the local performer is playing (``None`` before any kit is set)."""
+        audio = getattr(self._game, "audio_mngr", None)
+        drums = getattr(audio, "drums", None)
+        return getattr(drums, "active_kit", None)
 
     # ------------------------------------------------------------------
     # volume control

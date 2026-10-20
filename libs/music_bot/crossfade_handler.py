@@ -179,12 +179,16 @@ class CrossfadeHandler:
         if source != "local":
             canonical = str(track.get("webpage_url") or track.get("target", ""))
             headers = dict(info.get("http_headers") or {})
+        remote, remote_slot = self._bot._stream_remote()
         try:
             cand = AudioStreamer(
                 self._bot.game, url, src, self._bot.volume, bot=self._bot,
                 http_headers=headers,
                 canonical_url=canonical,
                 start_paused=True,
+                remote=remote,
+                remote_slot=remote_slot,
+                remote_category=self._bot._music_output_category(),
             )
         except Exception:
             self._bot._delete_source(src)
@@ -259,8 +263,9 @@ class CrossfadeHandler:
                     cand, self._bot.CROSSFADE_SECONDS)
             else:
                 old_streamer.network_muted = True
+        # Silent until the ramp starts, on the game's device or another one.
         with contextlib.suppress(Exception):
-            cand_src.gain = 0.0
+            cand.set_output_gain(0.0)
         cand.set_pause(False)
         state["phase"] = "fading"
         state["fade_started_at"] = time.monotonic()
@@ -275,16 +280,19 @@ class CrossfadeHandler:
         progress = min(1.0, max(0.0, elapsed / self._bot.CROSSFADE_SECONDS))
         src = self._bot.stream_source
         old_source = state.get("old_source")
-        if src is not None:
+        incoming = self._bot.streamer
+        outgoing = state.get("old_streamer")
+        if src is not None and incoming is not None:
             with contextlib.suppress(Exception):
-                src.gain = base_gain * progress
-        if old_source is not None:
+                incoming.set_output_gain(base_gain * progress)
+        if old_source is not None and outgoing is not None:
             with contextlib.suppress(Exception):
-                old_source.gain = (state.get("old_gain0") or 0.0) * (1.0 - progress)
+                outgoing.set_output_gain(
+                    (state.get("old_gain0") or 0.0) * (1.0 - progress))
         if progress >= 1.0:
-            if src is not None:
+            if incoming is not None:
                 with contextlib.suppress(Exception):
-                    src.gain = base_gain
+                    incoming.set_output_gain(base_gain)
             old_streamer = state.get("old_streamer")
             if old_streamer is not None and old_streamer is not self._bot.streamer:
                 with contextlib.suppress(Exception):

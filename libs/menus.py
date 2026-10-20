@@ -830,35 +830,44 @@ def drum_keyconfig_menu(
     refresh_current = parent.replace_last_substate if in_game else replace_call
 
     items = []
-    for binding in drum_keyconfig.DRUM_BINDINGS:
-        current_index = len(items)
-        primary = drum_keyconfig.binding_key(game.keyconfig, binding)
-        primary_name = (
-            string_utils.friendly_key_name(primary)
-            if primary is not None
-            else "unassigned"
-        )
-        alternate = drum_keyconfig.alternate_key(game.keyconfig, binding)
-        alternate_name = (
-            string_utils.friendly_key_name(alternate)
-            if alternate is not None
-            else "unassigned"
-        )
-        open_pad_menu = functools.partial(
-            drum_pad_keyconfig_menu,
-            game,
-            binding,
-            func_call,
-            replace_call=open_child,
-            parent=parent,
-            in_game=in_game,
-            list_position=current_index,
-        )
-        items.append((
-            f"{binding.label}: primary {primary_name}, "
-            f"alternate {alternate_name}",
-            open_pad_menu,
-        ))
+    # Every table a kit brought with it is listed beside the drum kit's own, so
+    # a player can bind the per drum's three strokes without starting a session
+    # at that drumset first. The rows of a kit are prefixed with its name; the
+    # drum kit's own rows keep the wording they always had.
+    for kit, kit_label, table in drum_keyconfig.binding_groups():
+        for binding in table:
+            current_index = len(items)
+            primary = drum_keyconfig.binding_key(game.keyconfig, binding)
+            primary_name = (
+                string_utils.friendly_key_name(primary)
+                if primary is not None
+                else "unassigned"
+            )
+            alternate = drum_keyconfig.alternate_key(game.keyconfig, binding)
+            alternate_name = (
+                string_utils.friendly_key_name(alternate)
+                if alternate is not None
+                else "unassigned"
+            )
+            open_pad_menu = functools.partial(
+                drum_pad_keyconfig_menu,
+                game,
+                binding,
+                func_call,
+                replace_call=open_child,
+                parent=parent,
+                in_game=in_game,
+                list_position=current_index,
+                kit=kit,
+            )
+            name = (binding.label if kit_label is None
+                    else f"{kit_label}: {binding.label}")
+            items.append((
+                f"{name}: primary {primary_name}, "
+                f"alternate {alternate_name}",
+                open_pad_menu,
+            ))
+    binding_count = len(items)
 
     def reset_defaults():
         drum_keyconfig.restore_defaults(game.keyconfig)
@@ -869,7 +878,7 @@ def drum_keyconfig_menu(
             replace_call=refresh_current,
             parent=parent,
             in_game=in_game,
-            restore_pos=len(drum_keyconfig.DRUM_BINDINGS),
+            restore_pos=binding_count,
         )
 
     def clear_all():
@@ -881,7 +890,7 @@ def drum_keyconfig_menu(
             replace_call=refresh_current,
             parent=parent,
             in_game=in_game,
-            restore_pos=len(drum_keyconfig.DRUM_BINDINGS) + 1,
+            restore_pos=binding_count + 1,
         )
 
     items.append(("Restore default drum keys.", reset_defaults))
@@ -901,6 +910,7 @@ def drum_pad_keyconfig_menu(
     parent=None,
     in_game=False,
     list_position=0,
+    kit=None,
 ):
     """Configure both playable key slots for one drum pad."""
     primary = drum_keyconfig.binding_key(game.keyconfig, binding)
@@ -934,6 +944,7 @@ def drum_pad_keyconfig_menu(
             parent=parent,
             in_game=in_game,
             list_position=list_position,
+            kit=kit,
         )
 
     def open_key_capture(function, display_name):
@@ -941,6 +952,7 @@ def drum_pad_keyconfig_menu(
             drum_keyconfig.validate_key,
             game.keyconfig,
             function,
+            kit=kit,
         )
         open_child(Key_config_screen(
             game,
@@ -962,6 +974,7 @@ def drum_pad_keyconfig_menu(
             parent=parent,
             in_game=in_game,
             list_position=list_position,
+            kit=kit,
         )
 
     def return_to_list():

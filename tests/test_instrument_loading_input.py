@@ -82,7 +82,9 @@ def build_handler(filename, class_name, speech, pressed):
         "pygame": pygame, "speak": speech.append, "re": re, "time": time,
         "consts": SimpleNamespace(CHANNEL_MAP=4),
         "PIANO_MIDI_PROFILE": profile, "DRUM_MIDI_PROFILE": profile,
-        "drum_keyconfig": SimpleNamespace(key_to_pad=lambda config: config),
+        # The key table is the played kit's own, so the stub takes the kit too.
+        "drum_keyconfig": SimpleNamespace(
+            key_to_pad=lambda config, kit=None: config),
     }
     exec(compile(ast.Module(body=[class_node], type_ignores=[]), filename, "exec"), namespace)
     return namespace[class_name], pygame

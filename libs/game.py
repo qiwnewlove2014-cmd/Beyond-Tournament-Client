@@ -68,9 +68,13 @@ Delayed_function = namedtuple("delayed_function", ["clock", "time", "function"])
 
 
 class Game:
-    # How many 3 s attempts a dropped session gets before the login menu is
-    # handed back (10 = ~30 s). A server that is down, or an account another
-    # copy really holds, must not leave the client retrying forever.
+    # How many 3 s cycles a dropped session gets before the login menu is handed
+    # back. This is the old bound and it stays only as a backstop: a cycle dials
+    # at least one door, so ``login_attempts.ATTEMPT_LIMIT`` -- the budget the
+    # whole run spends, a fresh login and its reconnect cycles together -- is
+    # what normally ends it. Ten cycles each re-spending a two-door walk was ten
+    # times the attempts the player asked for, which read as a client that
+    # reconnected forever.
     RECONNECT_ATTEMPTS = 10
 
     def __init__(self, screen):
@@ -247,8 +251,16 @@ class Game:
             event_handeler.EventHandeler,
         )
 
-    def _open_first_login_attempt(self):
+    def _open_first_login_attempt(self, continuing=False):
         """Open the transport a login starts on, and remember the retry list.
+
+        ``continuing`` is a reconnect cycle: it is the *same* run as the login
+        before it, so the doors it has already knocked on are forgotten (a
+        retry is a fresh socket on the same door -- a new local port is what
+        repairs a stale NAT mapping) while the run's budget is not
+        (``login_attempts.ATTEMPT_LIMIT``). A dropped session begins a new run
+        instead: ``disconnected`` clears the walk, so the next cycle comes
+        through here as a walk that has spent nothing yet.
 
         The list is the endpoint and the port above it
         (``libs/login_attempts.py``), with the port that last answered moved
@@ -260,20 +272,32 @@ class Game:
         """
         host, port = server_config.get_server_endpoint()
         self._login_name = host
-        self._login_candidates = login_attempts.candidate_addresses(
-            host,
-            port,
-            server_config.get_fallback_addresses(),
-            preferred=options.get_login_port(),
-        )
-        self._login_port = None
-        # A fresh walk: nothing has been dialled, nothing is known to be
-        # unfindable, and no backup address has been reached yet.
-        self._login_facts = None
+        facts = getattr(self, "_login_facts", None)
+        if continuing and facts is not None and getattr(self, "_login_candidates", None):
+            # Only the *retiring* half is forgotten: a door may be knocked on
+            # again, but `dialled` is this run's record, and the ports in the
+            # silence report and the log's `tried=` list are the run's.
+            facts["doors"].clear()
+        else:
+            self._login_candidates = login_attempts.candidate_addresses(
+                host,
+                port,
+                server_config.get_fallback_addresses(),
+                preferred=options.get_login_port(),
+            )
+            self._login_port = None
+            # A fresh walk: nothing has been dialled, nothing is known to be
+            # unfindable, and no backup address has been reached yet -- and no
+            # door of the run's budget has been spent.
+            self._login_facts = None
         if not self._login_candidates:
             raise OSError("There is no login candidate to open.")
         if not self._open_candidate(0):
-            raise self._last_open_error
+            # A walk stopped by the run's budget has no error of its own to
+            # report: every door it dialled was opened and stayed silent.
+            raise self._last_open_error or OSError(
+                "This login has no attempt left to make."
+            )
 
     def _open_candidate(self, index):
         """Open the first candidate at or after ``index``, and say which.
@@ -292,8 +316,14 @@ class Game:
         """
         candidates = tuple(getattr(self, "_login_candidates", ()))
         facts = self._login_walk()
+        limit = login_attempts.ATTEMPT_LIMIT
         last_error = None
         while index < len(candidates):
+            if facts["attempted"] >= limit:
+                # The run has spent every door it may dial: this login stops
+                # here and the player is handed the menu, instead of another
+                # silence window of "connecting".
+                break
             candidate = candidates[index]
             if not login_attempts.candidate_available(
                 candidate, facts["unresolvable"], facts["doors"]
@@ -326,8 +356,14 @@ class Game:
             # never reached is a retry the player did not have. When the login
             # really has been through something, both numbers count doors, so
             # what the player reads out to staff matches the log's tried= list.
+            facts["attempted"] += 1
             attempt, total = login_attempts.retry_position(
-                candidates, index, facts["unresolvable"], facts["doors"]
+                candidates,
+                index,
+                facts["unresolvable"],
+                facts["doors"],
+                run_attempts=facts["attempted"],
+                limit=limit,
             )
             if attempt > 1:
                 speak(login_attempts.retry_notice(attempt, total), False)
@@ -356,10 +392,14 @@ class Game:
         facts = self._login_walk()
         candidates = tuple(getattr(self, "_login_candidates", ()))
         # The ports of what was really dialled, or -- for a walk that never got
-        # that far -- of what this login was going to try.
+        # that far -- of what this login was going to try. The count is the
+        # run's own, so a reconnect that came back through the same doors says
+        # how many attempts the player really waited on.
         ports = [port for _, port in (facts["dialled"] or candidates)]
         return login_attempts.silence_message(
-            max(len(facts["dialled"]), 1), ports, backup_tried=facts["backup"]
+            max(facts["attempted"], len(facts["dialled"]), 1),
+            ports,
+            backup_tried=facts["backup"],
         )
 
     def _login_walk(self):
@@ -378,6 +418,7 @@ class Game:
                 "lookup_failed": False,  # a name was asked for and had no answer
                 "lookup": None,  # how the opened door's address was found
                 "backup": False,  # a candidate that was not the endpoint's name
+                "attempted": 0,  # doors dialled by this whole run (see above)
             }
             self._login_facts = facts
         return facts
@@ -1098,6 +1139,9 @@ class Game:
             # reconnect both end this state (see reconnect_state).
             self.reconnecting = True
             self._reconnect_attempts = 0
+            # A new run, and so a new budget: the doors the login that just
+            # worked had dialled are not attempts this run must pay for.
+            self._login_facts = None
             speak("The connection was lost. Reconnecting...", False)
             self.replace(self.reconnect_state)
         else:
@@ -1145,6 +1189,21 @@ class Game:
             menus.main_menu(self)
             speak(message, False)
 
+    def _login_run_spent(self):
+        """True when this run has dialled every door it may.
+
+        The one rule that ends a reconnect: a run is bounded by
+        ``login_attempts.ATTEMPT_LIMIT`` doors, the walk included, so a server
+        that is not running costs the player that many silence windows and then
+        the main menu -- never another cycle of the same two doors.
+
+        Asking never *starts* a run: a Game with no walk yet (a drop has just
+        cleared it) has spent nothing, and the call that follows builds its own
+        candidate list.
+        """
+        facts = getattr(self, "_login_facts", None)
+        return bool(facts) and facts["attempted"] >= login_attempts.ATTEMPT_LIMIT
+
     def reconnect_state(self):
         if not hasattr(self, "reconnect_clock"):
             self.reconnect_clock = self.new_clock()
@@ -1152,13 +1211,22 @@ class Game:
         
         if self.reconnect_clock.elapsed >= 3000:
             self.reconnect_clock.restart()
-            if self._reconnect_attempts >= self.RECONNECT_ATTEMPTS:
+            spent = self._login_run_spent()
+            if self._reconnect_attempts >= self.RECONNECT_ATTEMPTS or spent:
                 # A server that is down (or an account another copy really holds)
-                # is not retried forever: say it and hand the login menu back.
+                # is not retried forever: say what happened and hand the login
+                # menu back. A run that spent its doors says the run's own words
+                # -- the same sentence a fresh login gives -- because "could not
+                # be reached" does not tell a player who to tell.
                 self.reconnecting = False
+                self._reconnect_attempts = 0
                 menus.main_menu(self)
-                speak("The server could not be reached. You returned to the "
-                      "main menu.", True)
+                if spent:
+                    speak(self._report_login_failure() +
+                          " You returned to the main menu.", True)
+                else:
+                    speak("The server could not be reached. You returned to the "
+                          "main menu.", True)
                 return
             self._reconnect_attempts += 1
             speak("Connecting to the server. Please wait...", False)
@@ -1167,7 +1235,10 @@ class Game:
             # its replacement takes over.
             self._close_network()
             try:
-                self._open_first_login_attempt()
+                # The same run as the login this drop followed, and so the same
+                # budget -- only its doors are forgotten, because a retry is a
+                # new socket on the same door.
+                self._open_first_login_attempt(continuing=True)
                 self.replace(self.login2)
             except (OSError, server_config.ServerConfigError):
                 pass

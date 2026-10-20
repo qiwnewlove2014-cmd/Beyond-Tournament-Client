@@ -3172,6 +3172,17 @@ class EventHandeler:
     def jukebox_state(self, data):
         """Server sync of jukebox playback state (map join)."""
         state = data if isinstance(data, dict) else {"jukeboxes": {}}
+        # Date the needle this payload carries. A client that never heard the song
+        # start can join a cabinet at its real position only while the position and
+        # the instant it was read travel together (JukeboxPlayer._play_unheard);
+        # without the stamp an adoptee cannot tell this song's needle from the one
+        # the song that just ended left behind.
+        boxes = state.get("jukeboxes")
+        if isinstance(boxes, dict):
+            now = time.monotonic()
+            for box in boxes.values():
+                if isinstance(box, dict) and box.get("current"):
+                    box["position_at"] = now
         self.gameplay.jukebox_state = state
         # A state resync is authoritative even if the real-time pause packet
         # was lost. Stop any local source that the server says is paused or
@@ -3217,10 +3228,21 @@ class EventHandeler:
         if jid:
             boxes = state.setdefault("jukeboxes", {})
             box = boxes.setdefault(jid, {"id": jid})
+            previous = box.get("current")
+            previous_url = previous.get("url") if isinstance(previous, dict) else None
             box["current"] = data.get("current")
             box["queue"] = data.get("queue", [])
             box["repeat"] = data.get("repeat", "off")
             box["paused"] = bool(data.get("paused", False))
+            current = box["current"]
+            current_url = current.get("url") if isinstance(current, dict) else None
+            if current_url != previous_url:
+                # The needle (and its stamp) described the song that just ended.
+                # Left behind, it reads as this song's position to every menu and
+                # to an adoption join, and joining a fresh song there is how it
+                # started in the middle.
+                box.pop("position", None)
+                box.pop("position_at", None)
 
     def jukebox_play(self, data):
         """A jukebox started playing a song — play it at the jukebox position."""

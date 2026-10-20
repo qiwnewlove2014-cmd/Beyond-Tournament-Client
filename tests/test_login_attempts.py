@@ -558,7 +558,7 @@ class FirstAttemptTests(unittest.TestCase):
             return source[start:end if end != -1 else len(source)]
 
         self.assertIn(
-            "_open_first_login_attempt()", body(reconnect),
+            "_open_first_login_attempt(continuing=True)", body(reconnect),
             "a reconnect must know where a retry may go, exactly as a login does",
         )
         self.assertIn(

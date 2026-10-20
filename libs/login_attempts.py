@@ -19,6 +19,15 @@ Three rules keep the retry from making things worse than the silence:
 - Every attempt gets its own fresh silence window (``login_timed_out``), so a
   genuinely slow server is still waited for for as long as it keeps talking.
 
+How many doors one login is allowed is ``ATTEMPT_LIMIT``, and it is a budget for
+the whole run rather than for one walk: a fresh login and everything a dropped
+session does to get its session back spend the same five attempts. That is what
+stops a client whose server is not running from reconnecting for minutes -- the
+walk used to be restarted (and so re-spent) on every reconnect cycle, which is
+a loop a player watches with no end in it, however many cycles the cycle count
+claims are left. Five silent doors is about forty seconds, and then the main
+menu comes back with the sentence below.
+
 The attempt list is one rule rather than two numbers: the endpoint, and the
 port ``FALLBACK_OFFSET`` above it. The Server derives its second listener the
 same way from its own primary port (``consts.FALLBACK_PORT``), so there is
@@ -52,6 +61,15 @@ hint: a remembered port that is not one of this endpoint's candidates is
 ignored, so a stale setting -- or a hand-edited one -- cannot send anybody
 anywhere.
 """
+
+# How many doors one login run may dial before the client stops and hands the
+# player the main menu. Every door costs a whole silence window
+# (``consts.TIMEOUT``, 8 s), so this is also the longest a player can watch
+# "Connecting to the server" before the menu comes back: five doors is about
+# forty seconds. A run is a fresh login *and* the reconnect cycles that follow a
+# dropped session -- they spend this one budget rather than each starting a walk
+# of their own (see the module docstring).
+ATTEMPT_LIMIT = 5
 
 # How far above the configured port the fallback sits. The Server derives the
 # same one from its own primary port, so the pair moves together; a login of
@@ -205,7 +223,8 @@ def doors_before(candidates, index, unresolvable=()):
     )
 
 
-def retry_position(candidates, index, unresolvable=(), dialled=()):
+def retry_position(candidates, index, unresolvable=(), dialled=(), run_attempts=0,
+                   limit=None):
     """The ``(attempt, total)`` a retry notice reads for *candidates[index]*.
 
     ``attempt`` is which door this is, counted over doors rather than over list
@@ -215,13 +234,25 @@ def retry_position(candidates, index, unresolvable=(), dialled=()):
     the ports of a name with no answer do not, because nothing was ever sent to
     them (``doors_before``).
 
+    ``run_attempts`` is how many doors the *run* has dialled, this one
+    included, because a reconnect cycle continues a run instead of starting
+    one (``game``'s ``_login_walk()["attempted"]``); zero means the walk and
+    the run are the same thing, which is what a fresh login is. ``limit`` is
+    ``ATTEMPT_LIMIT`` when the caller has a run: the numbers a player hears
+    count one run, so a total never promises a sixth door a five-door run will
+    not dial, and an attempt is never read as more than its own total.
+
     The two numbers are what a player reports, so they have to describe the same
     walk the log's ``tried=`` list does: a login that says "2 of 2" and then
     dials one door is a sentence no reader can check.
     """
-    attempted = doors_before(candidates, index, unresolvable)
-    ahead = diallable_count(candidates[index:], unresolvable, dialled)
-    return attempted + 1, attempted + ahead
+    attempted = max(int(run_attempts), doors_before(candidates, index, unresolvable) + 1)
+    ahead = diallable_count(candidates[index + 1:], unresolvable, dialled)
+    total = attempted + ahead
+    if limit is not None:
+        total = min(total, int(limit))
+        attempted = min(attempted, total)
+    return attempted, total
 
 
 def retry_notice(attempt, total):

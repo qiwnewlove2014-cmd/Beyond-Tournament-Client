@@ -65,6 +65,12 @@ class AudioStreamer(threading.Thread):
     # mode flags need class defaults for the shared playback paths to work.
     cinema = None
     spatial_pair = None
+    # ... and so does the player's own output device (music_bot/output_device.py):
+    # a stream built by hand -- a test, a diagnostics tool -- plays where the
+    # game plays, which is what an unset option means too.
+    remote = None
+    remote_slot = 0
+    remote_category = 1.0
     # The music bot's PA sequence (channel 31). Class defaults for the same
     # reason as the flags above; the send site stamps the epoch on first use
     # (voice_chat.pa_timeline_epoch), so a hand-built instance streams too.
@@ -127,7 +133,8 @@ class AudioStreamer(threading.Thread):
                  spatial_pair=None, start_offset=0.0, http_headers=None,
                  start_offset_received_at=None, canonical_url=None, media_cache=None,
                  timeline_anchor=None, start_paused=False, room_lead_in_s=None,
-                 join_playing_room=False, cinema=None):
+                 join_playing_room=False, cinema=None, remote=None,
+                 remote_slot=0, remote_category=1.0):
         super().__init__(daemon=True)
         self.game = game
         self.bot = bot
@@ -223,6 +230,24 @@ class AudioStreamer(threading.Thread):
         else:
             self.channels = int(channels)
         self.BUFFER_SIZE = self.SAMPLES_PER_BUFFER * self.channels * 2
+        # The player's other device (music_bot/output_device.py): while this is
+        # set, every frame goes to that process instead of into this one's
+        # OpenAL, and this stream's own ear source stays silent. A cinema room
+        # or a spatial pair wins over it -- those are map objects in the game's
+        # world, and a device in the player's other ear has no position in it.
+        self.remote = (None if (cinema is not None or spatial_pair is not None)
+                       else remote)
+        self.remote_slot = remote_slot
+        # What the music category multiplies the volume by; the ear source's
+        # gain already carries it (see MapMusicBot._new_bot_source).
+        self.remote_category = float(remote_category or 1.0)
+        if self.remote is not None:
+            try:
+                self.remote.set_format(self.remote_slot, self.channels)
+                self.remote.set_gain(self.remote_slot,
+                                     self.remote_category * volume / 100.0)
+            except Exception:
+                self.remote = None
         self.running = True
         # A stream can be created already paused (a seek performed while the
         # bot was paused): its pre-buffered head stays silent until resume.
@@ -302,6 +327,10 @@ class AudioStreamer(threading.Thread):
                 pass
 
     def _all_playing(self):
+        if self.remote is not None:
+            # The child starts its own source when it has frames queued; a
+            # silent slot here is not a stalled output.
+            return True
         for src in self._all_sources():
             try:
                 if src.state != cyal.SourceState.PLAYING:
@@ -327,6 +356,8 @@ class AudioStreamer(threading.Thread):
         self._play_all()
 
     def _buffers_queued(self):
+        if self.remote is not None:
+            return self.remote.pending_frames()
         total = 0
         for src in self._all_sources():
             try:
@@ -477,10 +508,37 @@ class AudioStreamer(threading.Thread):
         except Exception:
             pass
 
+    def set_output_gain(self, gain):
+        """One absolute gain for this stream's output, wherever it plays.
+
+        The crossfade ramps two streams against each other, and on a chosen
+        device that ramp is a gain in the child process, not an OpenAL source
+        here -- one call site so the two can never disagree.
+        """
+        gain = max(0.0, min(1.0, float(gain)))
+        if self.remote is not None:
+            try:
+                self.remote.set_gain(self.remote_slot, gain)
+            except Exception:
+                pass
+            return
+        try:
+            if self.source is not None:
+                self.source.gain = gain
+        except Exception:
+            pass
+
     def set_volume(self, volume):
         """Update playback volume in real time."""
         self.volume = volume
         self.spatial_base_gain = max(0.0, min(1.0, volume / 100.0))
+        if self.remote is not None:
+            try:
+                self.remote.set_gain(self.remote_slot,
+                                     self.remote_category * volume / 100.0)
+            except Exception:
+                pass
+            return
         if self.spatial_pair:
             self._update_spatial_gain()
         elif self.cinema is not None:
@@ -493,6 +551,9 @@ class AudioStreamer(threading.Thread):
 
     def _init_buffer_pool(self):
         """Pre-allocate OpenAL buffers for reuse"""
+        if self.remote is not None:
+            # The other device's process owns its own buffers.
+            return
         if self.cinema is not None:
             # A cinema room allocates its own per-speaker pools: a single
             # shared pool could never hold N frames the pre-buffer needs.
@@ -555,6 +616,10 @@ class AudioStreamer(threading.Thread):
                     CRITICAL: cyal's unqueue_buffers() returns a SINGLE Buffer object by default, not a list -
                     handle both cases robustly. Spatial pairs drain both sources.
                     """
+        if self.remote is not None:
+            # This stream owns no buffers here: the child's process recycles its
+            # own, and the parent only counts what it has not written yet.
+            return
         if self.cinema is not None:
             # The speaker bank owns its per-speaker pools, so it owns the
             # reclamation too -- but the watchdog's audible-progress stamp is
@@ -981,6 +1046,20 @@ class AudioStreamer(threading.Thread):
             return self._queue_local_cinema(data)
         if self.spatial_pair:
             return self._queue_local_spatial(data)
+        if self.remote is not None:
+            if not self.remote.alive():
+                # The other device's process is gone (unplugged headset, a
+                # killed child): carry on where the game plays rather than
+                # freezing the song against a dead pipe. The bot notices the
+                # same fact on the next song and says it once.
+                self.remote = None
+            else:
+                # False means its queue is full, which is the same "come back
+                # for this frame" a spent buffer pool is.
+                if self.remote.push(data, self.remote_slot):
+                    self._note_fed_content(data)
+                    return True
+                return False
         self._reclaim_processed()
         buf = self._get_buffer()
         if buf is None:
@@ -2067,6 +2146,14 @@ class AudioStreamer(threading.Thread):
                     drain_limit -= 1
             except Exception:
                 pass
+        if self.remote is not None:
+            # Hand the slot back (that flushes only this stream's queue), and
+            # stop pointing at a device another song will own next.
+            try:
+                self.remote.release_slot(self.remote_slot)
+            except Exception:
+                pass
+            self.remote = None
         self._buffer_pool.clear()
         self._pause_buffer.clear()
         # Drain the network queue to free references
@@ -2110,6 +2197,11 @@ class AudioStreamer(threading.Thread):
                     break
         with self._lock:
             try:
+                if self.remote is not None:
+                    self.remote.set_pause(paused, self.remote_slot)
+                    if not paused:
+                        self.ready_event.set()
+                    return
                 if self.cinema is not None:
                     # A cinema room is N speakers, and pausing only the one this stream was handed leaves the rest
                     # playing their queues - and then replaying from the front of those queues on resume, which is heard
