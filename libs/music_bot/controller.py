@@ -172,6 +172,14 @@ class MapMusicBot:
         self._local_pick_seq = 0
         self.water_muffle_enabled = options.get("music_bot_water_muffle", True)
         self.reverb_enabled = options.get("music_bot_reverb", True)
+        # The song's key, in semitones from the song's own (the DSP itself is
+        # libs/music_bot/transpose.py). Persisted, and applied to every stream
+        # this bot starts and to the one already playing.
+        try:
+            transpose = int(options.get("music_bot_transpose", 0) or 0)
+        except (TypeError, ValueError):
+            transpose = 0
+        self.transpose_semitones = max(-12, min(12, transpose))
 
         # A shuffled Favorites feed. It preserves the user's current broadcast
         # routing and never changes saved playlists.
@@ -1416,11 +1424,45 @@ class MapMusicBot:
     def subtitle_timing_label(self):
         return subtitles.offset_label(self.subtitle_offset)
 
+    def _open_transpose_menu(self):
+        return self._menus()._open_transpose_menu()
+
     def _open_subtitle_language_menu(self):
         return self._menus()._open_subtitle_language_menu()
 
     def _open_subtitle_timing_menu(self):
         return self._menus()._open_subtitle_timing_menu()
+
+    def transpose_label(self):
+        """The key this bot plays in, the way the menu says it."""
+        semitones = int(getattr(self, "transpose_semitones", 0) or 0)
+        if not semitones:
+            return "Original key"
+        if abs(semitones) == 1:
+            return "1 semitone up" if semitones > 0 else "1 semitone down"
+        return f"{abs(semitones)} semitones {'up' if semitones > 0 else 'down'}"
+
+    def set_transpose(self, semitones):
+        """Move the song's key live, without moving its tempo or its position.
+
+        The transposer works on the decoded frames (transpose.py), so a
+        cabinet's end-of-song hand-over, a listener's jam notes and the
+        broadcast's timeline keep the beat they had: only the pitch moves.
+        """
+        from .transpose import ChromaticTransposer
+        try:
+            value = int(round(float(semitones or 0)))
+        except (TypeError, ValueError):
+            value = 0
+        value = max(-ChromaticTransposer.MAX_SEMITONES,
+                    min(ChromaticTransposer.MAX_SEMITONES, value))
+        self.transpose_semitones = value
+        options.set("music_bot_transpose", value)
+        streamer = getattr(self, "streamer", None)
+        if streamer is not None and hasattr(streamer, "set_transpose"):
+            with contextlib.suppress(Exception):
+                streamer.set_transpose(value)
+        return value
 
     def _eq_profile_label(self):
         for profile, label in self.EQ_PROFILES:

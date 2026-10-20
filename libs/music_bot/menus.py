@@ -809,7 +809,7 @@ class MusicBotMenus:
         gp.add_substate(m)
 
     def _open_settings_menu(self):
-        """Music Bot settings: output device first, then reverb, crossfade, EQ, muffle.
+        """Music Bot settings: output device first, then reverb, crossfade, EQ, key, muffle.
 
                     The output line leads because it is what a player comes here to change;
                     the underwater muffle sits last (just above Back) so the two are never
@@ -872,6 +872,13 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._open_eq_menu()
 
+        def get_transpose_label():
+            return f"Song Key: {self._bot.transpose_label()}"
+
+        def go_transpose():
+            gp.pop_last_substate()
+            self._open_transpose_menu()
+
         def get_output_label():
             return f"Music Output Device: {self._bot.output_device_label()}"
 
@@ -885,6 +892,7 @@ class MusicBotMenus:
             (get_reverb_label, toggle_reverb),
             (get_crossfade_label, toggle_crossfade),
             (get_eq_label, go_eq),
+            (get_transpose_label, go_transpose),
             (get_water_label, toggle_water),
             ("Back", go_back),
         ])
@@ -964,6 +972,51 @@ class MusicBotMenus:
             items.append((make_label(profile, label), make_pick(profile, label)))
         items.append(("Back", go_back))
         m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_transpose_menu(self):
+        """Move the song's key, a semitone a press, an octave each way.
+
+        This changes the SONG, not the room: the transposer
+        (`libs/music_bot/transpose.py`) works on the decoded frames and returns
+        them in the same quantity, so the tempo, the song's position and the
+        beat a cabinet or a jam session is keeping are all untouched. A key
+        that moves while the song plays bends into the new key rather than
+        clicking into it.
+        """
+        from .. import menu as menu_mod, menus
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def step(amount):
+            def apply():
+                self._bot.set_transpose(self._bot.transpose_semitones + amount)
+                speak(f"Key: {self._bot.transpose_label().lower()}.")
+                m.speak_current_item()
+            return apply
+
+        def reset():
+            self._bot.set_transpose(0)
+            speak("Key: the song's own.")
+            m.speak_current_item()
+
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Key: {self._bot.transpose_label()}",
+            parrent=gp,
+        )
+        m.add_items([
+            ("Up One Semitone", step(1)),
+            ("Down One Semitone", step(-1)),
+            ("Original Key", reset),
+            ("Back", go_back),
+        ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
 

@@ -22,6 +22,7 @@ from ..jukebox_clock import PAIR_KEY, SpotClock, mono_ms
 from ..party_sync import stereo_upload_eligible
 from ..speech import speak
 from .media import FFMPEG_PATH, YouTubeSearcher
+from .transpose import ChromaticTransposer
 
 
 def sequence_pa_frame(sender, channel, encoded):
@@ -76,6 +77,11 @@ class AudioStreamer(threading.Thread):
     # (voice_chat.pa_timeline_epoch), so a hand-built instance streams too.
     _pa_epoch = None
     _pa_seq = 0
+    # The song's key (libs/music_bot/transpose.py). Class defaults so a
+    # hand-built stream -- a test, a diagnostics tool -- plays at the song's
+    # own pitch; the bot turns the dial through set_transpose().
+    transpose_semitones = 0
+    transposer = None
 
     @property
     def spatial_active(self):
@@ -263,6 +269,20 @@ class AudioStreamer(threading.Thread):
         self.prebuffer_event = threading.Event()
         self.failure_reason = None
         self.completed_normally = False
+        # The key shifter's own look-ahead, given back once at the end of the
+        # song (only ever to the local output -- see _flush_transpose).
+        self._tail_returned = False
+        self._transpose_lock = threading.Lock()
+        self.transposer = None
+        self.transpose_semitones = 0
+        if bot is not None:
+            try:
+                value = int(getattr(bot, "transpose_semitones", 0) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            self.transpose_semitones = max(
+                -ChromaticTransposer.MAX_SEMITONES,
+                min(ChromaticTransposer.MAX_SEMITONES, value))
         # Crossfade bookkeeping: a retired outgoing stream whose network leg
         # must go silent the instant the next track takes over (two Music Bot
         # streams must never overlap on the PA / broadcast channel).
@@ -1035,6 +1055,59 @@ class AudioStreamer(threading.Thread):
         """Approximate media position (seconds) of the local decode head."""
         return self._direct_seek_to + self._fed_content_seconds
 
+    # ------------------------------------------------------- the song's key
+    # The transposer itself is libs/music_bot/transpose.py; this is only where
+    # it sits in the song's path: every frame the decode produces passes it
+    # before the local output, the broadcast and a room hear anything. Because
+    # it returns the same number of frames it was given, the song's position --
+    # content_position, the end-of-song hand-over, the pair clock and the
+    # network timeline -- is untouched by a key change.
+
+    def set_transpose(self, semitones):
+        """Move this song's key by whole semitones (0 is the song's own key)."""
+        try:
+            value = int(round(float(semitones or 0)))
+        except (TypeError, ValueError):
+            value = 0
+        value = max(-ChromaticTransposer.MAX_SEMITONES,
+                    min(ChromaticTransposer.MAX_SEMITONES, value))
+        with self._transpose_lock:
+            self.transpose_semitones = value
+            if self.transposer is None:
+                if not value:
+                    return value
+                self.transposer = ChromaticTransposer(channels=self.channels)
+            self.transposer.set_semitones(value)
+        return value
+
+    def _shape_frame(self, data):
+        """The song's own pitch, before any output hears it."""
+        if self.transposer is None:
+            if not self.transpose_semitones:
+                return data
+            with self._transpose_lock:
+                if self.transposer is None:
+                    self.transposer = ChromaticTransposer(channels=self.channels)
+                    self.transposer.set_semitones(self.transpose_semitones)
+        with self._transpose_lock:
+            shaped = self.transposer.process(data)
+        # A trailing partial sample at the very end of a song is not a frame
+        # and is dropped rather than padded (see process()).
+        return shaped
+
+    def _flush_transpose(self):
+        """The look-ahead the key shifter still holds, at the end of the song.
+
+        Local output only: the tail is not a whole 20 ms Opus frame, and the
+        broadcast's last frames are not worth a malformed one. A stream that
+        never engaged the shifter has nothing to give back.
+        """
+        if self.transposer is None:
+            return None
+        with self._transpose_lock:
+            tail = self.transposer.flush()
+        return tail or None
+
     def _queue_local(self, data):
         """Queue a chunk of PCM data to the LOCAL OpenAL source(s)."""
         if self._pending_room is not None and not self._commit_room_swap():
@@ -1432,8 +1505,12 @@ class AudioStreamer(threading.Thread):
 
             while (len(leftover) >= self.BUFFER_SIZE
                    and pre_buffered < self.PRE_BUFFER_COUNT):
-                data = leftover[:self.BUFFER_SIZE]
+                # The key shifter sits here, before the frame is either queued
+                # locally or remembered for the broadcast: one song, one key.
+                data = self._shape_frame(leftover[:self.BUFFER_SIZE])
                 leftover = leftover[self.BUFFER_SIZE:]
+                if not data:
+                    continue
                 with self._lock:
                     if self._diagnostic_startup_call("direct.queue", self._queue_local, data):
                         pre_buffered += 1
@@ -1466,7 +1543,9 @@ class AudioStreamer(threading.Thread):
                 if chunk:
                     leftover += chunk
                     while len(leftover) >= self.BUFFER_SIZE:
-                        self._pause_buffer.append(leftover[:self.BUFFER_SIZE])
+                        frame = self._shape_frame(leftover[:self.BUFFER_SIZE])
+                        if frame:
+                            self._pause_buffer.append(frame)
                         leftover = leftover[self.BUFFER_SIZE:]
                 elif self.process.poll() is not None:
                     break
@@ -1615,6 +1694,12 @@ class AudioStreamer(threading.Thread):
                 pass
         self._reclaim_processed()
         self._pause_buffer.clear()
+        # The new flight starts somewhere else in the song, so nothing of the
+        # old position may still be inside the key shifter's look-ahead.
+        with self._transpose_lock:
+            if self.transposer is not None:
+                self.transposer.reset()
+        self._tail_returned = False
         with self._ring_lock:
             self._fed_ring.clear()
         self._fed_content_seconds = 0.0
@@ -2026,6 +2111,20 @@ class AudioStreamer(threading.Thread):
                     data = _leftover
                     _leftover = b''
 
+            tail = None
+            if data:
+                data = self._shape_frame(data)
+            if eof and not _leftover and not self._tail_returned:
+                # ffmpeg has ended, and the key shifter is still holding the
+                # song's look-ahead: that is the last note of the song, not
+                # silence. Give it back once, to the local output only -- and
+                # after `data`, because a song whose length is not a whole
+                # number of 20 ms frames still has that last partial frame in
+                # front of the look-ahead. Queued the other way round, the tail
+                # plays first and the last sliver of the song lands after it.
+                self._tail_returned = True
+                tail = self._flush_transpose()
+
             if not self.running:
                 break
 
@@ -2041,6 +2140,8 @@ class AudioStreamer(threading.Thread):
             # === LOCAL: Buffer for OpenAL playback ===
             if data:
                 self._pause_buffer.append(data)
+            if tail:
+                self._pause_buffer.append(tail)
 
             with self._lock:
                 if not self.running:
