@@ -809,7 +809,7 @@ class MusicBotMenus:
         gp.add_substate(m)
 
     def _open_settings_menu(self):
-        """Music Bot settings: output device first, then reverb, crossfade, EQ, key, muffle.
+        """Music Bot settings: output device first, then reverb, crossfade, EQ, key, speech key, muffle.
 
                     The output line leads because it is what a player comes here to change;
                     the underwater muffle sits last (just above Back) so the two are never
@@ -879,6 +879,13 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._open_transpose_menu()
 
+        def get_speech_transpose_label():
+            return f"Speech Key: {self._bot.speech_transpose_label()}"
+
+        def go_speech_transpose():
+            gp.pop_last_substate()
+            self._open_speech_transpose_menu()
+
         def get_output_label():
             return f"Music Output Device: {self._bot.output_device_label()}"
 
@@ -893,6 +900,7 @@ class MusicBotMenus:
             (get_crossfade_label, toggle_crossfade),
             (get_eq_label, go_eq),
             (get_transpose_label, go_transpose),
+            (get_speech_transpose_label, go_speech_transpose),
             (get_water_label, toggle_water),
             ("Back", go_back),
         ])
@@ -1015,6 +1023,51 @@ class MusicBotMenus:
             ("Up One Semitone", step(1)),
             ("Down One Semitone", step(-1)),
             ("Original Key", reset),
+            ("Back", go_back),
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_speech_transpose_menu(self):
+        """Move the SPEECH key; the song keeps the key its own dial chose.
+
+        Same transposer (`libs/music_bot/transpose.py`), applied to the
+        microphone's frames instead of the song's (`libs/voice_chat.py`). A
+        broadcast voice reaches the map's PA speakers, a cabinet's room and
+        the talker's own monitor in the key chosen here, and it is the voice
+        that was sent -- a listener's client retunes nothing.
+        """
+        from .. import menu as menu_mod, menus
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def step(amount):
+            def apply():
+                current = int(getattr(self._bot, "speech_transpose_semitones", 0) or 0)
+                self._bot.set_speech_transpose(current + amount)
+                speak(f"Speech key: {self._bot.speech_transpose_label().lower()}.")
+                m.speak_current_item()
+            return apply
+
+        def reset():
+            self._bot.set_speech_transpose(0)
+            speak("Speech key: your own voice.")
+            m.speak_current_item()
+
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Speech Key: {self._bot.speech_transpose_label()}",
+            parrent=gp,
+        )
+        m.add_items([
+            ("Up One Semitone", step(1)),
+            ("Down One Semitone", step(-1)),
+            ("Original Voice", reset),
             ("Back", go_back),
         ])
         menus.set_default_sounds(m)

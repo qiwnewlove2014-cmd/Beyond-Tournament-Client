@@ -45,6 +45,19 @@ from .menus import MusicBotMenus
 from .streaming import AudioStreamer, LiveRelayStreamer
 
 
+def _key_label(semitones):
+    """A key in semitones, the way both dials' menus say it."""
+    try:
+        semitones = int(round(float(semitones or 0)))
+    except (TypeError, ValueError):
+        semitones = 0
+    if not semitones:
+        return "Original key"
+    if abs(semitones) == 1:
+        return "1 semitone up" if semitones > 0 else "1 semitone down"
+    return f"{abs(semitones)} semitones {'up' if semitones > 0 else 'down'}"
+
+
 class MapMusicBot:
     """Music Bot — searches YouTube and streams audio in real-time (local files as a
         fallback). Controls come from the player's key bindings in gameplay.py. Rules, paths
@@ -180,6 +193,16 @@ class MapMusicBot:
         except (TypeError, ValueError):
             transpose = 0
         self.transpose_semitones = max(-12, min(12, transpose))
+        # The SPEECH key (Music Bot Settings -> Speech Key): the same DSP on
+        # the broadcast voice, a dial of its own. The capture thread reads the
+        # option itself (libs/voice_chat.speech_key_semitones), so the next
+        # press is already in the new key, and neither dial moves the other:
+        # a song's key never touches a voice, a voice's key never the song.
+        try:
+            speech_key = int(options.get("music_bot_speech_transpose", 0) or 0)
+        except (TypeError, ValueError):
+            speech_key = 0
+        self.speech_transpose_semitones = max(-12, min(12, speech_key))
 
         # A shuffled Favorites feed. It preserves the user's current broadcast
         # routing and never changes saved playlists.
@@ -1427,6 +1450,9 @@ class MapMusicBot:
     def _open_transpose_menu(self):
         return self._menus()._open_transpose_menu()
 
+    def _open_speech_transpose_menu(self):
+        return self._menus()._open_speech_transpose_menu()
+
     def _open_subtitle_language_menu(self):
         return self._menus()._open_subtitle_language_menu()
 
@@ -1435,12 +1461,30 @@ class MapMusicBot:
 
     def transpose_label(self):
         """The key this bot plays in, the way the menu says it."""
-        semitones = int(getattr(self, "transpose_semitones", 0) or 0)
-        if not semitones:
-            return "Original key"
-        if abs(semitones) == 1:
-            return "1 semitone up" if semitones > 0 else "1 semitone down"
-        return f"{abs(semitones)} semitones {'up' if semitones > 0 else 'down'}"
+        return _key_label(getattr(self, "transpose_semitones", 0))
+
+    def speech_transpose_label(self):
+        """The key this bot's own broadcast voice is in."""
+        return _key_label(getattr(self, "speech_transpose_semitones", 0))
+
+    def set_speech_transpose(self, semitones):
+        """Move the SPEECH key, leaving the song's where its own dial put it.
+
+        The DSP is the song's (`transpose.py`), applied to the microphone's
+        frames instead of the decode's (`libs/voice_chat.SpeechKeyLine`): the
+        talker's voice reaches the map's PA speakers, a cabinet's room and
+        the talker's own monitor in this key, and no listener does any work
+        for it. The capture thread reads the option on every frame it sends,
+        so the next sentence is already in the new key.
+        """
+        try:
+            value = int(round(float(semitones or 0)))
+        except (TypeError, ValueError):
+            value = 0
+        value = max(-12, min(12, value))
+        self.speech_transpose_semitones = value
+        options.set("music_bot_speech_transpose", value)
+        return value
 
     def set_transpose(self, semitones):
         """Move the song's key live, without moving its tempo or its position.

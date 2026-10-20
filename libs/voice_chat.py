@@ -211,6 +211,64 @@ OPUS_FRAME_MS = 20.0                    # what decode_missing_packet is asked fo
 # talk spurt that never came back.
 PA_TIMELINE_MAX_CONCEAL = 5
 
+# THE SPEECH KEY (Music Bot Settings -> Speech Key). The DSP is the song's
+# own (libs/music_bot/transpose.py); only WHERE it runs is different. A
+# talker's broadcast voice is tuned on the microphone's 20 ms frames, before
+# Opus, so the map's PA speakers, the cinema room's speakers and the talker's
+# own monitor all play the one voice that was sent -- and every listener does
+# no work at all. Ordinary proximity voice is never shaped: this is the
+# broadcast's key, not the player's.
+SPEECH_KEY_OPTION = "music_bot_speech_transpose"
+
+
+def speech_key_semitones():
+    """The Music Bot's speech key in semitones, clamped the way the song's is."""
+    try:
+        value = int(round(float(options.get(SPEECH_KEY_OPTION, 0) or 0)))
+    except (TypeError, ValueError):
+        return 0
+    from .music_bot.transpose import ChromaticTransposer
+    return max(-ChromaticTransposer.MAX_SEMITONES,
+               min(ChromaticTransposer.MAX_SEMITONES, value))
+
+
+class SpeechKeyLine:
+    """The microphone's key line: the song's transposer, on one voice.
+
+    ``shape`` returns exactly the frames it was given, which is what keeps the
+    PA's frame sequence, its timeline and a room's playout intact: only the
+    pitch moves. ``tail_frames`` hands back the look-ahead the line is still
+    holding when the key is released -- otherwise the last tenth of a second
+    of every tuned sentence would never be sent, because a streaming shifter
+    cannot produce the end of a line before the line is over. The delay is
+    the song's own (~107 ms at the voice's own key, less as the key goes up),
+    and the line only exists while the dial is off the original key.
+    """
+
+    def __init__(self, channels=1, semitones=None):
+        from .music_bot.transpose import ChromaticTransposer
+        self.transposer = ChromaticTransposer(channels=channels)
+        self.transposer.set_semitones(
+            speech_key_semitones() if semitones is None else semitones)
+
+    @property
+    def semitones(self):
+        return self.transposer.semitones
+
+    def shape(self, pcm):
+        """Transpose one 20 ms frame; the same number of frames comes back."""
+        return self.transposer.process(bytes(pcm))
+
+    def tail_frames(self, frame_bytes=VOICE_FRAME_BYTES):
+        """The look-ahead as whole frames; a tail that is not one is not a frame."""
+        step = max(2, int(frame_bytes))
+        tail = self.transposer.flush()
+        frames = []
+        while len(tail) >= step:
+            frames.append(tail[:step])
+            tail = tail[step:]
+        return frames
+
 # How many 20 ms frames a CINEMA ROOM may be handed as a repeat of the last one
 # it played. The PA can let a slot go by: it has a jitter reserve, and the
 # listener leg underneath it is a queue of its own. A room has neither -- its
@@ -1395,6 +1453,9 @@ class VoiceChatRecord(threading.Thread):
         if not self.audio_input:
             speak(f"Failed to load audio device: {device}")
         self.vc_compression = voice_chat_compression(self.game)
+        # The speech key's line (SpeechKeyLine), built the first time a tuned
+        # frame goes to the PA and reset when the key is released.
+        self._speech_line = None
         self.recording = False
         self.running = True
         self.start()
@@ -1416,6 +1477,32 @@ class VoiceChatRecord(threading.Thread):
                     return candidate
         return None
     
+
+    def _speech_line_for(self, mega):
+        """This press's key line, or None when the voice is not going to the PA.
+
+        Only the broadcast leg is tuned (PA Test Mode, the megaphone weapon, or
+        a mic joined to the Music Bot's broadcast): proximity voice is left
+        alone, and a microphone whose key has never been moved has no line at
+        all, so its frames are byte-for-byte what they were. A line that is
+        already open stays open until the key is released even if the dial
+        goes back to the original key -- it holds the delay it was built
+        with, exactly as a song does.
+        """
+        if not mega:
+            return None
+        line = getattr(self, "_speech_line", None)
+        key = speech_key_semitones()
+        if line is None:
+            if not key:
+                return None
+            line = SpeechKeyLine(semitones=key)
+            self._speech_line = line
+        elif key != line.semitones:
+            # The dial moved mid-sentence: the line glides into the new key
+            # the way the song's does, instead of jumping.
+            line.transposer.set_semitones(key)
+        return line
 
     def run(self):
         accumulated_bytes = bytearray()
@@ -1491,8 +1578,17 @@ class VoiceChatRecord(threading.Thread):
                         locally_rendered=bool(voice_using_mega),
                     )
 
-                # Feed local sidechain immediately with 10ms chunk for zero-latency response
-                if voice_using_mega and gp and not route_to_bot:
+                # The speech key (Music Bot Settings -> Speech Key). Only the
+                # broadcast leg is tuned, and only while the dial is off the
+                # original key.
+                speech_line = self._speech_line_for(voice_using_mega)
+                monitor = bool(voice_using_mega and gp and not route_to_bot)
+
+                # Feed local sidechain immediately with 10ms chunk for zero-latency response.
+                # A tuned voice hands the monitor the SHAPED frame instead (below),
+                # so the performer hears what the PA plays rather than their own
+                # untuned voice.
+                if monitor and speech_line is None:
                     _feed_local_megaphone_direct(gp, chunk, producer='mic')
 
                 # Accumulate for the Opus encoder (a frame is exactly VOICE_FRAME_BYTES)
@@ -1500,6 +1596,11 @@ class VoiceChatRecord(threading.Thread):
                 while len(accumulated_bytes) >= VOICE_FRAME_BYTES:
                     chunk_bytes = accumulated_bytes[:VOICE_FRAME_BYTES]
                     accumulated_bytes = accumulated_bytes[VOICE_FRAME_BYTES:]
+
+                    if speech_line is not None:
+                        chunk_bytes = bytearray(speech_line.shape(chunk_bytes))
+                        if monitor:
+                            _feed_local_megaphone_direct(gp, chunk_bytes, producer='mic')
 
                     if route_to_bot:
                         if not hasattr(music_bot, 'mic_pcm_queue'):
@@ -1519,10 +1620,19 @@ class VoiceChatRecord(threading.Thread):
         self.voice_chat_finish2()
     
     def voice_chat_finish2(self):
+        line = getattr(self, "_speech_line", None)
+        self._speech_line = None
+        buf = b""
         try:
-            if self.audio_input.available_samples < VOICE_FRAME_BYTES // 2: return self.audio_input.capture_samples(bytearray(self.audio_input.available_samples*2))
-            buf = bytearray(VOICE_FRAME_BYTES)
-            self.audio_input.capture_samples(buf)
+            if self.audio_input.available_samples < VOICE_FRAME_BYTES // 2:
+                # Less than a whole frame is left: drain it, and send only what
+                # the key line is still holding.
+                self.audio_input.capture_samples(
+                    bytearray(self.audio_input.available_samples * 2))
+            else:
+                final = bytearray(VOICE_FRAME_BYTES)
+                self.audio_input.capture_samples(final)
+                buf = bytes(final)
         except cyal.exceptions.CyalError:
             # The microphone can die between the key release and this delayed
             # final drain; a dead handle is not worth interrupting the game.
@@ -1549,10 +1659,18 @@ class VoiceChatRecord(threading.Thread):
                 ),
             )
 
+        # Everything this press still owes: its last frame, then whatever the
+        # key line is holding. The tail is the END of the sentence, so it goes
+        # after the frame that came behind it rather than before it.
+        frames = [buf] if buf else []
+        if line is not None and frames:
+            frames = [line.shape(frames[0])] + line.tail_frames(VOICE_FRAME_BYTES)
+
         if route_to_bot:
             if not hasattr(music_bot, 'mic_pcm_queue'):
                 music_bot.mic_pcm_queue = collections.deque(maxlen=10)
-            music_bot.mic_pcm_queue.append(bytes(buf))
+            for frame in frames:
+                music_bot.mic_pcm_queue.append(frame)
         else:
             # Send the tail chunk on the session's own channel (already set by run()).
             # Re-deriving it from the music bot here is wrong: by the time finish2 runs
@@ -1564,9 +1682,11 @@ class VoiceChatRecord(threading.Thread):
                     self.vc_compression.set_channel(target_channel)
                 else:
                     self.vc_compression.channel = target_channel
-            self.vc_compression.put(bytearray(buf))
+            for frame in frames:
+                self.vc_compression.put(bytearray(frame))
     
     def close(self):
+        self._speech_line = None
         self.vc_compression.put(None)
         self.running = False
 
