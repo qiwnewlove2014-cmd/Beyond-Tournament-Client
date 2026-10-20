@@ -38,6 +38,7 @@ from . import (
     movement,
 )
 from .speech import speak
+from .music_bot import gate as music_bot_gate
 from .audio_diagnostics import probe as audio_probe
 from . import party_sync_audio
 from .tracking_description import describe_tracking_direction
@@ -1112,7 +1113,9 @@ class Gameplay(state.State):
 
     def buffer_cycle_l(self, mod=0):
         if mod & pygame.KMOD_CTRL:
-            if hasattr(self, 'music_bot') and self.music_bot and self._can_use_music_bot():
+            if (hasattr(self, 'music_bot') and self.music_bot
+                    and self._can_use_music_bot()
+                    and not music_bot_gate.blocked("feed")):
                 self.music_bot.previous_feed_track()
             return
         if mod & pygame.KMOD_SHIFT:
@@ -1121,7 +1124,9 @@ class Gameplay(state.State):
 
     def buffer_cycle_r(self, mod=0):
         if mod & pygame.KMOD_CTRL:
-            if hasattr(self, 'music_bot') and self.music_bot and self._can_use_music_bot():
+            if (hasattr(self, 'music_bot') and self.music_bot
+                    and self._can_use_music_bot()
+                    and not music_bot_gate.blocked("feed")):
                 self.music_bot.next_feed_track()
             return
         if mod & pygame.KMOD_SHIFT:
@@ -1974,7 +1979,15 @@ class Gameplay(state.State):
         speak(f"music volume: {str(self.music_volume)} percent. ")
 
     def _can_use_music_bot(self):
-        """Use the Server snapshot; Staff retain their existing permanent access."""
+        """Use the Server snapshot; Staff retain their existing permanent access.
+
+        The Server's feature gate sits on top of that rank answer and is never
+        widened by it: a Developer who locks the Music Bot itself loses it too
+        (server/libs/music_bot_gate.ts). Silent, because this is a predicate --
+        the keys below say the refusal themselves with `blocked`.
+        """
+        if music_bot_gate.is_locked("bot"):
+            return False
         return (
             getattr(self, "can_use_music_bot", False)
             or getattr(self, "is_staff", False)
@@ -1995,9 +2008,13 @@ class Gameplay(state.State):
         
         if mod & pygame.KMOD_CTRL and mod & pygame.KMOD_SHIFT:
             # Ctrl+Shift+M → Speak status
+            if music_bot_gate.blocked("bot"):
+                return
             self.music_bot.speak_status()
         elif mod & pygame.KMOD_CTRL:
             # Ctrl+M → Stop / Replay (toggle)
+            if music_bot_gate.blocked("playback"):
+                return
             if self.music_bot.playing:
                 # Keep the play queue (Queue Mode) and favorites/playlist
                 # intact: Stop only halts playback, Ctrl+M again replays the
@@ -2011,12 +2028,18 @@ class Gameplay(state.State):
                 speak("Nothing to replay. Press M to search.")
         elif mod & pygame.KMOD_SHIFT:
             # Shift+M → Pause/Resume
+            if music_bot_gate.blocked("playback"):
+                return
             self.music_bot.toggle_pause()
         elif mod & pygame.KMOD_ALT:
             # Alt+M → Toggle broadcast
+            if music_bot_gate.blocked("broadcast"):
+                return
             self.music_bot.toggle_broadcast()
         else:
             # M → Open YouTube search
+            if music_bot_gate.blocked("search"):
+                return
             self.music_bot.open_search()
 
     def music_bot_volume(self, delta):
@@ -2024,6 +2047,8 @@ class Gameplay(state.State):
         if not hasattr(self, 'music_bot') or not self.music_bot:
             return
         if not self._can_use_music_bot():
+            return
+        if music_bot_gate.blocked("volume"):
             return
         new_vol = max(0, min(100, self.music_bot.volume + delta))
         self.music_bot.set_volume(new_vol)
@@ -2038,6 +2063,8 @@ class Gameplay(state.State):
         if not self._can_use_music_bot():
             return
         if mod & pygame.KMOD_CTRL:
+            if music_bot_gate.blocked("seek"):
+                return
             step = 60 if (mod & pygame.KMOD_SHIFT) else 10
             self.music_bot.seek_by(direction * step)
             return
@@ -2050,6 +2077,8 @@ class Gameplay(state.State):
         so a stray Ctrl+F8 press cannot silently kick the player out of (or end) a
         session.
         """
+        if music_bot_gate.blocked("party"):
+            return
         ps = getattr(self, "party_sync", None)
         if not ps or not getattr(ps, "role", None):
             speak("You are not in a Party Sync session.")

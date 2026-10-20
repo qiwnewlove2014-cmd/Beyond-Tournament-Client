@@ -21,6 +21,7 @@ from .audio.cinema import speech as cinema_speech
 from pyogg import OpusDecoder
 from .audio_diagnostics import probe as audio_probe
 from .audio_health import probe as audio_health, recovery as audio_recovery
+from .music_bot import gate as music_bot_gate
 
 
 def _route_music_to_room(game, entity, channel_id):
@@ -240,6 +241,11 @@ class EventHandeler:
             self.gameplay.can_lock_cinema_mode = bool(
                 data.get("can_lock_cinema_mode", False)
             )
+            # The Music Bot's locked features (id -> the label to say). A login
+            # snapshot with no key is a Server that locks nothing, and this is
+            # a fresh session, so the answer is applied rather than remembered
+            # (see libs/music_bot/gate.py).
+            music_bot_gate.apply_locked(data.get("music_bot_locked") or {})
             # This client's own voice channel, needed to pan *yourself*: the Server tells a joiner
             # about everyone on the map except them, so it never arrives in a spawn packet. A Server
             # that predates the field leaves it unset and self is simply not listed, never guessed.
@@ -254,6 +260,10 @@ class EventHandeler:
             self.gameplay.can_use_cinema_speakers = False
             self.gameplay.can_use_cinema_pan = False
             self.gameplay.can_lock_cinema_mode = False
+            # A login snapshot this client could not read decides nothing: an
+            # empty gate is the one answer that cannot hide a feature the
+            # Server might have offered.
+            music_bot_gate.clear()
             
         # Reset PA Test Mode state
         if hasattr(self.gameplay, 'pa_test_mode'):
@@ -3426,6 +3436,19 @@ class EventHandeler:
             gp.can_use_cinema_pan = bool(data.get("can_use_cinema_pan", False))
         if "can_lock_cinema_mode" in data:
             gp.can_lock_cinema_mode = bool(data.get("can_lock_cinema_mode", False))
+        if "music_bot_locked" in data:
+            # A lock is global, so the bot itself can go away underneath a
+            # track that is already playing. Stopping it is a main-thread job
+            # (the audio sources belong there), and it is the same answer the
+            # permission revocation above gives: the Server has switched this
+            # off, so the sound stops rather than playing on from a menu that
+            # no longer offers it.
+            bot_was_allowed = not music_bot_gate.is_locked("bot")
+            music_bot_gate.apply_locked(data.get("music_bot_locked") or {})
+            if bot_was_allowed and music_bot_gate.is_locked("bot"):
+                bot = getattr(gp, "music_bot", None)
+                if bot is not None:
+                    self.game.put(bot.stop)
         if "can_use_cinema_speakers" in data:
             had_cinema_routing = bool(
                 getattr(gp, "can_use_cinema_speakers", False)

@@ -111,7 +111,9 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
 
     def test_dynamic_menu_uses_separate_recording_action(self):
         source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot" / "menus.py").read_text(encoding="utf-8")
-        self.assertIn("(\"Record Audio\", go_record_audio)", source)
+        # The line names the Server feature it belongs to, so the Music Bot's
+        # feature gate can hide it (libs/music_bot/gate.py).
+        self.assertIn("(\"recording\", \"Record Audio\", go_record_audio)", source)
         self.assertIn("def _open_recording_menu(self):", source)
         self.assertIn("self._bot.audio_recorder.choose_folder", source)
         self.assertIn("(self._bot.audio_recorder.menu_label, start_or_stop)", source)

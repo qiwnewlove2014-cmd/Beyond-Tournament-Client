@@ -41,6 +41,7 @@ import pygame
 from .. import options
 from .. import state
 from ..speech import speak
+from . import gate
 from . import output_device
 from ..string_utils import friendly_key_name
 from . import song_requests
@@ -121,18 +122,22 @@ class MusicBotMenus:
             return song_requests.queue_label(len(self._bot.next_up_queue))
 
         m = menu_mod.Menu(self._bot.game, "Music Bot Mode", parrent=gp)
-        items = [
-            ("Search YouTube", go_search),
+        # Each line names the Server feature it belongs to, and a locked feature's
+        # line is not built at all (libs/music_bot/gate.py): the lock is the
+        # Server's, the menu is where it is seen, and a feature added to the
+        # catalogue needs one id here and nothing else.
+        items = gate.filter_items([
+            ("search", "Search YouTube", go_search),
             # Right beside the search: staff who already hold the link should not
             # have to search for the song they are looking at.
-            ("Play a YouTube link", go_link),
-            ("Choose Local File", go_local),
-            ("My Playlists & Favorites", go_playlists),
-            ("Personal Music Feed", go_personal_feed),
-            ("Music Download Center", go_downloads),
-            ("Record Audio", go_record_audio),
-            ("Party Sync (Listen Together)", go_party_sync),
-        ]
+            ("search", "Play a YouTube link", go_link),
+            ("search", "Choose Local File", go_local),
+            ("playlists", "My Playlists & Favorites", go_playlists),
+            ("feed", "Personal Music Feed", go_personal_feed),
+            ("downloads", "Music Download Center", go_downloads),
+            ("recording", "Record Audio", go_record_audio),
+            ("party", "Party Sync (Listen Together)", go_party_sync),
+        ])
         
         # Show the megaphone routing option only when the server explicitly granted
         # broadcast permission (canBroadcastMegaphone()). The server is the single
@@ -140,7 +145,7 @@ class MusicBotMenus:
         # perfectly in sync (no client-side role guessing).
         can_broadcast_megaphone = getattr(gp, 'can_broadcast_megaphone', False) if gp else False
 
-        if can_broadcast_megaphone:
+        if can_broadcast_megaphone and not gate.is_locked("broadcast"):
             def get_megaphone_label():
                 status = "ON" if self._bot.broadcast_to_megaphone else "OFF"
                 return f"Broadcast to Megaphone: {status}"
@@ -167,7 +172,7 @@ class MusicBotMenus:
         # Cinema speaker routing is Developer/Contributor only (see
         # cinema_routing_allowed): everyone else gets a plain Music Bot menu
         # rather than a switch the Server would refuse to honour.
-        if self._bot.cinema_routing_allowed():
+        if self._bot.cinema_routing_allowed() and not gate.is_locked("cinema_speakers"):
             def go_cinema():
                 gp.pop_last_substate()
                 self._bot._open_cinema_menu()
@@ -189,14 +194,16 @@ class MusicBotMenus:
             # the same sentence the moment of a pan says, so it cannot look like a setting.
             items.append((self._bot.own_sound_label, self._bot.announce_own_sound))
 
-        items.extend([
-            (get_queue_mode_label, toggle_queue_mode),
-            (get_queue_count_label, go_queue),
-            (self._bot.subtitle_label, self._open_subtitle_menu),
-            ("Music Bot Settings", go_settings),
-            ("Help", go_help),
-            ("Cancel", lambda: gp.pop_last_substate())
-        ])
+        items.extend(gate.filter_items([
+            ("queue", get_queue_mode_label, toggle_queue_mode),
+            ("queue", get_queue_count_label, go_queue),
+            ("subtitles", self._bot.subtitle_label, self._open_subtitle_menu),
+            # The hub itself is never hidden: it is where a Developer looks to
+            # see what is left, and its own lines are filtered one at a time.
+            (None, "Music Bot Settings", go_settings),
+            (None, "Help", go_help),
+            (None, "Cancel", lambda: gp.pop_last_substate()),
+        ]))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -325,7 +332,10 @@ class MusicBotMenus:
             # in the Music Bot menu -- the queue it fills is this session's,
             # and this is the menu a host opens to run the session.
             item = self._bot.song_requests_switch_item(m.speak_current_item)
-            if item is not None:
+            # A locked `requests` feature takes the host's switch away: the line
+            # is how a session starts taking requests, so without it there is
+            # nothing a listener could ask into.
+            if item is not None and not gate.is_locked("requests"):
                 items.append(item)
             def do_end():
                 close_top()
@@ -894,16 +904,16 @@ class MusicBotMenus:
             self._open_output_device_menu()
 
         m = menu_mod.Menu(self._bot.game, "Music Bot Settings", parrent=gp)
-        m.add_items([
-            (get_output_label, go_output),
-            (get_reverb_label, toggle_reverb),
-            (get_crossfade_label, toggle_crossfade),
-            (get_eq_label, go_eq),
-            (get_transpose_label, go_transpose),
-            (get_speech_transpose_label, go_speech_transpose),
-            (get_water_label, toggle_water),
-            ("Back", go_back),
-        ])
+        m.add_items(gate.filter_items([
+            ("output_device", get_output_label, go_output),
+            ("reverb", get_reverb_label, toggle_reverb),
+            ("crossfade", get_crossfade_label, toggle_crossfade),
+            ("eq", get_eq_label, go_eq),
+            ("song_key", get_transpose_label, go_transpose),
+            ("speech_key", get_speech_transpose_label, go_speech_transpose),
+            ("muffle", get_water_label, toggle_water),
+            (None, "Back", go_back),
+        ]))
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
