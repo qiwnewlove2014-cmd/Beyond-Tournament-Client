@@ -1185,6 +1185,10 @@ class Gameplay(state.State):
 
 
     def quit(self, mod):
+        # Marks this as a logout, not a dropped connection: the disconnect that
+        # follows it must land on the main menu, never on the reconnect retry
+        # (see Game.disconnected).
+        self.game.logging_out = True
         self.game.audio_mngr.apply_filter(None)
         self.game.network.send(consts.CHANNEL_MISC, "logout", {"message": True})
         buffer.export_buffers()

@@ -68,6 +68,11 @@ Delayed_function = namedtuple("delayed_function", ["clock", "time", "function"])
 
 
 class Game:
+    # How many 3 s attempts a dropped session gets before the login menu is
+    # handed back (10 = ~30 s). A server that is down, or an account another
+    # copy really holds, must not leave the client retrying forever.
+    RECONNECT_ATTEMPTS = 10
+
     def __init__(self, screen):
         self.screen = screen
         
@@ -116,6 +121,10 @@ class Game:
         self.instance_mngr = instance_manager.InstanceManager()
         self.instance_mngr.update_title()
         self.reconnecting = False
+        # Set by the in-game logout so a transport drop that follows it is read
+        # as "leaving" and never as "lost the connection".
+        self.logging_out = False
+        self._reconnect_attempts = 0
         self._recovery_in_progress = False
         self._restart_in_progress = False
         
@@ -1081,8 +1090,27 @@ class Game:
         
         if getattr(self, "reconnecting", False):
             self.replace(self.reconnect_state)
+        elif self._drop_was_while_playing():
+            # A transport drop in the middle of play is not a logout: the player
+            # was logged in, standing in a map, and losing the socket must not
+            # cost the account (the login menu is what a sessionless client
+            # shows). Try the session again first -- one refusal or a working
+            # reconnect both end this state (see reconnect_state).
+            self.reconnecting = True
+            self._reconnect_attempts = 0
+            speak("The connection was lost. Reconnecting...", False)
+            self.replace(self.reconnect_state)
         else:
             menus.main_menu(self)
+
+    def _drop_was_while_playing(self):
+        """True when the transport died while a logged-in session was on screen."""
+        if getattr(self, "logging_out", False):
+            return False
+        gameplay = getattr(self, "gameplay", None)
+        if gameplay is None:
+            return False
+        return any(state is gameplay for state in getattr(self, "stack", ()))
 
     def _close_network(self, polite=True):
         """Release the network client without joining its worker.
@@ -1124,6 +1152,15 @@ class Game:
         
         if self.reconnect_clock.elapsed >= 3000:
             self.reconnect_clock.restart()
+            if self._reconnect_attempts >= self.RECONNECT_ATTEMPTS:
+                # A server that is down (or an account another copy really holds)
+                # is not retried forever: say it and hand the login menu back.
+                self.reconnecting = False
+                menus.main_menu(self)
+                speak("The server could not be reached. You returned to the "
+                      "main menu.", True)
+                return
+            self._reconnect_attempts += 1
             speak("Connecting to the server. Please wait...", False)
             # The attempt that got us here may still hold a socket (a no-op when
             # connection_error already released it): never leave one open while

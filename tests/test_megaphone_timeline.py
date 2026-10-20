@@ -357,10 +357,12 @@ class PaConcealmentTests(unittest.TestCase):
     def test_a_legacy_room_stream_invents_nothing(self):
         """A channel-30 frame carries no position, so nothing may be invented.
 
-        The room has no silence reserve to spend either -- it queues REAL frames
-        (``speech.START_FRAMES``) rather than padding silence -- so a hole on a
-        room leg whose sender never sent a sequence is paid out of the frames
-        already queued there, and the playout must feed the room nothing at all.
+        Nothing is concealed and no silence is padded: with no frame played yet
+        there is nothing honest to repeat, so the playout feeds the room nothing
+        at all. A hole AFTER a frame has played is bridged by repeating that real
+        frame (``voice_chat.ROOM_CONCEAL_FRAMES``), which is what
+        ``test_cinema_speech.RoomContinuityTests`` pins -- the room queues REAL
+        frames (``speech.START_FRAMES``), never padding.
         """
         jb, worker = self.hole_worker(sequenced=False)
         with mock.patch.object(vc.cinema_speech, 'routed', return_value=True), \

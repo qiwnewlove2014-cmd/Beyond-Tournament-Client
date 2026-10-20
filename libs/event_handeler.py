@@ -177,6 +177,10 @@ class EventHandeler:
 
     def connected(self, data):
         self.game.reconnecting = False
+        # A finished login ends any logout/reconnect bookkeeping from the
+        # session before it (a later transport drop is a drop, not a logout).
+        self.game.logging_out = False
+        self.game._reconnect_attempts = 0
         self.client.put(("connected", True))
         # The login watchdog ends here: the snapshot is the proof the Server finished
         # authenticating this account (see networking.Client.login_timed_out). Being connected

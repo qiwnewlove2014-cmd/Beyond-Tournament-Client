@@ -1114,6 +1114,80 @@ class MegaphoneDrainTests(unittest.TestCase):
         self.assertEqual(drop.call_args[0][1], 7)
 
 
+class _LossyBuffer:
+    """A jitter buffer that runs dry on the slots a lossy link ate."""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.is_playing = True
+
+    def should_output(self, now):
+        return True
+
+    def get_packet(self):
+        return self.frames.pop(0) if self.frames else None
+
+    def reset(self):
+        pass
+
+
+class RoomContinuityTests(MegaphoneDrainTests):
+    """A room is never left a 20 ms slot short, because it has no reserve.
+
+    The PA survives a missing packet: its jitter reserve covers the late frame and
+    the listener leg under it is a queue of its own. A cabinet's room has neither -
+    its speakers play exactly the frames handed to them, and a starved speaker needs
+    three fresh frames before it restarts (cinema/speech.START_FRAMES). So one lost
+    packet used to be 20 ms of silence plus a 60-80 ms restart: heard as a voice that
+    is full level but stutters. See ROOM_CONCEAL_FRAMES in libs/voice_chat.py.
+    """
+
+    def drain(self, voice, slots):
+        with mock.patch.object(cinema_speech, "feed") as room_feed:
+            for _ in range(slots):
+                voice._drain_megaphone_playout(now_ms=1000.0, now_monotonic=1.0)
+        return [call[0][3] for call in room_feed.call_args_list]
+
+    def test_a_lost_frame_is_repeated_instead_of_leaving_a_hole(self):
+        game = make_game()
+        voice = self.make_voice(game)
+        voice._megaphone_playouts[7]["jitter_buffer"] = _LossyBuffer(
+            [FRAME, None, FRAME, None])
+        fed = self.drain(voice, 4)
+        self.assertEqual(len(fed), 4)          # every slot reached the room
+        self.assertEqual(fed[1], FRAME)        # the lost one is the frame before
+        self.assertEqual(fed[3], FRAME)
+
+    def test_the_repeat_is_bounded_so_a_dead_stream_goes_quiet(self):
+        from libs.voice_chat import ROOM_CONCEAL_FRAMES
+        game = make_game()
+        voice = self.make_voice(game)
+        voice._megaphone_playouts[7]["jitter_buffer"] = _LossyBuffer(
+            [FRAME] + [None] * 10)
+        fed = self.drain(voice, 11)
+        self.assertEqual(len(fed), 1 + ROOM_CONCEAL_FRAMES)
+
+    def test_a_real_frame_restarts_the_repeat_budget(self):
+        from libs.voice_chat import ROOM_CONCEAL_FRAMES
+        game = make_game()
+        voice = self.make_voice(game)
+        voice._megaphone_playouts[7]["jitter_buffer"] = _LossyBuffer(
+            [FRAME] + [None] * ROOM_CONCEAL_FRAMES + [FRAME, None])
+        fed = self.drain(voice, ROOM_CONCEAL_FRAMES + 3)
+        self.assertEqual(len(fed), 1 + ROOM_CONCEAL_FRAMES + 1 + 1)
+
+    def test_a_pa_talker_still_lets_a_lost_slot_go_by(self):
+        """The repeat is for a room only: the PA's reserve is its own answer."""
+        game = make_game(cabinets=())
+        voice = self.make_voice(game, sources=[object(), object()])
+        voice._megaphone_playouts[7]["jitter_buffer"] = _LossyBuffer(
+            [FRAME, None, FRAME])
+        with mock.patch("libs.voice_chat.queue_and_delay_frame") as pa:
+            for _ in range(3):
+                voice._drain_megaphone_playout(now_ms=1000.0, now_monotonic=1.0)
+        self.assertEqual(pa.call_count, 2)
+
+
 class SendChannelTests(unittest.TestCase):
     """Which compression a talker SENDS on: the map's PA first, the room second.
 

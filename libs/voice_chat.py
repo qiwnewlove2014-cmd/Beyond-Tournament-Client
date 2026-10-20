@@ -211,6 +211,18 @@ OPUS_FRAME_MS = 20.0                    # what decode_missing_packet is asked fo
 # talk spurt that never came back.
 PA_TIMELINE_MAX_CONCEAL = 5
 
+# How many 20 ms frames a CINEMA ROOM may be handed as a repeat of the last one
+# it played. The PA can let a slot go by: it has a jitter reserve, and the
+# listener leg underneath it is a queue of its own. A room has neither -- its
+# speakers play exactly the frames the playout hands them, so an empty slot is
+# 20 ms of silence, and once a speaker's queue empties the leg needs
+# cinema/speech.START_FRAMES (3) more frames before it restarts at all. That is
+# the "full but slightly stuttering" report: level fine, one lost or late
+# packet = a 60-80 ms hole. Repeating speech for one frame is inaudible; a hole
+# is not. Three frames (60 ms) is the same bridge the sequenced PA path allows
+# before it stops extrapolating.
+ROOM_CONCEAL_FRAMES = 3
+
 
 def pa_timeline_epoch(epoch=None):
     """The epoch to stamp on a PA upload: the sender's own, made once and kept.
@@ -786,6 +798,9 @@ class voice_chat_compression(threading.Thread):
             # stream is, and the frame sequence the playout expects next, so a
             # hole can be concealed instead of paid for out of the reserve.
             self._megaphone_timeline = {}
+            # Per-talker room continuity: the last frame the room played and how
+            # many times it has been repeated into a hole (ROOM_CONCEAL_FRAMES).
+            self._room_conceal = {}
             # This sender's own PA upload identity (see _outgoing_packet).
             self._pa_epoch = None
             self._pa_seq = 0
@@ -930,6 +945,60 @@ class voice_chat_compression(threading.Thread):
         state['next_seq'] = (frame_seq + 1) & 0xFFFFFFFF
         return True, delta
 
+    def _conceal_due_slot(self, sender_id, stream, jitter_buffer):
+        """A concealed frame for a hole in a SEQUENCED stream, or None.
+
+        Only channel 31 carries the sequence that makes a hole knowable; a legacy
+        payload would guess, and guessing can mute frames that merely arrived late.
+        """
+        if not stream.get('sequenced') or not jitter_buffer.is_playing:
+            return None
+        state = self._megaphone_timeline.get(sender_id)
+        if state is None or state.get('next_seq') is None:
+            return None
+        if state.get('concealed', 0) >= PA_TIMELINE_MAX_CONCEAL:
+            # A hole this long is not a hole: stop extrapolating and go quiet
+            # until a real frame arrives.
+            return None
+        packet = self._conceal_frame(sender_id)
+        if packet is None:
+            return None
+        state['next_seq'] = (state['next_seq'] + 1) & 0xFFFFFFFF
+        state['concealed'] = state.get('concealed', 0) + 1
+        return packet
+
+    def _room_repeat_frame(self, sender_id):
+        """The frame a room's speakers already played, once more, for a lost slot.
+
+        Only ever called while the talker is heard through a room: the room has no
+        jitter reserve, so a slot left empty is a hole in the voice (and a starved
+        speaker needs START_FRAMES fresh frames before it restarts at all). Bounded
+        by ROOM_CONCEAL_FRAMES; the 1 s silence sweep retires the whole leg, so this
+        only ever bridges a hole inside a live sentence.
+        """
+        stream = self._megaphone_playouts.get(sender_id)
+        frame = None if stream is None else stream.get('room_frame')
+        if frame is None:
+            return None
+        if not hasattr(self, '_room_conceal'):
+            self._room_conceal = {}
+        state = self._room_conceal.get(sender_id)
+        if state is None:
+            state = self._room_conceal[sender_id] = {'repeated': 0}
+        if state['repeated'] >= ROOM_CONCEAL_FRAMES:
+            return None
+        state['repeated'] = state['repeated'] + 1
+        return frame
+
+    def _note_room_frame(self, sender_id, packet):
+        """Remember the last frame a room played, so a lost slot can repeat it."""
+        stream = self._megaphone_playouts.get(sender_id)
+        if stream is not None:
+            stream['room_frame'] = packet
+        if not hasattr(self, '_room_conceal'):
+            self._room_conceal = {}
+        self._room_conceal[sender_id] = {'repeated': 0}
+
     def _drain_megaphone_playout(self, now_ms=None, now_monotonic=None):
         """Drain PA frames at 20 ms cadence independently of packet arrivals."""
         if not self._megaphone_playouts:
@@ -960,26 +1029,24 @@ class voice_chat_compression(threading.Thread):
             # can mute good music frames: its reserve and the reliable listener
             # leg are what cover it.
             packet = jb.get_packet()
+            repeated = False
             if packet is None:
                 # SEQUENCED (channel 31): this sender's frames carry their
                 # position, so the slot that is due right now can be concealed
                 # instead of draining the reserve. This - not a bigger cushion -
                 # is the difference the loss table in
-                # tools/megaphone_latency_sim.py measures.
-                if not stream.get('sequenced') or not jb.is_playing:
-                    continue
-                state = self._megaphone_timeline.get(sender_id)
-                if state is None or state.get('next_seq') is None:
-                    continue
-                if state.get('concealed', 0) >= PA_TIMELINE_MAX_CONCEAL:
-                    # A hole this long is not a hole: stop extrapolating and go
-                    # quiet until a real frame arrives.
-                    continue
-                packet = self._conceal_frame(sender_id)
-                if packet is None:
-                    continue
-                state['next_seq'] = (state['next_seq'] + 1) & 0xFFFFFFFF
-                state['concealed'] = state.get('concealed', 0) + 1
+                # tools/megaphone_latency_sim.py measures. The sender's own
+                # decoder is preferred over a room's repeat below.
+                packet = self._conceal_due_slot(sender_id, stream, jb)
+            if packet is None and in_room:
+                # A ROOM HAS NO RESERVE (see ROOM_CONCEAL_FRAMES). The PA can
+                # let this slot go by; the room cannot, so a frame its speakers
+                # already played is handed to it once more rather than leaving
+                # 20 ms of silence (and 60-80 ms once its queue empties).
+                packet = self._room_repeat_frame(sender_id)
+                repeated = packet is not None
+            if packet is None:
+                continue
             try:
                 if gameplay.player.dead:
                     continue
@@ -987,6 +1054,10 @@ class voice_chat_compression(threading.Thread):
                     # The room's own speakers, not the PA: same cadence, same
                     # frame, shaped by the room's numbers. Still deferred --
                     # source creation, buffer upload and play() are OpenAL.
+                    if not repeated:
+                        # Only a frame that really arrived restarts the repeat
+                        # budget; a repeat must not extend its own bridge.
+                        self._note_room_frame(sender_id, packet)
                     _gp, _sid, _pkt = gameplay, sender_id, packet
                     self.game.audio_mngr.defer_audio(
                         lambda gp=_gp, sid=_sid, pkt=_pkt:
@@ -1015,6 +1086,8 @@ class voice_chat_compression(threading.Thread):
         for sender_id in stale:
             self._megaphone_playouts.pop(sender_id, None)
             self._megaphone_decoders.pop(sender_id, None)
+            if getattr(self, '_room_conceal', None):
+                self._room_conceal.pop(sender_id, None)
             # The stream is over, so its sequence bookkeeping is too: a later
             # transmission re-reads the epoch and starts clean.
             self._megaphone_timeline.pop(sender_id, None)

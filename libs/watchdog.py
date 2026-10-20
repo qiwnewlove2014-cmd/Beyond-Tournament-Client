@@ -3,8 +3,15 @@
 Monitors the main game loop's responsiveness. If the main loop freezes (e.g. GIL deadlock,
 main thread blockage, or native C driver lockup) for longer than the timeout threshold,
 this daemon thread captures and flushes the exact Python stack traces of ALL running threads
-to disk (`client_debug.log` and `.client_crash_sessions/last_freeze.txt`) before the process
-is terminated.
+to disk (`client_debug.log` and `.client_crash_sessions/last_freeze.txt`).
+
+It is a *witness*, never a judge: it never kills the process and never relaunches it. A
+compiled Client that relaunched itself on a guessed deadlock cost the player the whole
+session -- the new copy is refused by the single-instance guard (or starts at the login
+menu) while the old one exits -- and the guess was wrong every time the "freeze" was a
+slow first load of instrument samples from ``sounds.dat``. A real deadlock is better left
+to the player's Task Manager than guessed at with the session as the stake; what this
+thread must never lose is the stacks, and it keeps writing them.
 """
 
 import os
@@ -17,6 +24,13 @@ from . import logger
 _SESSION_DIR = ".client_crash_sessions"
 FREEZE_STACK_FILE = os.path.join(_SESSION_DIR, "last_freeze.txt")
 
+# A freeze that is still going is ONE report, not one per second: each dump
+# writes the whole file and fsyncs it, and a dump loop on the diagnostic thread
+# during a stall is load the stall does not need. The stacks are written again
+# when the freeze has lasted another full window, so a long hang still leaves a
+# record of how it progressed.
+FATAL_REPORT_INTERVAL_S = 60.0
+
 
 class GameWatchdog(threading.Thread):
     """Failsafe Watchdog thread that monitors the main loop's heartbeat."""
@@ -28,6 +42,9 @@ class GameWatchdog(threading.Thread):
         self.last_tick = time.time()
         self.running = True
         self.has_dumped = False
+        # When the long-freeze stacks were last written (monotonic), so a hang
+        # that lasts a minute is reported twice, not sixty times.
+        self._fatal_reported_at = None
 
     def heartbeat(self):
         """Update the heartbeat timestamp. Fast, lockless operation called on main loop ticks."""
@@ -53,13 +70,23 @@ class GameWatchdog(threading.Thread):
                     self.has_dumped = True
                     self._dump_thread_stacks(elapsed, fatal=False)
                 
-                # If the freeze persists for over 15 seconds, it's a hard deadlock.
-                if elapsed > 15.0:
+                # A freeze past 15 s may be a hard deadlock -- or a slow first
+                # load. Either way the stacks are the deliverable; the process
+                # is not touched (see this module's header).
+                if elapsed > 15.0 and self._fatal_due():
                     self._dump_thread_stacks(elapsed, fatal=True)
 
             except Exception:
                 # Failsafe: Watchdog errors must NEVER crash or interrupt the client process
                 pass
+
+    def _fatal_due(self):
+        now = time.monotonic()
+        if (self._fatal_reported_at is not None
+                and now - self._fatal_reported_at < FATAL_REPORT_INTERVAL_S):
+            return False
+        self._fatal_reported_at = now
+        return True
 
     def _dump_thread_stacks(self, elapsed, fatal=False):
         """Capture stack traces of all Python threads and persist them synchronously to disk."""
@@ -109,44 +136,26 @@ class GameWatchdog(threading.Thread):
             except Exception:
                 pass
 
-            # If the freeze is severe (> 15 seconds), it's a deadlock.
-            # We must report it and force close to save the user from Task Manager.
+            # A long freeze is reported, never acted on. `recovered` is the
+            # honest severity: the Client is still here and may recover by
+            # itself, and a fabricated `fatal` would tell staff a crash
+            # happened. No speech either -- the loop that would play it is the
+            # thing that is stuck.
             if fatal:
                 try:
                     from . import crash_reporting
-                    # Queue it as a fatal error so the server/staff get the alert
                     crash_reporting.queue_exception(
-                        Exception("Native Deadlock Detected"),
+                        Exception("Main loop frozen (watchdog)"),
                         context="Watchdog",
-                        severity="fatal",
+                        severity="recovered",
                         formatted_traceback=full_dump
                     )
-                    
-                    # Try to send it immediately if network is still alive
+                    # Best effort: the report is persisted first either way, so
+                    # a dead network only defers it to the next login.
                     if getattr(self, 'game', None):
                         crash_reporting.send_pending(self.game)
-                        time.sleep(0.5) # Give it half a second to send
                 except Exception:
                     pass
-                
-                print("CRITICAL: Main game loop deadlocked. Alerting player and restarting...")
-                
-                # Speak warning to the player
-                try:
-                    from .speech import speak
-                    speak("A critical freeze was detected. A crash report has been sent to the developers. Restarting the game. Please wait.")
-                    time.sleep(5.0)
-                except Exception:
-                    pass
-                
-                # Auto-restart the game process silently
-                try:
-                    import subprocess
-                    subprocess.Popen([sys.executable, sys.argv[0]] + sys.argv[1:])
-                except Exception:
-                    pass
-                
-                os._exit(1)
 
         except Exception:
             pass

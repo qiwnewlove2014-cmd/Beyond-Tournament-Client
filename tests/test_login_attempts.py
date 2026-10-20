@@ -550,8 +550,15 @@ class FirstAttemptTests(unittest.TestCase):
         reconnect = source.index("    def reconnect_state(self):")
         login = source.index("    def login(self):")
         retry = source.index("    def _retry_login(self):")
+
+        def body(start):
+            """The whole method, not a character window: an added guard line
+            inside reconnect_state must not push the call out of the slice."""
+            end = source.find("\n    def ", start + 1)
+            return source[start:end if end != -1 else len(source)]
+
         self.assertIn(
-            "_open_first_login_attempt()", source[reconnect:reconnect + 900],
+            "_open_first_login_attempt()", body(reconnect),
             "a reconnect must know where a retry may go, exactly as a login does",
         )
         self.assertIn(
