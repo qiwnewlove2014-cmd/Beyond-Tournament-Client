@@ -21,8 +21,8 @@ from math import sqrt
 
 from .channel import (AUTO, MONO, STEREO, ChannelAnalyzer, mix_samples,
                       source_layout, to_samples)
-from .layout import CinemaLayout
-from .profiles import IMAGE_SLOTS, get_profile
+from .layout import LAYER_SLOTS, SLOT_PAIRS, CinemaLayout
+from .profiles import IMAGE_SLOTS, LAYER_POWER_SHARE, get_profile
 
 # The plain two-source jukebox, expressed as a plan. Matching this exactly
 # lets the renderer hand back the untouched source frames, which is what
@@ -92,24 +92,79 @@ class CinemaRenderer:
         the back of the room before the screen wall.
         """
         available = self.layout.slots
-        slots = [slot for slot in profile.slots
-                 if slot in available and (only is None or slot in only)]
-        slots = slots[:self.max_speakers]
-        # The equal-power share is computed over the speakers this plan will
-        # actually feed, so trimming the room also raises each speaker's
-        # share instead of leaving the whole room quiet.
-        if profile.equal_power_surrounds:
-            shared = [slot for slot in slots
-                      if not profile.protect_image or slot not in IMAGE_SLOTS]
-        else:
+        allowed = [slot for slot in profile.slots
+                   if slot in available and (only is None or slot in only)]
+        slots = allowed[:self.max_speakers]
+        # A cut can land inside a mirrored pair -- a roof, a wide pair, a rear
+        # pair -- and half a pair is a steering bias rather than a cheaper
+        # room, so the pair goes together: the half that survived is dropped
+        # with it. Only a pair *the cut* separated is touched: a pair the map
+        # never had (a custom room's lone wall speaker, which is that mode's
+        # whole point) is left exactly as the resolver built it.
+        cut = set(allowed[len(slots):])
+        if cut:
+            present = set(slots)
+            for left, right in SLOT_PAIRS:
+                if (left in present) == (right in present):
+                    continue
+                lonely = left if left in present else right
+                partner = right if lonely == left else left
+                if partner in cut:
+                    slots = [slot for slot in slots if slot != lonely]
+                    present.discard(lonely)
+        # A squeeze down to two speakers is the *stereo* pair, not the left
+        # speaker and the centre: the cut walks room order, where ``front_c``
+        # stands between the pair, so the two survivors would otherwise both
+        # carry the left of the image and the room would lean. The pair is the
+        # floor ``plugin.MIN_BUDGETED_SPEAKERS`` promises, and it is why a
+        # listener holding two full rooms still hears the third in stereo
+        # rather than in a corner.
+        if len(slots) == 2:
+            stereo = [slot for slot in allowed if slot in IMAGE_SLOTS]
+            if len(stereo) == 2:
+                slots = stereo
+        # The shape's equal-power share is computed over the *shape* speakers
+        # this plan will actually feed, so trimming a room also raises each
+        # speaker's share instead of leaving the whole room quiet.
+        #
+        # A **layer** is not part of that share. The optional wide pair and
+        # overhead layer are added *over* the room, so counting them in the
+        # shape's divisor turns the centre and the walls down the moment somebody
+        # places a roof: measured on the twelve-speaker theatre, every wall fell
+        # from 1/sqrt(5) to 1/sqrt(10) and the room's difference signal dropped
+        # 17% -- the new width was paid for out of the walls rather than added to
+        # them, which is the opposite of what a layer is for. So the shape keeps
+        # exactly the level it was authored at (identical to the room without
+        # layers, term for term, which ``tests/test_cinema_layer_balance.py``
+        # holds) and the layers get their own share, ``LAYER_POWER_SHARE`` of the
+        # shape's power between them.
+        layer_slots = [slot for slot in slots if slot in LAYER_SLOTS]
+        shape_slots = [slot for slot in slots if slot not in LAYER_SLOTS]
+        if not profile.equal_power_surrounds:
             shared = []
+        elif profile.protect_image:
+            shared = [slot for slot in shape_slots if slot not in IMAGE_SLOTS]
+        else:
+            # No image to protect: the whole room is one budget, layers and all.
+            # A mono room is every speaker playing the same middle of the song,
+            # and two levels in it would be a stereo difference nobody asked
+            # for (``mono_spread``'s own rule).
+            shared = shape_slots + layer_slots
         scale = 1.0 / sqrt(len(shared)) if shared else 1.0
+        layer_scale = scale
+        if shared and layer_slots and profile.protect_image:
+            layer_scale = scale * sqrt(LAYER_POWER_SHARE * len(shared) / len(layer_slots))
         plan = []
         for slot in slots:
             weight = profile.weight(slot)
             if weight is None:
                 continue
-            factor = scale if slot in shared else 1.0
+            if slot in shared:
+                factor = scale
+            elif slot in layer_slots:
+                factor = layer_scale
+            else:
+                factor = 1.0
             level = self.layout.level(slot)
             plan.append((slot, weight[0] * level * factor, weight[1] * level * factor))
         return tuple(plan)

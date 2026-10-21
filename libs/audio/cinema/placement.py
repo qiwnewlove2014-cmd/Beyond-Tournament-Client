@@ -33,9 +33,10 @@ project already had rather than into silence.
 
 from math import floor, sqrt
 
-from .layout import (AUTO_SLOT, IDEAL_BEARING, ROOM_MAX_DISTANCE, ROOM_RADIUS,
-                     SLOT_ORDER, SLOT_PAIRS, CinemaSpeakerSpec, bearing_from,
-                     coerce_spec, slot_for_bearing)
+from .layout import (AUTO_SLOT, IDEAL_BEARING, OVERHEAD_SLOTS, ROOM_MAX_DISTANCE,
+                     ROOM_RADIUS, SLOT_ORDER, SLOT_PAIRS, WIDE_SLOTS,
+                     CinemaSpeakerSpec, bearing_from, coerce_spec, height_slot,
+                     is_height, slot_for_bearing)
 
 # ROOM_RADIUS (the room's own scale, in metres) lives with the rest of the
 # room's geometry in ``layout`` and is re-exported here, because that is where
@@ -122,6 +123,14 @@ def auto_profile(slots):
 
     ``None`` means the room cannot carry a stereo programme at all (no left
     and right front speaker), so cinema is not the right answer for it.
+
+    A layer is the one addition that does not raise the room to a bigger shape
+    by itself -- it is added over whatever the room already is -- so it keeps
+    ``front_only`` for a plain pair and promotes a front-only room to
+    ``front_stage``, which is the smallest shape that carries layers. Without
+    that step an ``auto`` cabinet with a roof pair or a wide pair placed would
+    pick the parity profile and play that layer silent, which is the one silent
+    failure this ladder exists to avoid.
     """
     slots = set(slots)
     if "front_l" not in slots or "front_r" not in slots:
@@ -130,7 +139,11 @@ def auto_profile(slots):
         return "theatre"
     if "side_l" in slots and "side_r" in slots:
         return "surround"
-    if "front_c" in slots:
+    layered = ("front_c" in slots
+               or ("height_l" in slots and "height_r" in slots)
+               or ("wide_l" in slots and "wide_r" in slots)
+               or "top_c" in slots)
+    if layered:
         return "front_stage"
     return "front_only"
 
@@ -195,7 +208,12 @@ def _room_yaw(speakers, anchor, explicit=None, tolerance=TOLERANCE_DEG):
     """
     if explicit is not None:
         return float(explicit) % 360.0
-    labelled = [s for s in speakers if s.declared in IDEAL_BEARING]
+    # A height speaker's label says nothing about the room's facing: it hangs
+    # over the seats, so its horizontal bearing is whatever the cabinet's own
+    # position makes it, and one overhead pair would pull the consensus mean
+    # towards a rotation nobody built.
+    labelled = [s for s in speakers
+                if s.declared in IDEAL_BEARING and not is_height(anchor, s.position)]
     if len(labelled) < 2:
         return 0.0
     deltas = [angular_delta(IDEAL_BEARING[s.declared], bearing_from(anchor, s.position))
@@ -210,11 +228,38 @@ def _name_of(speaker):
     return str(speaker.name or speaker.declared or "speaker")
 
 
-def _free_slot_for(bearing, taken):
-    """The unclaimed slot whose ideal bearing is closest to ``bearing``."""
+def _geometry_slot(anchor, speaker, measured_bearing):
+    """The slot a speaker's *position* names, in the room's rebased bearings.
+
+    Two rules in one place, because both resolvers (the shaped room and the
+    custom one) have to agree about them: a speaker hanging above the room is
+    a height speaker on the side it hangs on, and everything else is named by
+    the bearing band it falls in.
+    """
+    if is_height(anchor, speaker.position):
+        return height_slot(measured_bearing)
+    return slot_for_bearing(measured_bearing)
+
+
+def _free_slot_for(bearing, taken, *, overhead=False):
+    """The unclaimed slot whose ideal bearing is closest to ``bearing``.
+
+    The candidates are the slots this speaker could honestly *be*, by the same
+    two rules the room names it with: an overhead speaker may only take an
+    overhead slot, and a speaker standing on the floor may not take one of the
+    layers a bearing can never name. The wide pair is only ever a label and a
+    roof is architecture, so without that rule a wall speaker whose own slot
+    was taken fell into ``wide_r`` -- the same 60 degrees -- and a speaker
+    someone had clearly placed on the floor started playing the roof layer.
+    """
+    if overhead:
+        candidates = OVERHEAD_SLOTS
+    else:
+        candidates = tuple(slot for slot in SLOT_ORDER
+                           if slot not in OVERHEAD_SLOTS and slot not in WIDE_SLOTS)
     best = None
     best_delta = None
-    for slot in SLOT_ORDER:
+    for slot in candidates:
         if slot in taken:
             continue
         delta = abs(angular_delta(bearing, IDEAL_BEARING[slot]))
@@ -306,7 +351,7 @@ def resolve_room(speakers, anchor, *, radius=ROOM_RADIUS, room=None, area=None,
             )
             continue
         measured = rebase(bearing_from(anchor, speaker.position), yaw)
-        geometry = slot_for_bearing(measured)
+        geometry = _geometry_slot(anchor, speaker, measured)
         declared = speaker.declared if speaker.declared in IDEAL_BEARING else None
         slot, source, note = _choose_slot(speaker, measured, geometry, declared,
                                           placed, tolerance_deg)
@@ -385,9 +430,10 @@ def resolve_custom_room(speakers, anchor, *, radius=ROOM_RADIUS, room=None,
         if declared is not None and declared not in placed:
             slot, source = declared, "label"
         else:
-            slot = slot_for_bearing(measured)
+            slot = _geometry_slot(anchor, speaker, measured)
             if slot in placed:
-                slot = _free_slot_for(measured, placed)
+                slot = _free_slot_for(measured, placed,
+                                      overhead=slot in OVERHEAD_SLOTS)
             source = "geometry"
         if slot is None:
             dropped.append(speaker)
@@ -608,6 +654,13 @@ def _mislabelled(declared, measured, geometry, tolerance_deg):
     """
     if geometry == declared:
         return ""
+    # An overhead speaker cannot be checked by a bearing: two height speakers
+    # over the same seats sit a metre apart horizontally, which swings their
+    # measured bearing tens of degrees while both are still clearly the roof
+    # layer. When the label and the position agree that it is a height speaker
+    # at all, the label's own side is the answer.
+    if declared.startswith("height_") and geometry.startswith("height_"):
+        return ""
     if abs(measured) > DECISIVE_DEG and _slot_side(geometry) != _slot_side(declared):
         return "side"
     if abs(angular_delta(measured, IDEAL_BEARING[declared])) > tolerance_deg:
@@ -616,7 +669,13 @@ def _mislabelled(declared, measured, geometry, tolerance_deg):
 
 
 def _choose_slot(speaker, measured, geometry, declared, placed, tolerance_deg):
-    """Pick this speaker's slot, preferring its label when the room agrees."""
+    """Pick this speaker's slot, preferring its label when the room agrees.
+
+    ``geometry`` is the speaker's own answer (see :func:`_geometry_slot`), and
+    it is what decides whether a fallback may reach the overhead layer at all
+    -- never the label, which is a hint the room may overrule.
+    """
+    overhead = geometry in OVERHEAD_SLOTS
     name = _name_of(speaker)
     if declared is not None:
         if declared not in placed:
@@ -636,14 +695,14 @@ def _choose_slot(speaker, measured, geometry, declared, placed, tolerance_deg):
         if geometry not in placed:
             return (geometry, "geometry",
                     f"{name}: {declared} was already labelled, so it takes {geometry} by position")
-        slot = _free_slot_for(measured, placed)
+        slot = _free_slot_for(measured, placed, overhead=overhead)
         if slot is None:
             return (None, "dropped", f"{name}: no free slot near {measured:.0f}deg")
         return (slot, "floor", f"{name}: duplicate {declared}, moved to the nearest free slot {slot}")
 
     if geometry not in placed:
         return (geometry, "geometry", None)
-    slot = _free_slot_for(measured, placed)
+    slot = _free_slot_for(measured, placed, overhead=overhead)
     if slot is None:
         return (None, "dropped", f"{name}: no free slot near {measured:.0f}deg")
     return (slot, "floor", f"{name}: {geometry} was taken, moved to the nearest free slot {slot}")
@@ -677,7 +736,7 @@ class RoomPlan:
     """
 
     __slots__ = ("profile", "specs", "placement", "fill", "reach", "notes",
-                 "silent")
+                 "silent", "fed")
 
     def __init__(self, profile, specs=None, placement=None, fill=False,
                  reach=None, notes=(), silent=False):
@@ -695,6 +754,20 @@ class RoomPlan:
         # map has no speaker for this cabinet. Nothing is fed, nothing is
         # invented, and the caller must not fall back to the plain pair.
         self.silent = bool(silent)
+        # The speakers this *shape* feeds, as the renderer names them, or None
+        # when nobody has built one yet. It is the room's own answer to "which
+        # speakers does this mode play", and the voice and live-note paths read
+        # it: a cabinet set to ``front_only`` leaves its walls silent for a
+        # talker exactly as it does for a song, and ``custom`` plays the
+        # speakers someone placed -- the mode decides, never the map alone.
+        self.fed = None
+
+    @property
+    def fed_slots(self):
+        """Slots this room feeds; every placed slot when no renderer was built."""
+        if self.fed is not None:
+            return tuple(self.fed)
+        return tuple(getattr(self.placement, "slots", ()) or ())
 
     @property
     def profile_name(self):

@@ -59,6 +59,127 @@ class RoomResolutionTests(unittest.TestCase):
             "front_l", "front_c", "front_r", "side_l", "side_r", "rear_l", "rear_r"})
         self.assertEqual(room.warnings, ())
 
+    def test_the_ring_never_invents_a_height_pair(self):
+        """A roof layer is architecture: only a placed speaker, or a preset, makes one."""
+        layout = CinemaLayout(ANCHOR, [], use_ring=True)
+        self.assertNotIn("height_l", layout.slots)
+        self.assertNotIn("height_r", layout.slots)
+        self.assertEqual(set(layout.slots), {
+            "front_l", "front_c", "front_r", "side_l", "side_r", "rear_l", "rear_r"})
+
+    def test_a_height_pair_joins_the_room_from_above(self):
+        """A speaker over the seats is the room's roof layer, not a wall."""
+        room = resolve_room(
+            [speaker("front_l", -30), speaker("front_c", 0), speaker("front_r", 30),
+             speaker("side_l", -90), speaker("side_r", 90),
+             speaker("rear_l", -150), speaker("rear_r", 150),
+             speaker("height_l", -60, z=5.0), speaker("height_r", 60, z=5.0)],
+            ANCHOR,
+        )
+        self.assertIsNotNone(room)
+        self.assertEqual(room.profile_name, "theatre")
+        self.assertEqual(set(room.slots), {
+            "front_l", "front_c", "front_r", "side_l", "side_r", "rear_l", "rear_r",
+            "height_l", "height_r"})
+        self.assertEqual(room.warnings, ())
+        self.assertEqual(room.speakers["height_l"].source, "label")
+
+    def test_the_wide_pair_is_named_by_its_label_and_never_by_a_bearing(self):
+        """A wide speaker stands inside the front pair's own band.
+
+        That is why it is the one pair a bearing can never name: read by angle,
+        it would be a second front pair a metre further out. The label is the
+        whole rule, and a speaker left on ``auto`` at the same place stays what
+        the band says it is -- which is what keeps every room built before the
+        wide pair existed meaning what it meant.
+        """
+        self.assertEqual(slot_for_bearing(-60.0), "front_l")
+        self.assertEqual(slot_for_bearing(60.0), "front_r")
+        room = resolve_room(
+            [speaker("front_l", -30), speaker("front_r", 30),
+             speaker("wide_l", -60), speaker("wide_r", 60),
+             speaker("side_l", -90), speaker("side_r", 90)],
+            ANCHOR,
+        )
+        self.assertIsNotNone(room)
+        self.assertEqual(room.speakers["wide_l"].slot, "wide_l")
+        self.assertEqual(room.speakers["wide_l"].source, "label")
+        self.assertEqual(room.speakers["wide_r"].source, "label")
+        self.assertEqual(room.warnings, ())
+
+    def test_a_floor_speaker_never_falls_into_a_layer_by_accident(self):
+        """Every floor slot is taken, and the wide pair is still free.
+
+        The wide pair sits at the same bearing as a wall speaker, so the
+        fallback that gives a duplicate speaker "the nearest free slot" used to
+        hand it ``wide_r`` -- a layer the client promises is a label and never a
+        guess. A floor speaker is dropped instead, and said so.
+        """
+        room = resolve_custom_room(
+            [speaker("front_l", -30), speaker("front_c", 0), speaker("front_r", 30),
+             speaker("side_l", -90), speaker("side_r", 90),
+             speaker("rear_l", -150), speaker("rear_r", 150),
+             speaker(AUTO_SLOT, 60)],
+            ANCHOR,
+        )
+        self.assertIsNotNone(room)
+        self.assertEqual(len(room.slots), 7)
+        self.assertNotIn("wide_r", room.slots)
+        self.assertNotIn("height_r", room.slots)
+        self.assertTrue(any("every slot is taken" in warning for warning in room.warnings))
+
+    def test_an_overhead_speaker_falls_to_another_overhead_slot_and_not_the_floor(self):
+        """A second speaker over the seats is another overhead speaker."""
+        room = resolve_custom_room(
+            [speaker("front_l", -30), speaker("front_r", 30),
+             speaker(AUTO_SLOT, 60, z=5.0), speaker(AUTO_SLOT, 58, z=5.0)],
+            ANCHOR,
+        )
+        self.assertIsNotNone(room)
+        overhead = [slot for slot in room.slots
+                    if slot in ("height_l", "height_r", "top_c")]
+        self.assertEqual(len(overhead), 2)
+        self.assertNotIn("wide_r", room.slots)
+
+    def test_height_is_worked_out_from_the_height_not_the_bearing(self):
+        """An ``auto`` speaker overhead is a height speaker wherever it leans."""
+        room = resolve_custom_room(
+            [speaker("front_l", -30), speaker("front_r", 30),
+             speaker(AUTO_SLOT, -30, z=5.0), speaker(AUTO_SLOT, 30, z=5.0),
+             speaker(AUTO_SLOT, -5, z=5.0),
+             speaker(AUTO_SLOT, 0, z=0.0)],
+            ANCHOR,
+        )
+        self.assertIsNotNone(room)
+        self.assertIn("height_l", room.slots)
+        self.assertIn("height_r", room.slots)
+        # Straight up is the ceiling centre, a slot of its own.
+        self.assertIn("top_c", room.slots)
+        # The speaker on the floor under them is still the centre speaker.
+        self.assertIn("front_c", room.slots)
+
+    def test_a_lone_height_speaker_is_dropped_like_a_lone_wall(self):
+        """Half a roof layer is a steering bias, so the room keeps what it has."""
+        room = resolve_room(
+            [speaker("front_l", -30), speaker("front_r", 30),
+             speaker("height_r", 60, z=5.0)],
+            ANCHOR,
+        )
+        self.assertIsNotNone(room)
+        self.assertNotIn("height_r", room.slots)
+        self.assertEqual(len(room.dropped), 1)
+        self.assertTrue(any("has no partner" in warning for warning in room.warnings))
+
+    def test_auto_promotes_a_front_only_room_that_has_a_roof(self):
+        """Heights alone must not leave an ``auto`` room on the parity profile."""
+        self.assertEqual(auto_profile(["front_l", "front_r"]), "front_only")
+        self.assertEqual(
+            auto_profile(["front_l", "front_r", "height_l", "height_r"]),
+            "front_stage")
+        self.assertEqual(
+            auto_profile(["front_l", "front_r", "rear_l", "rear_r",
+                          "height_l", "height_r"]), "theatre")
+
     def test_front_pair_only_resolves_to_the_parity_profile(self):
         room = resolve_room([speaker("front_l", -30), speaker("front_r", 30)], ANCHOR)
         self.assertEqual(room.profile_name, "front_only")
@@ -285,13 +406,15 @@ class CustomRoomTests(unittest.TestCase):
                          {"front_l", "side_l", "rear_r"})
 
     def test_a_speaker_beyond_every_free_slot_is_dropped_not_faked(self):
-        seven = [speaker("front_l", -30), speaker("front_c", 0),
-                 speaker("front_r", 30), speaker("side_l", -90),
-                 speaker("side_r", 90), speaker("rear_l", -150),
-                 speaker("rear_r", 150)]
-        room = resolve_custom_room(seven + [speaker(AUTO_SLOT, -90, distance=9.0)],
+        twelve = [speaker("front_l", -30), speaker("front_c", 0),
+                  speaker("front_r", 30), speaker("side_l", -90),
+                  speaker("side_r", 90), speaker("rear_l", -150),
+                  speaker("rear_r", 150), speaker("wide_l", -60),
+                  speaker("wide_r", 60), speaker("height_l", -60, z=5.0),
+                  speaker("height_r", 60, z=5.0), speaker("top_c", 0, z=5.0)]
+        room = resolve_custom_room(twelve + [speaker(AUTO_SLOT, -90, distance=9.0)],
                                    ANCHOR)
-        self.assertEqual(len(room.slots), 7)
+        self.assertEqual(len(room.slots), 12)
         self.assertEqual(len(room.dropped), 1)
         self.assertTrue(any("every slot is taken" in warning
                             for warning in room.warnings))

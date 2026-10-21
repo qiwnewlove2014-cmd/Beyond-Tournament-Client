@@ -22,8 +22,8 @@ from .crossover import FULL_RANGE, crossover_hz, mark_of
 from .listener import (distance_gain, speaker_aim_gain, tone_openness,
                        TONE_NEUTRAL)
 from .pan import DEFAULT_DIRECTION, apply_direction
-from .plugin import (CINEMA_AUTO, CINEMA_OFF, cabinet_anchors, cabinet_reach,
-                     preview_room, room_diagnosis)
+from .plugin import (CINEMA_AUTO, CINEMA_OFF, cabinet_anchors, cabinet_mode,
+                     cabinet_reach, preview_room, room_diagnosis)
 from .profiles import get_profile
 from .layout import (ROOM_MAX_DISTANCE, ROOM_RADIUS, ROOM_REFERENCE_DISTANCE)
 
@@ -251,17 +251,8 @@ def _provider_key(provider):
     return provider
 
 
-def cabinet_mode(game, cabinet_id):
-    """The map's own decision for a cabinet (``auto`` when nothing says)."""
-    gameplay = getattr(game, "gameplay", None)
-    player = getattr(gameplay, "jukebox_player", None)
-    getter = getattr(player, "cinema_mode", None)
-    if not callable(getter):
-        return CINEMA_AUTO
-    try:
-        return getter(cabinet_id)
-    except Exception:
-        return CINEMA_AUTO
+# ``cabinet_mode`` is read here by the router and re-exported for the package's
+# own callers; it lives in ``plugin`` because a preview needs it too.
 
 
 class LiveRoomRouter:
@@ -453,8 +444,17 @@ class LiveRoomRouter:
             max_distance = plan_reach(plan)
         placement = getattr(plan, "placement", None)
         channels = plan_channels(plan)
+        # The note plays the speakers the cabinet's *mode* feeds, never every
+        # speaker standing around it (``speech._fed_of`` is the same rule for a
+        # voice): a band playing into a ``front_only`` room is heard from the
+        # screen wall, and into a ``custom`` room from whatever was placed.
+        wanted = None
+        if getattr(plan, "fed", None) is not None:
+            wanted = set(getattr(plan, "fed_slots", ()) or ())
         terms = []
         for slot in getattr(placement, "slots", ()):
+            if wanted is not None and slot not in wanted:
+                continue
             spec = placement.speakers[slot].spec
             spot = spec.position
             gain = (float(spec.level)

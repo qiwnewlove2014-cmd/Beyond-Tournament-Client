@@ -3,8 +3,24 @@
 Slots are named by their job in the room rather than by a channel index:
 
     front_l  front_c  front_r   -- the screen wall, carries the real image
+    wide_l   wide_r             -- between the screen and the walls, widens the stage
     side_l   side_r             -- the walls, carries the difference
     rear_l   rear_r             -- behind the listener, carries ambience
+    height_l height_r  top_c     -- above the seats, carries the height layer
+
+Twelve slots, and the last four are **layers**: a wide pair, a roof pair and a
+ceiling centre that a room adds *over* one of the base shapes rather than
+instead of one. They are optional everywhere -- a room that had seven
+speakers before this played exactly the same the day they arrived.
+
+Two of those layers cannot be named by a bearing. An overhead speaker stands
+almost directly above the cabinet, so its horizontal bearing is noise: it is
+worked out from the vertical offset instead (``is_height``) and named by the
+side it hangs on (``height_slot``), the middle of the ceiling being ``top_c``.
+The wide pair is the other way round: it is on the floor and inside the same
+bearing band as a front speaker, so it is named by its label and never
+guessed. A label still wins in both cases, which is what lets a builder put a
+height speaker on a beam that happens to be low.
 
 Engine axes match ``AudioManager.make_orientation``: X is left to right,
 Y is backward to forward, Z is down to up. So the screen wall is +Y, the
@@ -20,7 +36,43 @@ wherever they like and let the room sort itself out.
 
 from math import atan2, cos, degrees, radians, sin, sqrt
 
-SLOT_ORDER = ("front_l", "front_c", "front_r", "side_l", "side_r", "rear_l", "rear_r")
+# Room order, and it is also the order a room gives speakers up in: a room
+# that has to narrow (a listener over their speaker budget) loses its optional
+# layers first -- the ceiling centre, then the roof pair, then the wide pair --
+# and the screen wall never (`router._plan_for` truncates from this tail, and
+# drops a pair whole so a squeeze never leaves half of one).
+SLOT_ORDER = ("front_l", "front_c", "front_r",
+              "side_l", "side_r", "rear_l", "rear_r",
+              "wide_l", "wide_r",
+              "height_l", "height_r", "top_c")
+
+# How far above the cabinet a speaker has to hang before it is a height
+# speaker rather than a wall speaker standing high. Three metres is above a
+# doorway and below the ceiling of the rooms this game builds, so a speaker
+# over the seats is caught and a speaker on a tall wall is not.
+HEIGHT_MIN_ABOVE = 3.0
+
+# The wide pair: on the floor, either side of the stage, widening it. It sits
+# inside the same bearing band as the front pair, so it is a **label** and
+# never a guess -- a speaker someone forgot to label stays a front speaker, and
+# no room that existed before these slots arrived changes meaning.
+WIDE_SLOTS = ("wide_l", "wide_r")
+
+# The overhead layer: the roof pair and the ceiling centre. A room's roof is
+# architecture -- a speaker hangs from something a builder built -- so these
+# are the slots the geometric ring never invents.
+HEIGHT_SLOTS = ("height_l", "height_r")
+TOP_SLOT = "top_c"
+OVERHEAD_SLOTS = HEIGHT_SLOTS + (TOP_SLOT,)
+
+# Everything that is a layer over a shape rather than part of it. A profile's
+# equal-power scale never counts these (``profiles.CinemaProfile.surround_slots``),
+# so adding a layer cannot quietly turn down the speakers already there.
+LAYER_SLOTS = WIDE_SLOTS + OVERHEAD_SLOTS
+
+# How wide the middle of the ceiling is: an overhead speaker this close to the
+# centre line is the ceiling centre, not a side of the roof.
+TOP_C_BAND = 20.0
 
 AUTO_SLOT = "auto"
 
@@ -66,7 +118,8 @@ _BEARING_BANDS = (
 )
 
 # Mirror map for negative bearings; the centre is its own mirror image.
-_MIRROR = {"front_r": "front_l", "side_r": "side_l", "rear_r": "rear_l"}
+_MIRROR = {"front_r": "front_l", "side_r": "side_l", "rear_r": "rear_l",
+           "height_r": "height_l"}
 
 # Where each slot belongs in a room, in degrees relative to the screen wall
 # (0 = dead ahead, negative = the audience's left). This is the reference the
@@ -80,13 +133,28 @@ IDEAL_BEARING = {
     "side_r": 90.0,
     "rear_l": -150.0,
     "rear_r": 150.0,
+    # The horizontal half of a height speaker's job: above the seats, a little
+    # towards the wall on its own side. Only used as a tie-break for a free
+    # slot and by a ring that invents one -- ``is_height`` is what decides
+    # whether a placed speaker is one at all.
+    "height_l": -60.0,
+    "height_r": 60.0,
+    # 0, and only ever as a tie-break or a preset's own ring: a ceiling centre
+    # is found by its height, not by this number.
+    "top_c": 0.0,
+    # The wide pair: between the screen wall and the walls, on the floor. It is
+    # never guessed from a bearing (that band is the front pair's), so these
+    # numbers are what a label is measured against and where a preset puts one.
+    "wide_l": -60.0,
+    "wide_r": 60.0,
 }
 
 # Slots that only work as a mirrored pair. A left wall speaker with no right
 # wall speaker is not half a room, it is a room with a steering bias, so an
 # unpaired member is dropped and the profile falls back to what the rest of
 # the room can honestly reproduce.
-SLOT_PAIRS = (("side_l", "side_r"), ("rear_l", "rear_r"))
+SLOT_PAIRS = (("side_l", "side_r"), ("rear_l", "rear_r"),
+              ("height_l", "height_r"), ("wide_l", "wide_r"))
 
 # The deepest decorrelation trim a speaker may carry, in milliseconds. Past
 # this the offset stops reading as a wider wall and starts reading as an echo,
@@ -109,6 +177,59 @@ def slot_for_bearing(bearing):
         if angle <= limit:
             return slot
     return "rear_r"
+
+
+def is_height(anchor, position):
+    """True when this speaker hangs above the room rather than on a wall.
+
+    The one decision a bearing cannot make: a speaker over the seats has a
+    bearing that depends on which seat you measure from, so it is asked about
+    its height instead. A height speaker is *at least* this far above the
+    cabinet, which is what separates the roof layer from a wall speaker a
+    builder stood high up.
+    """
+    if anchor is None or position is None:
+        return False
+    try:
+        return (float(position[2]) - float(anchor[2])) >= HEIGHT_MIN_ABOVE
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
+def height_slot(measured_bearing):
+    """The overhead slot a bearing falls in: the centre, or the side it leans to.
+
+    An overhead speaker is named by its height (``is_height``); this is the
+    half that decides *which* overhead slot. Straight up is the ceiling centre
+    -- one speaker, like ``front_c`` -- and anything out at the roof's sides is
+    the pair, negative being the audience's left.
+    """
+    angle = float(measured_bearing)
+    while angle > 180.0:
+        angle -= 360.0
+    while angle < -180.0:
+        angle += 360.0
+    if abs(angle) <= TOP_C_BAND:
+        return TOP_SLOT
+    return "height_l" if angle < 0.0 else "height_r"
+
+
+# The old name, kept for one release: it is the same function, and the rename
+# (a ceiling centre is not a "side") is not worth a second spelling.
+height_side = height_slot
+
+
+def slot_for_position(anchor, position):
+    """The slot a speaker stands in: its height first, then its bearing.
+
+    Used by the ring-free layout (a caller handing raw specs) and by an
+    ``auto`` speaker. The placement resolver applies the same two rules but
+    rebases the bearing against the room's screen wall first, so a rotated
+    room resolves its height pair on the correct side.
+    """
+    if is_height(anchor, position):
+        return height_slot(bearing_from(anchor, position))
+    return slot_for_bearing(bearing_from(anchor, position))
 
 
 def bearing_from(anchor, position):
@@ -321,12 +442,12 @@ def coerce_spec(raw):
     )
 
 
-def _ring_position(anchor, bearing, radius):
+def _ring_position(anchor, bearing, radius, z_lift=0.0):
     angle = radians(float(bearing))
     return (
         float(anchor[0]) + sin(angle) * radius,
         float(anchor[1]) + cos(angle) * radius,
-        float(anchor[2]),
+        float(anchor[2]) + float(z_lift),
     )
 
 
@@ -342,15 +463,18 @@ class CinemaLayout:
     DEFAULT_SIDE_RADIUS = 6.0
     DEFAULT_REAR_RADIUS = 8.0
 
-    # Slot -> (bearing, radius attribute) baked into the ring fallback.
+    # Slot -> (bearing, radius attribute, z lift) baked into the ring fallback.
+    # The roof layer is deliberately absent: a ring invents speakers for a map
+    # that placed none, and an invented speaker hanging in mid-air is the one
+    # shape nobody can see, check or stand under (see ``HEIGHT_SLOTS``).
     _RING = (
-        ("front_l", -30.0, "front_radius"),
-        ("front_c", 0.0, "front_radius"),
-        ("front_r", 30.0, "front_radius"),
-        ("side_l", -90.0, "side_radius"),
-        ("side_r", 90.0, "side_radius"),
-        ("rear_l", -135.0, "rear_radius"),
-        ("rear_r", 135.0, "rear_radius"),
+        ("front_l", -30.0, "front_radius", 0.0),
+        ("front_c", 0.0, "front_radius", 0.0),
+        ("front_r", 30.0, "front_radius", 0.0),
+        ("side_l", -90.0, "side_radius", 0.0),
+        ("side_r", 90.0, "side_radius", 0.0),
+        ("rear_l", -135.0, "rear_radius", 0.0),
+        ("rear_r", 135.0, "rear_radius", 0.0),
     )
 
     def __init__(self, anchor, specs=None, *, front_radius=None, side_radius=None,
@@ -379,7 +503,7 @@ class CinemaLayout:
                 continue
             slot = speaker.slot
             if slot == AUTO_SLOT:
-                slot = slot_for_bearing(bearing_from(self.anchor, speaker.position))
+                slot = slot_for_position(self.anchor, speaker.position)
             if slot not in SLOT_ORDER:
                 continue
             speaker.slot = slot
@@ -391,11 +515,12 @@ class CinemaLayout:
             "side_radius": self.side_radius,
             "rear_radius": self.rear_radius,
         }
-        for slot, bearing, radius_key in self._RING:
+        for slot, bearing, radius_key, z_lift in self._RING:
             # A real speaker always wins; the ring only fills the gaps.
             if slot in self._specs:
                 continue
-            self._ring[slot] = _ring_position(self.anchor, bearing, radii[radius_key])
+            self._ring[slot] = _ring_position(self.anchor, bearing,
+                                              radii[radius_key], z_lift)
 
     @property
     def slots(self):

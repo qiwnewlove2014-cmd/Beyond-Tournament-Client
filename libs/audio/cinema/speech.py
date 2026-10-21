@@ -924,11 +924,29 @@ class RoomSpeechLeg:
                 self.holder.recycle(taken)
 
 
+def _fed_of(plan):
+    """The slots this room's *mode* feeds, or None when the plan named none.
+
+    A cabinet's ``front_only`` keeps its wall speakers silent for a song, and a
+    voice must be silent there too: a talker heard from a rear pair that never
+    plays music is the PA with extra steps and a room nobody can reason about.
+    ``custom`` comes out as the placed speakers, which is the mode's whole
+    answer, so "whatever the cabinet is set to, that is how the voice sounds"
+    is one rule rather than a special case per mode.
+    """
+    if getattr(plan, "fed", None) is None:
+        return None
+    return set(getattr(plan, "fed_slots", ()) or ())
+
+
 def _specs(plan):
     """``{slot: spec}`` for a resolved plan, or ``{}`` when it has none."""
     placement = getattr(plan, "placement", None)
+    wanted = _fed_of(plan)
     specs = {}
     for slot in getattr(placement, "slots", ()):
+        if wanted is not None and slot not in wanted:
+            continue
         specs[slot] = placement.speakers[slot].spec
     return specs
 
@@ -942,8 +960,11 @@ def _signature(plan):
     playing (rebuilding them would drop a queue's worth of voice).
     """
     placement = getattr(plan, "placement", None)
+    wanted = _fed_of(plan)
     parts = []
     for slot in getattr(placement, "slots", ()):
+        if wanted is not None and slot not in wanted:
+            continue
         spec = placement.speakers[slot].spec
         tone = getattr(spec, "tone", None)
         parts.append((slot, tuple(spec.position), float(spec.level),

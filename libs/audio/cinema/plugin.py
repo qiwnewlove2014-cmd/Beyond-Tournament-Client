@@ -12,6 +12,7 @@ before this feature is the plain two-source jukebox byte for byte.
 Rules, measured numbers and every trap: .agents/skills/cinema_speaker_system/.
 """
 
+from ...deferred_log import log_deferred as log_line
 from .bank import DEFAULT_CATEGORY, CinemaSpeakerBank
 from .channel import AUTO
 from .listener import ListenerPose, facing_report
@@ -101,6 +102,38 @@ def set_rooms_enabled(game, enabled):
     return enabled
 
 
+# How many speakers one listener's machine feeds at once, counting every room
+# it is holding. A room costs one OpenAL source and a 16-buffer pool per speaker
+# and one mix per speaker per frame, so the ceiling is a frame budget, not a
+# taste: the measured seven-speaker room is 2.7 ms of a 20 ms frame (about
+# 0.39 ms a speaker, on top of a fixed cost per room), so the full twelve-speaker
+# room is near 4.5 ms and two of them are near 9 ms -- 45% of the frame before
+# the rest of the game does anything. That is what sizes the budget: two full
+# rooms, and not a third. Past it a room narrows from the back
+# (``router._plan_for`` truncates from the tail of ``layout.SLOT_ORDER``, so the
+# ceiling centre goes first, then the roof pair, then the wide pair, then the
+# rears and the walls; the screen wall never does, and a pair the cut would
+# split goes whole).
+#
+# Twelve slots is what makes the last cabinet a *narrow* room rather than a
+# full one -- 24 is spent by two wide rooms where it used to take nearly three
+# -- and that is the deliberate trade: a room nobody can hear at all is worse
+# than a room heard from its screen wall. The preset says the cost out loud when
+# a technician builds one (``builder.cinema_room_preset.describe_write``).
+#
+# What a narrowed room must never do is drop *frames* to save the CPU: a dropped
+# frame is the song jumping forward, which is audible, while one speaker fewer
+# is a room that is a little less wide (trap 19).
+LISTENER_SPEAKER_BUDGET = 24
+
+# The floor a budget can squeeze a room to: the stereo front pair. A room that
+# could not even keep two speakers would not be a room, and its song would fall
+# back to the plain cabinet mid-track. ``router._plan_for`` keeps this honest:
+# a two-speaker budget is ``front_l`` and ``front_r``, never the left speaker
+# and the centre, which is what the room's own order would otherwise give.
+MIN_BUDGETED_SPEAKERS = 2
+
+
 class CinemaSpeakerHost:
     """One renderer per playing jukebox, keyed by jukebox id."""
 
@@ -116,6 +149,10 @@ class CinemaSpeakerHost:
         # The resolved room per cabinet, kept for the debug overlay and for
         # tests: "which speaker ended up where, and what did the map get wrong".
         self._placements = {}
+        # The last line told about this room narrowing under the listener's
+        # budget, so a room that stays narrowed says it once rather than once
+        # per play event.
+        self._budget_reports = {}
 
     @property
     def enabled(self):
@@ -132,6 +169,30 @@ class CinemaSpeakerHost:
     @staticmethod
     def _key(jukebox_id):
         return str(jukebox_id)
+
+    def budget_for(self, key=None):
+        """Speakers this room may still have, under the listener's budget.
+
+        The rooms already playing are not re-shaped when a new one arrives --
+        that would interrupt their audio to make a bookkeeping rule true -- so
+        the *newest* room is the one that narrows. First come, first kept: the
+        cabinet a listener walked up to plays at full width, and the fourth
+        cabinet in the map is heard through its front pair rather than pushing
+        three other songs into a stutter.
+
+        A room with no bank yet (a read-out, a preview) counts nothing, which
+        is why the key is excluded: a menu must describe what *this* room would
+        play, not what it would play if it were already playing.
+        """
+        budget = LISTENER_SPEAKER_BUDGET
+        used = 0
+        for other, bank in self._banks.items():
+            if key is not None and self._key(other) == self._key(key):
+                continue
+            if not bank.sources or bank.spent:
+                continue
+            used += len(bank.renderer.slots)
+        return max(MIN_BUDGETED_SPEAKERS, budget - used)
 
     def acquire(self, jukebox_id, anchor, **options):
         """Return the renderer for this cabinet, or None when cinema is off.
@@ -157,16 +218,23 @@ class CinemaSpeakerHost:
         # map has) and a requested shape (padded from the ring).
         layout = options.pop("layout", None)
         specs = options.pop("specs", None)
+        # The listener's budget, not the room's own cap: a room may ask for
+        # twelve speakers and be given four because two other cabinets are
+        # already playing. Applied here, before the renderer is built, so a
+        # speaker it cuts never creates a source or a buffer pool at all.
+        budget = self.budget_for(key)
+        cap = budget if self.max_speakers is None else min(self.max_speakers, budget)
         renderer = renderer_for(
             anchor,
             profile_name,
             layout=layout,
             specs=specs,
             fill=options.pop("fill", None) is not False,
-            max_speakers=self.max_speakers,
+            max_speakers=cap,
             detect_channels=options.pop("detect_channels", True),
             declared_layout=options.pop("declared_layout", AUTO),
         )
+        self._report_budget(key, renderer, cap)
         current = self._renderers.get(key)
         if current is not None and current.signature == renderer.signature:
             return current
@@ -192,6 +260,25 @@ class CinemaSpeakerHost:
             self._placements[key] = placement
         self._renderers[key] = renderer
         return renderer
+
+    def _report_budget(self, key, renderer, cap):
+        """Say once when a room was narrowed by the listener's budget.
+
+        A room that plays four of its twelve speakers is not a map mistake and
+        must not be reported as one: it is this machine choosing width over a
+        stutter, and the line says exactly that so a builder reading the log
+        does not go looking for a broken speaker.
+        """
+        full = self.max_speakers or renderer.MAX_SPEAKERS
+        if cap >= full:
+            self._budget_reports.pop(key, None)
+            return
+        line = (f"{len(renderer.slots)} speaker(s) from a budget of {cap}"
+                f" (listener budget {LISTENER_SPEAKER_BUDGET})")
+        if self._budget_reports.get(key) == line:
+            return
+        self._budget_reports[key] = line
+        log_line(f"[Cinema] room {key}: {line}; the rest of the room is silent")
 
     def plan_for(self, jukebox_id, anchor, requested=None, room_id=None):
         """Resolve this cabinet's room from the map, or None to stay plain.
@@ -509,6 +596,25 @@ def cabinet_element(game, jukebox_id):
         if str(getattr(element, "id", "")) == key:
             return element
     return None
+
+
+def cabinet_mode(game, cabinet_id):
+    """The map's own decision for a cabinet (``auto`` when nothing says).
+
+    Read through the jukebox player's own cache, so this is a plain map read and
+    not a resolution: every preview (a voice's room, a live note's, a pan
+    destination) asks it, and each of them has to play the shape the cabinet is
+    actually set to. It lives here rather than with the live-note router because
+    ``preview_room`` needs it and the router is the layer above.
+    """
+    gameplay = _gameplay_or(game)
+    reader = getattr(getattr(gameplay, "jukebox_player", None), "cinema_mode", None)
+    if not callable(reader):
+        return CINEMA_AUTO
+    try:
+        return reader(cabinet_id)
+    except Exception:
+        return CINEMA_AUTO
 
 
 def cabinet_reach(game, jukebox_id, default=None):
@@ -990,6 +1096,19 @@ def _ring_room(requested, reach, notes=()):
                     reach=reach, notes=notes)
 
 
+def _budget_cap(game, room_id):
+    """The speaker cap the listener's budget leaves this room, or None.
+
+    A read-out has to describe the room that would actually play, so it asks
+    the same listener-wide budget the bank is built under. No host yet (the
+    feature off, or a plain unit test) means no budget to apply.
+    """
+    host = _active_host(game) if game is not None else None
+    if host is None:
+        return None
+    return host.budget_for(room_id)
+
+
 def _ring_notes(scope_reasons, room_reasons, candidates):
     """What to say when a requested shape plays the ring instead of the map.
 
@@ -1030,14 +1149,23 @@ def _plan_from(placement, requested, reach=None):
                     reach=reach)
 
 
-def preview_room(game, anchor, *, room_id=None, radius=None):
+def preview_room(game, anchor, *, room_id=None, radius=None, requested=None):
     """Resolve the room the map describes, without turning the feature on.
 
-    Used by menus: a player must see which cabinets have a room before deciding to
-    route audio into one, and previewing must not change how the jukeboxes play.
+    Used by menus and by every path that asks "what would this cabinet play": a
+    player must see which cabinets have a room before deciding to route audio
+    into one, and previewing must not change how the jukeboxes play.
     :func:`cinema_room` is the playing path and still requires the feature enabled.
+
+    ``requested`` defaults to the cabinet's own ``cinema_mode``: a voice, a live
+    note and a pan destination all ask this, and all of them have to come out of
+    the shape the cabinet is set to. A cabinet set to ``off`` therefore previews
+    no room at all, and one set to ``custom`` previews exactly its own speakers.
     """
-    plan, _silent = room_plan(game, anchor, room_id=room_id, radius=radius)
+    if requested is None and room_id is not None:
+        requested = cabinet_mode(game, room_id)
+    plan, _silent = room_plan(game, anchor, room_id=room_id, radius=radius,
+                              requested=requested)
     return plan
 
 
@@ -1070,7 +1198,11 @@ def room_plan(game, anchor, *, requested=None, room_id=None, radius=None):
                             notes=[*scope_reasons, *room_reasons],
                             silent=True), []
         plan = _plan_from(placement, requested, reach)
-        room = renderer_for(anchor, plan.profile, specs=plan.specs, fill=plan.fill)
+        room = renderer_for(anchor, plan.profile, specs=plan.specs, fill=plan.fill,
+                            max_speakers=_budget_cap(game, room_id))
+        # The speakers this mode actually feeds, named on the plan so a voice
+        # and a live note play them too instead of every speaker the map has.
+        plan.fed = tuple(room.slots)
         placed = [(placed.spec.name, slot)
                   for slot, placed in placement.speakers.items()]
         fed = set(room.slots)
@@ -1082,7 +1214,11 @@ def room_plan(game, anchor, *, requested=None, room_id=None, radius=None):
                              report=room_reasons)
     if placement is not None:
         plan = _plan_from(placement, requested, reach)
-        room = renderer_for(anchor, plan.profile, specs=plan.specs, fill=plan.fill)
+        room = renderer_for(anchor, plan.profile, specs=plan.specs, fill=plan.fill,
+                            max_speakers=_budget_cap(game, room_id))
+        # The speakers this mode actually feeds, named on the plan so a voice
+        # and a live note play them too instead of every speaker the map has.
+        plan.fed = tuple(room.slots)
         placed = [(placed.spec.name, slot)
                   for slot, placed in placement.speakers.items()]
         fed = set(room.slots)
@@ -1093,7 +1229,9 @@ def room_plan(game, anchor, *, requested=None, room_id=None, radius=None):
         # crossover, a tone and a delay that nothing on this map makes.
         plan = _ring_room(requested, reach,
                           _ring_notes(scope_reasons, room_reasons, candidates))
-        room = renderer_for(anchor, plan.profile, specs=None, fill=True)
+        room = renderer_for(anchor, plan.profile, specs=None, fill=True,
+                            max_speakers=_budget_cap(game, room_id))
+        plan.fed = tuple(room.slots)
         placed = [(spec.name, spec.slot) for spec in
                   (coerce_spec(raw) for raw in candidates) if spec is not None]
         fed = set()
