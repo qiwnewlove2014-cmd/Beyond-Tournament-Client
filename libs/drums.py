@@ -146,6 +146,45 @@ class DrumAudio:
             ("Cowbell", "drums/DrumBy (Mr. Ling, Jik Jik)/Cabell lum.ogg", 0.24, 6),
             ("Rim", "drums/DrumBy (Mr. Ling, Jik Jik)/rim.ogg", 0.31, 6),
         ),
+        # The Hong Kong set: a whole acoustic kit recorded as one folder, kept
+        # under the name its files arrived in ("HongkongDrum Set") rather than
+        # renamed to the default kit's scheme. It is a full kit -- all 18 pads
+        # sound -- and its two snares are the two hits of the set: snare1 on the
+        # snare pad, snare2 on pad 2 (the diw kit's own answer to a second snare),
+        # and the dedicated rim on pad 17.
+        #
+        # Every scale here is measured, not guessed: it puts the pad's attack at
+        # full scale at ``volume 300`` (gain 3.0) -- the file's own true peak,
+        # plus the scale, plus 9.54 dB -- and never above it, so one hit cannot
+        # clip. That is the default kit's own convention (its pads land between
+        # -2.5 and +2.2 dBTP), and it is where this set belongs: it first
+        # shipped 2.9 dB lower (every pad peaking at -3 dBTP) and the owner
+        # heard the whole kit as "a little quiet". Measured after storing these
+        # values: -0.27 to -0.10 dBTP, every pad still under full scale.
+        #
+        # Loudness is NOT the measure here: ``ride.ogg`` sits at -49 LUFS beside
+        # a -11.5 dBTP peak because its tail is a long wash, so an
+        # integrated-loudness scale would have asked for 11 and clipped by 9 dB.
+        "hongkong": (
+            ("Kick", "drums/HongkongDrum Set/kick.ogg", 0.69, 6),
+            ("Snare", "drums/HongkongDrum Set/snare1.ogg", 0.71, 6),
+            ("Rim (Snare 2)", "drums/HongkongDrum Set/snare2.ogg", 0.41, 6),
+            ("Closed Hi-Hat", "drums/HongkongDrum Set/hat c.ogg", 2.56, 8),
+            ("Open Hi-Hat", "drums/HongkongDrum Set/h ope.ogg", 1.59, 4),
+            ("Foot Hi-Hat", "drums/HongkongDrum Set/hat f.ogg", 7.95, 8),
+            ("Tom 1", "drums/HongkongDrum Set/tom1.ogg", 0.44, 6),
+            ("Tom 2", "drums/HongkongDrum Set/tom2.ogg", 0.56, 6),
+            ("Tom 3", "drums/HongkongDrum Set/tom3.ogg", 0.82, 6),
+            ("Tom 4", "drums/HongkongDrum Set/tom4.ogg", 0.61, 6),
+            ("Crash Left", "drums/HongkongDrum Set/crash1.ogg", 1.60, 3),
+            ("Crash Right", "drums/HongkongDrum Set/crash2.ogg", 1.40, 3),
+            ("China", "drums/HongkongDrum Set/chana.ogg", 1.80, 3),
+            ("Splash", "drums/HongkongDrum Set/sp.ogg", 1.83, 3),
+            ("Ride", "drums/HongkongDrum Set/ride.ogg", 1.23, 4),
+            ("Ride Bell", "drums/HongkongDrum Set/bell.ogg", 1.22, 4),
+            ("Cowbell", "drums/HongkongDrum Set/cabell.ogg", 1.06, 6),
+            ("Rim", "drums/HongkongDrum Set/rimm.ogg", 1.36, 6),
+        ),
     }
     DEFAULT_KIT = "default"
     # Backwards-compatible alias: the canonical 17-pad definition. Always reflects the

@@ -521,5 +521,97 @@ class DrumMidiCoverageTests(unittest.TestCase):
                     f"kit {kit_name!r} does not define")
 
 
+class HongKongKitTests(unittest.TestCase):
+    """The Hong Kong set: a whole acoustic kit that arrived as one folder.
+
+    Its 18 files were recorded with their own names (``kick.ogg``, ``h ope.ogg``,
+    ``cabell.ogg``) rather than the default kit's ``Drums.hit.<Name>.ogg`` scheme,
+    so nothing in the folder says which pad a file belongs to -- the registry
+    does. A pad whose path is wrong is a piece of the kit that is silent with no
+    error anywhere, and a file no pad names is a piece nobody can hit, which is
+    why both halves are checked here rather than just the file names.
+
+    ``ride.ogg`` is also why the scales are peak-measured: it measures -49 LUFS
+    beside a -11.5 dBTP peak (a long wash tail), so a loudness-derived scale
+    would have asked for 11 and clipped by 9 dB.
+    """
+
+    KIT = "hongkong"
+
+    def kit_root(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+    def kit_folder(self):
+        return os.path.join(self.kit_root(), "data", "drums", "HongkongDrum Set")
+
+    def test_the_kit_is_a_complete_drum_kit(self):
+        pads = DrumAudio.KITS[self.KIT]
+        self.assertEqual(len(pads), len(DrumAudio.PAD_DEFS))
+        missing = [index for index, pad in enumerate(pads) if pad[1] is None]
+        self.assertEqual(missing, [],
+                         "this set ships every piece, so no pad may be silent")
+        self.assertEqual(
+            DrumAudio.KITS[self.KIT][2][0], "Rim (Snare 2)",
+            "the set's second snare is what pad 2 plays")
+        self.assertEqual(DrumAudio.KITS[self.KIT][17][0], "Rim")
+
+    def test_every_pad_points_at_a_real_file(self):
+        root = self.kit_root()
+        for index, (name, path, scale, polyphony) in enumerate(
+                DrumAudio.KITS[self.KIT]):
+            full = os.path.join(root, "data", path.replace("/", os.sep))
+            self.assertTrue(os.path.exists(full), f"pad {index} ({name}): {full}")
+            self.assertGreater(scale, 0.0, f"pad {index} would play silence")
+            self.assertGreaterEqual(polyphony, 1)
+
+    def test_no_single_hit_reaches_full_scale_and_none_is_left_quiet(self):
+        """The set sits at full scale on purpose, and never past it.
+
+        It first shipped 2.9 dB lower and the owner heard the whole kit as "a
+        little quiet"; the raise stops where a single hit stops, because the
+        price of going further is clipping -- which is distortion, not volume.
+        The engine plays a hit at gain 3.0 (`volume 300`), so the promise is
+        the file's peak plus its scale plus 9.54 dB, and a pad below the
+        ceiling by a decibel is the quiet piece report all over again.
+
+        The floor is -2 dB rather than 0 because this reads the *sample* peak:
+        the open hi-hat's attack overshoots its samples by 1.45 dB once the
+        signal is reconstructed (`ffmpeg`'s true peak, which is what the
+        scales were set from), and oversampled peaks are the higher of the
+        two. A whole set left 3 dB quiet -- the state this was reported as --
+        fails the floor, which is what it is for.
+        """
+        import audioop
+        import math
+        from libs.safe_vorbis import load_vorbis_pcm
+
+        root = self.kit_root()
+        for index, (name, path, scale, _polyphony) in enumerate(
+                DrumAudio.KITS[self.KIT]):
+            relative = os.path.relpath(
+                os.path.join(root, "data", path.replace("/", os.sep)))
+            pcm = load_vorbis_pcm(relative, max_pcm_bytes=32 * 1024 * 1024)
+            peak = audioop.max(pcm.buffer, 2) / 32768.0
+            hit_db = 20 * math.log10(peak) + 20 * math.log10(scale) + 9.542
+            self.assertLessEqual(
+                hit_db, 0.0,
+                f"pad {index} ({name}) peaks at {hit_db:+.2f} dBFS at volume "
+                "300: one hit is already clipping")
+            self.assertGreater(
+                hit_db, -2.0,
+                f"pad {index} ({name}) sits {hit_db:+.2f} dBFS, well under the "
+                "ceiling the rest of the set was raised to")
+
+    def test_the_folder_holds_no_file_no_pad_plays(self):
+        named = {os.path.basename(path)
+                 for _, path, _, _ in DrumAudio.KITS[self.KIT]}
+        on_disk = {name for name in os.listdir(self.kit_folder())
+                   if name.lower().endswith(".ogg")}
+        self.assertEqual(sorted(on_disk - named), [],
+                         "a sample in the kit folder that no pad names is a "
+                         "piece of the set nobody can hit")
+        self.assertEqual(sorted(named - on_disk), [])
+
+
 if __name__ == "__main__":
     unittest.main()
