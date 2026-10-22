@@ -250,24 +250,41 @@ class SpeechKeyLine:
         self.transposer = ChromaticTransposer(channels=channels)
         self.transposer.set_semitones(
             speech_key_semitones() if semitones is None else semitones)
+        # One press is fed by the capture thread and released by the game loop,
+        # so TWO threads enter one line: a frame shaped in VoiceChatRecord.run
+        # while voice_chat_finish2 flushes the same object. Shape's trim moves
+        # the read window, and landing between the flush's ensure and its read
+        # left the read stepping past the stretched stream -- the crash report
+        # of 2026-10-22 (index 3941 of 3941, transpose._read from flush). The
+        # lock makes the two callers one owner at a time; what it covers is one
+        # 20 ms frame of FFT, not a wait on anything outside this object.
+        self._lock = threading.Lock()
 
     @property
     def semitones(self):
-        return self.transposer.semitones
+        with self._lock:
+            return self.transposer.semitones
+
+    def set_semitones(self, semitones):
+        """Move the dial, in semitones: the line glides there as a song does."""
+        with self._lock:
+            return self.transposer.set_semitones(semitones)
 
     def shape(self, pcm):
         """Transpose one 20 ms frame; the same number of frames comes back."""
-        return self.transposer.process(bytes(pcm))
+        with self._lock:
+            return self.transposer.process(bytes(pcm))
 
     def tail_frames(self, frame_bytes=VOICE_FRAME_BYTES):
         """The look-ahead as whole frames; a tail that is not one is not a frame."""
         step = max(2, int(frame_bytes))
-        tail = self.transposer.flush()
-        frames = []
-        while len(tail) >= step:
-            frames.append(tail[:step])
-            tail = tail[step:]
-        return frames
+        with self._lock:
+            tail = self.transposer.flush()
+            frames = []
+            while len(tail) >= step:
+                frames.append(tail[:step])
+                tail = tail[step:]
+            return frames
 
 # How many 20 ms frames a CINEMA ROOM may be handed as a repeat of the last one
 # it played. The PA can let a slot go by: it has a jitter reserve, and the
@@ -1500,8 +1517,9 @@ class VoiceChatRecord(threading.Thread):
             self._speech_line = line
         elif key != line.semitones:
             # The dial moved mid-sentence: the line glides into the new key
-            # the way the song's does, instead of jumping.
-            line.transposer.set_semitones(key)
+            # the way the song's does, instead of jumping. Through the line's
+            # own lock -- the release may be flushing this object right now.
+            line.set_semitones(key)
         return line
 
     def run(self):

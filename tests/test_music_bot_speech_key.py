@@ -136,6 +136,69 @@ class SpeechKeyLineTests(unittest.TestCase):
                                delta=6.0)
 
 
+# ------------------------------------------------- the two threads on it
+
+
+class SpeechKeyLineThreadTests(unittest.TestCase):
+    """One press has two owners: the capture thread feeds the line, the release flushes it.
+
+    ``VoiceChatRecord.run`` shapes frames on the capture thread while
+    ``voice_chat_finish2`` flushes the same line on the game loop. Shaping
+    trims what the read head has already passed, and a trim landing between
+    the flush's ensure and its read walked the read off the end of the
+    stretched stream -- the crash report of 2026-10-22 (index 3941 of 3941,
+    ``transpose._read`` from ``flush``). The line's own lock is what keeps the
+    two callers from being inside it together.
+    """
+
+    def test_the_capture_thread_and_the_release_never_enter_the_line_together(self):
+        line = SpeechKeyLine(semitones=3)
+        pcm = to_pcm(tone(1.0))
+        chunks = [pcm[i:i + FRAME] for i in range(0, len(pcm) - FRAME + 1, FRAME)]
+        state = threading.Lock()
+        overlaps, shaped = [], [0]
+
+        def watched(method):
+            """Records a call that found the line already in use."""
+
+            def wrapper(*args, **kwargs):
+                if not state.acquire(blocking=False):
+                    overlaps.append(method.__name__)
+                    return method(*args, **kwargs)
+                try:
+                    return method(*args, **kwargs)
+                finally:
+                    state.release()
+
+            return wrapper
+
+        transposer = line.transposer
+        transposer.process = watched(transposer.process)
+        transposer.flush = watched(transposer.flush)
+
+        stop = threading.Event()
+
+        def capture():
+            for chunk in chunks:
+                if stop.is_set():
+                    return
+                line.shape(chunk)
+                shaped[0] += 1
+
+        worker = threading.Thread(target=capture, daemon=True)
+        worker.start()
+        try:
+            for _ in range(120):
+                line.shape(chunks[0])
+                line.tail_frames(FRAME)
+        finally:
+            stop.set()
+            worker.join(5)
+
+        self.assertEqual(overlaps, [], "two threads were inside the line at once")
+        self.assertGreater(shaped[0], 0, "the capture thread never ran")
+
+
 # -------------------------------------------------------- which press is tuned
 
 
