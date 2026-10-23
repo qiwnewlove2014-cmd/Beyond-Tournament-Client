@@ -819,7 +819,7 @@ class MusicBotMenus:
         gp.add_substate(m)
 
     def _open_settings_menu(self):
-        """Music Bot settings: output device first, then reverb, crossfade, EQ, key, speech key, muffle.
+        """Music Bot settings: output device first, then reverb, crossfade, EQ, key, speech key, auto-tune, retune speed, auto-tune scale, muffle.
 
                     The output line leads because it is what a player comes here to change;
                     the underwater muffle sits last (just above Back) so the two are never
@@ -890,11 +890,44 @@ class MusicBotMenus:
             self._open_transpose_menu()
 
         def get_speech_transpose_label():
+            if getattr(self._bot, "autotune_enabled", False):
+                # Not a dead line: the dial really has nothing to move while
+                # the grid is chromatic, so the row says who is in charge
+                # rather than letting a key press do nothing quietly.
+                return "Speech Key: replaced by Auto-Tune"
             return f"Speech Key: {self._bot.speech_transpose_label()}"
 
         def go_speech_transpose():
+            if getattr(self._bot, "autotune_enabled", False):
+                speak("Auto-Tune puts the voice on every note by itself, so "
+                      "Speech Key has nothing to move. Turn Auto-Tune off first.")
+                return
             gp.pop_last_substate()
             self._open_speech_transpose_menu()
+
+        def get_autotune_label():
+            return f"Auto-Tune: {self._bot.autotune_label()}"
+
+        def toggle_autotune():
+            enabled = self._bot.toggle_autotune()
+            speak("Auto-Tune on. The voice is snapped to the nearest note as "
+                  "you broadcast it; Retune Speed sets how fast it slides."
+                  if enabled else "Auto-Tune off. Your own voice.")
+            m.speak_current_item()
+
+        def get_autotune_speed_label():
+            return f"Retune Speed: {self._bot.autotune_speed_label()}"
+
+        def go_autotune_speed():
+            gp.pop_last_substate()
+            self._open_autotune_speed_menu()
+
+        def get_autotune_scale_label():
+            return f"Auto-Tune Scale: {self._bot.autotune_scale_label()}"
+
+        def go_autotune_scale():
+            gp.pop_last_substate()
+            self._open_autotune_scale_menu()
 
         def get_output_label():
             return f"Music Output Device: {self._bot.output_device_label()}"
@@ -911,6 +944,9 @@ class MusicBotMenus:
             ("eq", get_eq_label, go_eq),
             ("song_key", get_transpose_label, go_transpose),
             ("speech_key", get_speech_transpose_label, go_speech_transpose),
+            ("auto_tune", get_autotune_label, toggle_autotune),
+            ("auto_tune", get_autotune_speed_label, go_autotune_speed),
+            ("auto_tune", get_autotune_scale_label, go_autotune_scale),
             ("muffle", get_water_label, toggle_water),
             (None, "Back", go_back),
         ]))
@@ -1080,6 +1116,154 @@ class MusicBotMenus:
             ("Original Voice", reset),
             ("Back", go_back),
         ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_autotune_speed_menu(self):
+        """How fast Auto-Tune walks the voice to a note.
+
+        One list, fastest first: Instant is the effect (the voice snaps, and a
+        slide between two notes is heard as a step), Very slow is a correction
+        nobody notices until the note lands. Normal is the speed the project's
+        own key changes move at, which is why it is the default. The current
+        one is marked, as the equalizer profiles are.
+        """
+        from .. import menu as menu_mod, menus
+        from . import autotune
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def pick(index):
+            def apply():
+                self._bot.set_autotune_speed(index)
+                speak(f"Retune speed: {self._bot.autotune_speed_label().lower()}.")
+                m.speak_current_item()
+            return apply
+
+        items = []
+        for index, (label, _glide) in enumerate(autotune.SPEEDS):
+            current = (index == getattr(self._bot, "autotune_speed",
+                                        autotune.DEFAULT_SPEED))
+            items.append((f"{label} (active)" if current else label,
+                          pick(index)))
+        items.append(("Back", go_back))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Retune Speed: {self._bot.autotune_speed_label()}",
+            parrent=gp,
+        )
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_autotune_scale_menu(self):
+        """Which notes the voice may be moved to: a scale, and its key.
+
+        The Settings list gains ONE line for all of this (`Auto-Tune Scale:`),
+        because four lines of Auto-Tune in that list would bury the rest of the
+        menu. The key is not part of the list here -- it is one line that opens
+        its own twelve, and only while the scale has a key at all: a chromatic
+        grid has a note on every semitone, so `Chromatic` names no key and the
+        Root Note line is absent rather than present and dead. Choosing a scale
+        rebuilds this list (the row comes or goes with the choice), so the key
+        is there to press on the next key press instead of being discovered
+        only by reopening the menu.
+        """
+        from .. import menu as menu_mod, menus
+        from . import autotune
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def pick(mode_id, says):
+            def apply():
+                self._bot.set_autotune_mode(mode_id)
+                speak(f"Auto-tune scale: {self._bot.autotune_scale_label()}. "
+                      f"{says}.")
+                if autotune.is_chromatic(mode_id) == autotune.is_chromatic(mode):
+                    m.speak_current_item()
+                    return
+                # The key row comes and goes with the scale, so the list this
+                # press just changed is rebuilt: choosing Major lands the
+                # cursor on the new `Root Note:` line, and choosing Chromatic
+                # takes it away again rather than leaving a dead row behind.
+                gp.pop_last_substate()
+                self._open_autotune_scale_menu()
+            return apply
+
+        items = []
+        mode = getattr(self._bot, "autotune_mode", autotune.DEFAULT_MODE)
+        if not autotune.is_chromatic(mode):
+            def go_root():
+                gp.pop_last_substate()
+                self._open_autotune_root_menu()
+
+            root = getattr(self._bot, "autotune_root", autotune.DEFAULT_ROOT)
+            items.append((f"Root Note: {autotune.root_name(root)}", go_root))
+        for mode_id, name, classes in autotune.SCALES:
+            if not classes:
+                says = ("every semitone, so the voice is never moved more "
+                        "than half a semitone")
+            elif len(classes) == 5:
+                says = ("the five notes of the scale, so the widest move is "
+                        "a semitone and a half")
+            else:
+                says = ("the seven notes of the key, so a note outside the "
+                        "key is brought into it")
+            current = mode_id == autotune.clamp_mode(mode)
+            items.append((f"{name} (active)" if current else name,
+                          pick(mode_id, says)))
+        items.append(("Back", go_back))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Auto-Tune Scale: {self._bot.autotune_scale_label()}",
+            parrent=gp,
+        )
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_autotune_root_menu(self):
+        """The twelve keys, in note order, the current one marked."""
+        from .. import menu as menu_mod, menus
+        from . import autotune
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_autotune_scale_menu()
+
+        def pick(index):
+            def apply():
+                self._bot.set_autotune_root(index)
+                speak(f"Key: {autotune.root_name(index)}.")
+                m.speak_current_item()
+            return apply
+
+        current = autotune.clamp_root(getattr(self._bot, "autotune_root",
+                                              autotune.DEFAULT_ROOT))
+        items = []
+        for index, name in enumerate(autotune.ROOT_NAMES):
+            items.append((f"{name} (active)" if index == current else name,
+                          pick(index)))
+        items.append(("Back", go_back))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Auto-Tune Root: {autotune.root_name(current)}",
+            parrent=gp,
+        )
+        m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
 

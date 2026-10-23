@@ -489,6 +489,12 @@ class MenuTests(unittest.TestCase):
         self.bot.speech_transpose_semitones = 2
         self.bot.transpose_label.return_value = "2 semitones up"
         self.bot.speech_transpose_label.return_value = "Original key"
+        # The settings menu now also carries Auto-Tune and its Retune Speed; a
+        # bot with it off is the default, and what the speech key's own line
+        # says depends on that (see test_music_bot_autotune for the on case).
+        self.bot.autotune_enabled = False
+        self.bot.autotune_label.return_value = "OFF"
+        self.bot.autotune_speed_label.return_value = "Normal"
         self.bot.output_device_label.return_value = "Same as the game"
         self.bot._eq_profile_label.return_value = "Normal (Flat)"
         self.bot.water_muffle_enabled = True

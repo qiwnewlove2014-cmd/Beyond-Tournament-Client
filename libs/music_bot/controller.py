@@ -36,6 +36,7 @@ from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
 from ..audio_health import probe as audio_health
+from . import autotune
 from . import output_device
 from . import song_requests
 from . import subtitles
@@ -203,6 +204,19 @@ class MapMusicBot:
         except (TypeError, ValueError):
             speech_key = 0
         self.speech_transpose_semitones = max(-12, min(12, speech_key))
+        # AUTO-TUNE (Music Bot Settings -> Auto-Tune): the same line, tuned per
+        # note instead of by one interval (libs/music_bot/autotune.py). Its own
+        # switch and its own Retune Speed, both persisted; the capture thread
+        # reads them, so neither reaches the song nor the speech key.
+        self.autotune_enabled = bool(options.get("music_bot_autotune", False))
+        self.autotune_speed = autotune.clamp_speed(
+            options.get("music_bot_autotune_speed", autotune.DEFAULT_SPEED))
+        # Which notes it may move the voice to: a scale in a key. Chromatic --
+        # every semitone -- is the default, and the one mode that has no key.
+        self.autotune_mode = autotune.clamp_mode(
+            options.get("music_bot_autotune_mode", autotune.DEFAULT_MODE))
+        self.autotune_root = autotune.clamp_root(
+            options.get("music_bot_autotune_root", autotune.DEFAULT_ROOT))
 
         # A shuffled Favorites feed. It preserves the user's current broadcast
         # routing and never changes saved playlists.
@@ -1453,6 +1467,15 @@ class MapMusicBot:
     def _open_speech_transpose_menu(self):
         return self._menus()._open_speech_transpose_menu()
 
+    def _open_autotune_speed_menu(self):
+        return self._menus()._open_autotune_speed_menu()
+
+    def _open_autotune_scale_menu(self):
+        return self._menus()._open_autotune_scale_menu()
+
+    def _open_autotune_root_menu(self):
+        return self._menus()._open_autotune_root_menu()
+
     def _open_subtitle_language_menu(self):
         return self._menus()._open_subtitle_language_menu()
 
@@ -1466,6 +1489,58 @@ class MapMusicBot:
     def speech_transpose_label(self):
         """The key this bot's own broadcast voice is in."""
         return _key_label(getattr(self, "speech_transpose_semitones", 0))
+
+    def autotune_label(self):
+        """Whether this bot's broadcast voice is snapped to the notes."""
+        return "ON" if getattr(self, "autotune_enabled", False) else "OFF"
+
+    def autotune_speed_label(self):
+        """How fast Auto-Tune moves the voice to a note."""
+        return autotune.speed_label(getattr(self, "autotune_speed",
+                                            autotune.DEFAULT_SPEED))
+
+    def toggle_autotune(self):
+        """Turn Auto-Tune on or off for the next press.
+
+        The switch is read when a press starts (`libs/voice_chat`), so a voice
+        already going out keeps the line it was built with instead of losing
+        the look-ahead it is holding. While it is on the Speech Key dial has
+        nothing to move: a chromatic grid already has a note every semitone,
+        so shifting the whole grid would land the voice on the same notes.
+        """
+        self.autotune_enabled = not getattr(self, "autotune_enabled", False)
+        options.set("music_bot_autotune", self.autotune_enabled)
+        return self.autotune_enabled
+
+    def set_autotune_speed(self, index):
+        """Choose a Retune Speed; the next frame glides at the new rate."""
+        self.autotune_speed = autotune.clamp_speed(index)
+        options.set("music_bot_autotune_speed", self.autotune_speed)
+        return self.autotune_speed
+
+    def autotune_scale_label(self):
+        """'Chromatic', or 'C Major' -- the scale and its key in one line."""
+        return autotune.scale_label(getattr(self, "autotune_mode",
+                                            autotune.DEFAULT_MODE),
+                                    getattr(self, "autotune_root",
+                                            autotune.DEFAULT_ROOT))
+
+    def set_autotune_mode(self, mode):
+        """Choose the scale the voice is snapped to (a `SCALES` id).
+
+        A seven-note scale moves a voice by at most a semitone and a five-note
+        one by a semitone and a half -- the widest gap it has -- where the
+        chromatic grid never moves it more than half of one.
+        """
+        self.autotune_mode = autotune.clamp_mode(mode)
+        options.set("music_bot_autotune_mode", self.autotune_mode)
+        return self.autotune_mode
+
+    def set_autotune_root(self, root):
+        """Choose the key of that scale (0..11, C..B)."""
+        self.autotune_root = autotune.clamp_root(root)
+        options.set("music_bot_autotune_root", self.autotune_root)
+        return self.autotune_root
 
     def set_speech_transpose(self, semitones):
         """Move the SPEECH key, leaving the song's where its own dial put it.

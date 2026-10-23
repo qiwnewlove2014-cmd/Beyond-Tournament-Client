@@ -231,6 +231,37 @@ class TransposerTests(unittest.TestCase):
         quiet = float(np.abs(np.diff(still[SR:, 0])).max())
         self.assertLess(float(np.abs(np.diff(out[SR:, 0])).max()), quiet * 2.0)
 
+    def test_the_antialias_filter_holds_across_its_own_line(self):
+        """The filter is a delay, so switching it under a voice is a click.
+
+        It is engaged above 1.02 (about 34 cents up). A tuner's correction
+        dances around that line every time a note's vibrato moves, so the
+        filter used to come and go at the vibrato rate and each switch stepped
+        the audio by its 31 samples: measured as clicks under a slide. It is
+        dropped only below 1.016 (FILTER_HYSTERESIS), so 31 cents -- under the
+        engage line, over the drop line -- keeps it.
+        """
+        shifter = ChromaticTransposer(channels=2)
+        shifter.glide = 1.0                 # arrive at each target at once
+        pcm = to_pcm(tone(1.0, freq=220.0))
+        states = []
+
+        def drive(index, sh):
+            # 36 cents up for three frames engages it (the ratio has to settle
+            # there first); 31 is between the two lines; 20 is under both and
+            # lets it go.
+            if index < 3:
+                sh.set_pitch_offset(0.36)
+            else:
+                sh.set_pitch_offset(0.31 if index < 30 else 0.20)
+            states.append(sh._fir is not None)
+
+        play(shifter, pcm, per_frame=drive)
+        self.assertFalse(any(states[:2]), "the filter came on under the song's own key")
+        self.assertTrue(all(states[2:29]),
+                        "the filter flapped around its engage line")
+        self.assertFalse(states[-1], "the filter stayed on below its drop line")
+
     def test_a_wide_voice_keeps_its_width(self):
         """A voice's width is not the sum's business, so the key must not take it."""
         signal = wide_voice()

@@ -130,6 +130,17 @@ class ChromaticTransposer:
     MIN_HOP = 64         # the synthesis hop follows the ratio, never below this
     TAPS = 63            # long enough that the passband stays flat
     FILTER_FROM = 1.02   # below this the read is an interpolation, not a decimation
+    # The anti-aliasing low-pass is a step in the audio, not only a filter: it
+    # is linear phase, so everything through it arrives half its length late
+    # (31 samples), and switching it on jumps the audio by that much. A tuner's
+    # ratio crosses FILTER_FROM every time a note's vibrato does, which is how
+    # a crackle got under the slide. Two rules follow: the filter is dropped a
+    # little BELOW the ratio that engaged it, so it cannot flap on and off
+    # around one line (measured: 7 clicks in 4 s on a vibrato note without it,
+    # 0 with it), and a line whose ratio moves every frame pins it instead
+    # (see `pin_lowpass`) rather than switching it under a voice.
+    FILTER_HYSTERESIS = 0.004  # the ratio must fall this far below the line to drop
+    FILTER_RETUNE = 0.01       # rebuild the cutoff only when the ratio moved this far
     GLIDE = 0.55         # per-frame approach to a new ratio (~5 frames to settle)
     SNAP = 0.002         # stop gliding this close: a ratio this small is inaudible
     # The level the overlap-add loses on everything that is not a sustained
@@ -153,6 +164,10 @@ class ChromaticTransposer:
         self._semitones = 0
         self._target = 1.0
         self._ratio = 1.0
+        # How fast the ratio walks to a new target, once per frame. The dial's
+        # own value is the class constant; Auto-Tune moves it (a "Retune
+        # Speed" of Instant sets it to 1.0, which arrives in one frame).
+        self.glide = self.GLIDE
         # True once the line is back at the song's own key: the synthesis phase
         # is then taken from the analysis every frame, so the output is the
         # song itself rather than a phase-rotated copy of it (see _emit_hop).
@@ -181,6 +196,8 @@ class ChromaticTransposer:
         self._q = 0.0
         self._fir = None
         self._fir_ratio = 0.0
+        #: The ratio a caller pinned the filter at, or None (see pin_lowpass).
+        self._pinned = None
         # The level match's running gain and the power of the hops it is
         # measuring (see _level_match).
         self._gain = 1.0
@@ -204,6 +221,38 @@ class ChromaticTransposer:
         self._target = float(2.0 ** (value / 12.0))
         return value
 
+    def set_pitch_offset(self, semitones):
+        """A continuous move, in semitones -- what a tuner asks for.
+
+        ``set_semitones`` is a dial: whole semitones, clamped to +/-12. A
+        tuner's correction is the distance between the note that was sung and
+        the note it belongs to, which is a fraction of a semitone and changes
+        every 20 ms, so this path keeps the fraction instead of rounding it
+        away. The ratio it sets is the dial's own ratio, so the line, its
+        glide, its delay and its tail are unchanged -- only the resolution is.
+        """
+        value = float(semitones)
+        value = max(-self.MAX_SEMITONES, min(self.MAX_SEMITONES, value))
+        self._semitones = value
+        self._target = float(2.0 ** (value / 12.0))
+        return value
+
+    def pin_lowpass(self, ratio=None):
+        """Hold the anti-aliasing filter on, at its widest, for this line's life.
+
+        A tuner's ratio moves every frame, so a filter that follows it is
+        switched and rebuilt under a voice that is already sounding -- and a
+        linear-phase low-pass is a delay, so every switch is a step in the
+        audio. Pinned, it is engaged ONCE, into the line's opening silence, at
+        the largest ratio the caller will ask for, and never touched again: the
+        song's dial keeps the filter that follows its key, a tuner does not need
+        one. `ratio` is that largest ratio.
+        """
+        value = self.FILTER_FROM if ratio is None else float(ratio)
+        self._pinned = min(2.0, max(self.FILTER_FROM, value))
+        self._make_lowpass(self._pinned)
+        return self._pinned
+
     def reset(self):
         """Forget the stream: the next frame is a fresh song."""
         self._in = np.zeros((0, self.channels), dtype=np.float32)
@@ -222,10 +271,14 @@ class ChromaticTransposer:
         self._q = 0.0
         self._fir = None
         self._fir_ratio = 0.0
+        if self._pinned:
+            # A pinned line re-engages its filter on the silence it resets to.
+            self._make_lowpass(self._pinned)
         self._gain = 1.0
         self._out_power = 0.0
         self._out_samples = 0
         self.padded_samples = 0
+        self.glide = self.GLIDE
 
     # ------------------------------------------------------------- one frame
     def process(self, pcm):
@@ -298,18 +351,23 @@ class ChromaticTransposer:
             self._ratio = target
         else:
             settled = False
-            self._ratio += (target - self._ratio) * self.GLIDE
+            self._ratio += (target - self._ratio) * self.glide
         self._identity = settled and not self._semitones
         # The low-pass is only touched once the bend has arrived: replacing its
         # carry-over in the middle of a bend is a step at a frame boundary.
         if not settled:
             return
-        if self._ratio > self.FILTER_FROM:
-            if self._fir is None or abs(self._ratio - self._fir_ratio) > 0.01:
+        if self._pinned:
+            # Engaged once, at construction, and never switched under a voice.
+            return
+        if self._fir is None:
+            if self._ratio > self.FILTER_FROM:
                 self._make_lowpass(self._ratio)
-        elif self._fir is not None:
+        elif self._ratio < self.FILTER_FROM - self.FILTER_HYSTERESIS:
             self._fir = None
             self._fir_ratio = 0.0
+        elif abs(self._ratio - self._fir_ratio) > self.FILTER_RETUNE:
+            self._make_lowpass(self._ratio)
 
     def _append(self, block):
         if len(self._in):

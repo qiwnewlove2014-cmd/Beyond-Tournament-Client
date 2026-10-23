@@ -220,6 +220,20 @@ PA_TIMELINE_MAX_CONCEAL = 5
 # broadcast's key, not the player's.
 SPEECH_KEY_OPTION = "music_bot_speech_transpose"
 
+# AUTO-TUNE (Music Bot Settings -> Auto-Tune). The same line, the same DSP;
+# what changes is who chooses the interval: a dial, or a detector reading the
+# singer's own pitch every frame (libs/music_bot/autotune.py). It replaces the
+# speech key while it is on -- a chromatic grid has a note every semitone, so
+# shifting the whole grid by the key dial's interval would move the voice to
+# exactly the same notes. The menu says so instead of letting the dial do
+# nothing quietly.
+AUTOTUNE_OPTION = "music_bot_autotune"
+AUTOTUNE_SPEED_OPTION = "music_bot_autotune_speed"
+# Which notes the voice may be moved to: a scale id and a key (`autotune.SCALES`
+# is the catalogue). Chromatic is the default, and the only mode with no key.
+AUTOTUNE_MODE_OPTION = "music_bot_autotune_mode"
+AUTOTUNE_ROOT_OPTION = "music_bot_autotune_root"
+
 
 def speech_key_semitones():
     """The Music Bot's speech key in semitones, clamped the way the song's is."""
@@ -230,6 +244,27 @@ def speech_key_semitones():
     from .music_bot.transpose import ChromaticTransposer
     return max(-ChromaticTransposer.MAX_SEMITONES,
                min(ChromaticTransposer.MAX_SEMITONES, value))
+
+
+def autotune_enabled():
+    """Whether the Music Bot's Auto-Tune should shape this press's voice."""
+    return bool(options.get(AUTOTUNE_OPTION, False))
+
+
+def autotune_speed_index():
+    """The Retune Speed the menu last chose, clamped to a value that exists."""
+    from .music_bot import autotune
+    return autotune.clamp_speed(
+        options.get(AUTOTUNE_SPEED_OPTION, autotune.DEFAULT_SPEED))
+
+
+def autotune_scale():
+    """The scale and the key the menu last chose, as ``(mode, root)``."""
+    from .music_bot import autotune
+    return (autotune.clamp_mode(options.get(AUTOTUNE_MODE_OPTION,
+                                           autotune.DEFAULT_MODE)),
+            autotune.clamp_root(options.get(AUTOTUNE_ROOT_OPTION,
+                                            autotune.DEFAULT_ROOT)))
 
 
 class SpeechKeyLine:
@@ -273,6 +308,133 @@ class SpeechKeyLine:
     def shape(self, pcm):
         """Transpose one 20 ms frame; the same number of frames comes back."""
         with self._lock:
+            return self.transposer.process(bytes(pcm))
+
+    def tail_frames(self, frame_bytes=VOICE_FRAME_BYTES):
+        """The look-ahead as whole frames; a tail that is not one is not a frame."""
+        step = max(2, int(frame_bytes))
+        with self._lock:
+            tail = self.transposer.flush()
+            frames = []
+            while len(tail) >= step:
+                frames.append(tail[:step])
+                tail = tail[step:]
+            return frames
+
+
+class AutoTuneLine:
+    """The microphone's Auto-Tune line: a tuner steering the song's shifter.
+
+    Same object shape and the same promises as `SpeechKeyLine` -- one frame in,
+    one frame out, a `tail_frames` that hands back the look-ahead on release,
+    and one lock because the capture thread and the release share it -- because
+    the same two places in `VoiceChatRecord` drive either line. What differs is
+    where the interval comes from: `libs/music_bot/autotune.AutoTuner` reads the
+    frame being shaped and answers the distance to the nearest note, so the
+    line follows the singer instead of holding one key.
+
+    **The detector listens to the audio the read head is reading, not to the
+    newest samples.** The ratio a frame decides is applied to whatever the line
+    writes out now, which is the audio from `delay_samples()` ago; detecting on
+    the newest frame instead tunes a note by the pitch of a note that has not
+    been played yet. It is invisible on a held note and wrong on a slide --
+    measured 400 cents/second, 38-48 cents flat -- so the line keeps the
+    press's own recent samples and hands the tuner the 60 ms that ended one
+    look-ahead ago, as one contiguous slice (`AutoTuner.detect`). That window
+    costs no latency: the delay is longer than the window. What it DOES cost is
+    that look-ahead, on a broadcast that would otherwise be untouched -- the
+    speech key's own tenth of a second.
+    """
+
+    def __init__(self, speed=None):
+        import numpy as np
+        from .music_bot import autotune
+        from .music_bot.transpose import ChromaticTransposer
+        self.tuner = autotune.AutoTuner()
+        self.transposer = ChromaticTransposer(channels=1)
+        # The anti-aliasing low-pass is pinned at the widest interval a scale
+        # can ask for, engaged here into the line's opening silence. A filter
+        # that follows a ratio which moves every frame is switched and rebuilt
+        # under a sounding voice, and a linear-phase filter switched under a
+        # voice is a step in it -- measured as a crackle under a slide.
+        self.transposer.pin_lowpass(2.0 ** (autotune.MAX_PULL / 12.0))
+        self._speed = (autotune.DEFAULT_SPEED if speed is None
+                       else autotune.clamp_speed(speed))
+        self.transposer.glide = autotune.speed_glide(self._speed)
+        self._scale = (self.tuner.mode, self.tuner.root)
+        self._lock = threading.Lock()
+        # The press's recent samples, so the detector can be handed the audio
+        # one look-ahead old (see the class docstring). Sized for the line's
+        # own delay at the lowest ratio it can reach, plus a frame either side.
+        self._history = np.zeros((0,), dtype=np.float32)
+        self._frames = VOICE_FRAME_BYTES // 2
+        self._keep = (self.transposer.LOOKAHEAD * 2
+                      + (autotune.AutoTuner.WINDOW_FRAMES + 2) * self._frames)
+
+    @property
+    def speed(self):
+        with self._lock:
+            return self._speed
+
+    def set_speed(self, index):
+        """Move Retune Speed; the next frame glides at the new rate."""
+        from .music_bot import autotune
+        with self._lock:
+            self._speed = autotune.clamp_speed(index)
+            self.transposer.glide = autotune.speed_glide(self._speed)
+            return self._speed
+
+    def shape(self, pcm):
+        """Tune one 20 ms frame; the same number of frames comes back.
+
+        **The switch is read per frame, not once at the start of the press.**
+        Turning Auto-Tune off in the middle of a broadcast has to hand the
+        player their own voice back then and there, not when they next press
+        the key; so the line stops detecting and walks its ratio back to 1.0 at
+        the Retune Speed in force (a glide, never a cut), and the line stays
+        open until the release because it is holding the press's look-ahead.
+        Turning it back on resumes from the next frame -- the recent samples are
+        kept either way, so the detector still has the audio it needs.
+        """
+        import numpy as np
+        from .music_bot import autotune
+        with self._lock:
+            # Read the dial per frame, as the speech key's line does: a speed
+            # change lands on the sentence already being spoken.
+            speed = autotune.clamp_speed(
+                options.get(AUTOTUNE_SPEED_OPTION, autotune.DEFAULT_SPEED))
+            if speed != self._speed:
+                self._speed = speed
+                self.transposer.glide = autotune.speed_glide(speed)
+            # The scale and the key are read per frame too, so a key change
+            # lands on the sentence being spoken (a chromatic grid makes the
+            # key irrelevant, and `scale_label` is the only place that says so).
+            scale = autotune_scale()
+            if scale != self._scale:
+                self._scale = scale
+                self.tuner.set_scale(*scale)
+            samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+            self._history = np.concatenate((self._history, samples))
+            if self._history.size > self._keep:
+                self._history = self._history[-self._keep:]
+            if not autotune_enabled():
+                # Off (or turned off mid-sentence): stop deciding and glide the
+                # voice back to the interval it arrived with. The frames keep
+                # flowing through the line, so the delay is unchanged and the
+                # release still hands the look-ahead back.
+                self.transposer.set_pitch_offset(0.0)
+                return self.transposer.process(bytes(pcm))
+            # The audio reaching the read head right now, as ONE contiguous
+            # window: the detector is handed the slice itself, never frames to
+            # stack (`AutoTuner.track` says what stacking a sliding window
+            # did). Before the first look-ahead has been fed there is nothing
+            # to hear, and the output is still the line's opening silence.
+            end = self._history.size - self.transposer.delay_samples()
+            span = self.tuner.WINDOW_FRAMES * self._frames
+            offset = (self.tuner.detect(self._history[end - span:end])
+                      if end >= span else None)
+            if offset is not None:
+                self.transposer.set_pitch_offset(offset)
             return self.transposer.process(bytes(pcm))
 
     def tail_frames(self, frame_bytes=VOICE_FRAME_BYTES):
@@ -1496,21 +1658,40 @@ class VoiceChatRecord(threading.Thread):
     
 
     def _speech_line_for(self, mega):
-        """This press's key line, or None when the voice is not going to the PA.
+        """This press's line, or None when the voice is not going to the PA.
 
-        Only the broadcast leg is tuned (PA Test Mode, the megaphone weapon, or
+        Only the broadcast leg is shaped (PA Test Mode, the megaphone weapon, or
         a mic joined to the Music Bot's broadcast): proximity voice is left
-        alone, and a microphone whose key has never been moved has no line at
-        all, so its frames are byte-for-byte what they were. A line that is
-        already open stays open until the key is released even if the dial
-        goes back to the original key -- it holds the delay it was built
-        with, exactly as a song does.
+        alone, and a microphone with neither a moved key nor Auto-Tune has no
+        line at all, so its frames are byte-for-byte what they were. A line that
+        is already open stays open until the press ends even if the dial goes
+        back to the original key -- it holds the delay it was built with,
+        exactly as a song does.
+
+        Which KIND of line a press gets is decided when the press starts, not
+        per frame: swapping the object mid-sentence would throw away the
+        look-ahead it is holding, which is the last tenth of a second the
+        player already spoke. Auto-Tune wins over the key dial while it is on
+        (`libs/music_bot/autotune.py` says why the two cannot both be right).
+
+        The SWITCH is live all the same: `AutoTuneLine.shape` reads it every
+        frame, so turning Auto-Tune off mid-sentence hands the voice back then
+        and there (the line is kept for its look-ahead, and stops correcting).
+        Turning it ON mid-press starts tuning only if the press had no line at
+        all -- a press already wearing its key line keeps it until the next
+        press, because a tuner needs a look-ahead a running line cannot grow.
         """
         if not mega:
             return None
         line = getattr(self, "_speech_line", None)
+        if isinstance(line, AutoTuneLine):
+            return line
         key = speech_key_semitones()
         if line is None:
+            if autotune_enabled():
+                line = AutoTuneLine()
+                self._speech_line = line
+                return line
             if not key:
                 return None
             line = SpeechKeyLine(semitones=key)

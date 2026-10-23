@@ -23,31 +23,92 @@ def yin_pitch(frame, sr=DEFAULT_SR, min_freq=40.0, max_freq=1500.0, threshold=0.
     Returns the detected frequency in Hz, or None when the frame is
     unpitched/noisy. ``frame`` must be a 1-D float array.
     """
+    return yin_pitch_and_clarity(frame, sr, min_freq, max_freq, threshold)[0]
+
+
+def _refined_lag(cmnd, tau, tau_min, tau_max):
+    """The lag between ``tau - 1`` and ``tau + 1``, by parabolic interpolation.
+
+    A lag is a whole number of samples, and near the top of a voice's range
+    that is a coarse grid: at 220 Hz one lag is 8 cents, so a perfectly tuned
+    A was read as 221.2 Hz -- a correction that would have pulled every A down
+    a quarter of the way to G#. The three points around the minimum describe a
+    parabola; its vertex is the lag (de Cheveigne and Kawahara, the standard
+    YIN refinement). Outside half a sample the points are not a parabola one
+    can trust, so the whole lag is kept.
+    """
+    if tau <= tau_min or tau >= tau_max:
+        return float(tau)
+    left, middle, right = float(cmnd[tau - 1]), float(cmnd[tau]), float(cmnd[tau + 1])
+    curvature = left - 2.0 * middle + right
+    if abs(curvature) < 1e-12:
+        return float(tau)
+    delta = 0.5 * (left - right) / curvature
+    if not (-0.5 <= delta <= 0.5):
+        return float(tau)
+    return max(float(tau_min), min(float(tau_max), tau + delta))
+
+
+def yin_pitch_and_clarity(frame, sr=DEFAULT_SR, min_freq=40.0, max_freq=1500.0,
+                          threshold=0.15):
+    """YIN, with how periodic the answer was: ``(hz, clarity)``.
+
+    A note-on tracker only needs the note, so ``yin_pitch`` returns just the
+    frequency. A tuner needs to know when to KEEP OUT: a breath, a consonant,
+    a room's noise all have a best lag, and following it would bend the voice
+    to a note nobody sang. ``clarity`` is one minus YIN's cumulative mean
+    normalized difference at the chosen lag -- 1.0 for a steady tone, low for
+    noise -- and is 0.0 whenever there is no answer at all.
+
+    The answer is sub-sample accurate (``_refined_lag``), and the search is
+    vectorized: this runs on every microphone frame a broadcast voice sends, so
+    the cumulative-mean-difference loop it replaced was 14 % of one core by
+    itself. Cumsum is sequential, so the numbers are the loop's own.
+    """
     n = len(frame)
     tau_min = max(2, int(sr / max_freq))
     tau_max = min(n - 1, int(sr / min_freq))
     if tau_max <= tau_min:
-        return None
+        return None, 0.0
     nfft = 2 ** int(np.ceil(np.log2(n + tau_max)))
     xpad = np.zeros(nfft)
     xpad[:n] = frame
     X = np.fft.rfft(xpad)
     r = np.real(np.fft.irfft(X * np.conj(X)))[:tau_max + 1]
+    # The difference function, summed over each lag's OWN overlap:
+    #   d(tau) = sum_{j < n-tau} (x[j] - x[j+tau])^2
+    #          = prefix(tau) + suffix(tau) - 2 r(tau)
+    # Comparing the overlap against the energy of the WHOLE frame instead (the
+    # old 2*(r[0] - r[tau])) leaves out the samples a long lag never reads, so
+    # a long lag looks better than it is and every answer comes out short: a
+    # 220 Hz tone read as 221.2 (8 cents sharp), a 82.4 Hz tone (a low bass) as
+    # 6-14 cents sharp -- a tuner would then hold the voice that far off. With
+    # each lag's own overlap the same tones come back within a tenth of a cent.
+    x = np.asarray(frame, dtype=np.float64)[:n]
+    energy = np.cumsum(x * x)
+    total = float(energy[-1])
+    suffix = total - np.concatenate(([0.0], energy[:-1]))
+    before = n - 1 - np.arange(tau_max + 1)
+    prefix = np.where(before >= 0, energy[np.maximum(before, 0)], 0.0)
     d = np.empty(tau_max + 1)
     d[0] = 0.0
-    d[1:] = 2.0 * (r[0] - r[1:])
-    running = 0.0
+    d[1:] = np.maximum(0.0, prefix[1:] + suffix[1:tau_max + 1] - 2.0 * r[1:tau_max + 1])
+    running = np.cumsum(d[1:])
     cmnd = np.ones(tau_max + 1)
-    for tau in range(1, tau_max + 1):
-        running += d[tau]
-        cmnd[tau] = d[tau] * tau / max(running, 1e-9)
-    for tau in range(tau_min, tau_max):
-        if cmnd[tau] < threshold:
-            while tau + 1 < tau_max and cmnd[tau + 1] < cmnd[tau]:
-                tau += 1
-            return sr / tau
+    cmnd[1:] = d[1:] * np.arange(1, tau_max + 1) / np.maximum(running, 1e-9)
+    below = np.nonzero(cmnd[tau_min:tau_max] < threshold)[0]
+    if below.size:
+        tau = int(below[0]) + tau_min
+        while tau + 1 < tau_max and cmnd[tau + 1] < cmnd[tau]:
+            tau += 1
+        # The vertex is taken from d, not cmnd: cmnd carries the cumulative
+        # normalisation's own tilt, which is harmless for choosing the lag and
+        # enough to move the vertex a few cents.
+        return sr / _refined_lag(d, tau, tau_min, tau_max), float(1.0 - cmnd[tau])
     tau = int(np.argmin(cmnd[tau_min:])) + tau_min
-    return (sr / tau) if cmnd[tau] < 0.3 else None
+    if cmnd[tau] < 0.3:
+        return sr / _refined_lag(d, tau, tau_min, tau_max), float(1.0 - cmnd[tau])
+    return None, 0.0
 
 
 def hz_to_midi(hz):
