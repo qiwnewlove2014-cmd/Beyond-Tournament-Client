@@ -49,19 +49,21 @@ RESERVED_DRUM_KEYS = frozenset((
 # Kits that bring their own keys. A kit with no entry here plays the drum kit's
 # own 18 bindings, which is what every kit did before this table existed.
 #
-# The `per` kit is one hand drum's three voices, not a drum kit, and it has three
+# The `per` kit is one hand drum's voices, not a drum kit, and it has four
 # *keys* rather than eighteen: 1 for the treble stroke (the left-hand voice), 2
-# for the slap in the middle and 3 for the bass stroke (the right-hand voice) --
-# the number row reads left to right in the same order the drum sits in the
-# stereo field. They are stored under their own function names (`drum_per_lo`,
-# ...) so rebinding one instrument never rebinds the other -- a player who moves
-# the kick off Space has not moved the drum's bass stroke, and the conflict check
-# is scoped to the kit that is being edited for the same reason.
+# for the slap in the middle, 3 for the bass stroke (the right-hand voice) and 4
+# for the bell beside it -- the number row reads left to right in the same order
+# the drum sits in the stereo field, with the bell last. They are stored under
+# their own function names (`drum_per_lo`, ...) so rebinding one instrument never
+# rebinds the other -- a player who moves the kick off Space has not moved the
+# drum's bass stroke, and the conflict check is scoped to the kit that is being
+# edited for the same reason.
 KIT_BINDINGS = {
     "per": (
         DrumBinding("drum_per_lo", "Per lo", 0, pygame.K_3),
         DrumBinding("drum_per_hi", "Per Hi", 1, pygame.K_1),
         DrumBinding("drum_per_p", "Per P", 17, pygame.K_2),
+        DrumBinding("drum_per_cabell", "Cabell", 16, pygame.K_4),
     ),
     # The tuned per drum: the five notes of A minor pentatonic on 1-5, with the
     # untuned bass stroke and slap kept on 6 and 7 as rhythm pieces. The notes are

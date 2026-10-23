@@ -238,9 +238,9 @@ class DrumPadServerContractTests(unittest.TestCase):
 
 
 class PerKitTests(unittest.TestCase):
-    """The ``per`` kit: three strokes, three pads, three keys, real stereo.
+    """The ``per`` kit: one drum's strokes and its bell, on four pads and keys.
 
-    It is one hand drum rather than a drum kit, so it sounds on three pads and
+    It is a hand drum rather than a drum kit, so it sounds on four pads and
     keeps its own key table (``drum_keyconfig.KIT_BINDINGS``). Its samples are
     **true stereo** -- hi leans left, lo leans right, the slap sits centred --
     because the engine has no per-hit pan: a kit's image is the file's own (the
@@ -250,12 +250,12 @@ class PerKitTests(unittest.TestCase):
     ``tools/percussion_pan_bake.py`` and this is what says so.
     """
 
-    SOUNDING = {0: "Per lo", 1: "Per Hi", 17: "Per P"}
+    SOUNDING = {0: "Per lo", 1: "Per Hi", 16: "Cabell", 17: "Per P"}
 
     def kit_root(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
-    def test_the_kit_sounds_only_the_three_pads_it_has(self):
+    def test_the_kit_sounds_only_the_pads_it_has(self):
         pads = DrumAudio.KITS["per"]
         self.assertEqual(
             len(pads), len(DrumAudio.PAD_DEFS),
@@ -292,15 +292,20 @@ class PerKitTests(unittest.TestCase):
                 f"pad {index} is dual-mono (side at {side_db:.1f} dBFS), so a "
                 "listener hears it centred however the room routes it")
 
-    def test_the_scales_sit_the_three_strokes_at_one_level(self):
-        """The three pieces must read as one instrument, not one quiet piece.
+    def test_the_scales_sit_the_pieces_at_one_level(self):
+        """The pieces must read as one instrument, not one quiet piece.
 
         Measured by ``tools/percussion_pan_bake.py``; the values are stored in
-        the kit because the engine applies them per hit.
+        the kit because the engine applies them per hit. The bell is shorter and
+        peakier than the strokes, so its scale is the loudness-matched 0.75 that
+        still leaves the loudest hit 3.1 dB under full scale.
         """
         scales = {index: DrumAudio.KITS["per"][index][2] for index in self.SOUNDING}
         self.assertGreater(scales[0], 0.0)
         self.assertGreater(scales[1], 0.0)
+        self.assertGreaterEqual(scales[16], 0.0)
+        self.assertLessEqual(scales[16], 1.0,
+                             "the bell is peaky; a scale past 1 clips it")
         self.assertGreaterEqual(scales[17], 1.0,
                                 "the slap lost ~9.5 LU to its longer tail")
 
@@ -383,16 +388,16 @@ class PerTunedKitTests(unittest.TestCase):
 class PerKeyBindingTests(unittest.TestCase):
     """A kit that brings its own keys stores and validates only its own."""
 
-    def test_the_per_kit_brings_its_own_three_keys(self):
+    def test_the_per_kit_brings_its_own_keys(self):
         table = drum_keyconfig.bindings("per")
-        self.assertEqual([binding.pad for binding in table], [0, 1, 17])
+        self.assertEqual([binding.pad for binding in table], [0, 1, 17, 16])
         self.assertEqual(
             [binding.function for binding in table],
-            ["drum_per_lo", "drum_per_hi", "drum_per_p"])
+            ["drum_per_lo", "drum_per_hi", "drum_per_p", "drum_per_cabell"])
         self.assertEqual(
             [binding.default_key for binding in table],
-            [pygame.K_3, pygame.K_1, pygame.K_2],
-            "1 is the left-hand treble, 2 the slap, 3 the right-hand bass")
+            [pygame.K_3, pygame.K_1, pygame.K_2, pygame.K_4],
+            "1 is the left-hand treble, 2 the slap, 3 the right-hand bass, 4 the bell")
         self.assertIs(drum_keyconfig.bindings("default"),
                       drum_keyconfig.DRUM_BINDINGS)
         self.assertIs(drum_keyconfig.bindings(None), drum_keyconfig.DRUM_BINDINGS)
@@ -443,7 +448,7 @@ class PerKeyBindingTests(unittest.TestCase):
         self.assertEqual(keyconfig.save_count, 1)
         self.assertEqual(
             drum_keyconfig.key_to_pad(keyconfig, kit="per"),
-            {pygame.K_3: 0, pygame.K_1: 1, pygame.K_2: 17})
+            {pygame.K_3: 0, pygame.K_1: 1, pygame.K_2: 17, pygame.K_4: 16})
         self.assertNotIn("drum_per_hi_alt", keyconfig.keys)
 
     def test_the_handler_asks_the_kit_being_played(self):

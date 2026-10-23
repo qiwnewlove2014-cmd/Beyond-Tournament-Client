@@ -65,9 +65,12 @@ class DrumAudio:
             ("Cowbell", "drums/salamander/Drums.hit.Cowbell.ogg", 0.48, 6),
             ("Rim", "drums/salamander/Drums.hit.Rim.ogg", 0.62, 6),
         ),
-        # A three-piece hand percussion: a treble stroke, a bass stroke and the
-        # slap. The other fifteen pads are silent on purpose (the Salamander
-        # rule), because this kit is one drum's three voices, not a drum kit.
+        # A hand percussion: one drum's treble stroke, bass stroke and slap, plus
+        # the bell the owner moved into this folder (`cabell.ogg`, the same
+        # recording the Hong Kong set uses as its Cowbell -- the file is kept in
+        # both folders so that set stays whole). The other fourteen pads are
+        # silent on purpose (the Salamander rule), because this kit is one drum
+        # and a bell, not a drum kit.
         #
         # Its samples are TRUE stereo -- hi leans left, lo leans right, the slap
         # sits centred -- because the engine plays a kit's stereo image out of
@@ -93,7 +96,11 @@ class DrumAudio:
             (None, None, 1.0, 1),
             (None, None, 1.0, 1),
             (None, None, 1.0, 1),
-            (None, None, 1.0, 1),
+            # The bell: -25.65 LUFS and a -10.22 dBTP peak measured against the
+            # default kick (tools/percussion_pan_bake.py's anchor), so 0.75 puts it
+            # at the kit's level and the loudest hit still lands 3.1 dB under full
+            # scale at volume 300.
+            ("Cabell", "drums/per/cabell.ogg", 0.75, 6),
             ("Per P", "drums/per/per P.ogg", 1.14, 6),
         ),
         # The per drum tuned to A minor pentatonic: A3 C4 D4 E4 G4 from its own
