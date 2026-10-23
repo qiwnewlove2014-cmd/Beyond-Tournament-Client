@@ -18,6 +18,8 @@ The package is split by what a reader is looking for:
     cinema.py       what a room is called and how a builder chooses it - the spoken
                     sentences about a room's bands and silent speakers, and the mode /
                     reach / lock menus
+    voice.py        the cabinet's own voice - the lines it says out loud (power on,
+                    power off, a song being chosen), played from where it stands
     menu.py         the cabinet's own menu - play, queue, search, URL, skip, repeat,
                     and the Party Sync and My Song lines hanging off it
     widgets.py      the controls a menu opens - the EQ and volume sliders, the scrub line
@@ -36,7 +38,7 @@ on this package would not reach the code that reads it.
 The rules, the watchdogs and every measured timeout: .agents/skills/jukebox-system/.
 """
 
-from .menu import open_jukebox_menu
+from .menu import open_jukebox_menu, open_jukebox_switch_menu
 from .player import JukeboxPlayer, wall_occlusion_tier
 from .relay import JukeboxRelayReceiver
 
@@ -44,5 +46,6 @@ __all__ = [
     "JukeboxPlayer",
     "JukeboxRelayReceiver",
     "open_jukebox_menu",
+    "open_jukebox_switch_menu",
     "wall_occlusion_tier",
 ]

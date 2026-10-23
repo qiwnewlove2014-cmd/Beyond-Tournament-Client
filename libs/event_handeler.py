@@ -3178,6 +3178,14 @@ class EventHandeler:
                 # from the previous map can act on the new map's playback.
                 player.stop_all()
         gp.jukebox_state = {"jukeboxes": {}}
+        # A cabinet's voice belongs to the map it was standing on. ``getattr``
+        # because this method is also driven from harnesses with no game behind
+        # them, and a map change must never fail over a map that had no voice.
+        from .jukebox import motor, voice
+        voice.release(getattr(self, "game", None))
+        # The machinery belongs to the map's cabinets too: a motor left running
+        # would hum into the next map from a box that is not there.
+        motor.release(getattr(self, "game", None))
 
     def jukebox_state(self, data):
         """Server sync of jukebox playback state (map join)."""
@@ -3217,6 +3225,26 @@ class EventHandeler:
                     player.set_local_cinema_reach(jid, reach)
                 if box.get("paused") or not box.get("current"):
                     self.game.put(lambda jid=jid: player.stop(jid))
+        # The machinery. A cabinet switched on before this client arrived is a
+        # machine already running, and this flag is the only thing that says so:
+        # no power packet was sent while it was away. It is read from the state
+        # whether or not a player exists yet -- a silent cabinet has no song to
+        # stop, and still runs.
+        boxes = state.get("jukeboxes")
+        if isinstance(boxes, dict):
+            for jid, box in boxes.items():
+                if not isinstance(box, dict):
+                    continue
+                powered = box.get("powered")
+                if powered is None:
+                    continue
+                position = None
+                if all(box.get(axis) is not None for axis in ("x", "y", "z")):
+                    position = (box["x"], box["y"], box["z"])
+                self.game.put(
+                    lambda jid=jid, on=bool(powered), position=position:
+                    self._power_jukebox_motor(jid, on, position)
+                )
 
     def jukebox_open(self, data):
         """Player pressed interact near a jukebox — cache state and open the menu."""
@@ -3225,6 +3253,23 @@ class EventHandeler:
         if gp:
             from . import jukebox
             self.game.put(lambda: jukebox.open_jukebox_menu(self.game, gp))
+
+    def jukebox_switch_open(self, data):
+        """The interact key at a cabinet whose own switch is off.
+
+        The Server answers a dark cabinet with its switch rather than a queue
+        menu that would refuse every line; the player is handed the two-line
+        screen that turns it on. Nothing here decides who may throw it -- that
+        answer (and the staff-only way off) lives on the Server.
+        """
+        if not isinstance(data, dict) or not data.get("id"):
+            return
+        gp = self.gameplay
+        if gp is None:
+            return
+        from . import jukebox
+        jid = data["id"]
+        self.game.put(lambda: jukebox.open_jukebox_switch_menu(self.game, gp, jid))
 
     def jukebox_queue_update(self, data):
         """Queue changed on the server — refresh the cached state."""
@@ -3253,6 +3298,84 @@ class EventHandeler:
                 # started in the middle.
                 box.pop("position", None)
                 box.pop("position_at", None)
+
+    def jukebox_voice(self, data):
+        """A cabinet said a line -- play it from that cabinet's position.
+
+        The Server sends the words, never a path (see the jukebox engine's
+        ``JukeboxVoiceLine``), and it sends the cabinet's coordinates with them
+        so the line is anchored even on a client whose map element has not been
+        parsed yet. No OpenAL work happens here: the network thread hands the
+        play to the main thread, where the audio context lives.
+        """
+        if not isinstance(data, dict) or not data.get("id"):
+            return
+        if self.gameplay is None:
+            return
+        jid = data["id"]
+        line = data.get("line")
+        position = None
+        x, y, z = data.get("x"), data.get("y"), data.get("z")
+        if x is not None and y is not None and z is not None:
+            try:
+                position = (float(x), float(y), float(z))
+            except (TypeError, ValueError):
+                position = None
+        if position is None:
+            # Older Server (or a payload that lost the coordinates): the map's
+            # own element still knows where this cabinet stands.
+            jb = None
+            try:
+                if self.gameplay is not None and self.gameplay.map is not None:
+                    jb = self.gameplay.map.get_jukebox(jid)
+            except Exception:
+                jb = None
+            if jb is None:
+                return
+            position = tuple(jb.center)
+        self.game.put(
+            lambda: self._speak_jukebox_voice(jid, position, line)
+        )
+
+    def _speak_jukebox_voice(self, jid, position, line):
+        """Main-thread half of :meth:`jukebox_voice`."""
+        from .jukebox import voice
+        voice.speak(self.game, jid, position, line)
+
+    def jukebox_power(self, data):
+        """A cabinet got power, or lost it: its machinery starts or stops.
+
+        One packet per cabinet, carrying the cabinet's coordinates -- the same
+        anchoring ``jukebox_voice`` uses, so a client whose map element is not
+        parsed yet still hears the motor from the right place. Nothing happens
+        on the network thread: this only hands the work to the main thread,
+        where the audio context lives.
+        """
+        if not isinstance(data, dict) or not data.get("id"):
+            return
+        if self.gameplay is None:
+            return
+        jid = data["id"]
+        position = None
+        x, y, z = data.get("x"), data.get("y"), data.get("z")
+        if x is not None and y is not None and z is not None:
+            try:
+                position = (float(x), float(y), float(z))
+            except (TypeError, ValueError):
+                position = None
+        on = bool(data.get("on", True))
+        self.game.put(
+            lambda: self._power_jukebox_motor(jid, on, position)
+        )
+
+    def _power_jukebox_motor(self, jid, on, position):
+        """Main-thread half of :meth:`jukebox_power`.
+
+        A stop needs no coordinates and no map: the motor is looked up by id,
+        and a cabinet that is not running is answered quietly.
+        """
+        from .jukebox import motor
+        motor.power(self.game, jid, on, position)
 
     def jukebox_play(self, data):
         """A jukebox started playing a song — play it at the jukebox position."""
@@ -3473,29 +3596,6 @@ class EventHandeler:
             bot = getattr(gp, "music_bot", None)
             if bot is not None:
                 self.game.put(bot.stop)
-
-    def jukebox_hint(self, data):
-        """Walk-in hint near a jukebox. Rendered here so it can name the
-        player's actual (rebindable) interact key."""
-        import pygame
-        from .string_utils import friendly_key_name
-        key = friendly_key_name(
-            self.game.keyconfig.get("interact", pygame.K_f)
-        ).upper()
-        # A cabinet is an appliance and the map's power is its supply, so a hint that invited the player to
-        # open a machine with none would be the one thing standing between them and the power switch. A
-        # Server from before the field says nothing about power, which reads exactly as it always did.
-        powered = data.get("powered") if isinstance(data, dict) else None
-        if powered is False:
-            speak(
-                "You are near a music jukebox, but it has no power. "
-                "Find the power switch and turn it on."
-            )
-            return
-        speak(
-            f"You are near a music jukebox. "
-            f"Press {key} to open it and queue a song."
-        )
 
     def request_scandir(self, data):
         """Scan client's local asset directory and return file/folder items to server"""

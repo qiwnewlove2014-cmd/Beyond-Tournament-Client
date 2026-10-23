@@ -500,7 +500,11 @@ class TheCabinetsAroundACabinetTests(unittest.TestCase):
         self.assertEqual(neighbour_line(game, "j1"), "")
         menu_game = self.menu_game(speakers=pair(10.0, 26.0))
         menu_game.gameplay.is_staff = True      # the line is staff's to read
-        self.assertEqual([line for line in self.labels(menu_game) if "cabinet" in line], [])
+        labels = self.labels(menu_game)
+        self.assertEqual([line for line in labels
+                          if line.startswith("Another cabinet at ")], [])
+        # ...and the cabinet's own voice switch, which a player keeps, is not it.
+        self.assertIn("Cabinet voice: ON (you hear the cabinet speak)", labels)
 
     def test_a_distant_neighbour_is_named_with_its_distance(self):
         game, _map = build(cabinets=((10.0, 20.0), (150.0, 20.0)))

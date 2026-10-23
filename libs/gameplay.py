@@ -908,6 +908,14 @@ class Gameplay(state.State):
         with audio_probe.span("gp.sources"):
             for i in self.map.source_list.copy():
                 i.loop(self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
+        # A powered cabinet's machinery is a placed sound with no map element of
+        # its own to follow the listener, so it is ticked here, beside the sound
+        # sources it is modelled on (libs/jukebox/motor.py).
+        cabinets = getattr(getattr(self.game, "audio_mngr", None), "jukebox_motor", None)
+        if cabinets is not None:
+            audio_probe.call("gp.jukebox_motor", cabinets.tick,
+                             self.camera.focus_object.x, self.camera.focus_object.y,
+                             self.camera.focus_object.z)
         
         # === Music Bot loop (auto-advance tracks) ===
         if hasattr(self, 'music_bot') and self.music_bot:

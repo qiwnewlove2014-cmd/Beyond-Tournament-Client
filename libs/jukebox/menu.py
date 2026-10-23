@@ -13,6 +13,7 @@ from .cinema import (_cabinet_cinema_lock, _cabinet_cinema_mode,
                      _cinema_mode_label, _may_lock_cinema_mode,
                      _open_cinema_lock_menu, _open_cinema_mode_menu,
                      _open_cinema_reach_menu)
+from . import voice
 from .view import (_closest_jukebox, _current_state, _get_eq_values,
                    _get_jukebox_volume, _get_repeat_mode, _own_name,
                    _pause_menu_label, _scrub_spot)
@@ -131,6 +132,26 @@ def open_jukebox_menu(game, gp):
         speak(f"This cabinet's cinema mode is locked by {owner}. Staff who know "
               "its code can change the mode; the room is heard exactly as it is.")
 
+    def _voice_label():
+        # The listener's own switch, not the cabinet's: a cabinet says its lines
+        # to whoever wants to hear them. Callable like the other (now: …) lines,
+        # so the menu always reads the saved choice, and worded like the Music
+        # Bot's ``Cinema rooms:`` pair.
+        if voice.voice_enabled():
+            return "Cabinet voice: ON (you hear the cabinet speak)"
+        return "Cabinet voice: OFF (cabinets stay silent)"
+
+    def go_voice():
+        enabled = not voice.voice_enabled()
+        voice.set_voice_enabled(enabled)
+        if not enabled:
+            # The line this cabinet is saying right now stops with the switch,
+            # rather than finishing on a listener who just asked for silence.
+            voice.release(game)
+            speak("The cabinets stay silent.")
+        else:
+            speak("You hear the cabinet speak again.")
+
     mode_now = _cabinet_cinema_mode(gp, jukebox_id)
     lock_now = _cabinet_cinema_lock(gp, jukebox_id)
 
@@ -189,6 +210,25 @@ def open_jukebox_menu(game, gp):
     elif _may_lock_cinema_mode(gp):
         menu_items.append(("Lock cinema mode (set a code)…", go_cinema_lock))
 
+    # Last, beside the cinema lock: a listening choice for the person standing
+    # here, not a setting of the cabinet (it takes nothing from anyone else).
+    menu_items.append((_voice_label, go_voice))
+
+    # Staff may take the cabinet's own switch -- at the end, beside Cancel, like
+    # the other lines that change the cabinet rather than listen to it. The map's
+    # power is the supply; this is the appliance, and a shared cabinet is staff's
+    # to close. Players only ever get the way on.
+    if bool(getattr(gp, "is_staff", False) or getattr(gp, "is_builder", False)):
+        def go_switch_off():
+            gp.pop_last_substate()
+            network = getattr(game, "network", None)
+            if network is not None:
+                from .. import consts
+                network.send(consts.CHANNEL_MISC, "jukebox_switch",
+                             {"id": jukebox_id, "on": False})
+            speak("Switching the cabinet off.")
+        menu_items.append(("Turn off the cabinet (Staff only)", go_switch_off))
+
     menu_items.append(("Cancel", go_cancel))
 
     # The title says which thing this is: a plain cabinet, or one playing
@@ -196,6 +236,38 @@ def open_jukebox_menu(game, gp):
     # callable, so it is still fresh every time the menu speaks).
     m = menu_mod.Menu(game, _cabinet_title(game, gp, jukebox_id, mode_now),
                       parrent=gp)
+    m.add_items(menu_items)
+    menus.set_default_sounds(m)
+    gp.add_substate(m)
+
+
+def open_jukebox_switch_menu(game, gp, jukebox_id):
+    """The small screen a dark cabinet answers with: turn it on, or leave it.
+
+    A cabinet whose own switch is off is not a cabinet with a queue: every line
+    the normal menu carries would refuse, so the interact key gets the switch
+    itself and nothing else. Whether the switch may be thrown at all -- and by
+    whom, for going off -- is the Server's answer, never this menu's.
+    """
+    from .. import menu as menu_mod, menus
+
+    def go_cancel():
+        gp.pop_last_substate()
+
+    def go_on():
+        gp.pop_last_substate()
+        network = getattr(game, "network", None)
+        if network is not None:
+            from .. import consts
+            network.send(consts.CHANNEL_MISC, "jukebox_switch",
+                         {"id": jukebox_id, "on": True})
+        speak("Turning the cabinet on.")
+
+    menu_items = [
+        ("Turn on the cabinet", go_on),
+        ("Cancel", go_cancel),
+    ]
+    m = menu_mod.Menu(game, "Music Jukebox", parrent=gp)
     m.add_items(menu_items)
     menus.set_default_sounds(m)
     gp.add_substate(m)

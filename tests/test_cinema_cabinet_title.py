@@ -239,7 +239,14 @@ class TheRoomsOwnLinesAreStaffOnlyTests(unittest.TestCase):
     def test_a_player_is_shown_neither_the_room_nor_the_cabinets_near_it(self):
         labels = self.menu_labels(staff=False)
         self.assertEqual([line for line in labels if line.startswith("Cinema:")], [])
-        self.assertEqual([line for line in labels if "cabinet" in line], [])
+        # The neighbour line and the controls that re-tune a cabinet. (The
+        # cabinet's own voice switch *is* a player's line and sits at the end of
+        # everybody's menu, so "no line mentions a cabinet" is too broad to be
+        # the rule.)
+        self.assertEqual([line for line in labels
+                          if line.startswith("Another cabinet at ")], [])
+        self.assertEqual([line for line in labels
+                          if line.startswith(("Set cinema", "Manage cinema", "Lock cinema"))], [])
 
     def test_staff_still_get_both_read_outs_and_the_controls(self):
         labels = self.menu_labels(staff=True)
