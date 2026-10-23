@@ -1648,6 +1648,135 @@ class RoomLifetimeTests(unittest.TestCase):
         self.assertAlmostEqual(bank.cabinet_volume * 100.0, 40.0)
 
 
+class QueueAdvanceRoomHandoverTests(unittest.TestCase):
+    """The song that ends must not take the next song's room with it.
+
+    The reported bug: on a cabinet that plays through placed speakers, a song added to
+    the queue came up silent and then started in the middle. The log of a live room shows
+    the shape exactly -- ``retire(...): letting <song> finish its last 0.4s``, then the new
+    song's play, then ``retire(...): tail finished`` in the same second, then
+    ``cinema room ... was lost; awaiting recovery`` once a second for the next minute, and
+    finally a rebuild that seeks to the wall-clock position (66.8s, 70.9s) the song never
+    played. A queue advance is the only way a song ends while the next one starts, which
+    is why playing single songs one after another never showed it.
+
+    Both streams held the same bank: the tail was retired with the cabinet's room in its
+    hand, the new song's acquire was handed that same room, and the tail's release then
+    stopped the room the new song was feeding.
+    """
+
+    ROOM = RoomLifetimeTests.ROOM
+
+    def build(self):
+        """A cabinet playing through a room, with a song of its own."""
+        from math import cos, radians, sin
+        game = FakeGame()
+        set_enabled(game, True)
+        map_obj = Map(game)
+        for index, (channel, bearing) in enumerate(self.ROOM):
+            angle = radians(bearing)
+            x = ANCHOR[0] + sin(angle) * 8.0
+            y = ANCHOR[1] + cos(angle) * 8.0
+            map_obj.spawn_cinemaSpeaker(minx=x - 0.5, maxx=x + 0.5, miny=y - 0.5,
+                                        maxy=y + 0.5, minz=0, maxz=1,
+                                        id=f"spk{index}", channel=channel)
+        map_obj.spawn_jukebox(minx=9, maxx=10, miny=19, maxy=20, minz=0, maxz=1,
+                              id="j1")
+        game.gameplay.map = map_obj
+        player = jukebox.JukeboxPlayer(game)
+        from libs.music_bot.streaming import AudioStreamer
+        with mock.patch("libs.music_bot.AudioStreamer") as stub:
+            # The retire budget reads the class's own lead-in, so the stub carries it.
+            stub.DIRECT_LEAD_IN_S = AudioStreamer.DIRECT_LEAD_IN_S
+            player.play("j1", 9.5, 19.5, 0.5, "Song A", "http://example.com/a.mp3",
+                        120, transport="direct", playback_id=4)
+        return game, player
+
+    def playing_to_its_last_seconds(self, player, position=119.6):
+        """What a queue advance meets: a stream whose song is nearly over."""
+        streamer = player.players["j1"]["streamer"]
+        streamer.is_alive = lambda: True
+        streamer.failure_reason = None
+        streamer.content_position = lambda: position
+        streamer.stop = lambda: None
+        return streamer
+
+    def advance_to(self, player, title="Song B", playback_id=5):
+        from libs.music_bot.streaming import AudioStreamer
+        with mock.patch("libs.music_bot.AudioStreamer") as stub:
+            stub.DIRECT_LEAD_IN_S = AudioStreamer.DIRECT_LEAD_IN_S
+            player.play("j1", 9.5, 19.5, 0.5, title, "http://example.com/b.mp3",
+                        120, transport="direct", playback_id=playback_id)
+
+    def test_the_next_song_is_not_handed_the_room_the_tail_is_still_playing(self):
+        game, player = self.build()
+        first = player.players["j1"]["cinema"]
+        self.assertIsNotNone(first)
+        self.playing_to_its_last_seconds(player)
+
+        self.advance_to(player)
+
+        second = player.players["j1"]["cinema"]
+        self.assertEqual(len(player._retiring_direct), 1)
+        self.assertIs(player._retiring_direct[0]["cinema"], first)
+        # Two streams, two rooms: the tail keeps the room its song was playing
+        # through, and the new song builds its own.
+        self.assertIsNot(second, first)
+        self.assertFalse(first.spent)
+        self.assertFalse(second.spent)
+        self.assertIs(host_for(game).bank("j1"), second)
+        self.assertFalse(any(source.deleted for source in second.sources))
+
+    def test_the_tail_finishing_leaves_the_next_song_room_playing(self):
+        game, player = self.build()
+        first = player.players["j1"]["cinema"]
+        streamer = self.playing_to_its_last_seconds(player)
+        self.advance_to(player)
+        second = player.players["j1"]["cinema"]
+
+        # The tail drains and the sweep releases it, exactly as the frame after a song ends.
+        streamer.is_alive = lambda: False
+        player._sweep_retiring_direct()
+
+        self.assertTrue(first.spent, "the retired room was never given back")
+        self.assertFalse(second.spent, "the tail's teardown stopped the new song's room")
+        self.assertIs(host_for(game).bank("j1"), second)
+        self.assertFalse(any(source.deleted for source in second.sources))
+        # And the playing room is still the one the map refresh finds: the cabinet
+        # is not "lost", which is what used to leave it silent for a minute.
+        self.assertEqual(player.refresh_cinema_rooms(now=time.monotonic() + 2.0), 1)
+        self.assertIs(player.players["j1"]["cinema"], second)
+
+
+class DetachedRoomTests(unittest.TestCase):
+    """A room taken off the host for a tail is the tail's room, and only that."""
+
+    def test_a_detached_room_is_no_longer_what_the_cabinet_resolves_to(self):
+        from libs.audio.cinema import (acquire_bank, detach_bank,
+                                       release_renderer)
+        game = FakeGame()
+        set_enabled(game, True)
+        host = host_for(game)
+        bank = acquire_bank(game, "j1", ANCHOR, volume=100, cabinet_volume=100)
+        self.assertIs(host.bank("j1"), bank)
+
+        self.assertTrue(detach_bank(game, "j1", bank))
+
+        # The room itself is untouched (it is still playing), but the cabinet's
+        # name no longer resolves to it, so the next acquire builds a fresh one.
+        self.assertFalse(bank.spent)
+        self.assertIsNone(host.bank("j1"))
+        fresh = acquire_bank(game, "j1", ANCHOR, volume=100, cabinet_volume=100)
+        self.assertIsNot(fresh, bank)
+        self.assertIsNot(fresh.renderer, bank.renderer)
+        self.assertIs(host.bank("j1"), fresh)
+        # A second detach of a room nobody holds changes nothing.
+        self.assertFalse(detach_bank(game, "j1", bank))
+        release_renderer(game, "j1", bank)
+        self.assertTrue(bank.spent)
+        self.assertIs(host.bank("j1"), fresh)
+
+
 def make_bot(game, **attributes):
     bot = MapMusicBot.__new__(MapMusicBot)
     bot.game = game

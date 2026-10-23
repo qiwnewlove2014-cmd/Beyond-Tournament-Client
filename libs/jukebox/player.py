@@ -14,7 +14,7 @@ import time
 
 from ..audio.cinema import (CINEMA_AUTO, CINEMA_OFF, ROOM_REFERENCE_DISTANCE,
                             acquire_bank, cabinet_anchor, cinema_room,
-                            release_renderer)
+                            detach_bank, release_renderer)
 from ..audio_diagnostics import probe as audio_probe
 from ..audio_health import probe as audio_health
 from ..deferred_log import log_deferred as log_line
@@ -1610,6 +1610,15 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
                     bank = existing.get("cinema")
                     if bank is not None:
                         bank.set_reverb(None)
+                    # The tail keeps its room for its last seconds, and the song that
+                    # replaces it is about to acquire this cabinet's room: leave the room
+                    # registered and both streams share one (double-fed) bank, and the
+                    # tail's teardown then stops the room the NEW song is feeding -- heard
+                    # as a cabinet that goes silent at every queue advance and jumps into
+                    # the middle of the song when the watchdog finally rebuilds it. Off the
+                    # registry the tail's room is its own, and the next song builds its own.
+                    if bank is not None:
+                        detach_bank(self.game, jukebox_id, bank)
                     self._retiring_direct.append({
                         "id": jukebox_id,
                         "streamer": streamer,

@@ -441,6 +441,29 @@ class CinemaSpeakerHost:
         self._placements.pop(key, None)
         return popped if popped is not None else renderer
 
+    def detach(self, jukebox_id, bank):
+        """Take a room out of the host WITHOUT stopping it, for a song's last seconds.
+
+        A song near its end keeps playing through the room it had (the jukebox retires the
+        tail), and the song that replaces it starts before that tail is over. Handing the
+        same room to both is what took a room down: the tail's teardown released "the room
+        registered for this cabinet", which by then was the NEW song's, so the new song fed
+        a stopped room and stayed silent until a watchdog rebuilt it -- minutes into the
+        song. Detached, the tail's room is its own (bank and renderer: the renderer keeps
+        the per-frame window and channel verdict of the audio it is cutting, so two streams
+        may never share one), the next acquire builds a fresh room, and the tail's release
+        finds "not the registered room" and stops only what it owns.
+        """
+        key = self._key(jukebox_id)
+        held = self._banks.get(key)
+        if bank is None or held is not bank:
+            return False
+        self._banks.pop(key, None)
+        renderer = self._renderers.get(key)
+        if renderer is not None and renderer is getattr(bank, "renderer", None):
+            self._renderers.pop(key, None)
+        return True
+
     def release_all(self):
         banks = list(self._banks.values())
         self._banks.clear()
@@ -1289,6 +1312,16 @@ def acquire_bank(game, jukebox_id, anchor, **options):
     if host is None:
         return None
     return host.acquire_bank(jukebox_id, anchor, **options)
+
+
+def detach_bank(game, jukebox_id, bank=None):
+    """Take a cabinet's room off the host so the next song builds its own.
+
+    The room keeps playing -- the caller still holds the bank -- it is only no longer the
+    room this cabinet's name resolves to. See ``CinemaSpeakerHost.detach``.
+    """
+    host = host_for(game, create=False)
+    return False if host is None else host.detach(jukebox_id, bank)
 
 
 def release_renderer(game, jukebox_id, bank=None):
