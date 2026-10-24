@@ -94,6 +94,16 @@ def make_bot():
         pop_last_substate=lambda: None,
         can_broadcast_megaphone=True,
     )
+    # The recorder is a real object in the game and its labels are built from
+    # the settings, so the fake answers the way it does: a fade of 0 is Off.
+    recorder = mock.MagicMock()
+    recorder.fade_in_seconds.return_value = 0.0
+    recorder.fade_out_seconds.return_value = 0.0
+    recorder.fade_time_text.side_effect = (
+        lambda seconds: "Off" if not seconds else f"{float(seconds):g} seconds")
+    recorder.fade_in_setting_label.return_value = "Fade In at Start: Off"
+    recorder.fade_out_setting_label.return_value = "Fade Out at Stop: Off"
+    bot.audio_recorder = recorder
     return bot
 
 
@@ -294,6 +304,18 @@ class TheRestOfTheFeatureMenusAreDescribedTests(unittest.TestCase):
         self.handler._open_recording_settings_menu()
         self.assert_described(self.last_menu())
 
+    def test_the_recording_settings_menu_names_both_fades(self):
+        self.handler._open_recording_settings_menu()
+        labels = [label_of(item) for item in self.last_menu().items]
+        self.assertIn("Fade In at Start: Off", labels)
+        self.assertIn("Fade Out at Stop: Off", labels)
+
+    def test_the_recording_fade_pages(self):
+        for kind in ("in", "out"):
+            with self.subTest(kind=kind):
+                self.handler._open_recording_fade_menu(kind)
+                self.assert_described(self.last_menu())
+
     def test_the_recording_reset_confirmation(self):
         self.handler._open_recording_reset_confirmation()
         self.assert_described(self.last_menu())
@@ -479,6 +501,23 @@ class TabSpeaksTheDescriptionTests(unittest.TestCase):
             menu.update([tab()])
         self.assertEqual(menu.pos, index)
         self.assertEqual(chosen, [])
+
+    def test_tab_speaks_the_recording_menu_lines(self):
+        menu = self.menu_with(self.handler._open_recording_menu)
+        self.at(menu, "Recording Settings")
+        with mock.patch.object(menu_module.speech, "speak") as speak:
+            menu.update([tab()])
+        said = speak.call_args.args[0]
+        self.assertIn("splits", said.lower())
+        self.assertEqual(speak.call_args.kwargs.get("id"), "menu_help")
+
+    def test_tab_speaks_a_fade_page_line(self):
+        menu = self.menu_with(
+            lambda: self.handler._open_recording_fade_menu("in"))
+        self.at(menu, "Off (active)")
+        with mock.patch.object(menu_module.speech, "speak") as speak:
+            menu.update([tab()])
+        self.assertIn("no fade", speak.call_args.args[0].lower())
 
     def test_the_help_menus_tab_line_explains_tab(self):
         self.handler._show_help_menu()

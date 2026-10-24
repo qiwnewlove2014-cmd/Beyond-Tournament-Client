@@ -665,6 +665,14 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._open_recording_reset_confirmation()
 
+        def go_fade_in():
+            gp.pop_last_substate()
+            self._open_recording_fade_menu("in")
+
+        def go_fade_out():
+            gp.pop_last_substate()
+            self._open_recording_fade_menu("out")
+
         m = menu_mod.Menu(self._bot.game, "Audio Recording Settings", parrent=gp)
         m.add_items([
             (self._bot.audio_recorder.capture_scope_label,
@@ -683,6 +691,16 @@ class MusicBotMenus:
              self._bot.audio_recorder.cycle_countdown, None,
              "How long the countdown is before a recording starts, so there "
              "is time to get ready."),
+            (self._bot.audio_recorder.fade_in_setting_label,
+             go_fade_in, None,
+             "How long the recording takes to come up at its start, so the "
+             "file opens on a fade instead of a cut. The fade is written "
+             "into the file itself."),
+            (self._bot.audio_recorder.fade_out_setting_label,
+             go_fade_out, None,
+             "How long the recording falls away at its end, so the file "
+             "closes on a fade instead of a cut. Written into the file, and "
+             "nothing extra happens at Stop."),
             (self._bot.audio_recorder.split_setting_label,
              self._bot.audio_recorder.cycle_split_minutes, None,
              "How long one file runs before the next one starts: a long mix "
@@ -697,6 +715,121 @@ class MusicBotMenus:
             ("Back", go_back, None,
              "Returns to the Record Audio menu."),
         ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_recording_fade_menu(self, kind="in"):
+        """How long one end of the recording takes to fade: quick times, then any.
+
+        A recording of a live room almost never starts or ends on silence -- a
+        session that begins on a downbeat and stops mid-chord leaves a click at
+        each end -- so the fade is written into the file, and what leaves the
+        game is what any editor or player hears. It changes nothing about
+        playback, the mix or the microphone.
+
+        The quick rows are the times people ask for; `Custom Seconds` opens the
+        client's own text field for any whole second up to `MAX_FADE_SECONDS`,
+        because "12 seconds" is not a value worth arrowing seven rows to find.
+        """
+        from .. import menu as menu_mod, menus
+        from ..game_audio_recorder import FADE_CHOICES, MAX_FADE_SECONDS
+
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        recorder = self._bot.audio_recorder
+        fade_in = kind != "out"
+        title = "Fade In at Start" if fade_in else "Fade Out at Stop"
+
+        def live_seconds():
+            return recorder.fade_in_seconds() if fade_in else recorder.fade_out_seconds()
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_recording_settings_menu()
+
+        def apply(seconds):
+            if fade_in:
+                recorder.set_fade_in(seconds)
+            else:
+                recorder.set_fade_out(seconds)
+
+        def pick(seconds):
+            def chosen():
+                apply(seconds)
+                m.speak_current_item()
+            return chosen
+
+        def make_label(seconds):
+            # Read live, like the scale and tune amount lists: the mark follows
+            # the choice on the page that is already open.
+            def label_fn():
+                label = recorder.fade_time_text(seconds)
+                if abs(live_seconds() - seconds) < 1e-9:
+                    return f"{label} (active)"
+                return label
+            return label_fn
+
+        def submitted(text):
+            """Take what was typed, or say why nothing changed.
+
+            **The field is a substate and is taken off the stack on EVERY exit,**
+            Escape with nothing typed included: its `ck` answers True whenever
+            it is open, so a handler that forgets this leaves it holding every
+            key for good and the game looks frozen. The tune amount field and
+            the song search pop it in the same place for the same reason.
+            """
+            gp.pop_last_substate()
+            text = "" if text is None else str(text).strip()
+            before = live_seconds()
+            if not text:
+                speak(f"{title} unchanged, {recorder.fade_time_text(before)}.")
+                return
+            try:
+                value = float(text)
+            except ValueError:
+                speak(f"'{text}' is not a number of seconds, so "
+                      f"{title.lower()} is still {recorder.fade_time_text(before)}.")
+                return
+            apply(value)
+            after = live_seconds()
+            if after:
+                speak(f"{title}: {recorder.fade_time_text(after)}.")
+            else:
+                speak(f"{title} off.")
+
+        def go_custom():
+            gp.add_substate(self._bot.game.input.run(
+                f"Enter a fade of 0 to {int(MAX_FADE_SECONDS)} whole seconds "
+                f"(currently {recorder.fade_time_text(live_seconds())}):",
+                handeler=submitted,
+                min_val=0, max_val=int(MAX_FADE_SECONDS),
+                msg_length=2, multiline=False,
+            ))
+
+        notes = {
+            0.0: "No fade: the file begins (or ends) exactly where the sound does.",
+            0.5: "Half a second: enough to soften a cut without losing any of the take.",
+            1.0: "One second: a short fade a listener does not notice.",
+            2.0: "Two seconds: a fade you can hear, still short enough to keep the take.",
+            3.0: "Three seconds: a deliberate fade, for a session that starts or ends on a chord.",
+            5.0: "Five seconds: an effect rather than a guard against a click.",
+            10.0: "Ten seconds: a long fade, for a recording with a tail on it.",
+        }
+        items = [(make_label(seconds), pick(seconds), None, notes[seconds])
+                 for seconds in FADE_CHOICES]
+        items.append(("Custom Seconds", go_custom, None,
+                      f"Type the fade yourself, in whole seconds from 0 to "
+                      f"{int(MAX_FADE_SECONDS)}. 0 is off, the same as no fade."))
+        items.append(("Back", go_back, None,
+                      "Returns to Audio Recording Settings."))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot {title}: {recorder.fade_time_text(live_seconds())}",
+            parrent=gp,
+        )
+        m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
 

@@ -240,6 +240,66 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
             self.assertEqual(self.manager.split_minutes(), 0)
             self.assertTrue(self.manager.announce_details())
 
+    def test_fades_ship_off_and_are_restored_to_off(self):
+        stored = {}
+        with mock.patch("libs.game_audio_recorder.options.get",
+                        side_effect=lambda key, default=None: stored.get(key, default)), \
+                mock.patch("libs.game_audio_recorder.options.set",
+                           side_effect=lambda key, value: stored.__setitem__(key, value)):
+            self.assertEqual(self.manager.fade_in_seconds(), 0.0)
+            self.assertEqual(self.manager.fade_out_seconds(), 0.0)
+            self.assertEqual(self.manager.fade_in_setting_label(), "Fade In at Start: Off")
+            self.assertEqual(self.manager.fade_out_setting_label(), "Fade Out at Stop: Off")
+
+            self.manager.set_fade_in(2)
+            self.manager.set_fade_out(0.5)
+            self.assertEqual(self.manager.fade_in_setting_label(), "Fade In at Start: 2 seconds")
+            self.assertEqual(self.manager.fade_out_setting_label(), "Fade Out at Stop: 0.5 seconds")
+
+            # A typed or edited preference is clamped where it is read: the
+            # value becomes sample counts, and a fade longer than the take
+            # would eat all of it.
+            self.manager.set_fade_out(999)
+            self.assertEqual(self.manager.fade_out_seconds(), 30.0)
+            self.assertIn("30 seconds", self.manager.fade_out_setting_label())
+
+            self.assertTrue(self.manager.restore_setting_defaults())
+            self.assertEqual(self.manager.fade_in_seconds(), 0.0)
+            self.assertEqual(self.manager.fade_out_seconds(), 0.0)
+            self.assertEqual(self.manager.fade_in_setting_label(), "Fade In at Start: Off")
+
+    def test_one_second_is_said_in_the_singular(self):
+        self.assertEqual(self.manager.fade_time_text(0), "Off")
+        self.assertEqual(self.manager.fade_time_text(1), "1 second")
+        self.assertEqual(self.manager.fade_time_text(2), "2 seconds")
+        self.assertEqual(self.manager.fade_time_text(0.5), "0.5 seconds")
+
+    def test_recording_snapshots_the_fade_times_it_started_with(self):
+        """The fade belongs to the take: changing the setting cannot reach back.
+
+        A recording is a file already open on disk, so the times are read once,
+        when the countdown starts. That is also what makes Stop safe: the
+        writer was told the length it has to fade over before a frame existed.
+        """
+        values = {
+            "music_bot_recording_countdown_seconds": 0,
+            "music_bot_recording_fade_in_seconds": 2.0,
+            "music_bot_recording_fade_out_seconds": 3.0,
+        }
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch(
+                    "libs.game_audio_recorder.options.get",
+                    side_effect=lambda key, default=None: values.get(key, default),
+                ), mock.patch("libs.game_audio_recorder.options.set"):
+            output = Path(temp) / "faded.wav"
+            self.assertTrue(self.manager.start_to_path(output))
+            self.assertTrue(_wait_for(lambda: self.manager.state() == "recording"))
+            backend = _FakeBackend.instances[0]
+            self.assertEqual(backend.kwargs["fade_in_seconds"], 2.0)
+            self.assertEqual(backend.kwargs["fade_out_seconds"], 3.0)
+            self.manager.stop()
+            self.assertTrue(_wait_for(lambda: self.manager.state() == "idle"))
+
     def test_recording_snapshots_microphone_and_split_settings(self):
         values = {
             "music_bot_recording_include_microphone": True,
@@ -259,6 +319,8 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
             backend = _FakeBackend.instances[0]
             self.assertIsNotNone(backend.kwargs["microphone_overlay"])
             self.assertEqual(backend.kwargs["split_minutes"], 30)
+            self.assertEqual(backend.kwargs["fade_in_seconds"], 0.0)
+            self.assertEqual(backend.kwargs["fade_out_seconds"], 0.0)
             self.assertTrue(self.manager.feed_transmitted_microphone(b"\x01\x00" * 4))
             self.assertFalse(
                 self.manager.feed_transmitted_microphone(
@@ -442,6 +504,94 @@ class GameAudioPcmTests(unittest.TestCase):
                     frame_counts.append(recording.getnframes())
                     self.assertEqual(recording.getnchannels(), 2)
             self.assertEqual(frame_counts, [2, 2, 1])
+
+    def test_no_fade_writes_the_file_it_always_wrote(self):
+        """Both fades off is the old writer, byte for byte.
+
+        The setting ships off, and a player who never touches it must get the
+        same recording this code produced before the fade existed.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            plain = Path(temp) / "plain.wav"
+            zero = Path(temp) / "zero.wav"
+            pcm = self._pcm([1000, -1000] * 40)
+            for path, writer in (
+                (plain, _SegmentedWaveWriter(plain)),
+                (zero, _SegmentedWaveWriter(zero, 0, 0.0, 0.0)),
+            ):
+                writer.write(pcm)
+                writer.close()
+            self.assertEqual(plain.read_bytes(), zero.read_bytes())
+
+    def test_fade_in_starts_at_silence_and_reaches_full_level(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "fade-in.wav"
+            writer = _SegmentedWaveWriter(output, 0, fade_in_seconds=1.0)
+            writer.write(self._pcm([20_000, 20_000] * 96_000))  # two seconds
+            writer.close()
+            with wave.open(str(output), "rb") as recording:
+                self.assertEqual(recording.getnframes(), 96_000)
+                samples = array("h")
+                samples.frombytes(recording.readframes(recording.getnframes()))
+            # Frame 0 is the ramp's own zero, half a second in is half level,
+            # and the first frame past the ramp is the sample as captured.
+            self.assertEqual(samples[0], 0)
+            self.assertAlmostEqual(samples[24_000 * 2] / 20_000, 0.5, delta=0.01)
+            self.assertEqual(samples[48_000 * 2], 20_000)
+            self.assertEqual(samples[95_999 * 2], 20_000)
+
+    def test_fade_out_falls_to_silence_at_the_end(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "fade-out.wav"
+            writer = _SegmentedWaveWriter(output, 0, fade_out_seconds=0.5)
+            writer.write(self._pcm([20_000, 20_000] * 48_000))  # one second
+            writer.close()
+            with wave.open(str(output), "rb") as recording:
+                self.assertEqual(recording.getnframes(), 48_000)
+                samples = array("h")
+                samples.frombytes(recording.readframes(recording.getnframes()))
+            # The tail is held back until Stop and written with the ramp on it:
+            # the last frame is silence, the middle of the window is half.
+            self.assertLessEqual(abs(samples[-2]), 1)
+            self.assertAlmostEqual(samples[36_000 * 2] / 20_000, 0.5, delta=0.01)
+            # Everything before the window is the capture, untouched.
+            self.assertEqual(samples[23_999 * 2], 20_000)
+
+    def test_fade_out_tail_finishes_the_open_part_instead_of_a_stub(self):
+        """A split lands on whole parts: the held tail does not open a new one."""
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "split-fade.wav"
+            writer = _SegmentedWaveWriter(output, 0, fade_out_seconds=0.5)
+            writer.max_frames = 48_000  # one second per part
+            writer.write(self._pcm([5000, 5000] * 96_000))  # two seconds
+            writer.close()
+            self.assertEqual(len(writer.paths), 2)
+            with wave.open(writer.paths[1], "rb") as recording:
+                self.assertEqual(recording.getnframes(), 48_000)
+
+    def test_a_fade_longer_than_the_recording_still_ends_quietly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "short.wav"
+            writer = _SegmentedWaveWriter(
+                output, 0, fade_in_seconds=5.0, fade_out_seconds=5.0)
+            writer.write(self._pcm([9000, 9000] * 4800))  # 0.1 seconds
+            writer.close()
+            with wave.open(str(output), "rb") as recording:
+                self.assertEqual(recording.getnframes(), 4800)
+                samples = array("h")
+                samples.frombytes(recording.readframes(recording.getnframes()))
+            self.assertEqual(samples[0], 0)
+            self.assertLessEqual(abs(samples[-2]), 1)
+
+    def test_closing_twice_does_not_write_the_held_tail_twice(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "twice.wav"
+            writer = _SegmentedWaveWriter(output, 0, fade_out_seconds=0.25)
+            writer.write(self._pcm([700, 700] * 48_000))
+            writer.close()
+            writer.close()
+            with wave.open(str(output), "rb") as recording:
+                self.assertEqual(recording.getnframes(), 48_000)
 
 
 class VoiceChatRecorderRoutingTests(unittest.TestCase):

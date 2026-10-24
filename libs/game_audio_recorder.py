@@ -61,6 +61,13 @@ DEFAULT_COUNTDOWN_SECONDS = 3
 COUNTDOWN_CHOICES = (0, 3, 5)
 SPLIT_MINUTE_CHOICES = (0, 30, 60, 120)
 
+# How much a recording fades at its two ends. The quick answers are the times a
+# person actually asks for -- half a second softens a cut, five is an effect --
+# and any whole second up to the ceiling can be typed into the same page, so a
+# player is not limited to this list.
+FADE_CHOICES = (0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0)
+MAX_FADE_SECONDS = 30.0
+
 
 class ProcessLoopbackUnavailable(RuntimeError):
     """Raised when isolated application capture is unavailable or fails."""
@@ -144,15 +151,36 @@ def _mix_mono16_into_stereo16(stereo_pcm, mono_pcm):
 
 
 class _SegmentedWaveWriter:
-    """Write PCM to one or more collision-safe WAV segments."""
+    """Write PCM to one or more collision-safe WAV segments.
 
-    def __init__(self, output_path, split_minutes=0):
+    A recording can fade up at its start and down as it stops, and both ramps
+    live here because this is the one place every captured frame passes
+    through: the two backends differ in where the audio comes from, not in how
+    it is stored, so one writer means one fade.
+
+    The fade-out needs a decision a live recording cannot avoid: the end is not
+    known until Stop. So the last `fade_out` seconds are **held back in
+    memory** and written when the file is closed, with the ramp already
+    applied -- the capture thread keeps handing frames over at full rate, and
+    nothing on disk is rewritten, which a WAV cannot do safely after a split.
+    Both fades at 0 keep the old path exactly: no buffering, byte-for-byte the
+    same file.
+    """
+
+    def __init__(self, output_path, split_minutes=0, fade_in_seconds=0.0,
+                 fade_out_seconds=0.0):
         self.output_path = os.path.abspath(os.fspath(output_path))
         self.max_frames = max(0, int(split_minutes)) * 60 * SAMPLE_RATE
         self.paths = []
         self._wave = None
         self._raw = None
         self._part_frames = 0
+        self._fade_in_frames = self._fade_frames(fade_in_seconds)
+        self._fade_in_position = 0
+        self._fade_out_frames = self._fade_frames(fade_out_seconds)
+        self._tail = deque()
+        self._tail_frames = 0
+        self._tail_flushed = False
         self._open_part(1)
 
     def _part_path(self, part_number):
@@ -202,12 +230,92 @@ class _SegmentedWaveWriter:
             self._raw.close()
             self._raw = None
 
-    def write(self, pcm):
+    @staticmethod
+    def _fade_frames(seconds):
+        """Seconds to whole frames; nothing, a negative or a bad value is 0."""
+        try:
+            value = float(seconds or 0.0)
+        except (TypeError, ValueError):
+            return 0
+        if not value > 0:
+            return 0
+        return int(round(value * SAMPLE_RATE))
+
+    @staticmethod
+    def _scaled(pcm, gain_at, start=0, count=None):
+        """Scale 16-bit stereo frames by ``gain_at(index)``; index from *start*.
+
+        Only the frames inside a ramp are touched, so a fade costs one pass
+        over a few seconds and never over the whole recording.
+        """
+        block = CHANNELS * SAMPLE_WIDTH
+        frames = len(pcm) // block
+        if count is not None:
+            frames = min(frames, int(count))
+        if frames <= 0:
+            return b""
+        samples = array("h")
+        samples.frombytes(pcm[:frames * block])
+        for frame in range(frames):
+            gain = gain_at(start + frame)
+            if gain >= 1.0:
+                continue
+            base = frame * 2
+            samples[base] = int(samples[base] * gain)
+            samples[base + 1] = int(samples[base + 1] * gain)
+        return samples.tobytes()
+
+    def _fade_in(self, pcm):
+        block = CHANNELS * SAMPLE_WIDTH
+        total = self._fade_in_frames
+        count = min(len(pcm) // block, total - self._fade_in_position)
+        if count <= 0:
+            return pcm
+        head = self._scaled(
+            pcm, lambda index: index / total, self._fade_in_position, count)
+        self._fade_in_position += count
+        return head + pcm[count * block:]
+
+    def _hold_for_fade_out(self, pcm):
+        """Keep the last ``fade_out`` seconds; write everything older."""
+        block = CHANNELS * SAMPLE_WIDTH
+        self._tail.append(pcm)
+        self._tail_frames += len(pcm) // block
+        while self._tail_frames > self._fade_out_frames and self._tail:
+            chunk = self._tail.popleft()
+            frames = len(chunk) // block
+            excess = self._tail_frames - self._fade_out_frames
+            if frames <= excess:
+                self._write_pcm(chunk)
+                self._tail_frames -= frames
+                continue
+            self._write_pcm(chunk[:excess * block])
+            self._tail.appendleft(chunk[excess * block:])
+            self._tail_frames -= excess
+            return
+
+    def _flush_fade_out(self):
+        """Write the held tail with the ramp on it, on the file's own end."""
+        block = CHANNELS * SAMPLE_WIDTH
+        self._tail_flushed = True
+        if not self._tail:
+            return
+        tail = b"".join(self._tail)
+        self._tail.clear()
+        frames = len(tail) // block
+        self._tail_frames = 0
+        if frames <= 0:
+            return
+        total = max(1, frames)
+        faded = self._scaled(tail, lambda index: (total - index) / total, 0, frames)
+        self._write_pcm(faded + tail[frames * block:], allow_split=False)
+
+    def _write_pcm(self, pcm, allow_split=True):
         block_align = CHANNELS * SAMPLE_WIDTH
         offset = 0
         total_frames = len(pcm) // block_align
         while total_frames > 0:
-            if self.max_frames:
+            if self.max_frames and allow_split:
                 remaining = self.max_frames - self._part_frames
                 if remaining <= 0:
                     self._close_part()
@@ -215,6 +323,8 @@ class _SegmentedWaveWriter:
                     remaining = self.max_frames
                 frame_count = min(total_frames, remaining)
             else:
+                # The held fade-out tail finishes the part that is open rather
+                # than opening one last fragment of a few seconds.
                 frame_count = total_frames
             byte_count = frame_count * block_align
             self._wave.writeframesraw(pcm[offset:offset + byte_count])
@@ -222,7 +332,19 @@ class _SegmentedWaveWriter:
             total_frames -= frame_count
             offset += byte_count
 
+    def write(self, pcm):
+        if not pcm:
+            return
+        if self._fade_in_frames:
+            pcm = self._fade_in(pcm)
+        if self._fade_out_frames:
+            self._hold_for_fade_out(pcm)
+        else:
+            self._write_pcm(pcm)
+
     def close(self):
+        if not self._tail_flushed:
+            self._flush_fade_out()
         self._close_part()
 
 
@@ -645,6 +767,8 @@ class ProcessLoopbackRecorder:
         *,
         microphone_overlay=None,
         split_minutes=0,
+        fade_in_seconds=0.0,
+        fade_out_seconds=0.0,
     ):
         """Block on a worker thread until *stop_event* is set.
 
@@ -701,7 +825,8 @@ class ProcessLoopbackRecorder:
 
             # Exclusive creation is intentional: an automatic timestamp or a
             # late filesystem race must never overwrite an existing recording.
-            writer = _SegmentedWaveWriter(output_path, split_minutes)
+            writer = _SegmentedWaveWriter(
+                output_path, split_minutes, fade_in_seconds, fade_out_seconds)
 
             audio_client.Start()
             started_at = time.monotonic()
@@ -840,6 +965,8 @@ class GameAudioRecorderManager:
         self._session_countdown_seconds = DEFAULT_COUNTDOWN_SECONDS
         self._session_split_minutes = 0
         self._session_announce_details = True
+        self._session_fade_in_seconds = 0.0
+        self._session_fade_out_seconds = 0.0
 
     def _dispatch(self, callback):
         if self._closed:
@@ -894,6 +1021,65 @@ class GameAudioRecorderManager:
 
     def announce_details(self):
         return bool(options.get("music_bot_recording_announce_details", True))
+
+    def _fade_seconds(self, key):
+        """A fade time in seconds: 0 when off, never past the ceiling.
+
+        Clamped on the way out rather than trusted from the file: an edited
+        preference is a number this thread turns into sample counts, and a
+        fade longer than the recording would otherwise eat all of it.
+        """
+        try:
+            value = float(options.get(key, 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        if not value > 0:
+            return 0.0
+        return min(value, MAX_FADE_SECONDS)
+
+    def fade_in_seconds(self):
+        return self._fade_seconds("music_bot_recording_fade_in_seconds")
+
+    def fade_out_seconds(self):
+        return self._fade_seconds("music_bot_recording_fade_out_seconds")
+
+    @staticmethod
+    def fade_time_text(seconds):
+        """How a fade time reads: Off, `1 second`, `0.5 seconds`."""
+        if not seconds:
+            return "Off"
+        value = float(seconds)
+        if value.is_integer():
+            whole = int(value)
+            return f"{whole} second" if whole == 1 else f"{whole} seconds"
+        return f"{value:g} seconds"
+
+    def fade_in_setting_label(self):
+        return f"Fade In at Start: {self.fade_time_text(self.fade_in_seconds())}"
+
+    def fade_out_setting_label(self):
+        return f"Fade Out at Stop: {self.fade_time_text(self.fade_out_seconds())}"
+
+    def set_fade_in(self, seconds):
+        return self._set_fade("music_bot_recording_fade_in_seconds", seconds, "Fade in")
+
+    def set_fade_out(self, seconds):
+        return self._set_fade("music_bot_recording_fade_out_seconds", seconds, "Fade out")
+
+    def _set_fade(self, key, seconds, name):
+        if not self._can_change_settings():
+            return False
+        try:
+            value = float(seconds or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        value = max(0.0, min(value, MAX_FADE_SECONDS))
+        options.set(key, value)
+        if value:
+            self._announce(f"{name}: {self.fade_time_text(value)}.")
+        else:
+            self._announce(f"{name} off.")
+        return True
 
     def microphone_setting_label(self):
         state = "On" if self.include_microphone() else "Off"
@@ -999,6 +1185,8 @@ class GameAudioRecorderManager:
         options.set("music_bot_recording_countdown_seconds", DEFAULT_COUNTDOWN_SECONDS)
         options.set("music_bot_recording_split_minutes", 0)
         options.set("music_bot_recording_announce_details", True)
+        options.set("music_bot_recording_fade_in_seconds", 0.0)
+        options.set("music_bot_recording_fade_out_seconds", 0.0)
         self._announce("Recording settings restored to defaults.")
         return True
 
@@ -1249,6 +1437,10 @@ class GameAudioRecorderManager:
             self._session_countdown_seconds = self.countdown_seconds()
             self._session_split_minutes = self.split_minutes()
             self._session_announce_details = self.announce_details()
+            # The fade times belong to the take that is starting: changing the
+            # setting mid-recording cannot reach back into a file already open.
+            self._session_fade_in_seconds = self.fade_in_seconds()
+            self._session_fade_out_seconds = self.fade_out_seconds()
             self._stop_event.clear()
             self._cancel_countdown.clear()
             self._microphone_overlay.clear()
@@ -1289,6 +1481,8 @@ class GameAudioRecorderManager:
             include_computer_audio = self._session_include_computer_audio
             split_minutes = self._session_split_minutes
             announce_details = self._session_announce_details
+            fade_in_seconds = self._session_fade_in_seconds
+            fade_out_seconds = self._session_fade_out_seconds
         try:
             backend_factory = (
                 self._system_backend_factory if include_computer_audio else self._backend_factory
@@ -1319,6 +1513,8 @@ class GameAudioRecorderManager:
                 on_started,
                 microphone_overlay=self._microphone_overlay if include_microphone else None,
                 split_minutes=split_minutes,
+                fade_in_seconds=fade_in_seconds,
+                fade_out_seconds=fade_out_seconds,
             )
             frames, elapsed = result[:2]
             output_paths = tuple(result[2]) if len(result) > 2 else (output_path,)
@@ -1375,6 +1571,8 @@ class GameAudioRecorderManager:
             self._recording_started_at = None
             self._session_include_microphone = False
             self._session_include_computer_audio = False
+            self._session_fade_in_seconds = 0.0
+            self._session_fade_out_seconds = 0.0
             self._stop_event.clear()
             self._cancel_countdown.clear()
             self._microphone_overlay.clear()

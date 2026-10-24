@@ -1110,6 +1110,9 @@ class MapMusicBot:
     def _open_recording_settings_menu(self):
         return self._menus()._open_recording_settings_menu()
 
+    def _open_recording_fade_menu(self, kind="in"):
+        return self._menus()._open_recording_fade_menu(kind)
+
     def _open_recording_reset_confirmation(self):
         return self._menus()._open_recording_reset_confirmation()
 
