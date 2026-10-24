@@ -53,4 +53,4 @@ SOUNDSPREPEND="/data/"
 VFS_CACHE_MB = 512
 
 # Update this variable to force clients to update their game
-CLIENT_VERSION = "BT-1.9.3"
+CLIENT_VERSION = "BT-1.9.4"

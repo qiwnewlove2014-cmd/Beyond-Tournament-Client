@@ -510,7 +510,7 @@ class MenuTests(unittest.TestCase):
     def settings_labels(self):
         self.handler._open_settings_menu()
         return [label() if callable(label) else label
-                for label, _action in FakeMenu.built[-1].items]
+                for label, _action, *_extra in FakeMenu.built[-1].items]
 
     def test_the_settings_menu_carries_the_speech_line(self):
         self.assertIn("Speech Key: Original key", self.settings_labels())
@@ -526,7 +526,7 @@ class MenuTests(unittest.TestCase):
         self.handler._open_speech_transpose_menu()
         menu = FakeMenu.built[-1]
         self.assertEqual(menu.title, "Music Bot Speech Key: Original key")
-        self.assertEqual([label for label, _action in menu.items],
+        self.assertEqual([label for label, _action, *_extra in menu.items],
                          ["Up One Semitone", "Down One Semitone",
                           "Original Voice", "Back"])
         menu.items[0][1]()

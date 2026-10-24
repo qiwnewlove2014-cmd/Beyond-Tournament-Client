@@ -199,7 +199,7 @@ class TestNearMiss(unittest.TestCase):
     """
 
     def test_a_mistyped_command_gets_a_hint_that_names_it(self):
-        for line, word in (("/mp a song", "/mp"), ("/mm", "/mm"),
+        for line, word, *_extra in (("/mp a song", "/mp"), ("/mm", "/mm"),
                            ("/mmm a song", "/mmm"), ("/pl x", "/pl"),
                            ("/playy", "/playy"), ("/m.", "/m."),
                            ("/pn a song", "/pn"), ("//m x", "//m"),
@@ -406,7 +406,7 @@ class TestHostSide(unittest.TestCase):
 
     def test_a_refusal_never_reaches_the_search(self):
         patcher, thread_patch, speak_patch, searcher, _said = self._patch([])
-        for kwargs, expected in (
+        for kwargs, expected, *_extra in (
             ({"open_": False}, "closed"),
             ({"enabled": False}, "not running"),
         ):

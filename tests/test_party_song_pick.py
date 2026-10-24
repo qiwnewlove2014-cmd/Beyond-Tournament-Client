@@ -293,7 +293,7 @@ class TestThePicker(unittest.TestCase):
         bot, gp = make_bot()
         menu = open_menu(bot, "r3", self.ITEMS, "a song")
         self.assertEqual(menu.title, "Pick a song: a song")
-        self.assertEqual([label for label, _ in menu.items],
+        self.assertEqual([label for label, _, *_extra in menu.items],
                          ["Studio (4:29)", "Live", "Nothing, thanks"])
         self.assertEqual(len(gp.substates), 1)
 
@@ -302,7 +302,7 @@ class TestThePicker(unittest.TestCase):
         picked = []
         open_menu(bot, "r3", self.ITEMS, "a song", on_pick=picked.append)
         with mock.patch("libs.music_bot.menus.speak") as said:
-            for label, callback in FakeMenu.instances[-1].items:
+            for label, callback, *_extra in FakeMenu.instances[-1].items:
                 if label == "Live":
                     callback()
         self.assertEqual(picked, [1])
@@ -313,7 +313,7 @@ class TestThePicker(unittest.TestCase):
         bot, gp = make_bot()
         picked = []
         open_menu(bot, "r3", self.ITEMS, "a song", on_pick=picked.append)
-        for label, callback in FakeMenu.instances[-1].items:
+        for label, callback, *_extra in FakeMenu.instances[-1].items:
             if label == "Nothing, thanks":
                 callback()
         self.assertEqual(picked, [-1])
@@ -338,7 +338,7 @@ class TestThePicker(unittest.TestCase):
     def test_a_result_that_cannot_be_read_is_skipped_not_shown_blank(self):
         bot, gp = make_bot()
         menu = open_menu(bot, "r3", [None, self.ITEMS[0]], "a song")
-        self.assertEqual([label for label, _ in menu.items],
+        self.assertEqual([label for label, _, *_extra in menu.items],
                          ["Studio (4:29)", "Nothing, thanks"])
 
 
@@ -382,7 +382,7 @@ class TestWiring(unittest.TestCase):
                 "items": [{"title": "Studio", "duration": 269}],
             })
             self.assertEqual(len(gp.substates), 1)
-            for _label, callback in FakeMenu.instances[-1].items:
+            for _label, callback, *_extra in FakeMenu.instances[-1].items:
                 callback()
                 break
         self.assertEqual(sent, [("party_sync_song_pick",

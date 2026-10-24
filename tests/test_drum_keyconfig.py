@@ -529,8 +529,8 @@ class DrumMidiCoverageTests(unittest.TestCase):
 class HongKongKitTests(unittest.TestCase):
     """The Hong Kong set: a whole acoustic kit that arrived as one folder.
 
-    Its 18 files were recorded with their own names (``kick.ogg``, ``h ope.ogg``,
-    ``cabell.ogg``) rather than the default kit's ``Drums.hit.<Name>.ogg`` scheme,
+    Its files were recorded with their own names (``kick.ogg``, ``h ope.ogg``,
+    ``rimm.ogg``) rather than the default kit's ``Drums.hit.<Name>.ogg`` scheme,
     so nothing in the folder says which pad a file belongs to -- the registry
     does. A pad whose path is wrong is a piece of the kit that is silent with no
     error anywhere, and a file no pad names is a piece nobody can hit, which is
@@ -549,25 +549,38 @@ class HongKongKitTests(unittest.TestCase):
     def kit_folder(self):
         return os.path.join(self.kit_root(), "data", "drums", "HongkongDrum Set")
 
-    def test_the_kit_is_a_complete_drum_kit(self):
+    #: The one pad this set no longer ships: the owner deleted its cowbell
+    #: sample from the folder (2026-10-24). The pad stays in the canonical
+    #: 18-pad order and is silent -- `None`, the Salamander rule -- rather than
+    #: borrowing another kit's bell or being dropped (dropping it would move
+    #: the dedicated Rim from pad 17 to 16 and the cowbell key would play it).
+    SILENT_PAD = 16
+
+    def test_the_kit_is_complete_except_the_deleted_cowbell(self):
         pads = DrumAudio.KITS[self.KIT]
         self.assertEqual(len(pads), len(DrumAudio.PAD_DEFS))
-        missing = [index for index, pad in enumerate(pads) if pad[1] is None]
-        self.assertEqual(missing, [],
-                         "this set ships every piece, so no pad may be silent")
+        silent = [index for index, pad in enumerate(pads) if pad[1] is None]
+        self.assertEqual(silent, [self.SILENT_PAD],
+                         "only the cowbell is missing from this set")
+        self.assertEqual(pads[self.SILENT_PAD][0], "Cowbell")
         self.assertEqual(
             DrumAudio.KITS[self.KIT][2][0], "Rim (Snare 2)",
             "the set's second snare is what pad 2 plays")
         self.assertEqual(DrumAudio.KITS[self.KIT][17][0], "Rim")
 
-    def test_every_pad_points_at_a_real_file(self):
+    def test_every_pad_that_has_a_sample_points_at_a_real_file(self):
         root = self.kit_root()
         for index, (name, path, scale, polyphony) in enumerate(
                 DrumAudio.KITS[self.KIT]):
-            full = os.path.join(root, "data", path.replace("/", os.sep))
-            self.assertTrue(os.path.exists(full), f"pad {index} ({name}): {full}")
             self.assertGreater(scale, 0.0, f"pad {index} would play silence")
             self.assertGreaterEqual(polyphony, 1)
+            if path is None:
+                # A pad with no sample is a piece this set does not ship; the
+                # deleted cowbell is the only one.
+                self.assertEqual(index, self.SILENT_PAD)
+                continue
+            full = os.path.join(root, "data", path.replace("/", os.sep))
+            self.assertTrue(os.path.exists(full), f"pad {index} ({name}): {full}")
 
     def test_no_single_hit_reaches_full_scale_and_none_is_left_quiet(self):
         """The set sits at full scale on purpose, and never past it.
@@ -593,6 +606,10 @@ class HongKongKitTests(unittest.TestCase):
         root = self.kit_root()
         for index, (name, path, scale, _polyphony) in enumerate(
                 DrumAudio.KITS[self.KIT]):
+            if path is None:
+                # The deleted cowbell has no sample to measure.
+                self.assertEqual(index, self.SILENT_PAD)
+                continue
             relative = os.path.relpath(
                 os.path.join(root, "data", path.replace("/", os.sep)))
             pcm = load_vorbis_pcm(relative, max_pcm_bytes=32 * 1024 * 1024)
@@ -608,8 +625,11 @@ class HongKongKitTests(unittest.TestCase):
                 "ceiling the rest of the set was raised to")
 
     def test_the_folder_holds_no_file_no_pad_plays(self):
+        # A silent pad names no file, so it is not in either set: the folder
+        # must still hold exactly the samples the sounding pads name.
         named = {os.path.basename(path)
-                 for _, path, _, _ in DrumAudio.KITS[self.KIT]}
+                 for _, path, _, _ in DrumAudio.KITS[self.KIT]
+                 if path is not None}
         on_disk = {name for name in os.listdir(self.kit_folder())
                    if name.lower().endswith(".ogg")}
         self.assertEqual(sorted(on_disk - named), [],

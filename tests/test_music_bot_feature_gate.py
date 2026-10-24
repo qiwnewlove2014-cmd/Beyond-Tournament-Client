@@ -99,7 +99,7 @@ class GateStateTestCase(unittest.TestCase):
 def make_gp(**role_flags):
     gp = Gameplay.__new__(Gameplay)
     gp.music_bot = FakeMusicBot()
-    for key, val in role_flags.items():
+    for key, val, *_extra in role_flags.items():
         setattr(gp, key, val)
     return gp
 
@@ -265,7 +265,7 @@ class MenuTests(GateStateTestCase):
                 mock.patch("libs.menus.set_default_sounds"):
             getattr(bot, method)()
         return [label() if callable(label) else label
-                for label, _action in captured[-1].items]
+                for label, _action, *_extra in captured[-1].items]
 
     def test_the_mode_menu_drops_every_locked_line(self):
         bot = self._bot()

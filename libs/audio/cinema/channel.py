@@ -8,7 +8,12 @@ container-level check would report "stereo" forever. A running
 actually carry a stereo image worth preserving?
 
 Nothing here imports OpenAL, audioop or the Jukebox: this is pure sample
-maths so it can be unit tested offline and reused by any future source.
+maths so it can be unit tested offline and reused by any future source. That
+includes numpy, deliberately -- the core imports the standard library only
+(``test_cinema_portability``), so a host that wants the mix done in one C loop
+hands it in by calling :func:`set_vector_mix` (``fastmix.py`` does exactly
+that). The plain Python loop below is both the fallback and the reference the
+fast path is checked against.
 """
 
 import array
@@ -91,10 +96,26 @@ def mix_samples(left_samples, right_samples, gain_l=1.0, gain_r=0.0):
     which is the whole vocabulary the profiles need. Samples that would
     overflow are clamped, because a clipped speaker sounds like a broken
     speaker while a clamped one only ever sounds loud.
+
+    The arithmetic is the same either way -- ``(L * scaled_l + R * scaled_r)
+    >> 15``, then a clamp -- and it is done in one C loop when a host has
+    handed a vector mixer in (:func:`set_vector_mix`) and one Python iteration
+    per sample when it has not.
     """
     count = min(len(left_samples), len(right_samples))
     scaled_l = int(gain_l * _GAIN_SCALE)
     scaled_r = int(gain_r * _GAIN_SCALE)
+    vector_mix = _VECTOR_MIX
+    if count and vector_mix is not None:
+        try:
+            mixed_bytes = vector_mix(left_samples, right_samples, count,
+                                     scaled_l, scaled_r)
+        except Exception:
+            # A host mixer that cannot take these samples: the reference loop
+            # below is always able to answer.
+            mixed_bytes = None
+        if mixed_bytes is not None:
+            return mixed_bytes
     mixed = array.array("h", bytes(2 * count))
     for index in range(count):
         value = (left_samples[index] * scaled_l
@@ -105,6 +126,31 @@ def mix_samples(left_samples, right_samples, gain_l=1.0, gain_r=0.0):
             value = _INT16_MIN
         mixed[index] = value
     return mixed.tobytes()
+
+
+#: The host's vector mixer, or None. See :func:`set_vector_mix`.
+_VECTOR_MIX = None
+
+
+def set_vector_mix(mixer=None):
+    """Hand this core a faster mixer, or (with ``None``) take one back.
+
+    ``mixer(left_samples, right_samples, count, scaled_l, scaled_r)`` must return
+    the same int16 MONO bytes :func:`mix_samples` would -- the same ``>> 15``
+    floor shift and the same clamp -- or None when it cannot take these samples.
+    It is *the* per-speaker cost of a room's frame: the reference loop paid
+    0.49 ms per 1920-sample mix, 5.9 ms of every 40 ms frame for a twelve-speaker
+    room, and the transport thread held the interpreter for it; the vectorised
+    one in ``fastmix.py`` pays 0.027 ms for the same numbers.
+
+    numpy belongs here for the same reason the core imports nothing else: the
+    six modules are a library somebody could take, so what it needs is handed to
+    it (``test_cinema_portability``). Returns the mixer it replaced.
+    """
+    global _VECTOR_MIX
+    previous = _VECTOR_MIX
+    _VECTOR_MIX = mixer if callable(mixer) else None
+    return previous
 
 
 def mix_channels(left, right, gain_l=1.0, gain_r=0.0):

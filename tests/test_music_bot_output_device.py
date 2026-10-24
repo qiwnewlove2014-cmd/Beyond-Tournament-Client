@@ -188,7 +188,7 @@ def make_bot(**attrs):
     bot.eq_profile = "normal"
     bot.eq_values = {"bass": 50, "mid": 50, "treble": 50}
     bot.said = []
-    for key, value in attrs.items():
+    for key, value, *_extra in attrs.items():
         setattr(bot, key, value)
     return bot
 
@@ -428,7 +428,7 @@ class StreamerRoutingTests(unittest.TestCase):
         streamer.channels = 2
         streamer._direct_seek_to = 0.0
         streamer._fed_content_seconds = 0.0
-        for key, value in attrs.items():
+        for key, value, *_extra in attrs.items():
             setattr(streamer, key, value)
         return streamer
 
@@ -662,7 +662,7 @@ class SettingsMenuTests(unittest.TestCase):
     def settings_labels(self):
         self.handler._open_settings_menu()
         return [label() if callable(label) else label
-                for label, _action in FakeMenu.built[-1].items]
+                for label, _action, *_extra in FakeMenu.built[-1].items]
 
     def test_the_settings_menu_carries_the_output_line(self):
         self.assertIn("Music Output Device: Same as the game",
@@ -689,7 +689,7 @@ class SettingsMenuTests(unittest.TestCase):
                                         "OpenAL Soft on Headphones")):
             self.handler._open_output_device_menu()
         items = FakeMenu.built[-1].items
-        labels = [label for label, _action in items]
+        labels = [label for label, _action, *_extra in items]
         self.assertEqual(labels, ["Same as the game", "Speaker", "Headphones",
                                   "Back"])
         # Picking one asks the bot for that exact specifier.
@@ -706,7 +706,7 @@ class SettingsMenuTests(unittest.TestCase):
         with mock.patch.object(menus_module.output_device, "available_devices",
                                lambda: ("OpenAL Soft on Speaker",)):
             self.handler._open_output_device_menu()
-        labels = [label for label, _action in FakeMenu.built[-1].items]
+        labels = [label for label, _action, *_extra in FakeMenu.built[-1].items]
         self.assertEqual(labels[1], "Speaker (current)")
 
 

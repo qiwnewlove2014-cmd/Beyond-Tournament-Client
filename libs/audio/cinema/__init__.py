@@ -54,6 +54,10 @@ like the plain two-source jukebox it always was.
 from .bank import CinemaSpeakerBank
 from .channel import (ChannelAnalyzer, mid_side, mix_channels, mix_samples,
                      source_layout, to_samples)
+# The room core imports the standard library only, so the vectorised mix is
+# handed to it from here rather than reached for there (see fastmix.py).
+# Importing this installs it; without numpy the reference loop stays in place.
+from . import fastmix  # noqa: E402,F401
 from .layout import (IDEAL_BEARING, MAX_ROOM_REACH, MIN_ROOM_REACH,
                      ROOM_MAX_DISTANCE, ROOM_RADIUS, ROOM_REFERENCE_DISTANCE,
                      SLOT_ORDER, CinemaLayout, CinemaSpeakerSpec, coerce_spec,

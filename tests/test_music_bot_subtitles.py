@@ -507,7 +507,7 @@ def make_bot(**overrides):
     bot.mode = "youtube"
     bot.game = SimpleNamespace(put=lambda fn: None, stack=[])
     bot._find_gameplay = lambda: None
-    for key, value in overrides.items():
+    for key, value, *_extra in overrides.items():
         setattr(bot, key, value)
     return bot
 
@@ -719,8 +719,7 @@ class TheSubtitleMenuTests(unittest.TestCase):
 
     def test_the_menu_carries_the_switch_the_language_the_timing_and_the_status(self):
         bot = make_bot()
-        labels = [norm(label) for label, _action in
-                  self.open_menu(bot).items]
+        labels = [norm(item[0]) for item in self.open_menu(bot).items]
         self.assertIn("Subtitles: OFF", labels)
         self.assertIn("Language: Thai first, then English", labels)
         self.assertIn("Timing: as the video timed it", labels)
@@ -737,7 +736,7 @@ class TheSubtitleMenuTests(unittest.TestCase):
         with mock.patch.object(bot_module.options, "set") as opt_set, \
                 mock.patch.object(bot_module, "speak"), \
                 mock.patch.object(bot, "_begin_subtitles") as begin:
-            action = next(cb for label, cb in menu.items
+            action = next(cb for label, cb, *_extra in menu.items
                           if norm(label) == "Thai only")
             action()
         self.assertEqual(bot.subtitle_language, "th-only")
@@ -747,9 +746,9 @@ class TheSubtitleMenuTests(unittest.TestCase):
     def test_the_timing_menu_moves_half_a_second_and_clamps(self):
         bot = make_bot(subtitles_enabled=True)
         menu = self.open_menu(bot, "_open_subtitle_timing_menu")
-        earlier = next(cb for label, cb in menu.items
+        earlier = next(cb for label, cb, *_extra in menu.items
                        if str(label).startswith("Speak 0.5 seconds earlier"))
-        later = next(cb for label, cb in menu.items
+        later = next(cb for label, cb, *_extra in menu.items
                      if str(label).startswith("Speak 0.5 seconds later"))
         with mock.patch.object(bot_module.options, "set") as opt_set, \
                 mock.patch.object(bot_module, "speak"):

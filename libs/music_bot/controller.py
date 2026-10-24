@@ -793,7 +793,13 @@ class MapMusicBot:
             if on_toggle is not None:
                 on_toggle()
 
-        return (label, action)
+        # A Menu item with its Tab description in the fourth field: this line
+        # opens and closes the session's requests, so it says what that means
+        # to a listener, not just that a switch moved.
+        return (label, action, None,
+                "Whether this session takes song requests. While it is open, a "
+                "listener types /m and a song name in the Party Sync chat, and "
+                "the song joins your queue.")
 
     def toggle_song_requests(self):
         """Host: flip the switch, remember it, tell the session."""

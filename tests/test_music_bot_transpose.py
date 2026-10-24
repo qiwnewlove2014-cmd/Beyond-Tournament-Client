@@ -607,7 +607,7 @@ class KeyMenuTests(unittest.TestCase):
 
     def labels(self):
         return [label() if callable(label) else label
-                for label, _action in FakeMenu.built[-1].items]
+                for label, _action, *_extra in FakeMenu.built[-1].items]
 
     def test_the_settings_menu_carries_the_key_line(self):
         self.handler._open_settings_menu()
@@ -620,7 +620,7 @@ class KeyMenuTests(unittest.TestCase):
         self.assertEqual(FakeMenu.built[-1].title, "Music Bot Key: 2 semitones up")
         self.assertEqual(self.labels(),
                          ["Up One Semitone", "Down One Semitone", "Original Key", "Back"])
-        for label, action in FakeMenu.built[-1].items:
+        for label, action, *_extra in FakeMenu.built[-1].items:
             if label == "Up One Semitone":
                 action()
         self.bot.set_transpose.assert_called_once_with(3)
@@ -628,7 +628,7 @@ class KeyMenuTests(unittest.TestCase):
 
     def test_the_key_menu_can_go_back_to_the_song_s_own_key(self):
         self.handler._open_transpose_menu()
-        for label, action in FakeMenu.built[-1].items:
+        for label, action, *_extra in FakeMenu.built[-1].items:
             if label == "Original Key":
                 action()
         self.bot.set_transpose.assert_called_once_with(0)

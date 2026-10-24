@@ -108,11 +108,28 @@ def blocked(feature_id):
 def filter_items(items):
     """Menu lines minus the ones whose feature is locked.
 
-    Each entry is ``(feature_id, label, callback)`` -- the feature id sits
-    beside the line it guards, which is the whole of a menu's part in this:
-    a locked feature's line does not exist, so it cannot be chosen. A line that
-    belongs to no single feature (Back, the Settings hub, Help) names ``None``
-    and is never hidden. Returns the ordinary ``(label, callback)`` pairs a
-    Menu is built from.
+    Each entry is ``(feature_id, label, callback[, description])`` -- the
+    feature id sits beside the line it guards, which is the whole of a menu's
+    part in this: a locked feature's line does not exist, so it cannot be
+    chosen. A line that belongs to no single feature (Back, the Settings hub,
+    Help) names ``None`` and is never hidden. Returns the entries a Menu is
+    built from, **with the description kept**: the fourth field of a Music Bot
+    line is its Tab help (`Menu.speak_current_help`), so a locked feature losing
+    its line must not be the only thing this filter does to the lines it keeps.
+
+    The two shapes differ by one slot and it matters: a gate entry is
+    ``(id, label, callback, description)`` while a Menu line is
+    ``(label, callback, preview_sound, description)``. The description is
+    therefore the FOURTH field in both, and a line that carries one has to be
+    padded past the preview slot rather than slid into it -- a description in
+    the preview slot would be decoded and played as a sound file.
     """
-    return [(item[1], item[2]) for item in items if item[0] not in _locked]
+    kept = []
+    for item in items:
+        if item[0] in _locked:
+            continue
+        entry = tuple(item[1:])
+        if len(entry) > 2:
+            entry = (entry[0], entry[1], None, *entry[2:])
+        kept.append(entry)
+    return kept

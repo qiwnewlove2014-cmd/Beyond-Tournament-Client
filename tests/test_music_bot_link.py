@@ -98,7 +98,7 @@ class LinkLineTests(unittest.TestCase):
                 mock.patch("libs.menus.set_default_sounds"):
             bot._show_mode_menu()
         labels = [label() if callable(label) else label
-                  for label, _action in captured[-1].items]
+                  for label, _action, *_extra in captured[-1].items]
         return labels
 
     def test_the_link_line_sits_directly_under_search(self):
@@ -130,8 +130,8 @@ class LinkLineTests(unittest.TestCase):
                 mock.patch("libs.menus.set_default_sounds"):
             bot._show_mode_menu()
         labels = [label() if callable(label) else label
-                  for label, _action in captured[-1].items]
-        action = dict(zip(labels, [a for _l, a in captured[-1].items]))[
+                  for label, _action, *_extra in captured[-1].items]
+        action = dict(zip(labels, [a for _l, a, *_extra in captured[-1].items]))[
             "Play a YouTube link"]
         action()
         self.assertEqual(opened, [True])

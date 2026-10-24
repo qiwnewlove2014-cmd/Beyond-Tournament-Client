@@ -323,9 +323,20 @@ class CinemaSpeakerSpec:
 
     @property
     def has_cone(self):
-        """True when this speaker's aim should shape its output at all."""
-        return self.aim_yaw is not None and (self.cone_inner is not None
-                                             or self.cone_outer is not None)
+        """True when this speaker's aim should shape its output at all.
+
+        A cone *width* is what makes an aim mean anything. An element nobody
+        aimed still reports ``aim_yaw=0``, ``inner_cone_angle=0`` and
+        ``outer_cone_angle=0`` -- the element's defaults, not a decision -- and
+        a cone of zero width with an outer gain of 0 (also the default) makes
+        :func:`cone_gain` return 0 at every angle, so reading those zeroes as an
+        aim silences the speaker outright. That is exactly the shape a room
+        copied onto another map used to be written in, so a zero-width cone is
+        read as no aim: coverage stays the room's job and the speaker plays.
+        """
+        if self.aim_yaw is None:
+            return False
+        return (self.cone_inner or 0.0) > 0.0 or (self.cone_outer or 0.0) > 0.0
 
     def __repr__(self):
         return (f"CinemaSpeakerSpec({self.slot!r}, level={self.level}, "

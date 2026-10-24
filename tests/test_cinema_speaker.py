@@ -7,15 +7,18 @@ sounds exactly like it did before the feature existed.
 """
 
 import array
+import random
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from libs.audio.cinema import (ChannelAnalyzer, CinemaLayout, CinemaRenderer,
                                CinemaSpeakerSpec, CinemaSpeakerHost,
                                acquire_bank, acquire_renderer, get_profile, mid_side,
-                               mix_channels, release_all, release_renderer,
+                               mix_channels, mix_samples, release_all, release_renderer,
                                set_enabled, source_layout)
-from libs.audio.cinema.layout import (bearing_from, slot_for_bearing)
+from libs.audio.cinema.layout import bearing_from, coerce_spec, slot_for_bearing
+from libs.audio.cinema.listener import speaker_aim_gain
 from libs.audio.cinema.profiles import PROFILES
 
 
@@ -84,6 +87,87 @@ class ChannelMathTests(unittest.TestCase):
         left = mono_bytes([32767])
         right = mono_bytes([32767, ])
         self.assertEqual(to_mono_values(mix_channels(left, right, 1.0, 1.0)), [32767])
+
+
+class FastMixTests(unittest.TestCase):
+    """The room's per-speaker mix is one C loop, and the bytes are identical.
+
+    ``mix_samples`` is the cost a listener pays per fed speaker per frame. In the
+    reference loop a twelve-speaker room paid ~0.49 ms a speaker -- 5.9 ms of
+    every 40 ms frame -- and the transport thread held the interpreter for that
+    work, felt as the game stuttering while a cabinet played, on a slower
+    machine first. numpy makes it ~0.027 ms a speaker, and the rule these tests
+    pin is that it is *the same arithmetic* (the same ``>> 15`` floor shift and
+    the same clamp), not an approximation, and that a machine without numpy
+    still mixes through the reference loop.
+    """
+
+    WEIGHTS = ((1.0, 0.0), (0.0, 1.0), (0.5, 0.5), (0.5, -0.5), (0.707, 0.707),
+               (0.25, 0.75), (0.8, -0.3), (1.0, 1.0), (1.0, -1.0), (1.37, -0.2))
+    EXTREMES = (-32768, -32767, -20000, -1, 0, 1, 20000, 32766, 32767)
+
+    @staticmethod
+    def reference(left, right, gain_l, gain_r):
+        """The plain loop, written here so the module cannot grade its own work."""
+        from libs.audio.cinema.channel import _GAIN_SCALE
+        scaled_l = int(gain_l * _GAIN_SCALE)
+        scaled_r = int(gain_r * _GAIN_SCALE)
+        count = min(len(left), len(right))
+        out = array.array("h", bytes(2 * count))
+        for index in range(count):
+            value = (left[index] * scaled_l + right[index] * scaled_r) >> 15
+            out[index] = max(-32768, min(32767, value))
+        return out.tobytes()
+
+    def samples(self, rng, count):
+        return (array.array("h", [rng.choice(self.EXTREMES) for _ in range(count)]),
+                array.array("h", [rng.choice(self.EXTREMES) for _ in range(count)]))
+
+    def test_the_fast_path_is_the_same_bytes_as_the_reference(self):
+        rng = random.Random(11)
+        for gain_l, gain_r in self.WEIGHTS:
+            for _ in range(40):
+                left, right = self.samples(rng, rng.randint(1, 64))
+                self.assertEqual(mix_samples(left, right, gain_l, gain_r),
+                                 self.reference(left, right, gain_l, gain_r))
+
+    def test_the_extremes_clip_the_same_way(self):
+        left = array.array("h", [32767, -32768, 32767, -32768])
+        right = array.array("h", [32767, -32768, -32768, 32767])
+        for gain_l, gain_r in ((1.0, 1.0), (1.0, -1.0)):
+            self.assertEqual(mix_samples(left, right, gain_l, gain_r),
+                             self.reference(left, right, gain_l, gain_r))
+
+    def test_a_machine_without_a_vector_mixer_uses_the_reference_loop(self):
+        from libs.audio.cinema import channel
+        left, right = self.samples(random.Random(3), 32)
+        with mock.patch.object(channel, "_VECTOR_MIX", None):
+            self.assertEqual(channel.mix_samples(left, right, 0.5, 0.5),
+                             self.reference(left, right, 0.5, 0.5))
+
+    def test_the_core_takes_a_mixer_for_the_bytes_it_returns(self):
+        from libs.audio.cinema import channel
+        left, right = self.samples(random.Random(5), 8)
+        constant = array.array("h", [32767] * 8).tobytes()
+
+        def loudest(left_samples, right_samples, count, scaled_l, scaled_r):
+            return constant
+
+        previous = channel.set_vector_mix(loudest)
+        try:
+            self.assertEqual(channel.mix_samples(left, right), constant)
+        finally:
+            channel.set_vector_mix(previous)
+
+    def test_the_installed_mixer_is_the_numpy_one_on_this_machine(self):
+        from libs.audio.cinema import channel, fastmix
+        if not fastmix.installed:
+            self.skipTest("this machine has no numpy")
+        left, right = self.samples(random.Random(7), 16)
+        self.assertIs(channel._VECTOR_MIX, fastmix.numpy_mix)
+        # The route the renderer takes: arrays in, bytes out, same numbers.
+        self.assertEqual(channel._VECTOR_MIX(left, right, 16, 16384, 16384),
+                         self.reference(left, right, 0.5, 0.5))
 
 
 class SourceLayoutTests(unittest.TestCase):
@@ -183,6 +267,28 @@ class LayoutTests(unittest.TestCase):
     def test_max_delay_is_reported_for_the_jam_note_sync(self):
         layout = CinemaLayout(self.ANCHOR, [CinemaSpeakerSpec("rear_l", (0, 0, 0), delay_ms=25.0)])
         self.assertAlmostEqual(layout.max_delay_s, 0.025)
+
+    def test_an_unaimed_element_is_not_read_as_a_silent_cone(self):
+        # A map element nobody aimed still reports every one of these as 0, and a
+        # cone of zero width with an outer gain of 0 plays nothing at any angle.
+        # A room copied from one map to another was written in exactly this
+        # shape, so a zero-width cone must read as *no aim*, not as silence.
+        spec = coerce_spec({"x": 10.0, "y": 26.0, "z": 0.0, "channel": "front_c",
+                            "aim_yaw": 0, "inner_cone_angle": 0,
+                            "outer_cone_angle": 0, "outer_cone_gain": 0})
+        self.assertFalse(spec.has_cone)
+        listener = (10.0, 14.0, 0.0)          # behind the speaker, worst case
+        self.assertEqual(speaker_aim_gain(listener, spec.position, spec), 1.0)
+
+    def test_a_real_aim_still_shapes_the_output(self):
+        spec = coerce_spec({"x": 10.0, "y": 10.0, "z": 0.0, "channel": "front_c",
+                            "aim_yaw": 0, "inner_cone_angle": 60,
+                            "outer_cone_angle": 120, "outer_cone_gain": 0.25})
+        self.assertTrue(spec.has_cone)
+        ahead = speaker_aim_gain((10.0, 20.0, 0.0), spec.position, spec)
+        behind = speaker_aim_gain((10.0, 0.0, 0.0), spec.position, spec)
+        self.assertAlmostEqual(ahead, 1.0)
+        self.assertAlmostEqual(behind, 0.25)
 
     def test_bearing_and_slot_mapping_are_symmetric(self):
         self.assertEqual(slot_for_bearing(0), "front_c")

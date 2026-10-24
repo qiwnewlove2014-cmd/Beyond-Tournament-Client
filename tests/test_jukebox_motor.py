@@ -6,6 +6,11 @@ contract around them:
 * power on starts the spin-up once and loops the rotation **and the fan**, at the
   part of the cabinet's placed box nearest the listener, on the cabinet's own
   category with the engine's own sound-source distance model;
+* the spin-up is heard first and whole, and the rotation and the fan join it only
+  when its own **measured** length has run out -- silent underneath it, handed
+  over over the last ``CROSSFADE`` seconds, never both at once; a clip whose
+  length cannot be read is not waited for, and a cabinet switched off during its
+  spin-up is not left catching;
 * the level is a placed Sound Source's level -- smoothstep over 25 m measured to
   the nearest point of the box, height weighted 3.5x -- not a private 8 m/40 m
   curve, so a cabinet sounds like every other placed sound on the map;
@@ -28,6 +33,33 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs.jukebox import motor, voice
+
+
+# What the real clips are: start.ogg 3.99 s, loop.ogg 3.34 s, room3.ogg 6.95 s.
+DEFAULT_LENGTHS = {
+    motor.START: 4.0,
+    motor.LOOP: 3.34,
+    motor.FAN: 6.95,
+    motor.STOP: 2.8,
+}
+
+
+class FakeBuffer:
+    def __init__(self, seconds):
+        self.sec_length = seconds
+
+
+class FakeClock:
+    """A clock a test moves by hand: the handover is measured in seconds."""
+
+    def __init__(self, now=0.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
 
 
 class FakeSource:
@@ -60,12 +92,21 @@ class FakeSound:
 
 
 class FakeAudio:
-    def __init__(self, position=(0.0, 0.0, 0.0), missing=(), category=100):
+    def __init__(self, position=(0.0, 0.0, 0.0), missing=(), category=100, lengths=None):
         self.position = position
         self.missing = set(missing)
         self.played = []
         self.volume_categories = {"jukebox": [category]}
         self.efx = SimpleNamespace(send=mock.Mock())
+        self.lengths = dict(DEFAULT_LENGTHS)
+        if lengths:
+            self.lengths.update(lengths)
+
+    def load_buffer(self, path, instrument=True):
+        """What the cabinet measures a clip with: the file's own length."""
+        if path in self.missing:
+            return None
+        return FakeBuffer(self.lengths.get(path, 0.0))
 
     def play_unbound(self, path, x, y, z, **options):
         if path in self.missing:
@@ -102,7 +143,10 @@ class FakeGame:
 
 def make(audio=None, world=None):
     game = FakeGame(audio, world)
-    return game, motor.motors_for(game)
+    holder = motor.motors_for(game)
+    game.clock = FakeClock()
+    holder.clock = game.clock
+    return game, holder
 
 
 def zone(minx=0.0, maxx=0.0, miny=0.0, maxy=0.0, minz=0.0, maxz=0.0):
@@ -129,12 +173,12 @@ class StartTests(unittest.TestCase):
         self.assertFalse(played[motor.START][4]["looping"])
         self.assertTrue(played[motor.LOOP][4]["looping"])
         self.assertTrue(played[motor.FAN][4]["looping"])
-        # Inside the box the engine's fade is full, so both loops are at 1.0 and
-        # the spin-up is too; the play call itself starts silent.
+        # The spin-up is heard at the box's own level, and the loops are already
+        # running underneath it -- silent, because it has not finished yet.
         for path in (motor.LOOP, motor.FAN):
             sound = played[path][5]
             self.assertEqual(played[path][4]["volume"], 0)
-            self.assertAlmostEqual(sound.source.gain, 1.0, places=3)
+            self.assertAlmostEqual(sound.source.gain, 0.0, places=3)
         self.assertAlmostEqual(played[motor.START][5].source.gain, 1.0, places=3)
         for _path, x, y, z, options, _sound in audio.played:
             self.assertEqual((x, y, z), (0.0, 0.0, 0.0))
@@ -159,11 +203,90 @@ class StartTests(unittest.TestCase):
         self.assertAlmostEqual(holder.motors["jb1"]["gain"], 0.5, places=3)
 
 
+class HandoverTests(unittest.TestCase):
+    """The spin-up first, then the rotation -- timed by the clip, not a constant."""
+
+    def started(self, lengths=None):
+        audio = FakeAudio(lengths=lengths)
+        game, holder = make(audio, FakeMap(zone=zone()))
+        holder.power("jb1", True, (0.0, 0.0, 0.0))
+        return audio, game, holder
+
+    def loops(self, audio):
+        return [sound for sound in sounds(audio) if sound.looping]
+
+    def test_the_rotation_is_held_silent_for_the_whole_spin_up(self):
+        audio, game, holder = self.started()
+        game.clock.advance(audio.lengths[motor.START] - motor.CROSSFADE - 0.1)
+        holder.tick(0.0, 0.0, 0.0)
+        for loop in self.loops(audio):
+            self.assertEqual(loop.source.gain, 0.0)
+
+    def test_the_rotation_comes_up_under_the_end_of_the_clip(self):
+        audio, game, holder = self.started()
+        clip = audio.lengths[motor.START]
+        # Halfway through the handover the rotation and the fan are both up, and
+        # neither of them has jumped to full volume.
+        game.clock.advance(clip - motor.CROSSFADE / 2.0)
+        holder.tick(0.0, 0.0, 0.0)
+        for loop in self.loops(audio):
+            self.assertAlmostEqual(loop.source.gain, 0.5, places=3)
+        # At the clip's last sample the handover is complete, and the entry is
+        # tidied away so the per-frame path is the plain region level again.
+        game.clock.advance(motor.CROSSFADE / 2.0)
+        holder.tick(0.0, 0.0, 0.0)
+        for loop in self.loops(audio):
+            self.assertAlmostEqual(loop.source.gain, 1.0, places=3)
+        self.assertEqual(holder.motors["jb1"]["intro_until"], 0.0)
+
+    def test_a_shorter_spin_up_hands_over_sooner(self):
+        audio, game, holder = self.started(lengths={motor.START: 0.6})
+        # A clip shorter than ``CROSSFADE`` fades across its whole length: half
+        # way through it the rotation is half up, not still waiting.
+        game.clock.advance(0.3)
+        holder.tick(0.0, 0.0, 0.0)
+        self.assertAlmostEqual(self.loops(audio)[0].source.gain, 0.5, places=3)
+        game.clock.advance(0.3)
+        holder.tick(0.0, 0.0, 0.0)
+        self.assertAlmostEqual(self.loops(audio)[0].source.gain, 1.0, places=3)
+
+    def test_a_length_that_cannot_be_read_is_not_waited_for(self):
+        audio, _game, _holder = self.started(lengths={motor.START: 0.0})
+        self.assertAlmostEqual(self.loops(audio)[0].source.gain, 1.0, places=3)
+
+    def test_with_no_spin_up_clip_the_rotation_starts_at_once(self):
+        audio = FakeAudio(missing={motor.START})
+        _game, holder = make(audio, FakeMap(zone=zone()))
+        holder.power("jb1", True, (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(self.loops(audio)[0].source.gain, 1.0, places=3)
+
+    def test_the_spin_up_follows_the_listener_like_the_rotation(self):
+        audio, _game, holder = self.started()
+        spin_up = [sound for sound in sounds(audio) if sound.path == motor.START][0]
+        holder.tick(13.0, 0.0, 0.0)
+        # The engine's stepped ramp, from the near edge of the box: the spin-up is
+        # a source of the cabinet's own while it sounds, not a fixed one-shot.
+        self.assertAlmostEqual(spin_up.source.gain, 0.95, places=3)
+        self.assertEqual(spin_up.source.position, (0.5, 0.0, 0.0))
+        self.assertAlmostEqual(self.loops(audio)[0].source.gain, 0.0, places=3)
+
+    def test_switching_off_during_the_spin_up_takes_it_with_the_machine(self):
+        audio, _game, holder = self.started()
+        spin_up = [sound for sound in sounds(audio) if sound.path == motor.START][0]
+        self.assertTrue(holder.power("jb1", False, (0.0, 0.0, 0.0)))
+        # A cabinet switched off while it is still catching is dead: only the
+        # wind-down is left sounding, never a motor spinning up from a dead box.
+        self.assertTrue(spin_up.destroyed)
+        self.assertEqual(paths(audio).count(motor.STOP), 1)
+
+
 class TickTests(unittest.TestCase):
     def test_the_level_follows_the_listener_every_frame(self):
         audio = FakeAudio()
-        _game, holder = make(audio, FakeMap(zone=zone()))
+        game, holder = make(audio, FakeMap(zone=zone()))
         holder.power("jb1", True, (0.0, 0.0, 0.0))
+        game.clock.advance(audio.lengths[motor.START] + 0.01)
+        holder.tick(0.0, 0.0, 0.0)
         loop = [sound for sound in sounds(audio) if sound.looping][0]
         self.assertAlmostEqual(loop.source.gain, 1.0, places=3)
 
@@ -317,8 +440,9 @@ class StopTests(unittest.TestCase):
 class FanTests(unittest.TestCase):
     def test_the_fan_rides_with_the_rotation(self):
         audio = FakeAudio()
-        _game, holder = make(audio, FakeMap(zone=zone()))
+        game, holder = make(audio, FakeMap(zone=zone()))
         holder.power("jb1", True, (0.0, 0.0, 0.0))
+        game.clock.advance(audio.lengths[motor.START] + 0.01)
         fan = [sound for sound in sounds(audio) if sound.path == motor.FAN][0]
         self.assertTrue(fan.looping)
         holder.tick(13.0, 0.0, 0.0)
@@ -521,9 +645,9 @@ class CabinetSwitchMenuTests(unittest.TestCase):
 class TickWiringTests(unittest.TestCase):
     def test_the_module_tick_reaches_the_holder(self):
         audio = FakeAudio()
-        game = FakeGame(audio)
-        holder = motor.motors_for(game)
+        game, holder = make(audio)
         holder.power("jb1", True, (0.0, 0.0, 0.0))
+        game.clock.advance(audio.lengths[motor.START] + 0.01)
         loop = [sound for sound in sounds(audio) if sound.looping][0]
         motor.tick(game, 13.0, 0.0, 0.0)
         self.assertAlmostEqual(loop.source.gain, 0.95, places=3)

@@ -27,6 +27,7 @@ EQ).
 Rules, traps and the measured numbers: .agents/skills/cinema_speaker_system/.
 """
 
+import math
 import time
 from collections import deque
 from contextlib import suppress
@@ -72,6 +73,22 @@ RELEASE_AFTER_S = 1.0
 # speaker (no ground-reflection clone, unlike the PA), so this is cheaper than
 # the path it replaces.
 MAX_TALKERS = 8
+# **How many voices are summed at one room's speakers.** The PA has always
+# mixed its talkers equal-power -- ``megaphone_system.update_megaphone_audio``
+# scales every active speaker by 1/sqrt(N), so two people talking over each
+# other sum to about one voice instead of to two. A room is the same broadcast
+# at a second set of speakers and never got that rule: every voice played at
+# the room's own full level, so two talkers summed to ~1.7 of full scale and the
+# mixer clipped them -- heard as the louder voice breaking up, the other losing
+# its body, and both sounding chopped. The count is kept per room, because two
+# voices in two different halls are not summed anywhere. The window is the PA's
+# own (1.5 s after the last frame), so somebody between two words is still one
+# of the voices in the room.
+SUM_SAFE_WINDOW_S = 1.5
+# ...and the gain RAMPED into rather than stepped: a talker starting or going
+# quiet would otherwise be a click in the level of everybody already there.
+# 0.15 a frame at 50 Hz is the PA's own 15% a frame, about a quarter of a second.
+MIX_RAMP = 0.15
 # The cabinet's own slider, because this is that cabinet's system: one volume
 # moves the song, the band and the voice coming out of it together.
 CATEGORY = "jukebox"
@@ -539,6 +556,28 @@ class SpeechRooms:
                           if now - leg.last_feed > RELEASE_AFTER_S]:
             self.drop(sender_id)
 
+    def mix_gain(self, leg):
+        """1/sqrt(N) for the voices this client is playing into ``leg``'s room.
+
+        The PA's own sum-safe rule (see ``SUM_SAFE_WINDOW_S``), asked of the room
+        this leg belongs to: only legs in the *same* room are counted, because
+        those are the ones summed at the same speakers. A monitor leg counts too --
+        the owner's own voice comes out of those speakers like any other. One
+        voice, or a room this leg has not resolved yet, is no attenuation.
+        """
+        room = leg.cabinet_id
+        if room is None:
+            return 1.0
+        now = time.monotonic()
+        count = 0
+        for other in self.legs.values():
+            if other.cabinet_id != room:
+                continue
+            if now - other.last_feed > SUM_SAFE_WINDOW_S:
+                continue
+            count += 1
+        return 1.0 / math.sqrt(count) if count > 1 else 1.0
+
     def take_buffer(self):
         while self.pool:
             buffer = self.pool.pop()
@@ -600,6 +639,10 @@ class RoomSpeechLeg:
         self.environments = {}  # slot -> the (reverb, EQ, tone, dynamics) last applied
         self._environment_value = (None, None, None, None)
         self._environment_at = 0.0
+        # The equal-power share this voice is playing at (see ``SpeechRooms.mix_gain``).
+        # None until the first shaped frame, so a leg is born at its real share
+        # rather than stepping down from one.
+        self.mix = None
         self.last_feed = 0.0
 
     # --------------------------------------------------------------- feeding
@@ -711,6 +754,11 @@ class RoomSpeechLeg:
         game = self.holder.game
         audio = getattr(game, "audio_mngr", None)
         volume = _volume(game)
+        # One step of the ramp per FRAME, not per speaker: read inside the loop it
+        # would advance once for every speaker of the room, so a fourteen-speaker
+        # room would settle its share in a fraction of the intended quarter second
+        # and hand each speaker a slightly different gain.
+        mix = self._mix()
         for slot, source in self.sources.items():
             term = terms.get(slot)
             if term is None:
@@ -723,7 +771,7 @@ class RoomSpeechLeg:
             _slot, _spot, gain, _delay, tier, *_rest = term
             tone = _rest[1] if len(_rest) > 1 else None
             with suppress(Exception):
-                source.gain = max(0.0, volume * gain)
+                source.gain = max(0.0, volume * gain * mix)
             if (tier == self.tiers.get(slot)
                     and tone == self.tones.get(slot)
                     and environment == self.environments.get(slot)):
@@ -738,6 +786,15 @@ class RoomSpeechLeg:
                 else:
                     restore_filter(source, audio)
             self._send_environment(source, environment, filt)
+
+    def _mix(self):
+        """This voice's equal-power share of its room, ramped (see ``MIX_RAMP``)."""
+        target = self.holder.mix_gain(self)
+        if self.mix is None:
+            self.mix = target
+        else:
+            self.mix += (target - self.mix) * MIX_RAMP
+        return max(0.0, self.mix)
 
     def _environment(self):
         """The room's reverb and EQ, plus the voice's own tone chain.
@@ -901,6 +958,7 @@ class RoomSpeechLeg:
         self.plan = None
         self.signature = None
         self.cabinet_id = None
+        self.mix = None
 
     def _destroy(self, source):
         with suppress(Exception):

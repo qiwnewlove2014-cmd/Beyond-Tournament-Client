@@ -557,6 +557,103 @@ class RoomLegTests(unittest.TestCase):
                          ["7: jukebox j1 (2 speaker(s))"])
 
 
+class RoomMixTests(unittest.TestCase):
+    """Several voices in one room: summed equal-power, never at full level each.
+
+    The PA has always scaled its talkers by 1/sqrt(N) so N people talking over
+    each other sum to about one voice (megaphone_system.update_megaphone_audio).
+    A room is the same broadcast at a second set of speakers, and without that
+    rule two voices played at the room's full level each -- a clipped sum, heard
+    as the louder voice breaking up and the other losing its body.
+    """
+
+    def settle(self, game, sender_ids, frames=60):
+        for _ in range(frames):
+            for sender_id in sender_ids:
+                cinema_speech.feed(game, game.gameplay, sender_id, FRAME)
+        return game.audio_mngr.cinema_speech
+
+    def two_talkers(self, game):
+        game.gameplay.voice_channels[8] = SimpleNamespace(
+            x=ANCHOR[0], y=ANCHOR[1], z=0.0)
+        return game
+
+    def test_two_voices_in_one_room_are_mixed_equal_power(self):
+        game = self.two_talkers(make_game())
+        holder = self.settle(game, (7, 8))
+        share = 1.0 / math.sqrt(2.0)
+        for sender_id in (7, 8):
+            self.assertAlmostEqual(holder.legs[sender_id].sources["front_l"].gain,
+                                   share, places=3)
+            self.assertAlmostEqual(holder.legs[sender_id].sources["front_r"].gain,
+                                   share, places=3)
+
+    def test_three_voices_in_one_room_share_it_three_ways(self):
+        game = self.two_talkers(make_game())
+        game.gameplay.voice_channels[9] = SimpleNamespace(
+            x=ANCHOR[0], y=ANCHOR[1], z=0.0)
+        holder = self.settle(game, (7, 8, 9))
+        for sender_id in (7, 8, 9):
+            self.assertAlmostEqual(holder.legs[sender_id].sources["front_l"].gain,
+                                   1.0 / math.sqrt(3.0), places=3)
+
+    def test_one_voice_alone_is_still_the_rooms_full_level(self):
+        game = make_game()
+        holder = self.settle(game, (7,), frames=3)
+        self.assertAlmostEqual(holder.legs[7].sources["front_l"].gain, 1.0, places=6)
+
+    def test_a_voice_that_stopped_talking_does_not_turn_the_room_down(self):
+        game = self.two_talkers(make_game())
+        holder = self.settle(game, (7, 8))
+        # One second of silence is past the PA's own active window: the room is
+        # no longer summing two voices, so the one still talking goes back up.
+        holder.legs[8].last_feed -= cinema_speech.SUM_SAFE_WINDOW_S + 0.1
+        self.settle(game, (7,), frames=60)
+        self.assertAlmostEqual(holder.legs[7].sources["front_l"].gain, 1.0, places=3)
+
+    def test_the_share_is_ramped_instead_of_stepping(self):
+        game = self.two_talkers(make_game())
+        holder = self.settle(game, (7,), frames=3)
+        self.assertAlmostEqual(holder.legs[7].sources["front_l"].gain, 1.0, places=6)
+        # The second talker's first frame must not step the first voice down 3 dB
+        # in one 20 ms frame: that is a click on somebody who is already talking.
+        cinema_speech.feed(game, game.gameplay, 8, FRAME)
+        cinema_speech.feed(game, game.gameplay, 7, FRAME)
+        gain = holder.legs[7].sources["front_l"].gain
+        self.assertGreater(gain, 1.0 / math.sqrt(2.0))
+        self.assertLess(gain, 1.0)
+
+    def test_the_owners_own_monitor_is_one_of_the_room_voices(self):
+        game = self.two_talkers(make_game())
+        for _ in range(60):
+            cinema_speech.feed_local(game, game.gameplay, "local", FRAME)
+            cinema_speech.feed(game, game.gameplay, 8, FRAME)
+        holder = game.audio_mngr.cinema_speech
+        for key in ("local", 8):
+            self.assertAlmostEqual(holder.legs[key].sources["front_l"].gain,
+                                   1.0 / math.sqrt(2.0), places=3)
+
+    def test_only_the_voices_in_the_same_room_share_it(self):
+        game = make_game()
+        holder = self.settle(game, (7,))
+        # A second voice in another hall comes out of a different set of
+        # speakers, so it is not summed with this one and must not turn it down.
+        other = cinema_speech.RoomSpeechLeg(holder, 8)
+        other.cabinet_id = "j2"
+        other.last_feed = holder.legs[7].last_feed
+        holder.legs[8] = other
+        self.assertAlmostEqual(holder.mix_gain(holder.legs[7]), 1.0, places=6)
+        # The same voice standing in this room is one of the two being summed.
+        other.cabinet_id = "j1"
+        self.assertAlmostEqual(holder.mix_gain(holder.legs[7]),
+                               1.0 / math.sqrt(2.0), places=6)
+        holder.legs.pop(8).release()
+
+
+
+
+
+
 class RestartingSpeakerTests(unittest.TestCase):
     """A speaker that has finished one burst has to start again on the next.
 

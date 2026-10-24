@@ -92,7 +92,7 @@ def make_bot(**overrides):
     bot._stop_local = lambda: None
     bot._destroy_stream_source = lambda: None
     bot._clear_personal_feed = lambda: None
-    for key, value in overrides.items():
+    for key, value, *_extra in overrides.items():
         setattr(bot, key, value)
     return bot
 
@@ -362,10 +362,10 @@ class TestResultSelectQueueMode(unittest.TestCase):
         with patch_menu()[0], patch_menu()[1]:
             bot._on_result_selected(0, gp)
         items = last_menu().items
-        labels = [label for label, _ in items]
+        labels = [label for label, _, *_extra in items]
         self.assertIn("Play Now", labels)
         self.assertIn("Play Next (Add to Queue)", labels)
-        for label, cb in items:
+        for label, cb, *_extra in items:
             if label == "Play Next (Add to Queue)":
                 cb()
         self.assertEqual(enqueued, ["Song A"])
@@ -387,7 +387,7 @@ class TestQueueMenu(unittest.TestCase):
             {"title": "Song B", "target": "t2"},
         ]
         self._open(bot)
-        labels = [norm(label) for label, _ in last_menu().items]
+        labels = [norm(label) for label, _, *_extra in last_menu().items]
         # The count is the menu title; the body is the same list a Party Sync
         # listener reads (song_requests.queue_lines).
         self.assertEqual(last_menu().title, "Play Queue (2 waiting)")
@@ -402,7 +402,7 @@ class TestQueueMenu(unittest.TestCase):
     def test_empty_queue_has_no_song_items(self):
         bot = make_bot(playing=False, current_title="")
         self._open(bot)
-        labels = [norm(label) for label, _ in last_menu().items]
+        labels = [norm(label) for label, _, *_extra in last_menu().items]
         self.assertEqual(last_menu().title, "Play Queue (empty)")
         self.assertEqual(labels, [
             "The queue is empty.",
@@ -414,7 +414,7 @@ class TestQueueMenu(unittest.TestCase):
         bot.next_up_queue = [{"title": "Song A", "target": "t1"}]
         self._open(bot)
         with mock.patch("libs.music_bot.menus.speak") as speak:
-            for label, cb in last_menu().items:
+            for label, cb, *_extra in last_menu().items:
                 if norm(label) == "1. Song A":
                     cb()
         speak.assert_called_once_with("1. Song A")
@@ -430,14 +430,14 @@ class TestQueueMenu(unittest.TestCase):
         with patch_menu()[0], patch_menu()[1]:
             bot._open_queue_menu()
             with mock.patch("libs.music_bot.menus.speak") as speak:
-                for label, cb in last_menu().items:
+                for label, cb, *_extra in last_menu().items:
                     if norm(label) == "Clear Queue":
                         cb()
         self.assertEqual(bot.next_up_queue, [])
         speak.assert_called_once_with("Queue cleared.")
         # The menu was rebuilt without the removed song item.
         self.assertEqual(len(FakeMenu.instances), 2)
-        labels = [norm(label) for label, _ in last_menu().items]
+        labels = [norm(label) for label, _, *_extra in last_menu().items]
         self.assertEqual(last_menu().title, "Play Queue (empty)")
         # The song on air keeps its own line: with nothing waiting the empty
         # sentence would be news only to a bot that is not playing anything.
@@ -505,7 +505,7 @@ class TestSettings(unittest.TestCase):
         with patch_menu()[0], patch_menu()[1]:
             bot._open_settings_menu()
         items = last_menu().items
-        labels = [norm(label) for label, _ in items]
+        labels = [norm(label) for label, _, *_extra in items]
         # Broadcast to Others is intentionally absent — it has its own
         # keyboard shortcut and must not be duplicated in the settings menu.
         self.assertNotIn("Broadcast to Others: OFF", labels)
@@ -524,7 +524,7 @@ class TestSettings(unittest.TestCase):
             bot._open_settings_menu()
         with mock.patch("libs.music_bot.menus.options.set") as opt_set, \
                 mock.patch("libs.music_bot.menus.speak") as speak:
-            for label, cb in last_menu().items:
+            for label, cb, *_extra in last_menu().items:
                 if norm(label).startswith("Underwater Muffle"):
                     cb()
         self.assertFalse(bot.water_muffle_enabled)
@@ -545,7 +545,7 @@ class TestSettings(unittest.TestCase):
             bot._open_settings_menu()
         with mock.patch("libs.music_bot.menus.options.set") as opt_set, \
                 mock.patch("libs.music_bot.menus.speak") as speak:
-            for label, cb in last_menu().items:
+            for label, cb, *_extra in last_menu().items:
                 if norm(label).startswith("Room Reverb"):
                     cb()
         self.assertFalse(bot.reverb_enabled)

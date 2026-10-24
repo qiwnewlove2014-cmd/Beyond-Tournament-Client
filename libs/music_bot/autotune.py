@@ -9,10 +9,17 @@ the notes -- and the glide between those decisions is what makes it either an
 effect (instant) or a correction nobody notices (slow).
 
 "The note it belongs to" is a choice, and `SCALES` is that choice: every
-semitone (chromatic), the seven of a major or a minor key, or the five of a
-pentatonic -- in the key the player picked. The chromatic grid was the first
-version and stays the default, because it is the only one that can never move
-the voice more than half a semitone.
+semitone (chromatic), the seven of a major or a minor key -- natural, harmonic
+or melodic -- or the five of a pentatonic, in the key the player picked. The
+chromatic grid was the first version and stays the default, because it is the
+only one that can never move the voice more than half a semitone.
+
+**A scale is four things, and the menu reads all four.** Its id, its name, its
+pitch classes, and the sentence a player who has never met the word needs: what
+it sounds like and what it is for. The harmonic and melodic minors are the
+two that proved why the fourth field matters -- "Harmonic Minor" is a name, and
+"a minor key with its seventh raised a semitone, which is what pulls a phrase
+back to its own note" is the reason somebody picks it.
 
 Three pieces, two of them already in the project
 -----------------------------------------------
@@ -256,27 +263,74 @@ class AutoTuner:
 #: correction is bounded by half a semitone. `() ` means every class, so it is
 #: spelled out rather than listed (and it makes the root irrelevant, as a grid
 #: with a note every semitone can have no key).
+#: ``(id, menu name, pitch classes above the root, what the menu says it is)``.
+#: Chromatic is every note -- what the first version did, and the only mode
+#: whose correction is bounded by half a semitone. ``()`` means every class, so
+#: it is spelled out rather than listed (and it makes the root irrelevant, as a
+#: grid with a note every semitone can have no key).
+#:
+#: The fourth field is not decoration: the Settings menu describes every line it
+#: shows (`client/tests/test_music_bot_menu_help.py`), and a scale is the one
+#: choice in the Music Bot nobody can be expected to know by name.
 SCALES = (
-    ("chromatic", "Chromatic", ()),
-    ("major", "Major", (0, 2, 4, 5, 7, 9, 11)),
-    ("minor", "Minor", (0, 2, 3, 5, 7, 8, 10)),
-    ("major_pentatonic", "Major Pentatonic", (0, 2, 4, 7, 9)),
-    ("minor_pentatonic", "Minor Pentatonic", (0, 3, 5, 7, 10)),
+    ("chromatic", "Chromatic", (),
+     "Every semitone, so the voice is only ever moved to the nearest note "
+     "there is: half a semitone at most, either way. It cannot be in a key."),
+    ("major", "Major", (0, 2, 4, 5, 7, 9, 11),
+     "The major scale of the key you pick: the bright one most songs are "
+     "written in. A note outside it is moved a semitone into it."),
+    ("minor", "Minor", (0, 2, 3, 5, 7, 8, 10),
+     "The natural minor scale: the darker relative of major. Same seven "
+     "notes as its major, started from the sixth."),
+    ("harmonic_minor", "Harmonic Minor", (0, 2, 3, 5, 7, 8, 11),
+     "A minor key with its seventh raised a semitone. That half-step gap at "
+     "the top is the harmonic-minor sound: a phrase is pulled back to the "
+     "key note, so it suits anything that wants to sound classical, "
+     "Eastern or metal."),
+    ("melodic_minor", "Melodic Minor", (0, 2, 3, 5, 7, 9, 11),
+     "A minor key with its sixth and seventh raised, which is how a minor "
+     "melody climbs. It is minor at the bottom and major on top, so it "
+     "takes a tune somewhere major cannot."),
+    ("major_pentatonic", "Major Pentatonic", (0, 2, 4, 7, 9),
+     "Five notes of the major scale, with every half step left out, so no "
+     "two of them can clash. The safest scale there is."),
+    ("minor_pentatonic", "Minor Pentatonic", (0, 3, 5, 7, 10),
+     "Five notes of the minor scale: the rock and blues scale. The widest "
+     "move is a semitone and a half, so it is heard as an effect."),
 )
 DEFAULT_MODE = "chromatic"
 DEFAULT_ROOT = 0        # C
-#: The widest correction any scale can ask for, in semitones: half of the
-#: widest gap a five-note scale has. The line pins its anti-aliasing filter at
-#: this interval once, so the filter never has to switch under a voice (see
-#: `ChromaticTransposer.pin_lowpass`).
-MAX_PULL = 1.5
 #: The twelve keys, named the way the rest of the project names a note.
 ROOT_NAMES = tuple(NOTE_NAMES)
 
 
+def widest_gap(mode):
+    """The widest step between two neighbouring notes of the scale, in semitones.
+
+    A voice is only ever moved to the nearest note of its scale, so this -- and
+    not any property of the scale's size -- is what bounds the correction.
+    """
+    classes = tuple(sorted(scale_classes(mode)))
+    if not classes:
+        return 1                # every semitone, so every step is a semitone
+    gaps = [b - a for a, b in zip(classes, classes[1:])]
+    gaps.append(12 - classes[-1] + classes[0])
+    return max(gaps)
+
+
+def widest_pull(mode):
+    """The furthest this scale can move a voice, in semitones: half its widest gap.
+
+    Half a semitone on the chromatic grid, one in a major or natural minor (a
+    two-semitone gap), a semitone and a half in a pentatonic or the harmonic
+    minor (a three-semitone gap).
+    """
+    return widest_gap(mode) / 2.0
+
+
 def clamp_mode(value):
     """A scale id that exists, whatever was handed in or saved."""
-    for mode_id, _label, _classes in SCALES:
+    for mode_id, _label, _classes, _note in SCALES:
         if value == mode_id:
             return mode_id
     return DEFAULT_MODE
@@ -298,15 +352,50 @@ def clamp_root(value):
 
 def scale_classes(mode):
     """The pitch classes above the root, or () for every note."""
-    for mode_id, _label, classes in SCALES:
+    for mode_id, _label, classes, _note in SCALES:
         if mode_id == clamp_mode(mode):
             return classes
     return ()
 
 
+#: The widest correction any scale can ask for, in semitones. Measured from the
+#: catalogue rather than written down, so a scale added later can never ask for
+#: more than the line's anti-aliasing filter was pinned at: the filter is pinned
+#: once (`ChromaticTransposer.pin_lowpass`) and must never switch under a voice.
+MAX_PULL = max(widest_pull(mode_id) for mode_id, _label, _classes, _note in SCALES)
+
+
+def scale_note(mode):
+    """What the menu says a scale is, for a player who has never met the name."""
+    for mode_id, _label, _classes, note in SCALES:
+        if mode_id == clamp_mode(mode):
+            return note
+    return SCALES[0][3]
+
+
+def scale_says(mode):
+    """The sentence spoken when a scale is chosen: how far it can move a voice.
+
+    Measured from the scale's own gap rather than from how many notes it has.
+    The two used to be the same question -- a seven-note scale could only pull
+    a semitone -- and the harmonic minor broke that: it has seven notes and a
+    three-semitone gap, so a voice outside it can be moved a semitone and a
+    half, exactly as in a pentatonic.
+    """
+    pull = widest_pull(mode)
+    if pull <= 0.5:
+        return ("every semitone, so the voice is never moved more than "
+                "half a semitone")
+    if pull >= 1.5:
+        return ("the widest move is a semitone and a half, which is heard "
+                "as an effect rather than a correction")
+    return ("the seven notes of the key, so a note outside it is brought "
+            "into it by a semitone at most")
+
+
 def mode_name(mode):
     """The menu's words for a scale: 'Major', 'Minor Pentatonic'..."""
-    for mode_id, label, _classes in SCALES:
+    for mode_id, label, _classes, _note in SCALES:
         if mode_id == clamp_mode(mode):
             return label
     return SCALES[0][1]
@@ -334,12 +423,23 @@ def scale_label(mode=DEFAULT_MODE, root=DEFAULT_ROOT):
 #: The values are `ChromaticTransposer`'s own glide constant at Normal, so a
 #: tuner at Normal moves the voice at the speed the project's key changes
 #: already move it, and Instant is one frame (the hard effect).
+#:
+#: ``(menu name, glide, what the speed does)`` -- the third field is what Tab
+#: reads on that line, so a speed is described where it is chosen.
 SPEEDS = (
-    ("Instant (hard tune)", 1.0),
-    ("Fast", 0.85),
-    ("Normal", ChromaticTransposer.GLIDE),
-    ("Slow", 0.28),
-    ("Very slow", 0.12),
+    ("Instant (hard tune)", 1.0,
+     "The effect: the voice snaps onto the note in one frame, so a slide "
+     "between two notes is heard as a step."),
+    ("Fast", 0.85,
+     "The effect, a little less sharp: the note arrives in about two frames."),
+    ("Normal", ChromaticTransposer.GLIDE,
+     "The speed this project's own key changes move a voice at: heard as "
+     "singing in tune rather than as a machine."),
+    ("Slow", 0.28,
+     "A pull: on a held note you hear the voice travel to the note."),
+    ("Very slow", 0.12,
+     "A correction you only notice when the note lands, which is what a "
+     "voice off the note needs."),
 )
 DEFAULT_SPEED = 2
 
@@ -363,3 +463,9 @@ def speed_glide(index=None):
     """The per-frame glide constant a speed index means."""
     index = DEFAULT_SPEED if index is None else clamp_speed(index)
     return SPEEDS[index][1]
+
+
+def speed_note(index=None):
+    """What the menu says this Retune Speed does (what Tab reads)."""
+    index = DEFAULT_SPEED if index is None else clamp_speed(index)
+    return SPEEDS[index][2]

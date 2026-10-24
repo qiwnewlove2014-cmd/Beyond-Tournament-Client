@@ -112,12 +112,13 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
     def test_dynamic_menu_uses_separate_recording_action(self):
         source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot" / "menus.py").read_text(encoding="utf-8")
         # The line names the Server feature it belongs to, so the Music Bot's
-        # feature gate can hide it (libs/music_bot/gate.py).
-        self.assertIn("(\"recording\", \"Record Audio\", go_record_audio)", source)
+        # feature gate can hide it (libs/music_bot/gate.py), and it carries the
+        # sentence Tab reads for it (a four-field line).
+        self.assertIn("(\"recording\", \"Record Audio\", go_record_audio,", source)
         self.assertIn("def _open_recording_menu(self):", source)
         self.assertIn("self._bot.audio_recorder.choose_folder", source)
-        self.assertIn("(self._bot.audio_recorder.menu_label, start_or_stop)", source)
-        self.assertIn("(\"Recording Settings\", go_settings)", source)
+        self.assertIn("(self._bot.audio_recorder.menu_label, start_or_stop,", source)
+        self.assertIn("(\"Recording Settings\", go_settings,", source)
         self.assertIn("def _open_recording_settings_menu(self):", source)
         self.assertIn("self._bot.audio_recorder.capture_scope_label", source)
         self.assertIn("self._bot.audio_recorder.computer_audio_setting_label", source)
@@ -126,7 +127,7 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
         self.assertIn("self._bot.audio_recorder.split_setting_label", source)
         self.assertIn("self._bot.audio_recorder.announce_setting_label", source)
         self.assertIn("def _open_recording_reset_confirmation(self):", source)
-        self.assertIn("(\"Cancel and Keep Current Settings\", cancel)", source)
+        self.assertIn("(\"Cancel and Keep Current Settings\", cancel,", source)
         self.assertIn("self._bot.audio_recorder.open_folder", source)
         self.assertIn("self._bot.audio_recorder.menu_action()", source)
         # The recorder is closed by the bot's own shutdown, not by a menu.

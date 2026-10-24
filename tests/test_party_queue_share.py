@@ -142,7 +142,7 @@ def open_listener_queue(bot):
 
 
 def body_lines(menu, ends):
-    return [label for label, _ in menu.items if label not in ends]
+    return [label for label, _, *_extra in menu.items if label not in ends]
 
 
 class TestTheBuilders(unittest.TestCase):
@@ -187,7 +187,7 @@ class TestOneWording(unittest.TestCase):
         # host's own items re-read themselves, a report's do nothing).
         self.assertEqual(
             body_lines(host, ("Clear Queue", "Back")),
-            [label for label, _ in listener.items[:-1]],
+            [label for label, _, *_extra in listener.items[:-1]],
             "the host's body is the listener's body")
         self.assertEqual(host.title, listener.title)
         self.assertEqual(host.title, "Play Queue (2 waiting)")
@@ -196,7 +196,9 @@ class TestOneWording(unittest.TestCase):
             "1. A Song (requested by Bob)",
             "2. Host Pick",
         ])
-        self.assertIn(("Close", listener.items[-1][1]), listener.items)
+        # Close is the listener's only button, and it carries its Tab line now.
+        self.assertEqual(listener.items[-1][0], "Close")
+        self.assertTrue(str(listener.items[-1][3]).strip())
 
     def test_an_empty_queue_is_the_same_sentence_on_both_sides(self):
         bot = make_bot(host=True, playing=False, title="", queue=[])
@@ -219,7 +221,7 @@ class TestOneWording(unittest.TestCase):
                        queue=self.QUEUE)
         menu = open_host_queue(bot)
         with mock.patch("libs.music_bot.menus.speak") as speak:
-            for label, callback in menu.items:
+            for label, callback, *_extra in menu.items:
                 if label.startswith("1."):
                     callback()
         speak.assert_called_once_with("1. A Song (requested by Bob)")

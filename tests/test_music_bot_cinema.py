@@ -165,7 +165,7 @@ def make_bot(game, **attributes):
     bot.cinema_bank_key = None
     bot.cinema_cabinet = None
     bot._find_gameplay = lambda: game.gameplay
-    for key, value in attributes.items():
+    for key, value, *_extra in attributes.items():
         setattr(bot, key, value)
     return bot
 
@@ -283,7 +283,7 @@ class CinemaMenuTests(unittest.TestCase):
         """
         game = FakeGame()
         map_obj = Map(game)
-        for index, x in enumerate((10.0, 20.0)):
+        for index, x, *_extra in enumerate((10.0, 20.0)):
             map_obj.spawn_cinemaSpeaker(minx=int(x), maxx=int(x) + 1, miny=5, maxy=6,
                                         minz=0, maxz=1, id=f"spk{index}", channel="auto")
         map_obj.spawn_jukebox(minx=10, maxx=11, miny=5, maxy=6, minz=0, maxz=1,
@@ -469,7 +469,7 @@ class CinemaOutputTests(unittest.TestCase):
         # Ducking (a megaphone broadcast) must reach every speaker.
         bank.set_duck(0.5)
         bank.update_output()
-        for before, after in zip(full, [source.gain for source in bank.sources]):
+        for before, after, *_extra in zip(full, [source.gain for source in bank.sources]):
             self.assertAlmostEqual(after, before * 0.5, places=6)
 
         # Halving the Music slider halves the room, while the Jukebox slider
@@ -478,7 +478,7 @@ class CinemaOutputTests(unittest.TestCase):
         volumes["music"] = [50]
         volumes["jukebox"] = [25]
         bank.update_output()
-        for before, after in zip(full, [source.gain for source in bank.sources]):
+        for before, after, *_extra in zip(full, [source.gain for source in bank.sources]):
             self.assertAlmostEqual(after, before * 0.5, places=6)
 
     def test_without_a_target_the_bot_is_untouched(self):
@@ -589,7 +589,7 @@ class LiveInstrumentRoutingTests(unittest.TestCase):
 
     def tearDown(self):
         from libs import options
-        for key, value in self._saved.items():
+        for key, value, *_extra in self._saved.items():
             options.prefs.pop(key, None)
             if value is not None:
                 options.prefs[key] = value
@@ -696,7 +696,7 @@ class LiveInstrumentRoutingTests(unittest.TestCase):
         with mock.patch("libs.menu.Menu", FakeMenu), \
                 mock.patch("libs.menus.set_default_sounds"):
             bot._show_mode_menu()
-        labels = [norm(label) for label, _action in captured[-1].items]
+        labels = [norm(label) for label, _action, *_extra in captured[-1].items]
         self.assertTrue(any(label.startswith("Cinema rooms: ON")
                             for label in labels), labels)
         self.assertTrue(any(label.startswith("Instruments:")
@@ -797,13 +797,13 @@ class OwnSoundLineTests(unittest.TestCase):
         return made[-1]
 
     def _labels(self, menu):
-        return [norm(label) for label, _action in menu.items]
+        return [norm(label) for label, _action, *_extra in menu.items]
 
     def test_it_sits_beside_the_listening_switches(self):
         _game, _gp, bot = self._bot()
         menu = self._open_menu(bot)
         labels = self._labels(menu)
-        speech = next(index for index, text in enumerate(labels)
+        speech = next(index for index, text, *_extra in enumerate(labels)
                       if text.startswith("Speech:"))
         self.assertTrue(any(text.startswith("Cinema rooms:") for text in labels))
         self.assertTrue(any(text.startswith("Instruments:") for text in labels))
@@ -813,7 +813,7 @@ class OwnSoundLineTests(unittest.TestCase):
             "Your sound: where you stand (no staff pan)")
         # The reading line sits directly under the three listening switches:
         # they are choices and it is an answer, so it must not look like one.
-        sound = next(index for index, text in enumerate(labels)
+        sound = next(index for index, text, *_extra in enumerate(labels)
                      if text.startswith("Your sound:"))
         self.assertEqual(sound, speech + 1)
         self.assertEqual(labels[sound].split(":")[0], "Your sound",
@@ -824,7 +824,7 @@ class OwnSoundLineTests(unittest.TestCase):
         menu = self._open_menu(bot)
         with mock.patch("libs.music_bot.controller.options.set") as store, \
                 mock.patch("libs.music_bot.cinema_handler.speak") as speech:
-            item = next(action for label, action in menu.items
+            item = next(action for label, action, *_extra in menu.items
                         if norm(label).startswith("Your sound:"))
             item()
         self.assertFalse(store.called)

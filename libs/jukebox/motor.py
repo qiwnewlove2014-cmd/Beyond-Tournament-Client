@@ -20,6 +20,16 @@ The fan rides with the rotation and dies with it: it starts when the cabinet get
 power, follows the same box, gain and room, and is gone when the power is. It is
 not a separate thing to switch off.
 
+The spin-up is heard first and whole, and the rotation joins it as it ends. The
+loops are already running underneath it -- loaded and playing, so the join costs
+no load and leaves no gap -- but they are silent until the last ``CROSSFADE``
+seconds of the clip, where they come up with a smoothstep. When that is decided is
+the file's own business: the clip's length is measured (``Buffer.sec_length``),
+never assumed, so a four-second ``start.ogg`` holds the rotation for four seconds
+and a half-second one holds it for half a second. While it sounds the spin-up is
+a source of the cabinet's own -- it follows the listener like the rotation, and
+switching the cabinet off during it takes it away with the loops.
+
 The Server says when a cabinet's power changes (``jukebox_power``,
 ``{id, x, y, z, on}``, one packet per cabinet) and the map-join state carries a
 ``powered`` flag per cabinet, so a listener who joins a powered room hears the
@@ -42,6 +52,9 @@ silent box, which is what every cabinet was before there was any. The lines the
 cabinet *says* are a separate path (``voice.py``), and the listener's
 ``Cabinet voice`` switch never silences the machinery.
 """
+
+import time
+
 
 # The cabinet's own slider: turning a cabinet down turns its motor down too.
 CATEGORY = "jukebox"
@@ -67,6 +80,11 @@ REFERENCE_DISTANCE = 10.0
 # a cabinet that pops every time the listener crosses a tile edge is a bug.
 GAIN_STEP = 0.05
 
+# How long the rotation takes to come up under the end of the spin-up, in seconds.
+# The handover opens inside the clip's own tail, and never lasts longer than the
+# clip itself: a short spin-up gets a proportionally shorter one.
+CROSSFADE = 0.8
+
 # Aux send 0 is the room's reverb -- the index the cabinet's song and its voice
 # use, so everything out of one box stands in one room.
 REVERB_SEND = 0
@@ -78,6 +96,10 @@ class CabinetMotors:
     Kept on the audio manager (``audio_mngr.jukebox_motor``) beside the spoken
     lines, so a relogin or an audio rebuild takes the sources with it.
     """
+
+    #: Seconds for the spin-up's handover. A seam a test can move, because a
+    #: unittest has no frame loop to run in real time.
+    clock = staticmethod(time.monotonic)
 
     def __init__(self, game=None):
         self.game = game
@@ -116,9 +138,17 @@ class CabinetMotors:
             # edge of the fade is as quiet as the rotation under it.
             _set_gain(start, gain)
             self._send_reverb(audio, [start], point)
+        # How long the spin-up really is: the clip decides when the rotation may
+        # be heard, never a constant, so a re-recorded start file needs no code
+        # change. A clip whose length cannot be read is not waited for at all.
+        spin_up_seconds = (
+            _clip_seconds(start, audio, START) if start is not None else 0.0
+        )
+        holding = spin_up_seconds > 0.0
         loops = []
         # Both loops start silent and are mixed to the region level below: a loop
-        # born at full volume would blip for a frame before its gain is set.
+        # born at full volume would blip for a frame before its gain is set -- and
+        # while the spin-up is still sounding they are silent on purpose.
         for path, volume in ((LOOP, 100), (FAN, FAN_VOLUME)):
             sound = self._play(audio, path, point, True, 0)
             if sound is not None:
@@ -129,12 +159,16 @@ class CabinetMotors:
             return False
         if loops:
             self._send_reverb(audio, [sound for sound, _volume in loops], point)
-            self._apply_gain(loops, gain)
+            self._apply_gain(loops, gain if not holding else 0.0)
         self.motors[key] = {
             "position": _packet_point(position),
+            "start": start,
             "loops": loops,
             "gain": gain if loops else 0.0,
             "paused": False,
+            # Until when the spin-up owns the ear, and how long its handover is.
+            "intro_until": self.clock() + spin_up_seconds if holding else 0.0,
+            "intro_fade": min(CROSSFADE, spin_up_seconds) if holding else 0.0,
         }
         return True
 
@@ -151,6 +185,7 @@ class CabinetMotors:
         if audio is None:
             return
         listener = _point(x, y, z)
+        now = self.clock()
         for key, motor in list(self.motors.items()):
             box = _region_of(self.game, key, motor.get("position"))
             if box is None:
@@ -158,7 +193,8 @@ class CabinetMotors:
             target = self._gain(audio, box, listener)
             motor["gain"] = _approach(motor.get("gain", 0.0), target)
             loops = motor.get("loops")
-            if not loops:
+            spin_up = motor.get("start")
+            if not loops and spin_up is None:
                 continue
             point = _nearest_point(box, listener)
             if motor["gain"] <= 0.0 and target <= 0.0:
@@ -167,16 +203,29 @@ class CabinetMotors:
                 if not motor.get("paused"):
                     for sound, _volume in loops:
                         _pause(sound)
+                    if spin_up is not None:
+                        _pause(spin_up)
                     motor["paused"] = True
                 continue
             if motor.get("paused"):
                 for sound, _volume in loops:
                     _resume(sound)
+                if spin_up is not None:
+                    _resume(spin_up)
                 motor["paused"] = False
-            self._apply_gain(loops, motor["gain"])
             for sound, _volume in loops:
                 _place(sound, point)
-            self._send_reverb(audio, [sound for sound, _volume in loops], point)
+            if spin_up is not None:
+                # The spin-up is the cabinet's own while it sounds: it follows
+                # the listener exactly as the rotation under it does.
+                _set_gain(spin_up, motor["gain"])
+                _place(spin_up, point)
+            voices = [sound for sound, _volume in loops]
+            if spin_up is not None:
+                voices.append(spin_up)
+            self._send_reverb(audio, voices, point)
+            if loops:
+                self._apply_gain(loops, motor["gain"] * _intro_envelope(motor, now))
 
     def stop(self, cabinet_id):
         """Stop one cabinet's machinery dead and say the machine winding down.
@@ -204,6 +253,11 @@ class CabinetMotors:
             return False, None
         for sound, _volume in motor.get("loops", ()):
             _destroy(sound)
+        spin_up = motor.get("start")
+        if spin_up is not None:
+            # A cabinet switched off while it is still catching is not left
+            # spinning up: the machine is dead, and only its wind-down is heard.
+            _destroy(spin_up)
         return True, motor
 
     def _wind_down(self, key, motor):
@@ -391,6 +445,54 @@ def _approach(current, target):
     if current > target:
         return max(target, current - GAIN_STEP)
     return current
+
+
+def _intro_envelope(motor, now):
+    """How much of the rotation may be heard while the spin-up still sounds.
+
+    0 for the body of the clip, then a smoothstep up to 1 over its last
+    ``intro_fade`` seconds -- which is ``CROSSFADE`` or the whole clip when that
+    is shorter. The rotation is already playing underneath, so this is a handover
+    of the ear's attention, not a second start: no gap, no double attack, and the
+    fan comes up with it. Once the clip is over the entry is tidied away, so the
+    per-frame path is the plain region level again.
+    """
+    until = motor.get("intro_until") or 0.0
+    if until <= 0.0:
+        return 1.0
+    remaining = until - now
+    if remaining <= 0.0:
+        motor["intro_until"] = 0.0
+        return 1.0
+    fade = motor.get("intro_fade") or CROSSFADE
+    if remaining >= fade:
+        return 0.0
+    t = 1.0 - (remaining / fade)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _clip_seconds(sound, audio, path):
+    """How long a clip really is, in seconds -- measured, never assumed.
+
+    The buffer the clip was played from knows its own length; a client that cannot
+    read it that way asks the audio manager for the same file, whose loader is
+    cached. Anything unreadable is 0.0, which means "no handover to wait for": a
+    cabinet is never left silent waiting on a length nobody could read.
+    """
+    seconds = _buffer_seconds(getattr(getattr(sound, "source", None), "buffer", None))
+    if seconds <= 0.0 and audio is not None:
+        try:
+            seconds = _buffer_seconds(audio.load_buffer(path))
+        except Exception:
+            seconds = 0.0
+    return seconds
+
+
+def _buffer_seconds(buffer):
+    try:
+        return max(0.0, float(buffer.sec_length or 0.0))
+    except Exception:
+        return 0.0
 
 
 def _set_gain(sound, gain):

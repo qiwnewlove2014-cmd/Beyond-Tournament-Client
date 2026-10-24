@@ -122,22 +122,44 @@ class MusicBotMenus:
             return song_requests.queue_label(len(self._bot.next_up_queue))
 
         m = menu_mod.Menu(self._bot.game, "Music Bot Mode", parrent=gp)
-        # Each line names the Server feature it belongs to, and a locked feature's
-        # line is not built at all (libs/music_bot/gate.py): the lock is the
-        # Server's, the menu is where it is seen, and a feature added to the
-        # catalogue needs one id here and nothing else.
-        items = gate.filter_items([
-            ("search", "Search YouTube", go_search),
+        # Every line is ``(feature id, label, action, description)``: the id is
+        # the Server's own (libs/music_bot/gate.py) and a locked feature's line
+        # is not built at all, so a feature added to the catalogue needs one id
+        # here and nothing else; the description is what Tab reads out for the
+        # line the cursor is on, and EVERY line of this menu carries one (a
+        # feature nobody can explain is a feature only its author uses).
+        # `None` is a line that belongs to no single feature: Back, Help, the
+        # Settings hub and the listener-side cinema switches are never hidden.
+        items = [
+            ("search", "Search YouTube", go_search,
+             "Searches YouTube and plays what you pick, without downloading "
+             "anything. Enter on a result plays it now, or adds it to the "
+             "play-next queue while Queue Mode is on."),
             # Right beside the search: staff who already hold the link should not
             # have to search for the song they are looking at.
-            ("search", "Play a YouTube link", go_link),
-            ("search", "Choose Local File", go_local),
-            ("playlists", "My Playlists & Favorites", go_playlists),
-            ("feed", "Personal Music Feed", go_personal_feed),
-            ("downloads", "Music Download Center", go_downloads),
-            ("recording", "Record Audio", go_record_audio),
-            ("party", "Party Sync (Listen Together)", go_party_sync),
-        ])
+            ("search", "Play a YouTube link", go_link,
+             "Plays a link you already have instead of searching for it: a "
+             "youtube.com or youtu.be address, from a chat message or a "
+             "browser. Every other site is refused."),
+            ("search", "Choose Local File", go_local,
+             "Plays a song file already on this computer, through the same "
+             "speakers, key and equalizer this bot uses for YouTube."),
+            ("playlists", "My Playlists & Favorites", go_playlists,
+             "Songs you saved and playlists you made: play them, save the song "
+             "that is playing, or take one out again."),
+            ("feed", "Personal Music Feed", go_personal_feed,
+             "A shuffled stream of your Favorites, one song after another, "
+             "kept apart from the play-next queue."),
+            ("downloads", "Music Download Center", go_downloads,
+             "Downloads songs and playlists to this computer as files, so they "
+             "play with no internet and no YouTube."),
+            ("recording", "Record Audio", go_record_audio,
+             "Records what this machine plays, the game and the song together, "
+             "to a file for a final mix."),
+            ("party", "Party Sync (Listen Together)", go_party_sync,
+             "Invites people on any map to hear your music privately in their "
+             "own headphones, at the same moment you hear it."),
+        ]
         
         # Show the megaphone routing option only when the server explicitly granted
         # broadcast permission (canBroadcastMegaphone()). The server is the single
@@ -167,7 +189,12 @@ class MusicBotMenus:
                     {"locked": self._bot.broadcast_to_megaphone}
                 )
                 
-            items.append((get_megaphone_label, toggle_megaphone_routing))
+            items.append(("broadcast", get_megaphone_label,
+                          toggle_megaphone_routing,
+                          "Sends the song, an instrument and your voice "
+                          "through the map's PA speakers, so everyone in "
+                          "earshot hears it. The song's own room routing is a "
+                          "different line."))
 
         # Cinema speaker routing is Developer/Contributor only (see
         # cinema_routing_allowed): everyone else gets a plain Music Bot menu
@@ -177,34 +204,63 @@ class MusicBotMenus:
                 gp.pop_last_substate()
                 self._bot._open_cinema_menu()
 
-            items.append((self._bot.cinema_target_label, go_cinema))
+            items.append((
+                "cinema_speakers", self._bot.cinema_target_label, go_cinema,
+                "Which cabinet's room this song is played through. A room "
+                "plays it from the speakers its builder placed, aimed at the "
+                "seats, instead of from the cabinet."))
 
         # Three listener-side switches, one line below the song's own routing: a room is
         # how *this* listener hears a cabinet, so none of them takes anything from anybody
         # and all three are open to anyone who can open this menu (the song routing above
         # stays Developer/Contributor). Songs, instruments and a voice.
         if self._bot.cinema_listening_allowed():
-            items.append((self._bot.cinema_rooms_label, self._bot.toggle_cinema_rooms))
-            items.append((self._bot.instruments_cinema_label,
-                          self._bot.toggle_instruments_cinema))
-            items.append((self._bot.speech_cinema_label, self._bot.toggle_speech_cinema))
+            items.append((None, self._bot.cinema_rooms_label,
+                          self._bot.toggle_cinema_rooms,
+                          "Whether a cabinet's room plays into your own ears. "
+                          "Off means you hear the cabinet as the plain pair of "
+                          "speakers it is."))
+            items.append((None, self._bot.instruments_cinema_label,
+                          self._bot.toggle_instruments_cinema,
+                          "Whether instruments played on this map are heard "
+                          "through a cinema room's speakers as well."))
+            items.append((None, self._bot.speech_cinema_label,
+                          self._bot.toggle_speech_cinema,
+                          "Whether a voice talking over the map is heard "
+                          "through a cinema room's speakers as well."))
             # The three lines above choose how *you* hear a room; this one is the other
             # direction and is not a switch at all - it answers "where do other players hear me
             # from", which is decided by staff. It reads rather than toggles: pressing it says
             # the same sentence the moment of a pan says, so it cannot look like a setting.
-            items.append((self._bot.own_sound_label, self._bot.announce_own_sound))
+            items.append((None, self._bot.own_sound_label,
+                          self._bot.announce_own_sound,
+                          "Says where other players hear you from: your own "
+                          "body, or the speaker a staff member panned you to. "
+                          "It only tells you; staff decide it."))
 
-        items.extend(gate.filter_items([
-            ("queue", get_queue_mode_label, toggle_queue_mode),
-            ("queue", get_queue_count_label, go_queue),
-            ("subtitles", self._bot.subtitle_label, self._open_subtitle_menu),
+        items.extend([
+            ("queue", get_queue_mode_label, toggle_queue_mode,
+             "When it is on, Enter on a search result adds the song to the "
+             "play-next list instead of playing it now."),
+            ("queue", get_queue_count_label, go_queue,
+             "The songs waiting behind the one that is playing. Enter opens "
+             "the list to read them, or to clear it."),
+            ("subtitles", self._bot.subtitle_label, self._open_subtitle_menu,
+             "Reads the song's own words out loud as the song reaches them, "
+             "for a player who cannot see the screen. Songs often have none."),
             # The hub itself is never hidden: it is where a Developer looks to
             # see what is left, and its own lines are filtered one at a time.
-            (None, "Music Bot Settings", go_settings),
-            (None, "Help", go_help),
-            (None, "Cancel", lambda: gp.pop_last_substate()),
-        ]))
-        m.add_items(items)
+            (None, "Music Bot Settings", go_settings,
+             "Every sound choice: where the song comes out, reverb, "
+             "crossfade, the equalizer, the song's key, the voice's key and "
+             "Auto-Tune."),
+            (None, "Help", go_help,
+             "The keys the Music Bot answers to. Tab reads what the line you "
+             "are standing on does, on every page of this menu."),
+            (None, "Cancel", lambda: gp.pop_last_substate(),
+             "Closes this menu. Nothing is changed."),
+        ])
+        m.add_items(gate.filter_items(items))
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
@@ -246,7 +302,10 @@ class MusicBotMenus:
             if callable(on_pick):
                 on_pick(-1)
 
-        entries.append(("Nothing, thanks", withdraw))
+        entries.append((
+            "Nothing, thanks", withdraw, None,
+            "Answers the person who asked: there is no song to queue this "
+            "time, and nothing is added to the session."))
         title = "Pick a song"
         if query:
             title = f"Pick a song: {query}"
@@ -271,7 +330,8 @@ class MusicBotMenus:
             getattr(ps, "now_playing", ""),
         )
         items = [(line, lambda: None) for line in lines]
-        items.append(("Close", lambda: gp.pop_last_substate()))
+        items.append(("Close", lambda: gp.pop_last_substate(), None,
+                      "Closes this list and returns to the Party Sync menu."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -299,10 +359,17 @@ class MusicBotMenus:
             def do_start():
                 close_top()
                 self._bot._party_sync_send("party_sync_start")
-            items.append(("Start Party Sync session", do_start))
+            items.append((
+                "Start Party Sync session", do_start, None,
+                "Starts a session with you as the host: the song you play is "
+                "sent to everyone you invite, and they hear it at the moment "
+                "you do."))
             items.append((
                 "Invite friends anywhere to hear your music privately",
-                lambda: None,
+                lambda: None, None,
+                "A session is not tied to a map: a listener anywhere hears your "
+                "song in their own headphones, never through the map's "
+                "speakers.",
             ))
         elif ps.role == "host":
             def guests_label():
@@ -310,12 +377,17 @@ class MusicBotMenus:
                     g["name"] for g in ps.guests
                 ) if ps.guests else "nobody yet"
                 return f"Listeners ({len(ps.guests)}): {names}"
-            items.append((guests_label, lambda: None))
+            items.append((guests_label, lambda: None, None,
+                          "Who is listening right now. Each of them hears what "
+                          "you hear, from the moment they joined."))
             if ps.guests:
                 def do_kick():
                     close_top()
                     self._open_party_kick_menu(ps)
-                items.append(("Kick a listener", do_kick))
+                items.append((
+                    "Kick a listener", do_kick, None,
+                    "Removes one listener from the session. They stop hearing "
+                    "your song at once and can be invited again."))
             def do_invite():
                 close_top()
                 # A session is not map-scoped, so the picker lists every player
@@ -326,7 +398,10 @@ class MusicBotMenus:
                     lambda: self._open_party_sync_menu()
                 )
                 self._bot._party_sync_send("party_sync_list")
-            items.append(("Invite players (any map)", do_invite))
+            items.append((
+                "Invite players (any map)", do_invite, None,
+                "Opens the list of everyone online. A listener on another map "
+                "hears the song as clearly as one standing beside you."))
             # The /p switch sits with the host's listeners, their invite and
             # their End action (one builder: song_requests_switch_item), not
             # in the Music Bot menu -- the queue it fills is this session's,
@@ -343,25 +418,40 @@ class MusicBotMenus:
                 ps.end_session()
                 self._bot.party_sync_force_upload = False
                 self._bot._clear_party_sync_direct()
-            items.append(("End Party Sync session", do_end))
+            items.append((
+                "End Party Sync session", do_end, None,
+                "Ends the session for everyone. You keep playing on your own "
+                "machine; your listeners hear nothing more."))
         elif ps.role == "guest":
             def do_leave():
                 close_top()
                 self._bot._party_sync_send("party_sync_leave")
                 ps.end_session()
                 self._bot._clear_party_sync_direct()
-            items.append((f"Listening to {ps.host_name}", lambda: None))
+            items.append((f"Listening to {ps.host_name}", lambda: None, None,
+                          "The host whose song you are hearing. It comes "
+                          "straight to your headphones, not through the map's "
+                          "speakers."))
             # Read-only: whether this party takes song requests (/p) is the
             # host's decision, and it arrives with the session state. A listener
             # reads it here instead of finding out by asking.
-            items.append((self._bot.song_requests_label, lambda: None))
+            items.append((self._bot.song_requests_label, lambda: None, None,
+                          "Whether the host takes song requests. While it is "
+                          "open, type /m and a song name in the party chat."))
             # ...and what the host has waiting, which is the other half of
             # asking for a song: the queue is the host's machine's, relayed to
             # the room (song_requests.queue_share -> parse_queue -> here).
-            items.append((self._bot.party_queue_label, self.open_party_queue_view))
-            items.append(("Leave Party Sync session", do_leave))
+            items.append((self._bot.party_queue_label,
+                          self.open_party_queue_view, None,
+                          "What the host has waiting behind the song that is "
+                          "playing. Enter opens the list to read it."))
+            items.append((
+                "Leave Party Sync session", do_leave, None,
+                "Stops listening and leaves the session. The host keeps "
+                "playing, and you can be invited again."))
 
-        items.append(("Back", back_to_bot_menu))
+        items.append(("Back", back_to_bot_menu, None,
+                      "Returns to the Music Bot menu. Nothing is ended."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -395,8 +485,12 @@ class MusicBotMenus:
                     close_top()
                     self._bot._party_sync_send("party_sync_kick", {"name": target})
                 return cb
-            items.append((f"Kick {name}", make_kick()))
-        items.append(("Back", back_to_party))
+            items.append((f"Kick {name}", make_kick(), None,
+                          f"Removes {name} from the session: they stop "
+                          f"hearing the song and can be invited again."))
+        items.append(("Back", back_to_party, None,
+                      "Returns to the Party Sync menu without kicking "
+                      "anybody."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -418,9 +512,17 @@ class MusicBotMenus:
 
         m = menu_mod.Menu(self._bot.game, "Personal Music Feed", parrent=gp)
         m.add_items([
-            ("Start shuffled Favorites feed", start_feed),
-            ("Next feed song", next_feed),
-            ("Back", lambda: (gp.pop_last_substate(), self._show_mode_menu())),
+            ("Start shuffled Favorites feed", start_feed, None,
+             "Plays your Favorites in a shuffled order, one song after "
+             "another, until you stop it. It takes nothing out of your play "
+             "queue."),
+            ("Next feed song", next_feed, None,
+             "Moves to the next shuffled song now, instead of waiting for "
+             "this one to end."),
+            ("Back", lambda: (gp.pop_last_substate(),
+                              self._show_mode_menu()), None,
+             "Returns to the Music Bot menu. The feed keeps playing if it "
+             "was started."),
         ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -439,7 +541,10 @@ class MusicBotMenus:
             def fav_current():
                 gp.pop_last_substate()
                 self._bot._save_current_to_favorites()
-            items.append(("Save Current Song to Favorites", fav_current))
+            items.append((
+                "Save Current Song to Favorites", fav_current, None,
+                "Saves the song that is playing to your Favorites, so you can "
+                "find it again without searching for it."))
 
         def go_favorites():
             gp.pop_last_substate()
@@ -449,17 +554,26 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._bot._prompt_create_playlist()
 
-        items.append(("All Favorites", go_favorites))
-        items.append(("Create New Playlist", go_create_playlist))
+        items.append(("All Favorites", go_favorites, None,
+                      "Every song you have saved. Enter opens the list to "
+                      "play one, remove one, or play them all."))
+        items.append(("Create New Playlist", go_create_playlist, None,
+                      "Makes an empty playlist with a name you choose, then "
+                      "fills it from the song that is playing or from search "
+                      "results."))
 
         # List custom playlists
         playlist_names = self._bot.playlist_mgr.get_playlist_names()
         for p_name in playlist_names:
             def make_p_cb(name):
                 return lambda: (gp.pop_last_substate(), self._show_custom_playlist_menu(name))
-            items.append((f"Playlist: {p_name}", make_p_cb(p_name)))
+            items.append((f"Playlist: {p_name}", make_p_cb(p_name), None,
+                          "Opens this playlist: play every song in it, play "
+                          "one, or remove one."))
 
-        items.append(("Back", lambda: (gp.pop_last_substate(), self._show_mode_menu())))
+        items.append(("Back", lambda: (gp.pop_last_substate(),
+                                       self._show_mode_menu()), None,
+                      "Returns to the Music Bot menu."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -488,14 +602,30 @@ class MusicBotMenus:
 
         m = menu_mod.Menu(self._bot.game, "Record Audio", parrent=gp)
         items = [
-            (self._bot.audio_recorder.folder_menu_label, self._bot.audio_recorder.speak_folder),
-            ("Set Recording Folder", self._bot.audio_recorder.choose_folder),
-            (self._bot.audio_recorder.menu_label, start_or_stop),
-            (self._bot.audio_recorder.status_menu_label, self._bot.audio_recorder.speak_status),
-            ("Recording Settings", go_settings),
-            ("Open Recording Folder", self._bot.audio_recorder.open_folder),
+            (self._bot.audio_recorder.folder_menu_label,
+             self._bot.audio_recorder.speak_folder, None,
+             "The folder recordings are saved to. Enter reads it out again."),
+            ("Set Recording Folder", self._bot.audio_recorder.choose_folder,
+             None,
+             "Chooses where recordings are saved. The dialog opens outside "
+             "the game, so the audio keeps running."),
+            (self._bot.audio_recorder.menu_label, start_or_stop, None,
+             "Starts a recording after a countdown, or stops the one that is "
+             "running. A recording cannot be started during a match."),
+            (self._bot.audio_recorder.status_menu_label,
+             self._bot.audio_recorder.speak_status, None,
+             "The current state: what is being captured, how long it has run, "
+             "and where the file is going."),
+            ("Recording Settings", go_settings, None,
+             "What goes into the recording, and how long it runs before it "
+             "splits into another file."),
+            ("Open Recording Folder", self._bot.audio_recorder.open_folder,
+             None,
+             "Opens the recording folder on this computer, to listen to or "
+             "edit what was captured."),
         ]
-        items.append(("Back", go_back))
+        items.append(("Back", go_back, None,
+                      "Returns to the Music Bot menu."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -518,14 +648,35 @@ class MusicBotMenus:
 
         m = menu_mod.Menu(self._bot.game, "Audio Recording Settings", parrent=gp)
         m.add_items([
-            (self._bot.audio_recorder.capture_scope_label, self._bot.audio_recorder.speak_capture_scope),
-            (self._bot.audio_recorder.computer_audio_setting_label, self._bot.audio_recorder.toggle_computer_audio),
-            (self._bot.audio_recorder.microphone_setting_label, self._bot.audio_recorder.toggle_microphone),
-            (self._bot.audio_recorder.countdown_setting_label, self._bot.audio_recorder.cycle_countdown),
-            (self._bot.audio_recorder.split_setting_label, self._bot.audio_recorder.cycle_split_minutes),
-            (self._bot.audio_recorder.announce_setting_label, self._bot.audio_recorder.toggle_announce_details),
-            ("Restore Recording Defaults", confirm_restore),
-            ("Back", go_back),
+            (self._bot.audio_recorder.capture_scope_label,
+             self._bot.audio_recorder.speak_capture_scope, None,
+             "What a recording captures: this computer's game audio, the "
+             "microphone, or both."),
+            (self._bot.audio_recorder.computer_audio_setting_label,
+             self._bot.audio_recorder.toggle_computer_audio, None,
+             "Whether the game's own audio -- the song, the instruments, the "
+             "room -- is in the recording."),
+            (self._bot.audio_recorder.microphone_setting_label,
+             self._bot.audio_recorder.toggle_microphone, None,
+             "Whether this computer's microphone is in the recording, for a "
+             "mix with the voice in it."),
+            (self._bot.audio_recorder.countdown_setting_label,
+             self._bot.audio_recorder.cycle_countdown, None,
+             "How long the countdown is before a recording starts, so there "
+             "is time to get ready."),
+            (self._bot.audio_recorder.split_setting_label,
+             self._bot.audio_recorder.cycle_split_minutes, None,
+             "How long one file runs before the next one starts: a long mix "
+             "is easier to edit in pieces."),
+            (self._bot.audio_recorder.announce_setting_label,
+             self._bot.audio_recorder.toggle_announce_details, None,
+             "Whether each finished file, and its size, is spoken -- for a "
+             "player who cannot see the folder."),
+            ("Restore Recording Defaults", confirm_restore, None,
+             "Puts every recording setting back to the value it ships with. "
+             "It asks once more before doing it."),
+            ("Back", go_back, None,
+             "Returns to the Record Audio menu."),
         ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -553,8 +704,11 @@ class MusicBotMenus:
             parrent=gp,
         )
         m.add_items([
-            ("Yes, Restore Recording Defaults", restore),
-            ("Cancel and Keep Current Settings", cancel),
+            ("Yes, Restore Recording Defaults", restore, None,
+             "Puts every recording setting back to the value it ships with. "
+             "Recordings already saved are not touched."),
+            ("Cancel and Keep Current Settings", cancel, None,
+             "Leaves every setting as it is and goes back."),
         ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -568,11 +722,21 @@ class MusicBotMenus:
         self._bot.download_mgr.show_progress_bar()
 
         items = [
-            (self._bot.download_mgr.folder_menu_label, self._bot.download_mgr.speak_folder),
-            ("Set Download Folder", self._bot.download_mgr.choose_default_folder),
+            (self._bot.download_mgr.folder_menu_label,
+             self._bot.download_mgr.speak_folder, None,
+             "The folder downloaded songs are saved to. Enter reads it out "
+             "again."),
+            ("Set Download Folder",
+             self._bot.download_mgr.choose_default_folder, None,
+             "Chooses where downloads are saved. The dialog opens outside the "
+             "game, so the song keeps playing."),
         ]
         if self._bot.download_mgr.has_saved_folder_setting():
-            items.append(("Clear Saved Download Folder", self._bot.download_mgr.clear_default_folder))
+            items.append((
+                "Clear Saved Download Folder",
+                self._bot.download_mgr.clear_default_folder, None,
+                "Forgets the saved folder. Files already downloaded are not "
+                "touched; the next download asks where to save."))
         if (self._bot.current_source != "local"
                 and is_supported_music_url(self._bot.current_target)):
             def download_current():
@@ -581,37 +745,58 @@ class MusicBotMenus:
                     [{"title": self._bot.current_title, "target": self._bot.current_target}],
                     self._bot.current_title or "current song",
                 )
-            items.append(("Download Current Song", download_current))
+            items.append((
+                "Download Current Song", download_current, None,
+                "Saves the song that is playing as a file on this computer, at "
+                "the quality you pick next."))
 
         favorites = self._bot.playlist_mgr.get_favorites()
         if favorites:
             def download_favorites():
                 gp.pop_last_substate()
                 self._bot.download_mgr.configure(favorites, "Favorites")
-            items.append(("Download All Favorites", download_favorites))
+            items.append((
+                "Download All Favorites", download_favorites, None,
+                "Saves every song in your Favorites, one after another, at the "
+                "quality you pick next."))
 
         if self._bot.playlist_mgr.get_playlist_names():
             def choose_playlist():
                 gp.pop_last_substate()
                 self._open_download_playlist_menu()
-            items.append(("Download a Saved Playlist", choose_playlist))
+            items.append((
+                "Download a Saved Playlist", choose_playlist, None,
+                "Picks one of your playlists and saves every song in it, one "
+                "after another."))
 
         items.append((
             self._bot.download_mgr.parallel_menu_label,
-            self._bot.download_mgr.cycle_parallel_downloads,
+            self._bot.download_mgr.cycle_parallel_downloads, None,
+            "How many songs are downloaded at the same time. More is faster on "
+            "a fast connection, and can starve the song you are listening to "
+            "on a slow one.",
         ))
         items.append((
             self._bot.download_mgr.notification_menu_label,
-            self._bot.download_mgr.toggle_file_notifications,
+            self._bot.download_mgr.toggle_file_notifications, None,
+            "Whether a sound and a spoken line say when a download finishes.",
         ))
 
         items.append((
             self._bot.download_mgr.progress_menu_label,
-            self._bot.download_mgr.speak_status,
+            self._bot.download_mgr.speak_status, None,
+            "How the downloads are going: how many, and how far each one has "
+            "got.",
         ))
         if self._bot.download_mgr.is_active():
-            items.append(("Cancel Active Download", self._bot.download_mgr.cancel))
-        items.append(("Back", lambda: (gp.pop_last_substate(), self._show_mode_menu())))
+            items.append((
+                "Cancel Active Download", self._bot.download_mgr.cancel, None,
+                "Stops the downloads running now. Files already finished are "
+                "kept."))
+        items.append(("Back", lambda: (gp.pop_last_substate(),
+                                       self._show_mode_menu()), None,
+                      "Returns to the Music Bot menu. A running download keeps "
+                      "running."))
 
         download_mgr = self._bot.download_mgr
 
@@ -639,8 +824,12 @@ class MusicBotMenus:
                     self._bot.playlist_mgr.get_playlist_tracks(playlist_name),
                     f"playlist {playlist_name}",
                 )
-            items.append((name, choose))
-        items.append(("Back", lambda: (gp.pop_last_substate(), self._open_download_menu())))
+            items.append((name, choose, None,
+                          "Saves every song in this playlist as a file on "
+                          "this computer."))
+        items.append(("Back", lambda: (gp.pop_last_substate(),
+                                       self._open_download_menu()), None,
+                      "Returns to the Music Download Center."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -665,7 +854,9 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._bot._start_track_queue(favs, "Favorites")
 
-        items.append(("Play All Favorites", play_all))
+        items.append(("Play All Favorites", play_all, None,
+                      "Plays every favorite from the top of the list, one "
+                      "after another."))
         for track in favs:
             title = track.get("title", "Unknown")
             target = track.get("target", "")
@@ -676,7 +867,9 @@ class MusicBotMenus:
 
             items.append((title, make_fav_item_cb(title, target, source)))
 
-        items.append(("Back", lambda: (gp.pop_last_substate(), self._open_playlists_menu())))
+        items.append(("Back", lambda: (gp.pop_last_substate(),
+                                       self._open_playlists_menu()), None,
+                      "Returns to My Playlists & Favorites."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -698,14 +891,18 @@ class MusicBotMenus:
                 gp.pop_last_substate()
                 self._bot._play_playlist_all(playlist_name)
 
-            items.append(("Play All Tracks", play_all))
+            items.append(("Play All Tracks", play_all, None,
+                          "Plays every song in this playlist, in the order "
+                          "it is listed."))
 
         def delete_playlist():
             gp.pop_last_substate()
             self._bot.playlist_mgr.delete_playlist(playlist_name)
             speak(f"Deleted playlist {playlist_name}.")
 
-        items.append(("Delete Playlist", delete_playlist))
+        items.append(("Delete Playlist", delete_playlist, None,
+                      "Deletes this playlist from this computer. The songs "
+                      "are not touched, and a favorite stays a favorite."))
 
         for track in tracks:
             title = track.get("title", "Unknown")
@@ -717,7 +914,9 @@ class MusicBotMenus:
 
             items.append((title, make_tr_cb(title, target, source, playlist_name)))
 
-        items.append(("Back", lambda: (gp.pop_last_substate(), self._open_playlists_menu())))
+        items.append(("Back", lambda: (gp.pop_last_substate(),
+                                       self._open_playlists_menu()), None,
+                      "Returns to My Playlists & Favorites."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -737,7 +936,8 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._bot.play_single_track(title, target, source)
 
-        items.append(("Play Now", play_now))
+        items.append(("Play Now", play_now, None,
+                      "Starts this song now, on top of whatever is playing."))
 
         if source != "local" and is_supported_music_url(target):
             def download_track():
@@ -746,21 +946,27 @@ class MusicBotMenus:
                     [{"title": title, "target": target}],
                     title,
                 )
-            items.append(("Download This Track", download_track))
+            items.append(("Download This Track", download_track, None,
+                          "Saves this song as a file on this computer."))
 
         if is_favorite:
             def remove_fav():
                 gp.pop_last_substate()
                 self._bot.playlist_mgr.remove_favorite(target)
                 speak(f"Removed {title} from favorites.")
-            items.append(("Remove from Favorites", remove_fav))
+            items.append((
+                "Remove from Favorites", remove_fav, None,
+                "Takes this song out of your Favorites. A file you downloaded "
+                "stays where it is."))
 
         if playlist_name:
             def remove_from_p():
                 gp.pop_last_substate()
                 self._bot.playlist_mgr.remove_from_playlist(playlist_name, target)
                 speak(f"Removed {title} from playlist.")
-            items.append((f"Remove from {playlist_name}", remove_from_p))
+            items.append((f"Remove from {playlist_name}", remove_from_p, None,
+                          "Takes this song out of this playlist. Your other "
+                          "playlists and Favorites keep it."))
 
         def back_action():
             gp.pop_last_substate()
@@ -769,7 +975,8 @@ class MusicBotMenus:
             else:
                 self._show_favorites_menu()
 
-        items.append(("Back", back_action))
+        items.append(("Back", back_action, None,
+                      "Returns to the list this song came from."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -812,8 +1019,11 @@ class MusicBotMenus:
                 speak(song_line)
 
             items.append((line, read_line))
-        items.append(("Clear Queue", clear_queue))
-        items.append(("Back", go_back))
+        items.append(("Clear Queue", clear_queue, None,
+                      "Removes every waiting song. The song that is playing "
+                      "keeps playing."))
+        items.append(("Back", go_back, None,
+                      "Returns to the Music Bot menu."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -937,18 +1147,48 @@ class MusicBotMenus:
             self._open_output_device_menu()
 
         m = menu_mod.Menu(self._bot.game, "Music Bot Settings", parrent=gp)
+        # One line per feature, and every line says what it does when Tab is
+        # pressed on it: the labels have to stay short enough to arrow past, so
+        # the explanation rides beside the line instead of inside it.
         m.add_items(gate.filter_items([
-            ("output_device", get_output_label, go_output),
-            ("reverb", get_reverb_label, toggle_reverb),
-            ("crossfade", get_crossfade_label, toggle_crossfade),
-            ("eq", get_eq_label, go_eq),
-            ("song_key", get_transpose_label, go_transpose),
-            ("speech_key", get_speech_transpose_label, go_speech_transpose),
-            ("auto_tune", get_autotune_label, toggle_autotune),
-            ("auto_tune", get_autotune_speed_label, go_autotune_speed),
-            ("auto_tune", get_autotune_scale_label, go_autotune_scale),
-            ("muffle", get_water_label, toggle_water),
-            (None, "Back", go_back),
+            ("output_device", get_output_label, go_output,
+             "Where the song comes out: this game's device, or another pair of "
+             "speakers or a headset. The equalizer and the room reverb stay on "
+             "the game's device, so a song sent elsewhere is unshaped."),
+            ("reverb", get_reverb_label, toggle_reverb,
+             "Adds the room's own reverb to the song, so a song played inside "
+             "a hall sounds like it is in the hall."),
+            ("crossfade", get_crossfade_label, toggle_crossfade,
+             "Starts the next song before this one ends and blends the two, "
+             "so there is no silence between songs."),
+            ("eq", get_eq_label, go_eq,
+             "Shapes the song's bass, mid and treble. A profile is heard as "
+             "soon as it is chosen; Custom opens the three bands as sliders."),
+            ("song_key", get_transpose_label, go_transpose,
+             "Moves the whole song up or down a semitone at a time. The tempo "
+             "and the song's position do not change, so a cabinet and a jam "
+             "session stay in step."),
+            ("speech_key", get_speech_transpose_label, go_speech_transpose,
+             "Moves your broadcast voice up or down a semitone; the song "
+             "keeps its own key. It is replaced by Auto-Tune while that is on, "
+             "because a chromatic grid already has a note every semitone."),
+            ("auto_tune", get_autotune_label, toggle_autotune,
+             "Snaps the broadcast voice to the nearest note as you speak. "
+             "Retune Speed sets how fast it slides, Auto-Tune Scale sets which "
+             "notes count, and it costs about a tenth of a second of delay."),
+            ("auto_tune", get_autotune_speed_label, go_autotune_speed,
+             "How fast Auto-Tune walks the voice to a note: from Instant, "
+             "which is the effect, to Very slow, which is a correction you "
+             "only notice when the note lands."),
+            ("auto_tune", get_autotune_scale_label, go_autotune_scale,
+             "Which notes the voice may be moved to: every semitone, a major "
+             "key, a natural, harmonic or melodic minor key, or a pentatonic, "
+             "in the key you pick. Each one is described on its own line."),
+            ("muffle", get_water_label, toggle_water,
+             "Muffles the song the way being underwater does, for a player "
+             "who dives while it plays."),
+            (None, "Back", go_back,
+             "Returns to the Music Bot menu. Nothing on this page is lost."),
         ]))
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -978,14 +1218,20 @@ class MusicBotMenus:
                 m.speak_current_item()
 
         items = [
-            ("Same as the game", lambda: choose("")),
+            ("Same as the game", lambda: choose(""), None,
+             "The song comes out of the same device as the game, with the "
+             "equalizer, the room reverb and the underwater muffle."),
         ]
         for device in output_device.available_devices():
             label = output_device.short_name(device)
             if device == self._bot.output_device:
                 label = f"{label} (current)"
-            items.append((label, functools.partial(choose, device)))
-        items.append(("Back", go_back))
+            items.append((label, functools.partial(choose, device), None,
+                          "Sends only the Music Bot's song to this device, so "
+                          "the game can stay in the headset. The equalizer "
+                          "and the room reverb stay on the game's device."))
+        items.append(("Back", go_back, None,
+                      "Returns to Music Bot Settings."))
         m = menu_mod.Menu(self._bot.game, "Music Output Device", parrent=gp)
         m.add_items(items)
         menus.set_default_sounds(m)
@@ -1020,11 +1266,34 @@ class MusicBotMenus:
                 m.speak_current_item()
             return pick
 
+        # What each profile does, in the words of somebody who has never met an
+        # equalizer (Tab reads it). The profile table itself stays `(id, label)`
+        # on the bot -- the effect slot is looked up by it -- so the sentences
+        # live here beside the menu that shows them, with a default for a
+        # profile added without one.
+        profile_help = {
+            "normal": "Every band left where the recording has it: no shaping "
+                      "at all.",
+            "bass_boost": "Raises everything below about 260 Hz: the low end, "
+                          "a kick or a bass line, at its own level.",
+            "vocal_boost": "Raises the middle, around 500 Hz and 3 kHz: the "
+                           "range a voice sits in.",
+            "treble_boost": "Raises everything above about 4 kHz: cymbals, "
+                            "hi-hats and air.",
+            "custom": "Opens Bass, Mid and Treble as three sliders: Up and "
+                      "Down adjust, Page Up and Page Down by ten, Home resets "
+                      "the band, Enter saves.",
+        }
         m = menu_mod.Menu(self._bot.game, "Music Bot Equalizer", parrent=gp)
         items = []
         for profile, label in self._bot.EQ_PROFILES:
-            items.append((make_label(profile, label), make_pick(profile, label)))
-        items.append(("Back", go_back))
+            items.append((make_label(profile, label), make_pick(profile, label),
+                          None, profile_help.get(
+                              profile,
+                              "A ready-made shape of the song's bass, mid "
+                              "and treble.")))
+        items.append(("Back", go_back, None,
+                      "Returns to Music Bot Settings."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -1066,10 +1335,16 @@ class MusicBotMenus:
             parrent=gp,
         )
         m.add_items([
-            ("Up One Semitone", step(1)),
-            ("Down One Semitone", step(-1)),
-            ("Original Key", reset),
-            ("Back", go_back),
+            ("Up One Semitone", step(1), None,
+             "Raises the song by a semitone. A song already playing bends "
+             "into the new key, and its tempo does not change."),
+            ("Down One Semitone", step(-1), None,
+             "Lowers the song by a semitone. A song already playing bends "
+             "into the new key, and its tempo does not change."),
+            ("Original Key", reset, None,
+             "Puts the song back in the key it was recorded in."),
+            ("Back", go_back, None,
+             "Returns to Music Bot Settings."),
         ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -1111,10 +1386,17 @@ class MusicBotMenus:
             parrent=gp,
         )
         m.add_items([
-            ("Up One Semitone", step(1)),
-            ("Down One Semitone", step(-1)),
-            ("Original Voice", reset),
-            ("Back", go_back),
+            ("Up One Semitone", step(1), None,
+             "Raises your broadcast voice by a semitone: the voice that "
+             "reaches the PA speakers, a cabinet's room and your own "
+             "monitor. The song is not touched."),
+            ("Down One Semitone", step(-1), None,
+             "Lowers your broadcast voice by a semitone. The song is not "
+             "touched."),
+            ("Original Voice", reset, None,
+             "Your own voice, untransposed."),
+            ("Back", go_back, None,
+             "Returns to Music Bot Settings."),
         ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -1145,13 +1427,22 @@ class MusicBotMenus:
                 m.speak_current_item()
             return apply
 
+        def make_label(index, label):
+            # A live label, the way the equalizer's profiles are drawn: the line
+            # reads the bot each time it is spoken, so the "(active)" mark moves
+            # to the speed just chosen instead of sitting on whichever one was
+            # current when this list was built.
+            def label_fn():
+                current = getattr(self._bot, "autotune_speed",
+                                  autotune.DEFAULT_SPEED)
+                return f"{label} (active)" if index == current else label
+            return label_fn
+
         items = []
-        for index, (label, _glide) in enumerate(autotune.SPEEDS):
-            current = (index == getattr(self._bot, "autotune_speed",
-                                        autotune.DEFAULT_SPEED))
-            items.append((f"{label} (active)" if current else label,
-                          pick(index)))
-        items.append(("Back", go_back))
+        for index, (label, _glide, note) in enumerate(autotune.SPEEDS):
+            items.append((make_label(index, label), pick(index), None, note))
+        items.append(("Back", go_back, None,
+                      "Returns to Music Bot Settings."))
         m = menu_mod.Menu(
             self._bot.game,
             f"Music Bot Retune Speed: {self._bot.autotune_speed_label()}",
@@ -1208,21 +1499,33 @@ class MusicBotMenus:
                 self._open_autotune_root_menu()
 
             root = getattr(self._bot, "autotune_root", autotune.DEFAULT_ROOT)
-            items.append((f"Root Note: {autotune.root_name(root)}", go_root))
-        for mode_id, name, classes in autotune.SCALES:
-            if not classes:
-                says = ("every semitone, so the voice is never moved more "
-                        "than half a semitone")
-            elif len(classes) == 5:
-                says = ("the five notes of the scale, so the widest move is "
-                        "a semitone and a half")
-            else:
-                says = ("the seven notes of the key, so a note outside the "
-                        "key is brought into it")
-            current = mode_id == autotune.clamp_mode(mode)
-            items.append((f"{name} (active)" if current else name,
-                          pick(mode_id, says)))
-        items.append(("Back", go_back))
+            items.append((f"Root Note: {autotune.root_name(root)}", go_root,
+                          None,
+                          "Which key the scale is in. This line exists only "
+                          "while the scale has a key: a chromatic grid has a "
+                          "note on every semitone, so it cannot be in D."))
+        # Every scale is four fields, and the fourth is the sentence Tab reads
+        # on that line: a name like "Harmonic Minor" is not an explanation, and
+        # the person choosing a note set is exactly the person who has never
+        # met the word.
+        def make_label(mode_id, name):
+            # The mark is read live, not baked into the line when the list is
+            # built: choosing Minor over Major leaves this list standing, so a
+            # frozen label would still say "Major (active)" and only a trip back
+            # to Music Bot Settings would show the change.
+            def label_fn():
+                current = getattr(self._bot, "autotune_mode",
+                                  autotune.DEFAULT_MODE)
+                return (f"{name} (active)"
+                        if mode_id == autotune.clamp_mode(current) else name)
+            return label_fn
+
+        for mode_id, name, _classes, note in autotune.SCALES:
+            items.append((make_label(mode_id, name),
+                          pick(mode_id, autotune.scale_says(mode_id)),
+                          None, note))
+        items.append(("Back", go_back, None,
+                      "Returns to Music Bot Settings."))
         m = menu_mod.Menu(
             self._bot.game,
             f"Music Bot Auto-Tune Scale: {self._bot.autotune_scale_label()}",
@@ -1251,16 +1554,28 @@ class MusicBotMenus:
                 m.speak_current_item()
             return apply
 
-        current = autotune.clamp_root(getattr(self._bot, "autotune_root",
-                                              autotune.DEFAULT_ROOT))
+        def make_label(index, name):
+            # Read live, like the scale list's: picking a key leaves this menu
+            # open, so the "(active)" mark has to follow the choice by itself.
+            def label_fn():
+                current = autotune.clamp_root(
+                    getattr(self._bot, "autotune_root", autotune.DEFAULT_ROOT))
+                return f"{name} (active)" if index == current else name
+            return label_fn
+
         items = []
         for index, name in enumerate(autotune.ROOT_NAMES):
-            items.append((f"{name} (active)" if index == current else name,
-                          pick(index)))
-        items.append(("Back", go_back))
+            items.append((make_label(index, name),
+                          pick(index), None,
+                          f"Puts the scale in this key: the same notes, "
+                          f"started on {name} instead."))
+        items.append(("Back", go_back, None,
+                      "Returns to the Auto-Tune Scale list."))
+        opened_on = autotune.clamp_root(getattr(self._bot, "autotune_root",
+                                                 autotune.DEFAULT_ROOT))
         m = menu_mod.Menu(
             self._bot.game,
-            f"Music Bot Auto-Tune Root: {autotune.root_name(current)}",
+            f"Music Bot Auto-Tune Root: {autotune.root_name(opened_on)}",
             parrent=gp,
         )
         m.add_items(items)
@@ -1303,11 +1618,20 @@ class MusicBotMenus:
 
         m = menu_mod.Menu(self._bot.game, "Subtitles", parrent=gp)
         m.add_items([
-            (self._bot.subtitle_label, self._bot.toggle_subtitles),
-            (self._bot.subtitle_language_label, go_language),
-            (self._bot.subtitle_timing_label, go_timing),
-            (lambda: self._bot.subtitle_reader.status(), read_status),
-            ("Back", go_back),
+            (self._bot.subtitle_label, self._bot.toggle_subtitles, None,
+             "Turns the spoken subtitles on or off: the song's own words, "
+             "read out as the song reaches them."),
+            (self._bot.subtitle_language_label, go_language, None,
+             "Which language YouTube is asked for a caption track in. The "
+             "first language with a track is the one spoken."),
+            (self._bot.subtitle_timing_label, go_timing, None,
+             "Moves the spoken line earlier or later against the song, if "
+             "the screen reader falls behind or runs ahead."),
+            (lambda: self._bot.subtitle_reader.status(), read_status, None,
+             "How far the reader has got, and where the words come from: "
+             "the uploader's own caption track, or YouTube's automatic one."),
+            ("Back", go_back, None,
+             "Returns to the Music Bot menu."),
         ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -1344,9 +1668,13 @@ class MusicBotMenus:
             return pick
 
         m = menu_mod.Menu(self._bot.game, "Subtitle Language", parrent=gp)
-        items = [(make_label(key, label), make_pick(key, label))
+        items = [(make_label(key, label), make_pick(key, label), None,
+                  "The order YouTube is asked for a caption track in. The "
+                  "first language with a track is the one read out; songs "
+                  "often have none at all.")
                  for key, label, _languages in subtitles.LANGUAGE_PREFERENCES]
-        items.append(("Back", go_back))
+        items.append(("Back", go_back, None,
+                      "Returns to the Subtitles menu."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -1387,13 +1715,22 @@ class MusicBotMenus:
         step = subtitles.OFFSET_STEP_MS / 1000.0
         m = menu_mod.Menu(self._bot.game, "Subtitle Timing", parrent=gp)
         m.add_items([
-            (self._bot.subtitle_timing_label, speak_timing),
+            (self._bot.subtitle_timing_label, speak_timing, None,
+             "How far the spoken line sits from the song, and which way it "
+             "has been pushed."),
             (f"Speak {step:.1f} seconds earlier",
-             shift(subtitles.OFFSET_STEP_MS)),
+             shift(subtitles.OFFSET_STEP_MS), None,
+             "Speaks each line half a second earlier, for a screen reader "
+             "that falls behind the song."),
             (f"Speak {step:.1f} seconds later",
-             shift(-subtitles.OFFSET_STEP_MS)),
-            ("Reset timing", reset),
-            ("Back", go_back),
+             shift(-subtitles.OFFSET_STEP_MS), None,
+             "Speaks each line half a second later, for a screen reader that "
+             "runs ahead of the song."),
+            ("Reset timing", reset, None,
+             "Puts the timing back to exactly where the video's own captions "
+             "are timed."),
+            ("Back", go_back, None,
+             "Returns to the Subtitles menu."),
         ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -1420,19 +1757,56 @@ class MusicBotMenus:
             self._bot.game.keyconfig.get("music_bot_vol_up", pygame.K_F10)
         )
 
-        m = menu_mod.Menu(self._bot.game, "Music Bot Controls Help", parrent=gp)
+        def say_tab_help():
+            speak("Tab reads what the line you are standing on does. It works "
+                  "on every page of the Music Bot menu: arrow to a line, press "
+                  "Tab, and it explains the feature behind it -- what it "
+                  "changes, what you will hear, and what it costs. Pressing "
+                  "Tab never chooses a line or closes the menu.")
+
+        # The Tab line leads, because it is the one thing a first visitor does
+        # not know: every other line here is a key to memorise, and this one is
+        # how the rest of the bot explains itself.
+        m = menu_mod.Menu(
+            self._bot.game, "Music Bot Controls Help", parrent=gp,
+            intro="Tab reads what the line you are on does, on every page.",
+        )
         items = [
-            (f"{toggle_key}: Open mode menu", lambda: None),
-            (f"Shift + {toggle_key}: Pause / Resume", lambda: None),
-            (f"Ctrl + {toggle_key}: Stop / Replay last song", lambda: None),
-            (f"Ctrl + Shift + {toggle_key}: Speak status", lambda: None),
-            (f"Alt + {toggle_key}: Toggle broadcast (Private/Public)", lambda: None),
-            ("Personal Music Feed: Ctrl left bracket for previous; Ctrl right bracket for next", lambda: None),
-            (f"{volume_down_key}: Decrease volume", lambda: None),
-            (f"{volume_up_key}: Increase volume", lambda: None),
-            (f"Ctrl + {volume_down_key}: Rewind 10 seconds (add Shift for 60)", lambda: None),
-            (f"Ctrl + {volume_up_key}: Fast-forward 10 seconds (add Shift for 60)", lambda: None),
-            ("Back", go_back)
+            ("Tab: Read what the line you are on does", say_tab_help, None,
+             "Every line in the Music Bot's menus carries its own description "
+             "and its properties: which scale a key has, what a Retune Speed "
+             "does, what a listening switch changes. Arrow to a line and "
+             "press Tab to hear it."),
+            (f"{toggle_key}: Open mode menu", lambda: None, None,
+             "Opens the Music Bot menu: search, local files, playlists, "
+             "downloads, recording, Party Sync, the queue and Settings."),
+            (f"Shift + {toggle_key}: Pause / Resume", lambda: None, None,
+             "Stops the song where it is and starts it again from the same "
+             "place. A cabinet, a room and a jam session follow it."),
+            (f"Ctrl + {toggle_key}: Stop / Replay last song", lambda: None, None,
+             "Stops the song entirely, or starts the last one from the "
+             "beginning when nothing is playing."),
+            (f"Ctrl + Shift + {toggle_key}: Speak status", lambda: None, None,
+             "Says what is playing, how far in it is, and whether it is "
+             "private or broadcast."),
+            (f"Alt + {toggle_key}: Toggle broadcast (Private/Public)", lambda: None, None,
+             "Chooses whether other players hear the song or only you do."),
+            ("Personal Music Feed: Ctrl left bracket for previous; Ctrl right bracket for next",
+             lambda: None, None,
+             "Moves through your shuffled Favorites feed without opening a "
+             "menu."),
+            (f"{volume_down_key}: Decrease volume", lambda: None, None,
+             "Turns the song down, without touching the game's own sounds."),
+            (f"{volume_up_key}: Increase volume", lambda: None, None,
+             "Turns the song up, without touching the game's own sounds."),
+            (f"Ctrl + {volume_down_key}: Rewind 10 seconds (add Shift for 60)",
+             lambda: None, None,
+             "Goes back in the song. Held with Shift it is a whole minute."),
+            (f"Ctrl + {volume_up_key}: Fast-forward 10 seconds (add Shift for 60)",
+             lambda: None, None,
+             "Goes forward in the song. Held with Shift it is a whole minute."),
+            ("Back", go_back, None,
+             "Returns to the Music Bot menu."),
         ]
         m.add_items(items)
         menus.set_default_sounds(m)
@@ -1462,7 +1836,8 @@ class MusicBotMenus:
                 return lambda: self._on_result_selected(idx, gp)
             items.append((label, make_callback(i)))
 
-        items.append(("Cancel", lambda: gp.pop_last_substate()))
+        items.append(("Cancel", lambda: gp.pop_last_substate(), None,
+                      "Closes the results without playing anything."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -1492,9 +1867,11 @@ class MusicBotMenus:
                     else:
                         speak(f"{title} is already in {p_name}.")
                 return do_add
-            items.append((name, make_add_cb(name)))
+            items.append((name, make_add_cb(name), None,
+                          f"Adds {title} to this playlist."))
 
-        items.append(("Cancel", lambda: gp.pop_last_substate()))
+        items.append(("Cancel", lambda: gp.pop_last_substate(), None,
+                      "Leaves your playlists as they are."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -1560,12 +1937,22 @@ class MusicBotMenus:
                 title,
             )
 
-        items.append(("Play Now", play_now))
-        items.append(("Play Next (Add to Queue)", add_to_queue))
-        items.append(("Download Song", download_song))
-        items.append(("Save to Favorites", save_fav))
-        items.append(("Add to Playlist...", save_playlist))
-        items.append(("Cancel", lambda: gp.pop_last_substate()))
+        items.append(("Play Now", play_now, None,
+                      "Starts this song now, on top of whatever is playing."))
+        items.append(("Play Next (Add to Queue)", add_to_queue, None,
+                      "Puts this song behind the one that is playing, so it "
+                      "comes next."))
+        items.append(("Download Song", download_song, None,
+                      "Saves this song as a file on this computer, at the "
+                      "quality you pick next."))
+        items.append(("Save to Favorites", save_fav, None,
+                      "Adds this song to your Favorites, so you can find it "
+                      "again without searching."))
+        items.append(("Add to Playlist...", save_playlist, None,
+                      "Picks one of your playlists to put this song in."))
+        items.append(("Cancel", lambda: gp.pop_last_substate(), None,
+                      "Closes this menu without doing anything with the "
+                      "song."))
 
         m.add_items(items)
         menus.set_default_sounds(m)

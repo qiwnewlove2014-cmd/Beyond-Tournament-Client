@@ -270,7 +270,7 @@ class SpeedTests(unittest.TestCase):
                          ChromaticTransposer.GLIDE)
 
     def test_the_speeds_run_fastest_to_slowest(self):
-        glides = [glide for _label, glide in autotune.SPEEDS]
+        glides = [glide for _label, glide, _note in autotune.SPEEDS]
         self.assertEqual(glides, sorted(glides, reverse=True))
         self.assertEqual(glides[0], 1.0)
         self.assertGreater(len(glides), 3)
@@ -647,6 +647,17 @@ class BotOptionTests(unittest.TestCase):
                              autotune.DEFAULT_SPEED)
 
 
+def labels_in(menu):
+    """Every line's text, read the way the menu itself reads it.
+
+    A label may be a callable -- `libs/menu.py` says so on `add_items`: "if [0]
+    is a callable it will use its return value to speak its label" -- which is
+    how a live mark like "(active)" follows the setting it names instead of
+    freezing at the moment the list was built.
+    """
+    return [item[0]() if callable(item[0]) else item[0] for item in menu.items]
+
+
 class FakeMenu:
     built = []
 
@@ -693,9 +704,11 @@ class MenuTests(unittest.TestCase):
         self.speak = mock.patch("libs.music_bot.menus.speak").start()
 
     def settings_labels(self):
+        # A line is (label, action[, preview]) with a description beside it; the
+        # labels are what these tests read, whatever else the line carries.
         self.handler._open_settings_menu()
-        return [label() if callable(label) else label
-                for label, _action in FakeMenu.built[-1].items]
+        return [item[0]() if callable(item[0]) else item[0]
+                for item in FakeMenu.built[-1].items]
 
     def test_the_settings_menu_carries_both_lines(self):
         labels = self.settings_labels()
@@ -727,8 +740,8 @@ class MenuTests(unittest.TestCase):
     def test_the_speed_menu_lists_every_speed_and_marks_the_current(self):
         self.handler._open_autotune_speed_menu()
         menu = FakeMenu.built[-1]
-        labels = [label for label, _action in menu.items]
-        for index, (name, _glide) in enumerate(autotune.SPEEDS):
+        labels = labels_in(menu)
+        for index, (name, _glide, _note) in enumerate(autotune.SPEEDS):
             expected = f"{name} (active)" if index == autotune.DEFAULT_SPEED else name
             self.assertIn(expected, labels)
         self.assertEqual(menu.title,
@@ -804,6 +817,59 @@ class ScaleTests(unittest.TestCase):
             self.assertLessEqual(widest, 1.5 + 1e-9)
             self.assertGreater(widest, 1.4)
 
+    def test_the_harmonic_minor_is_the_minor_with_a_raised_seventh(self):
+        self.assertEqual(autotune.scale_classes("harmonic_minor"),
+                         (0, 2, 3, 5, 7, 8, 11))
+        self.assertEqual(autotune.scale_label("harmonic_minor", 9),
+                         "A Harmonic Minor")
+        # Seven notes and a three-semitone gap (Ab to B), so the pull is
+        # measured from the GAP and not from how many notes the scale has.
+        self.assertEqual(autotune.widest_gap("harmonic_minor"), 3)
+        self.assertEqual(autotune.widest_pull("harmonic_minor"), 1.5)
+
+    def test_the_melodic_minor_raises_the_sixth_and_the_seventh(self):
+        self.assertEqual(autotune.scale_classes("melodic_minor"),
+                         (0, 2, 3, 5, 7, 9, 11))
+        self.assertEqual(autotune.widest_gap("melodic_minor"), 2)
+        self.assertEqual(autotune.widest_pull("melodic_minor"), 1.0)
+
+    def test_every_scale_is_inside_the_ceiling_the_filter_was_pinned_at(self):
+        """`MAX_PULL` is measured from the catalogue: a new scale cannot widen it."""
+        self.assertEqual(autotune.MAX_PULL, 1.5)
+        for mode_id, _label, _classes, _note in autotune.SCALES:
+            with self.subTest(mode=mode_id):
+                self.assertLessEqual(autotune.widest_pull(mode_id),
+                                     autotune.MAX_PULL)
+
+    def test_a_note_outside_the_harmonic_minor_lands_on_one_of_its_notes(self):
+        # C harmonic minor is C D Eb F G Ab B: A natural is not in it, and is
+        # one semitone above Ab (two below B), so it comes down onto Ab.
+        self.assertAlmostEqual(
+            autotune.AutoTuner.scale_correction(midi_hz(69),
+                                                "harmonic_minor", 0), -1.0)
+        # G# IS in the scale, and is left where it is.
+        self.assertAlmostEqual(
+            autotune.AutoTuner.scale_correction(midi_hz(68),
+                                                "harmonic_minor", 0), 0.0)
+
+    def test_the_harmonic_minor_never_pulls_more_than_a_semitone_and_a_half(self):
+        widest = max(
+            abs(autotune.AutoTuner.scale_correction(midi_hz(m + step / 20.0),
+                                                    "harmonic_minor", 0))
+            for m in range(60, 72) for step in range(20))
+        self.assertLessEqual(widest, 1.5 + 1e-9)
+        self.assertGreater(widest, 1.4)
+
+    def test_every_scale_is_described_and_says_how_far_it_reaches(self):
+        for mode_id, _label, _classes, note in autotune.SCALES:
+            with self.subTest(mode=mode_id):
+                self.assertTrue(note.strip(), f"{mode_id} has no description")
+                self.assertEqual(autotune.scale_note(mode_id), note)
+        self.assertIn("half a semitone", autotune.scale_says("chromatic"))
+        self.assertIn("semitone at most", autotune.scale_says("major"))
+        self.assertIn("semitone and a half",
+                      autotune.scale_says("harmonic_minor"))
+
     def test_an_out_of_scale_note_takes_the_lower_neighbour(self):
         """D# in C major is exactly a semitone from D and from E."""
         self.assertAlmostEqual(
@@ -876,7 +942,7 @@ class ScaleMenuTests(unittest.TestCase):
         self.handler._open_autotune_scale_menu()
         menu = FakeMenu.built[-1]
         self.assertEqual(menu.title, "Music Bot Auto-Tune Scale: Chromatic")
-        labels = [label for label, _action in menu.items]
+        labels = labels_in(menu)
         self.assertIn("Chromatic (active)", labels)
         self.assertIn("Major", labels)
         self.assertIn("Minor Pentatonic", labels)
@@ -896,17 +962,17 @@ class ScaleMenuTests(unittest.TestCase):
 
         self.bot.set_autotune_mode.side_effect = remember
         self.handler._open_autotune_scale_menu()
-        labels = [label for label, _action in FakeMenu.built[-1].items]
+        labels = labels_in(FakeMenu.built[-1])
         self.assertFalse([label for label in labels
                           if label.startswith("Root Note")])
         FakeMenu.built[-1].items[labels.index("Major")][1]()
-        relabelled = [label for label, _action in FakeMenu.built[-1].items]
+        relabelled = labels_in(FakeMenu.built[-1])
         self.assertEqual(relabelled[0], "Root Note: C")
         self.assertIn("Major (active)", relabelled)
         # ...and going back to Chromatic takes it away rather than leaving a
         # row that no longer means anything.
         FakeMenu.built[-1].items[relabelled.index("Chromatic")][1]()
-        chromatically = [label for label, _action in FakeMenu.built[-1].items]
+        chromatically = labels_in(FakeMenu.built[-1])
         self.assertFalse([label for label in chromatically
                           if label.startswith("Root Note")])
         self.assertIn("Chromatic (active)", chromatically)
@@ -914,18 +980,49 @@ class ScaleMenuTests(unittest.TestCase):
     def test_a_scale_with_a_key_offers_the_twelve_keys(self):
         self.bot.autotune_mode = "major"
         self.bot.autotune_root = 9
+        self.bot.set_autotune_root.side_effect = lambda index: setattr(
+            self.bot, "autotune_root", index)
         self.handler._open_autotune_scale_menu()
         menu = FakeMenu.built[-1]
-        labels = [label for label, _action in menu.items]
+        labels = labels_in(menu)
         self.assertIn("Root Note: A", labels)
         menu.items[labels.index("Root Note: A")][1]()
         keys = FakeMenu.built[-1]
         self.assertEqual(keys.title, "Music Bot Auto-Tune Root: A")
-        names = [label for label, _action in keys.items]
+        names = labels_in(keys)
         self.assertIn("A (active)", names)
         self.assertEqual(len(names), 13)          # twelve keys and Back
         keys.items[names.index("F#")][1]()
         self.bot.set_autotune_root.assert_called_with(6)
+        # The twelve keys stay open after one is picked, so the mark has to
+        # move with the choice rather than wait for the menu to be reopened.
+        moved = labels_in(keys)
+        self.assertIn("F# (active)", moved)
+        self.assertNotIn("A (active)", moved)
+
+    def test_the_mark_moves_without_leaving_the_list(self):
+        # Reported: choosing Major while Minor was marked left "Minor (active)"
+        # on the list until Music Bot Settings was left and reopened. Both
+        # scales are diatonic, so the list is not rebuilt, and the mark was a
+        # plain string written when the list was built. It is read whenever the
+        # line is spoken now, so the mark follows the choice with the list
+        # standing exactly as it was.
+        self.bot.autotune_mode = "minor"
+
+        def remember(mode):
+            self.bot.autotune_mode = mode
+
+        self.bot.set_autotune_mode.side_effect = remember
+        self.handler._open_autotune_scale_menu()
+        menu = FakeMenu.built[-1]
+        self.assertIn("Minor (active)", labels_in(menu))
+        before = labels_in(menu)
+        menu.items[before.index("Major")][1]()
+        # The same list, still open: nothing was popped or rebuilt.
+        self.assertIs(FakeMenu.built[-1], menu)
+        after = labels_in(menu)
+        self.assertIn("Major (active)", after)
+        self.assertNotIn("Minor (active)", after)
 
     def test_the_gate_hides_the_scale_line_too(self):
         self.addCleanup(music_bot_gate.clear)
