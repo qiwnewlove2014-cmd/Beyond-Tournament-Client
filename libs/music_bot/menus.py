@@ -1670,6 +1670,11 @@ class MusicBotMenus:
         100% is a ceiling, not a dial that goes further: the nearest note is the
         whole correction, so more than all of it would carry the voice past the
         note it was aiming for.
+
+        Five rows are the quick answers and `Custom Percentage` is the rest of
+        the range: it opens the client's own text field (`game.input.run`) for
+        any whole number, because "63%" is a thing a player can want and no
+        list of five can hold every percentage.
         """
         from .. import menu as menu_mod, menus
         from . import autotune
@@ -1700,8 +1705,48 @@ class MusicBotMenus:
                 return f"{label} (active)" if percent == current else label
             return label_fn
 
+        def current_amount():
+            return autotune.clamp_amount(
+                getattr(self._bot, "autotune_amount", autotune.DEFAULT_AMOUNT))
+
+        def submitted_amount(text):
+            """Take what was typed, or say why it was not taken.
+
+                The field refuses anything outside 0..100 as it is typed, so a
+                refusal here is text that was not a number at all -- and it
+                says the value did not change instead of guessing what "half"
+                meant.
+                """
+            if not str(text or "").strip():
+                speak(f"Tune amount unchanged, {autotune.amount_label(current_amount())}.")
+                return
+            value = autotune.parse_amount(text)
+            if value is None:
+                speak(f"'{text}' is not a percentage, so the tune amount is "
+                      f"still {autotune.amount_label(current_amount())}.")
+                return
+            self._bot.set_autotune_amount(value)
+            speak(f"Tune amount: {autotune.amount_label(value)}. "
+                  f"{autotune.amount_note(value)}")
+
+        def go_custom():
+            # The five rows are the common answers; a percentage between them
+            # is what a player who asks for "63%" actually wants, so the row
+            # opens the client's own text field (the one the search box uses)
+            # rather than adding a sixth step nobody picked. The menu is left
+            # underneath and comes back on Enter or Escape.
+            gp.add_substate(self._bot.game.input.run(
+                f"Enter a tune amount from 0 to 100 percent "
+                f"(currently {autotune.amount_label(current_amount())}):",
+                handeler=submitted_amount,
+                min_val=0, max_val=100, msg_length=3, multiline=False,
+            ))
+
         items = [(make_label(percent), pick(percent), None, note)
                  for percent, note in autotune.TUNE_AMOUNTS]
+        items.append(("Custom Percentage", go_custom, None,
+                      "Type the amount yourself, from 0 to 100. Any whole "
+                      "number works, so 63% is 63% and not the step beside it."))
         items.append(("Back", go_back, None,
                       "Returns to Music Bot Settings."))
         m = menu_mod.Menu(

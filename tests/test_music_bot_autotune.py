@@ -940,12 +940,17 @@ class ScaleTests(unittest.TestCase):
         # Still listening to the note: 0% is a share of zero, not a deaf tuner.
         self.assertIsNotNone(tuner.detected_hz)
 
-    def test_the_amount_only_takes_values_that_exist(self):
-        self.assertEqual(autotune.clamp_amount(100), 100)
-        self.assertEqual(autotune.clamp_amount(60), 50)      # the nearest step
+    def test_the_amount_takes_any_whole_percent_and_no_more(self):
+        # Typed values are kept, not snapped to a step: 63% is 63%.
+        self.assertEqual(autotune.clamp_amount(63), 63)
         self.assertEqual(autotune.clamp_amount(250), 100)    # the note is the end
+        self.assertEqual(autotune.clamp_amount(-5), 0)
         self.assertEqual(autotune.clamp_amount("rubbish"), 100)
         self.assertEqual(autotune.amount_label(), "100%")
+        self.assertEqual(autotune.parse_amount("63"), 63)
+        self.assertEqual(autotune.parse_amount(" 63% "), 63)
+        self.assertIsNone(autotune.parse_amount("half"))
+        self.assertIsNone(autotune.parse_amount("63.5"))
 
 
 class ScaleLineTests(unittest.TestCase):
@@ -1107,7 +1112,8 @@ class ScaleMenuTests(unittest.TestCase):
         self.handler._open_autotune_amount_menu()
         menu = FakeMenu.built[-1]
         labels = labels_in(menu)
-        self.assertEqual(len(labels), len(autotune.TUNE_AMOUNTS) + 1)  # and Back
+        # Five steps, the Custom Percentage row, and Back.
+        self.assertEqual(len(labels), len(autotune.TUNE_AMOUNTS) + 2)
         for percent, _note in autotune.TUNE_AMOUNTS:
             expected = (f"{percent}% (active)" if percent == 100
                         else f"{percent}%")
@@ -1116,6 +1122,36 @@ class ScaleMenuTests(unittest.TestCase):
         self.bot.set_autotune_amount.assert_called_with(50)
         # The mark follows the choice on the list that is still open.
         self.assertIn("50% (active)", labels_in(menu))
+
+    def test_the_custom_row_takes_a_percentage_that_is_not_a_step(self):
+        self.bot.autotune_amount = 100
+        self.bot.set_autotune_amount.side_effect = (
+            lambda percent: setattr(self.bot, "autotune_amount", percent))
+        self.handler._open_autotune_amount_menu()
+        menu = FakeMenu.built[-1]
+        labels = labels_in(menu)
+        menu.items[labels.index("Custom Percentage")][1]()
+        run = self.bot.game.input.run
+        self.assertTrue(run.called)
+        kwargs = run.call_args.kwargs
+        # The field itself refuses anything outside 0..100 while typing.
+        self.assertEqual((kwargs.get("min_val"), kwargs.get("max_val")), (0, 100))
+        kwargs["handeler"]("63")
+        self.bot.set_autotune_amount.assert_called_with(63)
+        self.assertIn("63%", str(self.speak.call_args_list[-1].args[0]))
+
+    def test_a_typed_word_leaves_the_amount_alone(self):
+        self.bot.autotune_amount = 75
+        self.handler._open_autotune_amount_menu()
+        labels = labels_in(FakeMenu.built[-1])
+        FakeMenu.built[-1].items[labels.index("Custom Percentage")][1]()
+        kwargs = self.bot.game.input.run.call_args.kwargs
+        kwargs["handeler"]("half")
+        self.assertFalse(self.bot.set_autotune_amount.called)
+        self.assertIn("still 75%", str(self.speak.call_args_list[-1].args[0]))
+        # Escape submits an empty string: the amount is untouched and says so.
+        kwargs["handeler"]("")
+        self.assertFalse(self.bot.set_autotune_amount.called)
 
     def test_clear_puts_every_setting_back_and_switches_it_off(self):
         self.bot.autotune_enabled = True

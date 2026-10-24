@@ -497,6 +497,8 @@ def speed_note(index=None):
 #:
 #: ``(percent, what the amount does)`` -- the second field is what Tab reads on
 #: that line, because "50%" alone does not say what half of anything sounds like.
+#: The five rows are the menu's quick answers, not the only values: the Custom
+#: Percentage row takes any whole number between 0 and 100 (`parse_amount`).
 TUNE_AMOUNTS = (
     (0,
      "None of the correction: the effect runs and the voice goes out as it was "
@@ -518,12 +520,33 @@ DEFAULT_AMOUNT = 100
 
 
 def clamp_amount(value):
-    """A tune amount in percent, snapped to the nearest step that exists."""
+    """A tune amount in percent: any whole number 0..100, whatever was saved.
+
+    It clamps and rounds rather than snapping to a step: the five rows in
+    `TUNE_AMOUNTS` are the menu's quick answers, and a player who typed 63%
+    means 63%.
+    """
     try:
-        number = float(value)
+        number = int(round(float(value)))
     except (TypeError, ValueError):
         return DEFAULT_AMOUNT
-    return min(TUNE_AMOUNTS, key=lambda row: (abs(row[0] - number), -row[0]))[0]
+    return max(0, min(100, number))
+
+
+def parse_amount(text):
+    """A percentage a player typed: 0..100, or None when it is not a number.
+
+    Accepts what somebody actually types into a percentage field -- "63",
+    "63%", " 63 " -- and nothing else. "half" and "63.5" are refused rather
+    than guessed at: a dial is easier to trust when it does exactly what was
+    asked of it, and a refusal says the value did not change.
+    """
+    if text is None:
+        return None
+    cleaned = str(text).strip().rstrip("%").strip()
+    if not cleaned.isdigit():
+        return None
+    return clamp_amount(int(cleaned))
 
 
 def amount_label(percent=None):
@@ -532,9 +555,15 @@ def amount_label(percent=None):
 
 
 def amount_note(percent=None):
-    """What the menu says this amount does (what Tab reads)."""
+    """What the menu says this amount does (what Tab reads).
+
+    A value typed into the Custom Percentage field is described by what it is
+    rather than by the nearest step: somebody who asked for 63% did not ask for
+    50, so saying "halfway" would be the dial ignoring them.
+    """
     wanted = DEFAULT_AMOUNT if percent is None else clamp_amount(percent)
     for step, note in TUNE_AMOUNTS:
         if step == wanted:
             return note
-    return TUNE_AMOUNTS[-1][1]
+    return (f"{wanted}% of the correction: the voice is moved {wanted}% of the "
+            f"distance to the nearest note of the scale.")
