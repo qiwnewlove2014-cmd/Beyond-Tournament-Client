@@ -1169,9 +1169,23 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._open_autotune_amount_menu()
 
-        # The two dials are only in the list while the switch is on: off, they
-        # change nothing a player can hear, and three Auto-Tune lines that do
-        # nothing are two lines of noise between the player and the rest of
+        def get_autotune_harmony_label():
+            return f"Harmony 1: {self._bot.autotune_harmony_label()}"
+
+        def go_autotune_harmony():
+            gp.pop_last_substate()
+            self._open_autotune_harmony_menu()
+
+        def get_autotune_harmony2_label():
+            return f"Harmony 2: {self._bot.autotune_harmony_label(second=True)}"
+
+        def go_autotune_harmony2():
+            gp.pop_last_substate()
+            self._open_autotune_harmony_menu(second=True)
+
+        # The dials are only in the list while the switch is on: off, they
+        # change nothing a player can hear, and five Auto-Tune lines that do
+        # nothing are four lines of noise between the player and the rest of
         # the page. Turning it on puts them there (the switch rebuilds).
         dials = [] if not getattr(self._bot, "autotune_enabled", False) else [
             (
@@ -1193,6 +1207,19 @@ class MusicBotMenus:
                 "the notes of the scale, 50% leaves half the error in it and "
                 "half the human wobble, 0% is your own voice with Auto-Tune "
                 "still switched on.",
+            ),
+            (
+                "auto_tune", get_autotune_harmony_label, go_autotune_harmony,
+                "A second copy of your broadcast voice an interval above it, "
+                "taken from your scale so it is always in key: a third, a "
+                "fifth, a sixth, a seventh or an octave. Off is your own "
+                "voice alone, and every copy is part of the one broadcast.",
+            ),
+            (
+                "auto_tune", get_autotune_harmony2_label, go_autotune_harmony2,
+                "A third voice, on another interval of the same scale. A third "
+                "and a fifth together turn one voice into a three-note chord; "
+                "Off leaves Harmony 1 singing alone.",
             ),
         ]
 
@@ -1590,11 +1617,15 @@ class MusicBotMenus:
             self._bot.set_autotune_root(autotune.DEFAULT_ROOT)
             self._bot.set_autotune_speed(autotune.DEFAULT_SPEED)
             self._bot.set_autotune_amount(autotune.DEFAULT_AMOUNT)
+            self._bot.set_autotune_harmony(autotune.DEFAULT_HARMONY)
+            self._bot.set_autotune_harmony(autotune.DEFAULT_HARMONY,
+                                          second=True)
             if getattr(self._bot, "autotune_enabled", False):
                 self._bot.toggle_autotune()
             speak("Auto-Tune cleared. Your own voice again, and the scale, the "
-                  "key, the retune speed and the tune amount are back at "
-                  "their defaults: Chromatic in C, Normal speed, 100%.")
+                  "key, the retune speed, the tune amount and both harmony "
+                  "voices are back at their defaults: Chromatic in C, Normal "
+                  "speed, 100%, no harmony.")
             gp.pop_last_substate()
             self._open_settings_menu()
 
@@ -1763,6 +1794,66 @@ class MusicBotMenus:
         m = menu_mod.Menu(
             self._bot.game,
             f"Music Bot Tune Amount: {self._bot.autotune_amount_label()}",
+            parrent=gp,
+        )
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_autotune_harmony_menu(self, second=False):
+        """Which interval one harmony copy sings: a third, a fifth, an octave.
+
+        Two copies, so two of these pages (`Harmony 1:` and `Harmony 2:` in the
+        Settings list). The interval is counted in the scale, so the copy is
+        always on a note the scale has -- a third above C is E, above D it is F
+        -- and `Chromatic` falls back to the major scale's spelling of each
+        interval, because a grid with a note every semitone has no key to
+        harmonise in.
+
+        The copy is part of the ONE broadcast voice: it is mixed into the same
+        20 ms frame (`libs/voice_chat.HarmonyVoice`), so a listener hears it
+        without anything extra being sent, and a PA slot or a cinema room still
+        gets exactly the frames it always did.
+        """
+        from .. import menu as menu_mod, menus
+        from . import autotune
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def pick(interval_id):
+            def apply():
+                self._bot.set_autotune_harmony(interval_id, second=second)
+                speak(f"Harmony {'2' if second else '1'}: "
+                      f"{self._bot.autotune_harmony_label(second=second)}. "
+                      f"{autotune.harmony_note(interval_id)}")
+                m.speak_current_item()
+            return apply
+
+        def make_label(interval_id):
+            # Read live, like the scale, key and amount lists: the mark follows
+            # the choice on the list that is already open.
+            def label_fn():
+                attribute = "autotune_harmony2" if second else "autotune_harmony"
+                current = autotune.clamp_harmony(
+                    getattr(self._bot, attribute, autotune.DEFAULT_HARMONY))
+                label = autotune.harmony_label(interval_id)
+                return f"{label} (active)" if interval_id == current else label
+            return label_fn
+
+        items = [(make_label(interval_id), pick(interval_id), None, note)
+                 for interval_id, _label, _semitones, note
+                 in autotune.HARMONY_INTERVALS]
+        items.append(("Back", go_back, None,
+                      "Returns to Music Bot Settings."))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Harmony {'2' if second else '1'}: "
+            f"{self._bot.autotune_harmony_label(second=second)}",
             parrent=gp,
         )
         m.add_items(items)

@@ -1491,6 +1491,9 @@ class MapMusicBot:
     def _open_autotune_amount_menu(self):
         return self._menus()._open_autotune_amount_menu()
 
+    def _open_autotune_harmony_menu(self, second=False):
+        return self._menus()._open_autotune_harmony_menu(second=second)
+
     def _open_subtitle_language_menu(self):
         return self._menus()._open_subtitle_language_menu()
 
@@ -1567,6 +1570,30 @@ class MapMusicBot:
         self.autotune_amount = autotune.clamp_amount(percent)
         options.set("music_bot_autotune_amount", self.autotune_amount)
         return self.autotune_amount
+
+    def autotune_harmony_label(self, second=False):
+        """What one harmony copy is set to: 'Off', 'Third', 'Octave'..."""
+        attribute = "autotune_harmony2" if second else "autotune_harmony"
+        return autotune.harmony_label(getattr(self, attribute,
+                                              autotune.DEFAULT_HARMONY))
+
+    def set_autotune_harmony(self, interval_id, second=False):
+        """Choose the interval one harmony copy sings (or Off for none).
+
+        Two copies, each with its own line: a singer who wants a third and a
+        fifth sets both, one who wants a single voice leaves the other Off. The
+        copy is built from the same microphone frame and mixed into the same
+        20 ms frame (`libs/voice_chat.HarmonyVoice`), so a listener, a PA slot
+        and a cinema room still count exactly the frames they always did.
+        """
+        value = autotune.clamp_harmony(interval_id)
+        if second:
+            self.autotune_harmony2 = value
+            options.set("music_bot_autotune_harmony2", value)
+        else:
+            self.autotune_harmony = value
+            options.set("music_bot_autotune_harmony", value)
+        return value
 
     def set_speech_transpose(self, semitones):
         """Move the SPEECH key, leaving the song's where its own dial put it.

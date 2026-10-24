@@ -167,6 +167,12 @@ class AutoTuner:
         self._pitch = collections.deque(maxlen=self.PITCH_MEDIAN)
         #: The correction the line is actually being sent, before Tune Amount.
         self._applied = 0.0
+        #: The two harmony copies' intervals (see `HARMONY_INTERVALS`).
+        self.harmony = (DEFAULT_HARMONY, DEFAULT_HARMONY)
+        #: The pitch this press is singing right now, as a MIDI number, or None.
+        #: The harmony copies are placed from it, so one detection serves three
+        #: voices and a copy never gets a note of its own to disagree with.
+        self.sung_midi = None
 
     def reset(self):
         """Forget the press: the next frame is a fresh microphone."""
@@ -176,6 +182,7 @@ class AutoTuner:
         self._pending_note = None
         self._pending_frames = 0
         self._applied = 0.0
+        self.sung_midi = None
         self.detected_hz = None
         self.offset = 0.0
         self.clarity = 0.0
@@ -197,6 +204,49 @@ class AutoTuner:
         """How much of the correction to use: 100 puts the voice on the note."""
         self.amount = clamp_amount(percent)
         return self.amount
+
+    def set_harmony(self, first=None, second=None):
+        """Which intervals the two harmony copies sing, if any.
+
+        Setting either to ``'off'`` silences that copy. Nothing is rebuilt here
+        -- the line does that, and it needs the old copy's delay to fade it out
+        rather than cut it. The intervals arrive as None when the caller has no
+        opinion, which means Off; the defaults are read here rather than in the
+        signature because the catalogue is defined below this class.
+        """
+        first = DEFAULT_HARMONY if first is None else first
+        second = DEFAULT_HARMONY if second is None else second
+        self.harmony = (clamp_harmony(first), clamp_harmony(second))
+        return self.harmony
+
+    def harmony_offset(self, interval_id):
+        """What one harmony copy's shifter is asked for, in semitones, or None.
+
+        The copy is placed from the note the LEAD has landed on (or is gliding
+        to), plus the interval the scale gives there -- never from its own
+        reading of the pitch, so the two cannot disagree about which note is
+        being sung. The Tune Amount is already inside `offset`, and the interval
+        rides on top of it unchanged: at 50% the lead keeps half the singer's
+        error and the copy keeps the same half, so the interval between them is
+        exactly the interval that was chosen.
+
+        None means "the copy has nothing to sing yet" (no note has been named,
+        or the interval is Off), and the line holds the last ratio rather than
+        dragging the copy back to the voice at every breath.
+        """
+        interval_id = clamp_harmony(interval_id)
+        if interval_id == "off" or self.held_note is None or self.sung_midi is None:
+            return None
+        target = self.nearest_note(
+            self.held_note + harmony_semitones(interval_id), self.mode, self.root)
+        if target is None:
+            return None
+        return float(self.offset) + (target - self.held_note)
+
+    def harmony_offsets(self):
+        """One answer per harmony slot, in the order `self.harmony` holds them."""
+        return tuple(self.harmony_offset(interval_id)
+                     for interval_id in self.harmony)
 
     @staticmethod
     def grid_correction(hz):
@@ -323,6 +373,7 @@ class AutoTuner:
         self._pitch.append(hz)
         pitch = float(np.median(self._pitch))
         midi = 69.0 + 12.0 * float(np.log2(pitch / 440.0))
+        self.sung_midi = midi
         note = self.nearest_note(midi, self.mode, self.root)
         if note is None:
             return None
@@ -573,6 +624,86 @@ def scale_label(mode=DEFAULT_MODE, root=DEFAULT_ROOT):
     if clamp_mode(mode) == "chromatic":
         return mode_name(mode)
     return f"{root_name(root)} {mode_name(mode)}"
+
+
+# ------------------------------------------------------------- the harmony voices
+
+#: A harmony voice is a second copy of the tuned voice, an interval above it.
+#: The interval is counted in the note set, not in semitones: a third above C
+#: in C major is E (four semitones) and above D it is F (three), which is why a
+#: harmony that follows the scale is always in key while a fixed shift is not.
+#: A chromatic grid has no scale to count in, so it counts in the major scale --
+#: what everyone means by "a third" when no key has been chosen.
+#:
+#: ``(id, menu name, semitones above the tuned note, what Tab reads)``. The
+#: third field is the size the note is looked for from, and `AutoTuner.
+#: nearest_note` snaps it to the scale, so a pentatonic answers with the nearest
+#: note it actually has rather than inventing one.
+HARMONY_INTERVALS = (
+    ("off", "Off", 0,
+     "No second voice: the tuned voice on its own."),
+    ("third", "Third", 4,
+     "A second copy of the voice a third above: the nearest note your scale "
+     "has there, so it is a major third over some notes and a minor third "
+     "over others -- the interval a second singer would take."),
+    ("fifth", "Fifth", 7,
+     "A second copy a fifth above: the strongest harmony there is, because "
+     "it sounds like the same chord one voice higher."),
+    ("sixth", "Sixth", 9,
+     "A second copy a sixth above: wider and softer than a third, and the "
+     "one that sounds like a duet rather than a chord."),
+    ("seventh", "Seventh", 11,
+     "A second copy a seventh above, a whole tone under the octave. It is the "
+     "jazzier, more open harmony, and it wants a scale that has one -- a "
+     "pentatonic answers with its own nearest note."),
+    ("octave", "Octave", 12,
+     "A second copy an octave above: the same note, higher, which thickens "
+     "the voice instead of adding a note to it."),
+)
+DEFAULT_HARMONY = "off"
+
+
+def clamp_harmony(value):
+    """A harmony interval id that exists, whatever was handed in or saved."""
+    for interval_id, _label, _semitones, _note in HARMONY_INTERVALS:
+        if value == interval_id:
+            return interval_id
+    return DEFAULT_HARMONY
+
+
+def harmony_semitones(interval_id):
+    """The size a harmony voice is looked for at, in semitones (0 for Off)."""
+    for interval_id_, _label, semitones, _note in HARMONY_INTERVALS:
+        if interval_id_ == clamp_harmony(interval_id):
+            return semitones
+    return 0
+
+
+def harmony_label(interval_id):
+    """The menu's words for a harmony interval: 'Third', 'Off'..."""
+    for interval_id_, label, _semitones, _note in HARMONY_INTERVALS:
+        if interval_id_ == clamp_harmony(interval_id):
+            return label
+    return HARMONY_INTERVALS[0][1]
+
+
+def harmony_note(interval_id):
+    """What the menu says this harmony is, for a player meeting it first."""
+    for interval_id_, _label, _semitones, note in HARMONY_INTERVALS:
+        if interval_id_ == clamp_harmony(interval_id):
+            return note
+    return HARMONY_INTERVALS[0][3]
+
+
+def harmony_pitch_limit(semitones):
+    """The widest interval a harmony copy may ask its shifter for.
+
+    The copy is the interval PLUS the tuning correction the lead is holding, and
+    the transposer clamps what it is asked for. An octave above a voice that is
+    a semitone and a half flat is 13.5 semitones, so the line this copy runs on
+    is given its own limit and a look-ahead to match (`transpose.py`).
+    """
+    return abs(float(semitones)) + MAX_PULL + 0.01
 
 
 # ------------------------------------------------------------------ the dials

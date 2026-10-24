@@ -155,9 +155,18 @@ class ChromaticTransposer:
                          # 53 ms with the key an octave up, 107 ms at the song's
                          # own key, and 213 ms an octave down
 
-    def __init__(self, channels=2, sample_rate=SAMPLE_RATE):
+    def __init__(self, channels=2, sample_rate=SAMPLE_RATE, lookahead=None):
         self.channels = max(1, int(channels))
         self.sample_rate = int(sample_rate)
+        # A line that asks for a wider interval than the dial allows -- a
+        # harmony copy, a third or an octave above the broadcast voice -- needs
+        # two things of its own to stay inside this class's contract: a longer
+        # opening silence (the read has further to go before the vocoder has
+        # produced the audio) and a limit for `set_pitch_offset`. Both default
+        # to the dial's own, so an ordinary line is byte-for-byte what it was.
+        self.pitch_limit = float(self.MAX_SEMITONES)
+        self.lookahead = (self.LOOKAHEAD if lookahead is None
+                          else max(self.LOOKAHEAD, int(lookahead)))
         n = np.arange(self.WINDOW)
         self._window = (0.5 - 0.5 * np.cos(2.0 * np.pi * n / self.WINDOW)).astype(np.float32)
         self._omega = (2.0 * np.pi * np.arange(self.WINDOW // 2 + 1) / self.WINDOW)
@@ -186,7 +195,7 @@ class ChromaticTransposer:
         # Stretched stream (the vocoder's output) and the read head into it.
         # It opens with LOOKAHEAD silent samples: that is the line's delay, and
         # it is what keeps the read from ever running past produced audio.
-        self._st = np.zeros((self.LOOKAHEAD, self.channels), dtype=np.float32)
+        self._st = np.zeros((self.lookahead, self.channels), dtype=np.float32)
         self._st_pos = 0
         self._pending = np.zeros((self.WINDOW, self.channels), dtype=np.float32)
         # The overlap weight is seeded with its steady-state value: the first
@@ -232,7 +241,7 @@ class ChromaticTransposer:
         glide, its delay and its tail are unchanged -- only the resolution is.
         """
         value = float(semitones)
-        value = max(-self.MAX_SEMITONES, min(self.MAX_SEMITONES, value))
+        value = max(-self.pitch_limit, min(self.pitch_limit, value))
         self._semitones = value
         self._target = float(2.0 ** (value / 12.0))
         return value
@@ -249,7 +258,11 @@ class ChromaticTransposer:
         one. `ratio` is that largest ratio.
         """
         value = self.FILTER_FROM if ratio is None else float(ratio)
-        self._pinned = min(2.0, max(self.FILTER_FROM, value))
+        # The ceiling is THIS line's own widest interval: a harmony copy an
+        # octave up plus a correction reaches past the dial's 2.0, and a filter
+        # pinned below the ratio it feeds would alias instead of anti-alias.
+        ceiling = float(2.0 ** (self.pitch_limit / 12.0))
+        self._pinned = min(ceiling, max(self.FILTER_FROM, value))
         self._make_lowpass(self._pinned)
         return self._pinned
 
@@ -264,7 +277,7 @@ class ChromaticTransposer:
         self._lock_blend = 0.0
         self._identity = True
         self._pick = None
-        self._st = np.zeros((self.LOOKAHEAD, self.channels), dtype=np.float32)
+        self._st = np.zeros((self.lookahead, self.channels), dtype=np.float32)
         self._st_pos = 0
         self._pending = np.zeros((self.WINDOW, self.channels), dtype=np.float32)
         self._wsum = np.full(self.WINDOW, self._steady_weight(self.HOP))
@@ -312,7 +325,7 @@ class ChromaticTransposer:
         ``LOOKAHEAD`` counts stretched samples; the read runs at the ratio, so
         in the song's time the delay is that much shorter as the key goes up.
         """
-        return max(1, int(round(self.LOOKAHEAD / self._ratio)))
+        return max(1, int(round(self.lookahead / self._ratio)))
 
     def flush(self):
         """The look-ahead the line is still holding, at the end of a song."""
@@ -326,6 +339,20 @@ class ChromaticTransposer:
     def lag_samples(cls):
         """How many samples this line delays the song by (its whole look-ahead)."""
         return cls.LOOKAHEAD
+
+    @classmethod
+    def lookahead_for(cls, limit):
+        """The opening silence a line that may ask for ``limit`` semitones needs.
+
+        ``LOOKAHEAD`` is sized for the dial's own +12 (a ratio of 2.0): one read
+        step plus the analysis window at that ratio. A line whose interval can
+        go wider -- a harmony copy, an octave above the voice and a correction
+        on top -- needs the same arithmetic at ITS ratio, or the read walks past
+        what the vocoder has produced and `_input_slice` invents the samples
+        (`padded_samples` is the witness). Past +12 this grows; below it the
+        class constant is already enough and `__init__` keeps the larger one.
+        """
+        return int(np.ceil(cls.LOOKAHEAD * (2.0 ** (float(limit) / 12.0)) / 2.0))
 
     # --------------------------------------------------------------- internals
     def _steady_weight(self, hop):

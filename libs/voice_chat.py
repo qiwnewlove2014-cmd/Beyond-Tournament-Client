@@ -237,6 +237,11 @@ AUTOTUNE_ROOT_OPTION = "music_bot_autotune_root"
 # 100 puts the voice on the note of its scale, 50 leaves half the error in it,
 # 0 is the voice as it was sung. Read per frame like the two above.
 AUTOTUNE_AMOUNT_OPTION = "music_bot_autotune_amount"
+# The two harmony copies' intervals (`music_bot/autotune.HARMONY_INTERVALS`).
+# Two rows rather than one "pair" preset: a singer who wants a third and a
+# fifth picks each one, and a singer who wants one leaves the other Off.
+AUTOTUNE_HARMONY_OPTION = "music_bot_autotune_harmony"
+AUTOTUNE_HARMONY2_OPTION = "music_bot_autotune_harmony2"
 
 
 def speech_key_semitones():
@@ -276,6 +281,15 @@ def autotune_amount():
     from .music_bot import autotune
     return autotune.clamp_amount(
         options.get(AUTOTUNE_AMOUNT_OPTION, autotune.DEFAULT_AMOUNT))
+
+
+def autotune_harmony():
+    """The two harmony copies' intervals, as ``(first, second)`` ids."""
+    from .music_bot import autotune
+    return (autotune.clamp_harmony(
+                options.get(AUTOTUNE_HARMONY_OPTION, autotune.DEFAULT_HARMONY)),
+            autotune.clamp_harmony(
+                options.get(AUTOTUNE_HARMONY2_OPTION, autotune.DEFAULT_HARMONY)))
 
 
 class SpeechKeyLine:
@@ -333,6 +347,112 @@ class SpeechKeyLine:
             return frames
 
 
+class HarmonyVoice:
+    """One extra copy of the tuned voice, an interval above it.
+
+    The copy is the SAME microphone frame through a shifter of its own, set to
+    the lead's correction plus the interval (`AutoTuner.harmony_offset`), mixed
+    into the lead's frame rather than sent as a second stream: a listener, a PA
+    slot, a cinema room's playout and a cabinet's timeline count frames, and one
+    frame in is still one frame out.
+
+    **The two shifters do not delay the voice by the same amount, and that is
+    what this class is for.** A line delays the voice by its look-ahead divided
+    by its ratio, so a copy a third above (ratio 1.26) arrives about 22 ms
+    BEFORE the lead and one an octave above (ratio 2.0) about 53 ms before it.
+    Summed raw that is not a chord: it is the same voice twice, tens of
+    milliseconds apart -- heard as a slap or a phasey double, with every
+    consonant smeared. So the copy's output is held back by exactly that
+    difference, read out of a ring by how far the lead is ahead, and the
+    distance is slewed a few samples per frame instead of jumped when a glide
+    moves the ratio.
+    """
+
+    #: How long the copy takes to join or leave the mix, in frames. A copy
+    #: switched off mid-sentence is faded; cutting it is a click.
+    FADE_FRAMES = 3
+
+    def __init__(self, interval_id):
+        import numpy as np
+        from .music_bot import autotune
+        from .music_bot.transpose import ChromaticTransposer
+        self.interval = autotune.clamp_harmony(interval_id)
+        step = autotune.harmony_semitones(self.interval)
+        # This copy may be asked for the interval PLUS the lead's correction,
+        # and an octave above a voice a semitone and a half flat is 13.5
+        # semitones: the line gets its own limit, its own anti-aliasing filter
+        # ceiling and a look-ahead that reaches (`transpose.py`).
+        limit = autotune.harmony_pitch_limit(step)
+        self.transposer = ChromaticTransposer(
+            channels=1, lookahead=ChromaticTransposer.lookahead_for(limit))
+        self.transposer.pitch_limit = limit
+        self.transposer.pin_lowpass(2.0 ** (limit / 12.0))
+        self._buffer = np.zeros((0,), dtype=np.float32)
+        #: How far the copy's output is held back so it lines up with the lead.
+        #:
+        #: **A FIXED distance, never a follow-the-lead loop.** The two delays
+        #: move when the tuner glides its correction, and chasing that moved the
+        #: read point 8 samples a frame -- which is a 0.83 % time-scale change,
+        #: measured as the copy sitting 14 cents FLAT (a slow delay sweep is a
+        #: pitch bend, not an alignment). Fixed, the copy is a few samples out of
+        #: place when the correction moves instead, which is a fraction of a
+        #: millisecond: under 2 ms against two frames of detune.
+        nominal = 2.0 ** (step / 12.0)
+        self._align = max(0.0, float(ChromaticTransposer.LOOKAHEAD
+                                     - self.transposer.lookahead / nominal))
+        #: 1.0 while it sings, 0.0 once it has faded out and can be dropped.
+        self.gain = 0.0
+        #: Whether the menu still asks for it (a fade-out keeps it alive).
+        self.wanted = True
+
+    def advance_gain(self):
+        """One frame's step of the join/leave fade; answers the gain to use."""
+        target = 1.0 if self.wanted else 0.0
+        step = 1.0 / self.FADE_FRAMES
+        if self.gain < target:
+            self.gain = min(target, self.gain + step)
+        elif self.gain > target:
+            self.gain = max(target, self.gain - step)
+        return self.gain
+
+    def process(self, pcm):
+        """Shape one frame and answer it, delayed to the lead's own timeline."""
+        import numpy as np
+        out = np.frombuffer(self.transposer.process(bytes(pcm)),
+                            dtype="<i2").astype(np.float32) / 32768.0
+        self._buffer = np.concatenate((self._buffer, out))
+        frames = out.size
+        align = int(round(self._align))
+        start = max(0, self._buffer.size - frames - align)
+        piece = self._buffer[start:start + frames]
+        if piece.size < frames:
+            piece = np.concatenate((np.zeros(frames - piece.size, np.float32), piece))
+        keep = frames + align + 2 * frames
+        if self._buffer.size > keep:
+            self._buffer = self._buffer[-keep:]
+        return piece
+
+    def flush(self):
+        """Hand the copy's own look-ahead into the ring, for the tail."""
+        import numpy as np
+        out = np.frombuffer(self.transposer.flush(),
+                            dtype="<i2").astype(np.float32) / 32768.0
+        self._buffer = np.concatenate((self._buffer, out))
+
+    def tail(self, frames):
+        """The next ``frames`` samples of the copy's aligned tail."""
+        import numpy as np
+        start = int(round(self._align))
+        piece = self._buffer[start:start + frames]
+        if piece.size < frames:
+            piece = np.concatenate((np.zeros(frames - piece.size, np.float32), piece))
+        if self._buffer.size >= frames:
+            self._buffer = self._buffer[frames:]
+        else:
+            self._buffer = np.zeros((0,), dtype=np.float32)
+        return piece
+
+
 class AutoTuneLine:
     """The microphone's Auto-Tune line: a tuner steering the song's shifter.
 
@@ -382,6 +502,11 @@ class AutoTuneLine:
         self._frames = VOICE_FRAME_BYTES // 2
         self._keep = (self.transposer.LOOKAHEAD * 2
                       + (autotune.AutoTuner.WINDOW_FRAMES + 2) * self._frames)
+        # The harmony copies (a second and a third voice, an interval above the
+        # lead). They are built only while Auto-Tune is on and the menu asks for
+        # one, so a press that never uses them pays nothing for them.
+        self._harmony_ids = (autotune.DEFAULT_HARMONY, autotune.DEFAULT_HARMONY)
+        self._harmonies = []
 
     @property
     def speed(self):
@@ -432,6 +557,12 @@ class AutoTuneLine:
             if amount != self._amount:
                 self._amount = amount
                 self.tuner.set_amount(amount)
+            # ...and the harmony copies: a player choosing a fifth mid-sentence
+            # hears it join on the words already leaving their mouth.
+            harmony = autotune_harmony()
+            if harmony != self._harmony_ids:
+                self._harmony_ids = harmony
+                self.tuner.set_harmony(*harmony)
             samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
             self._history = np.concatenate((self._history, samples))
             if self._history.size > self._keep:
@@ -440,9 +571,12 @@ class AutoTuneLine:
                 # Off (or turned off mid-sentence): stop deciding and glide the
                 # voice back to the interval it arrived with. The frames keep
                 # flowing through the line, so the delay is unchanged and the
-                # release still hands the look-ahead back.
+                # release still hands the look-ahead back. A harmony copy that
+                # is still in the mix is faded out here rather than cut.
                 self.transposer.set_pitch_offset(0.0)
-                return self.transposer.process(bytes(pcm))
+                for voice in self._harmonies:
+                    voice.wanted = False
+                return self._mix(self.transposer.process(bytes(pcm)), pcm)
             # The audio reaching the read head right now, as ONE contiguous
             # window: the detector is handed the slice itself, never frames to
             # stack (`AutoTuner.track` says what stacking a sliding window
@@ -454,18 +588,113 @@ class AutoTuneLine:
                       if end >= span else None)
             if offset is not None:
                 self.transposer.set_pitch_offset(offset)
-            return self.transposer.process(bytes(pcm))
+                self._shape_harmonies(pcm, offsets=self.tuner.harmony_offsets())
+            lead = self.transposer.process(bytes(pcm))
+            return self._mix(lead, pcm)
+
+    def _shape_harmonies(self, pcm, offsets):
+        """Build or drop the copies the menu asks for, and aim each one.
+
+        Read the dial per frame, as every other Auto-Tune setting is: a player
+        choosing a fifth mid-sentence hears it join the words already leaving
+        their mouth. A copy that is dropped is faded out and only then thrown
+        away (`HarmonyVoice.advance_gain`), because a cut is a click.
+        """
+        wanted = []
+        for interval_id in self._harmony_ids:
+            if interval_id != "off" and interval_id not in wanted:
+                wanted.append(interval_id)
+        for voice in self._harmonies:
+            voice.wanted = voice.interval in wanted
+            if not voice.wanted and voice.gain <= 0.0:
+                self._harmonies.remove(voice)
+        for interval_id in wanted:
+            if not any(v.interval == interval_id for v in self._harmonies):
+                self._harmonies.append(HarmonyVoice(interval_id))
+        # Each copy is placed from the LEAD's note (see `harmony_offset`), so
+        # the interval between them is always exactly the one that was chosen.
+        for voice in list(self._harmonies):
+            slot = (self._harmony_ids.index(voice.interval)
+                    if voice.interval in self._harmony_ids else -1)
+            if slot < 0 or slot >= len(offsets) or offsets[slot] is None:
+                continue
+            voice.transposer.set_pitch_offset(offsets[slot])
+
+    def _mix(self, lead_pcm, pcm):
+        """Sum the lead and its copies into ONE frame, in equal shares.
+
+        A share of ``1 / (1 + copies)`` each keeps the sum inside full scale
+        without a limiter, and makes one copy exactly half and half: the lead is
+        never louder than the harmony it is singing with, which is what makes it
+        a duet rather than a voice with an echo behind it.
+        """
+        import numpy as np
+        if not self._harmonies:
+            return lead_pcm
+        frames = len(lead_pcm) // 2
+        if frames <= 0:
+            return lead_pcm
+        voices = [v for v in self._harmonies if v.wanted or v.gain > 0.0]
+        if not voices:
+            self._harmonies = []
+            return lead_pcm
+        share = 1.0 / (1.0 + len(voices))
+        mix = (np.frombuffer(lead_pcm, dtype="<i2").astype(np.float32)
+               / 32768.0) * share
+        for voice in voices:
+            piece = voice.process(pcm)
+            gain = voice.advance_gain()
+            if gain > 0.0:
+                mix[:frames] += piece[:frames] * (share * gain)
+            if not voice.wanted and gain <= 0.0 and voice in self._harmonies:
+                self._harmonies.remove(voice)
+        return (np.clip(mix, -1.0, 1.0) * 32767.0).round().astype("<i2").tobytes()
 
     def tail_frames(self, frame_bytes=VOICE_FRAME_BYTES):
         """The look-ahead as whole frames; a tail that is not one is not a frame."""
         step = max(2, int(frame_bytes))
         with self._lock:
             tail = self.transposer.flush()
-            frames = []
-            while len(tail) >= step:
-                frames.append(tail[:step])
-                tail = tail[step:]
-            return frames
+            if not self._harmonies:
+                frames = []
+                while len(tail) >= step:
+                    frames.append(tail[:step])
+                    tail = tail[step:]
+                return frames
+            # The copies' own look-ahead goes into their rings first: their
+            # aligned tail is the same length as the lead's by construction,
+            # and what is short of it is padded rather than dropped.
+            for voice in self._harmonies:
+                voice.flush()
+            return self._mix_tail(tail, step)
+
+    def _mix_tail(self, lead_tail, step):
+        """The release, mixed like a frame: the last tenth of a second, tuned."""
+        import numpy as np
+        voices = [v for v in self._harmonies if v.wanted or v.gain > 0.0]
+        if not voices:
+            out = []
+            while len(lead_tail) >= step:
+                out.append(lead_tail[:step])
+                lead_tail = lead_tail[step:]
+            return out
+        per_frame = step // 2
+        share = 1.0 / (1.0 + len(voices))
+        out = []
+        while len(lead_tail) >= step:
+            piece = lead_tail[:step]
+            lead_tail = lead_tail[step:]
+            mix = (np.frombuffer(piece, dtype="<i2").astype(np.float32)
+                   / 32768.0) * share
+            for voice in voices:
+                gain = voice.advance_gain()
+                if gain > 0.0:
+                    mix += voice.tail(per_frame) * (share * gain)
+                else:
+                    voice.tail(per_frame)   # keep the ring advancing
+            out.append((np.clip(mix, -1.0, 1.0) * 32767.0)
+                       .round().astype("<i2").tobytes())
+        return out
 
 # How many 20 ms frames a CINEMA ROOM may be handed as a repeat of the last one
 # it played. The PA can let a slot go by: it has a jitter reserve, and the
