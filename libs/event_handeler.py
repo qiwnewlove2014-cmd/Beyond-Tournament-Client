@@ -3314,6 +3314,8 @@ class EventHandeler:
             return
         jid = data["id"]
         line = data.get("line")
+        if self._jukebox_line_from_a_dark_cabinet(jid, line):
+            return
         position = None
         x, y, z = data.get("x"), data.get("y"), data.get("z")
         if x is not None and y is not None and z is not None:
@@ -3336,6 +3338,24 @@ class EventHandeler:
         self.game.put(
             lambda: self._speak_jukebox_voice(jid, position, line)
         )
+
+    def _jukebox_line_from_a_dark_cabinet(self, jid, line):
+        """True when the Server says this cabinet is off and the line is not its death.
+
+        The switch is the appliance, so a dark cabinet is silent. `power_off` is
+        the line it says *as* that switch opens, and it still plays; every other
+        line belongs to a cabinet that is on, and the Server refuses them all.
+        This is the Client's half of the same rule -- a line already on the wire
+        when the switch was thrown must not make a closed box speak in a room
+        that has heard it go quiet. A cabinet this client knows nothing about is
+        answered by the line rather than by a guess.
+        """
+        if str(line or "").strip().lower() == "power_off":
+            return False
+        state = getattr(self.gameplay, "jukebox_state", None)
+        boxes = state.get("jukeboxes") if isinstance(state, dict) else None
+        box = boxes.get(jid) if isinstance(boxes, dict) else None
+        return isinstance(box, dict) and box.get("powered") is False
 
     def _speak_jukebox_voice(self, jid, position, line):
         """Main-thread half of :meth:`jukebox_voice`."""
@@ -3364,6 +3384,23 @@ class EventHandeler:
             except (TypeError, ValueError):
                 position = None
         on = bool(data.get("on", True))
+        # The same packet that starts the machinery is the switch itself, so it
+        # is what this client remembers about the cabinet: a cabinet it has been
+        # told is dark answers no voice line (`_jukebox_line_from_a_dark_cabinet`).
+        # The Server's own `jukebox_state` carries the same flag at join, and this
+        # one keeps it right for a client that has not had that resync yet.
+        state = getattr(self.gameplay, "jukebox_state", None)
+        if not isinstance(state, dict):
+            state = {"jukeboxes": {}}
+            try:
+                self.gameplay.jukebox_state = state
+            except Exception:
+                state = None
+        boxes = state.setdefault("jukeboxes", {}) if isinstance(state, dict) else None
+        if isinstance(boxes, dict):
+            box = boxes.setdefault(jid, {"id": jid})
+            if isinstance(box, dict):
+                box["powered"] = on
         self.game.put(
             lambda: self._power_jukebox_motor(jid, on, position)
         )

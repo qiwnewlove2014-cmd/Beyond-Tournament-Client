@@ -456,5 +456,64 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(audio.groups, [])
 
 
+class DarkCabinetTests(unittest.TestCase):
+    """A cabinet the Server says is off says nothing but its own death.
+
+    The switch is the appliance, so a dark box is silent for everyone. The
+    Server refuses every control and every line but `power_off`; this is the
+    Client agreeing with it, so a line already on the wire when the switch was
+    thrown cannot make a closed cabinet speak in a room that heard it go quiet
+    -- which is what the person who threw the switch (standing elsewhere) never
+    hears, while the room around the cabinet does.
+    """
+
+    def _handler(self, game):
+        from libs.event_handeler import EventHandeler
+        handler = EventHandeler.__new__(EventHandeler)
+        handler.game = game
+        handler.gameplay = game.gameplay
+        return handler
+
+    def _game(self, powered):
+        game = FakeGame(FakeAudio())
+        game.gameplay.jukebox_state = {
+            "jukeboxes": {"jb1": {"id": "jb1", "powered": powered}},
+        }
+        return game
+
+    def test_a_line_from_a_cabinet_that_is_off_is_not_heard(self):
+        game = self._game(False)
+        self._handler(game).jukebox_voice(
+            {"id": "jb1", "line": "searching", "x": 0, "y": 0, "z": 0})
+        self.assertEqual(game.audio_mngr.groups, [])
+
+    def test_the_line_it_says_as_it_goes_dark_is_still_heard(self):
+        game = self._game(False)
+        self._handler(game).jukebox_voice(
+            {"id": "jb1", "line": "power_off", "x": 0, "y": 0, "z": 0})
+        self.assertEqual(game.audio_mngr.groups[0].plays[0][0],
+                         "jukebox_voice/power_off.ogg")
+
+    def test_a_cabinet_this_client_knows_nothing_about_still_speaks(self):
+        # An older Server sends no switch state: the line answers for itself.
+        game = FakeGame(FakeAudio())
+        self._handler(game).jukebox_voice(
+            {"id": "jb1", "line": "searching", "x": 0, "y": 0, "z": 0})
+        self.assertEqual(len(game.audio_mngr.groups), 1)
+
+    def test_the_switch_packet_is_what_the_client_remembers(self):
+        game = FakeGame(FakeAudio())
+        handler = self._handler(game)
+        with mock.patch("libs.jukebox.motor.power"):
+            handler.jukebox_power({"id": "jb1", "on": False})
+            handler.jukebox_voice(
+                {"id": "jb1", "line": "searching", "x": 0, "y": 0, "z": 0})
+            self.assertEqual(game.audio_mngr.groups, [])
+            handler.jukebox_power({"id": "jb1", "on": True})
+            handler.jukebox_voice(
+                {"id": "jb1", "line": "searching", "x": 0, "y": 0, "z": 0})
+        self.assertEqual(len(game.audio_mngr.groups), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
