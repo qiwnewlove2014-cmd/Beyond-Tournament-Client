@@ -1716,8 +1716,19 @@ class MusicBotMenus:
                 refusal here is text that was not a number at all -- and it
                 says the value did not change instead of guessing what "half"
                 meant.
+
+                **The field is a substate and has to be taken off the stack on
+                EVERY exit, an Escape with nothing typed included.** Its `ck`
+                answers True for every frame it is open (that is how it keeps
+                the player's keys), so a handler that forgets this leaves the
+                field on top of the stack for good: no key reaches the menu or
+                the player again and the game looks frozen. The search box, the
+                paste-a-link field and the playlist prompt pop it in the same
+                place for the same reason.
                 """
-            if not str(text or "").strip():
+            gp.pop_last_substate()
+            text = "" if text is None else text
+            if not str(text).strip():
                 speak(f"Tune amount unchanged, {autotune.amount_label(current_amount())}.")
                 return
             value = autotune.parse_amount(text)

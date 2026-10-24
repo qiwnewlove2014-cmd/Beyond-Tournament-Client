@@ -35,16 +35,18 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pygame
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from libs import consts, voice_chat  # noqa: E402
+from libs import consts, state as state_module, voice_chat  # noqa: E402
 from libs.music_bot import MapMusicBot  # noqa: E402
 from libs.music_bot import autotune  # noqa: E402
 from libs.music_bot import gate as music_bot_gate  # noqa: E402
 from libs.music_bot import menus as menus_module  # noqa: E402
 from libs.music_bot.transpose import ChromaticTransposer  # noqa: E402
 from libs.pitch import yin_pitch, yin_pitch_and_clarity  # noqa: E402
+from libs.virtual_input import Virtual_input  # noqa: E402
 from libs.voice_chat import (AUTOTUNE_AMOUNT_OPTION,  # noqa: E402
                              AUTOTUNE_MODE_OPTION, AUTOTUNE_OPTION,
                              AUTOTUNE_ROOT_OPTION, AUTOTUNE_SPEED_OPTION,
@@ -1282,6 +1284,30 @@ class ScaleMenuTests(unittest.TestCase):
         self.bot.set_autotune_amount.assert_called_with(63)
         self.assertIn("63%", str(self.speak.call_args_list[-1].args[0]))
 
+    def test_the_custom_field_is_popped_even_when_escape_types_nothing(self):
+        """The reported freeze: Escape with an empty field, then nothing works.
+
+        The field's `ck` answers True on every frame it is open -- that is how
+        it keeps the player's keys -- so the handler is the only thing that can
+        take it off the substate stack. Left there, it swallows every key: the
+        menu underneath never hears one, and neither does the player.
+        """
+        popped = []
+        self.bot._find_gameplay.return_value = SimpleNamespace(
+            add_substate=lambda item: None,
+            pop_last_substate=lambda: popped.append(True))
+        self.bot.autotune_amount = 63
+        self.handler._open_autotune_amount_menu()
+        labels = labels_in(FakeMenu.built[-1])
+        FakeMenu.built[-1].items[labels.index("Custom Percentage")][1]()
+        handeler = self.bot.game.input.run.call_args.kwargs["handeler"]
+        handeler("")        # Escape: the field hands over an empty string
+        self.assertEqual(popped, [True])
+        self.assertIn("unchanged", str(self.speak.call_args_list[-1].args[0]))
+        handeler("40")      # Enter with a value pops it too
+        self.assertEqual(popped, [True, True])
+        self.bot.set_autotune_amount.assert_called_with(40)
+
     def test_a_typed_word_leaves_the_amount_alone(self):
         self.bot.autotune_amount = 75
         self.handler._open_autotune_amount_menu()
@@ -1312,6 +1338,81 @@ class ScaleMenuTests(unittest.TestCase):
         self.bot.toggle_autotune.assert_called_with()
         self.assertIn("cleared",
                       str(self.speak.call_args_list[-1].args[0]).lower())
+
+
+class CustomAmountFieldTests(unittest.TestCase):
+    """The reported freeze, through the real field instead of a stand-in.
+
+    `game.input.run` returns a substate whose `ck` answers True on every frame
+    it is open -- that is what keeps the player's keys in the field. Escape
+    with nothing typed used to leave it on the stack, so every key after it was
+    swallowed: the menu under it never heard one and neither did the player.
+    These tests drive the real `Virtual_input` and the real `State.update`.
+    """
+
+    def setUp(self):
+        self.spoken = []
+        for target in ("libs.virtual_input.speak", "libs.music_bot.menus.speak"):
+            mock.patch(target, lambda *args, **kwargs: self.spoken.append(
+                args[0] if args else "")).start()
+        self.addCleanup(mock.patch.stopall)
+        game = SimpleNamespace(
+            network=None,
+            input_history=[""],
+            direct_soundgroup=SimpleNamespace(play=lambda *a, **k: None),
+            events=[],
+            new_clock=lambda: SimpleNamespace(elapsed=0.0, restart=lambda: None),
+        )
+        game.input = Virtual_input(game)
+        self.game = game
+        self.gp = state_module.State(game)
+        self.bot = mock.MagicMock()
+        self.bot.game = game
+        self.bot.autotune_amount = autotune.DEFAULT_AMOUNT
+        self.bot.autotune_amount_label.return_value = autotune.amount_label()
+        self.bot._find_gameplay.return_value = self.gp
+        self.handler = menus_module.MusicBotMenus(self.bot)
+        FakeMenu.built = []
+        mock.patch("libs.menu.Menu", FakeMenu).start()
+        mock.patch("libs.menus.set_default_sounds").start()
+
+    def open_custom(self):
+        self.handler._open_autotune_amount_menu()
+        labels = labels_in(FakeMenu.built[-1])
+        FakeMenu.built[-1].items[labels.index("Custom Percentage")][1]()
+        # The field sits on top of the menu it was opened from.
+        self.assertEqual(len(self.gp.substates), 2)
+
+    def press(self, key):
+        self.game.events = [pygame.event.Event(
+            pygame.KEYDOWN, key=key, unicode="", mod=0)]
+        return self.gp.update(self.game.events)
+
+    def test_escape_with_nothing_typed_takes_the_field_off_the_stack(self):
+        self.open_custom()
+        self.assertTrue(self.press(pygame.K_ESCAPE))
+        # One substate left, and it is the menu the field was opened from.
+        self.assertEqual(len(self.gp.substates), 1)
+        self.assertIs(self.gp.substates[0], FakeMenu.built[-1])
+        self.assertIn("unchanged", " ".join(self.spoken))
+        self.assertFalse(self.bot.set_autotune_amount.called)
+
+    def test_a_value_typed_then_entered_takes_the_field_off_the_stack(self):
+        self.open_custom()
+        for digit in "63":
+            self.game.events = [pygame.event.Event(
+                pygame.KEYDOWN, key=ord(digit), unicode=digit, mod=0)]
+            self.gp.update(self.game.events)
+        self.press(pygame.K_RETURN)
+        self.assertEqual(len(self.gp.substates), 1)
+        self.bot.set_autotune_amount.assert_called_with(63)
+
+    def test_nothing_blocks_the_player_after_the_field_closes(self):
+        """What the report called frozen: the next frame reaches the game."""
+        self.open_custom()
+        self.press(pygame.K_ESCAPE)
+        self.game.events = []
+        self.assertFalse(self.gp.update(self.game.events))
 
 
 if __name__ == "__main__":
