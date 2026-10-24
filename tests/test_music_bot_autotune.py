@@ -710,14 +710,28 @@ class MenuTests(unittest.TestCase):
         return [item[0]() if callable(item[0]) else item[0]
                 for item in FakeMenu.built[-1].items]
 
-    def test_the_settings_menu_carries_both_lines(self):
+    def test_the_settings_menu_carries_the_switch_and_hides_the_dials(self):
         labels = self.settings_labels()
         self.assertIn("Auto-Tune: OFF", labels)
-        self.assertIn(f"Retune Speed: {autotune.speed_label()}", labels)
         self.assertEqual(labels.index("Auto-Tune: OFF"),
                          labels.index("Speech Key: Original key") + 1)
+        # Off, the two dials are not in the list at all: they change nothing a
+        # player can hear until the switch above them is on, and three
+        # Auto-Tune lines that mostly do nothing bury the rest of the page.
+        self.assertFalse([label for label in labels
+                          if label.startswith(("Auto-Tune Scale",
+                                               "Retune Speed"))])
         # The muffle stays last (pinned by the speech key's own suite too).
         self.assertEqual(labels[-2], "Underwater Muffle: ON")
+
+    def test_turning_it_on_puts_the_two_dials_under_the_switch(self):
+        self.bot.autotune_enabled = True
+        self.bot.autotune_label.return_value = "ON"
+        labels = self.settings_labels()
+        self.assertEqual(labels.index("Auto-Tune: ON") + 1,
+                         labels.index(f"Retune Speed: {autotune.speed_label()}"))
+        self.assertEqual(labels.index(f"Retune Speed: {autotune.speed_label()}") + 1,
+                         labels.index("Auto-Tune Scale: Chromatic"))
 
     def test_the_speech_line_says_who_is_in_charge_while_autotune_is_on(self):
         self.bot.autotune_enabled = True
@@ -930,6 +944,8 @@ class ScaleMenuTests(unittest.TestCase):
         return MenuTests.settings_labels(self)
 
     def test_the_settings_list_gains_one_line_for_all_of_it(self):
+        self.bot.autotune_enabled = True
+        self.bot.autotune_label.return_value = "ON"
         labels = self.settings_labels()
         self.assertIn("Auto-Tune Scale: Chromatic", labels)
         self.assertEqual(labels.index("Auto-Tune Scale: Chromatic"),
@@ -1024,12 +1040,35 @@ class ScaleMenuTests(unittest.TestCase):
         self.assertIn("Major (active)", after)
         self.assertNotIn("Minor (active)", after)
 
-    def test_the_gate_hides_the_scale_line_too(self):
+    def test_the_gate_hides_the_switch_and_both_dials(self):
+        # Hidden by the switch being off is not the same answer as locked: the
+        # lock has to take all three away even while Auto-Tune is on.
         self.addCleanup(music_bot_gate.clear)
+        self.bot.autotune_enabled = True
+        self.bot.autotune_label.return_value = "ON"
         music_bot_gate.apply_locked({"auto_tune": "Auto-Tune"})
         labels = self.settings_labels()
         self.assertNotIn("Auto-Tune Scale: Chromatic", labels)
-        self.assertIn("Speech Key: Original key", labels)
+        self.assertNotIn(f"Retune Speed: {autotune.speed_label()}", labels)
+        self.assertNotIn("Auto-Tune: ON", labels)
+        self.assertIn("Speech Key: replaced by Auto-Tune", labels)
+
+    def test_clear_puts_every_setting_back_and_switches_it_off(self):
+        self.bot.autotune_enabled = True
+        self.bot.autotune_mode = "major"
+        self.bot.autotune_root = 9
+        self.bot.autotune_speed = len(autotune.SPEEDS) - 1
+        self.handler._open_autotune_scale_menu()
+        menu = FakeMenu.built[-1]
+        labels = labels_in(menu)
+        self.assertIn("Clear Auto-Tune Tuning", labels)
+        menu.items[labels.index("Clear Auto-Tune Tuning")][1]()
+        self.bot.set_autotune_mode.assert_called_with(autotune.DEFAULT_MODE)
+        self.bot.set_autotune_root.assert_called_with(autotune.DEFAULT_ROOT)
+        self.bot.set_autotune_speed.assert_called_with(autotune.DEFAULT_SPEED)
+        self.bot.toggle_autotune.assert_called_with()
+        self.assertIn("cleared",
+                      str(self.speak.call_args_list[-1].args[0]).lower())
 
 
 if __name__ == "__main__":

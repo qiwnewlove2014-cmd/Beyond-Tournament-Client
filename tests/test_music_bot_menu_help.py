@@ -446,6 +446,9 @@ class TabSpeaksTheDescriptionTests(unittest.TestCase):
         return menu
 
     def test_tab_speaks_the_line_about_the_autotune_scale(self):
+        # The scale line is in the settings list only while Auto-Tune is on.
+        self.bot.autotune_enabled = True
+        self.bot.autotune_label.return_value = "ON"
         menu = self.menu_with(self.handler._open_settings_menu)
         self.at(menu, f"Auto-Tune Scale: {autotune.scale_label()}")
         with mock.patch.object(menu_module.speech, "speak") as speak:
@@ -465,6 +468,8 @@ class TabSpeaksTheDescriptionTests(unittest.TestCase):
 
     def test_asking_does_not_choose_the_line_or_move_the_cursor(self):
         chosen = []
+        self.bot.autotune_enabled = True
+        self.bot.autotune_label.return_value = "ON"
         menu = self.menu_with(self.handler._open_settings_menu)
         index = self.at(menu, f"Auto-Tune Scale: {autotune.scale_label()}").pos
         item = menu.items[index]

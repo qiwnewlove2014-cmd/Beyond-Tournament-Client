@@ -49,6 +49,25 @@ from . import subtitles
 from .music_downloader import is_supported_music_url
 
 
+def stand_on(menu, prefix):
+    """Put a rebuilt menu's cursor back on the line whose text starts `prefix`.
+
+    A page that changes shape around a press -- the Auto-Tune dials exist only
+    while the switch above them is on -- cannot be updated in place: it is
+    popped and built again. The cursor would land on the first line of a page
+    the player did not open from the top, so it is put back on the switch they
+    just pressed instead, and the line is read with its new label.
+    """
+    if menu is None:
+        return
+    for index, item in enumerate(menu.items):
+        text = item[0]() if callable(item[0]) else item[0]
+        if str(text).startswith(prefix):
+            menu.pos = index
+            break
+    menu.speak_current_item()
+
+
 class MusicBotMenus:
     """Builds and opens every Music Bot menu (see the module docstring)."""
 
@@ -1123,7 +1142,11 @@ class MusicBotMenus:
             speak("Auto-Tune on. The voice is snapped to the nearest note as "
                   "you broadcast it; Retune Speed sets how fast it slides."
                   if enabled else "Auto-Tune off. Your own voice.")
-            m.speak_current_item()
+            # The two dials below this line exist only while it is on, so the
+            # page is rebuilt around this press and the cursor is put back on
+            # the switch rather than jumping to the top of the list.
+            gp.pop_last_substate()
+            stand_on(self._open_settings_menu(), "Auto-Tune:")
 
         def get_autotune_speed_label():
             return f"Retune Speed: {self._bot.autotune_speed_label()}"
@@ -1138,6 +1161,26 @@ class MusicBotMenus:
         def go_autotune_scale():
             gp.pop_last_substate()
             self._open_autotune_scale_menu()
+
+        # The two dials are only in the list while the switch is on: off, they
+        # change nothing a player can hear, and three Auto-Tune lines that do
+        # nothing are two lines of noise between the player and the rest of
+        # the page. Turning it on puts them there (the switch rebuilds).
+        dials = [] if not getattr(self._bot, "autotune_enabled", False) else [
+            (
+                "auto_tune", get_autotune_speed_label, go_autotune_speed,
+                "How fast Auto-Tune walks the voice to a note: from Instant, "
+                "which is the effect, to Very slow, which is a correction you "
+                "only notice when the note lands.",
+            ),
+            (
+                "auto_tune", get_autotune_scale_label, go_autotune_scale,
+                "Which notes the voice may be moved to: every semitone, a "
+                "major key, a natural, harmonic or melodic minor key, or a "
+                "pentatonic, in the key you pick. Each one is described on "
+                "its own line.",
+            ),
+        ]
 
         def get_output_label():
             return f"Music Output Device: {self._bot.output_device_label()}"
@@ -1176,14 +1219,7 @@ class MusicBotMenus:
              "Snaps the broadcast voice to the nearest note as you speak. "
              "Retune Speed sets how fast it slides, Auto-Tune Scale sets which "
              "notes count, and it costs about a tenth of a second of delay."),
-            ("auto_tune", get_autotune_speed_label, go_autotune_speed,
-             "How fast Auto-Tune walks the voice to a note: from Instant, "
-             "which is the effect, to Very slow, which is a correction you "
-             "only notice when the note lands."),
-            ("auto_tune", get_autotune_scale_label, go_autotune_scale,
-             "Which notes the voice may be moved to: every semitone, a major "
-             "key, a natural, harmonic or melodic minor key, or a pentatonic, "
-             "in the key you pick. Each one is described on its own line."),
+            *dials,
             ("muffle", get_water_label, toggle_water,
              "Muffles the song the way being underwater does, for a player "
              "who dives while it plays."),
@@ -1192,6 +1228,7 @@ class MusicBotMenus:
         ]))
         menus.set_default_sounds(m)
         gp.add_substate(m)
+        return m
 
     def _open_output_device_menu(self):
         """Where this bot's own song is heard: the game's device, or another one.
@@ -1524,6 +1561,32 @@ class MusicBotMenus:
             items.append((make_label(mode_id, name),
                           pick(mode_id, autotune.scale_says(mode_id)),
                           None, note))
+
+        def clear_tuning():
+            """Every Auto-Tune setting back to nothing, and the voice back.
+
+                Asked for as "a button to clear the tuning": a player who has
+                moved the scale, the key and the speed around wants one press
+                that puts all three back where they started and takes the
+                effect off, rather than three pages to undo by hand. The page
+                it returns to rebuilds itself, so the two dials are gone from
+                the settings list along with the switch being off.
+                """
+            self._bot.set_autotune_mode(autotune.DEFAULT_MODE)
+            self._bot.set_autotune_root(autotune.DEFAULT_ROOT)
+            self._bot.set_autotune_speed(autotune.DEFAULT_SPEED)
+            if getattr(self._bot, "autotune_enabled", False):
+                self._bot.toggle_autotune()
+            speak("Auto-Tune cleared. Your own voice again, and the scale, the "
+                  "key and the retune speed are back at their defaults: "
+                  "Chromatic in C, Normal speed.")
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        items.append(("Clear Auto-Tune Tuning", clear_tuning, None,
+                      "Puts everything Auto-Tune was set to back the way it "
+                      "came -- Chromatic in C at Normal speed -- and turns it "
+                      "off, so the next press is your own voice."))
         items.append(("Back", go_back, None,
                       "Returns to Music Bot Settings."))
         m = menu_mod.Menu(
