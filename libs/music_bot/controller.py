@@ -217,6 +217,12 @@ class MapMusicBot:
             options.get("music_bot_autotune_mode", autotune.DEFAULT_MODE))
         self.autotune_root = autotune.clamp_root(
             options.get("music_bot_autotune_root", autotune.DEFAULT_ROOT))
+        # How much of that correction is taken: 100% puts the voice on the note
+        # of its scale, 50% leaves half the error in the voice, 0% is the voice
+        # as it was sung. Taste, not range -- there is nothing to correct past
+        # the nearest note (see `autotune.TUNE_AMOUNTS`).
+        self.autotune_amount = autotune.clamp_amount(
+            options.get("music_bot_autotune_amount", autotune.DEFAULT_AMOUNT))
 
         # A shuffled Favorites feed. It preserves the user's current broadcast
         # routing and never changes saved playlists.
@@ -1482,6 +1488,9 @@ class MapMusicBot:
     def _open_autotune_root_menu(self):
         return self._menus()._open_autotune_root_menu()
 
+    def _open_autotune_amount_menu(self):
+        return self._menus()._open_autotune_amount_menu()
+
     def _open_subtitle_language_menu(self):
         return self._menus()._open_subtitle_language_menu()
 
@@ -1547,6 +1556,17 @@ class MapMusicBot:
         self.autotune_root = autotune.clamp_root(root)
         options.set("music_bot_autotune_root", self.autotune_root)
         return self.autotune_root
+
+    def autotune_amount_label(self):
+        """How much of the correction is used: '100%'."""
+        return autotune.amount_label(getattr(self, "autotune_amount",
+                                             autotune.DEFAULT_AMOUNT))
+
+    def set_autotune_amount(self, percent):
+        """Choose a Tune Amount; the next frame takes that share of the move."""
+        self.autotune_amount = autotune.clamp_amount(percent)
+        options.set("music_bot_autotune_amount", self.autotune_amount)
+        return self.autotune_amount
 
     def set_speech_transpose(self, semitones):
         """Move the SPEECH key, leaving the song's where its own dial put it.

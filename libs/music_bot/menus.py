@@ -1162,6 +1162,13 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._open_autotune_scale_menu()
 
+        def get_autotune_amount_label():
+            return f"Tune Amount: {self._bot.autotune_amount_label()}"
+
+        def go_autotune_amount():
+            gp.pop_last_substate()
+            self._open_autotune_amount_menu()
+
         # The two dials are only in the list while the switch is on: off, they
         # change nothing a player can hear, and three Auto-Tune lines that do
         # nothing are two lines of noise between the player and the rest of
@@ -1179,6 +1186,13 @@ class MusicBotMenus:
                 "major key, a natural, harmonic or melodic minor key, or a "
                 "pentatonic, in the key you pick. Each one is described on "
                 "its own line.",
+            ),
+            (
+                "auto_tune", get_autotune_amount_label, go_autotune_amount,
+                "How much of the correction is used: 100% puts the voice on "
+                "the notes of the scale, 50% leaves half the error in it and "
+                "half the human wobble, 0% is your own voice with Auto-Tune "
+                "still switched on.",
             ),
         ]
 
@@ -1575,11 +1589,12 @@ class MusicBotMenus:
             self._bot.set_autotune_mode(autotune.DEFAULT_MODE)
             self._bot.set_autotune_root(autotune.DEFAULT_ROOT)
             self._bot.set_autotune_speed(autotune.DEFAULT_SPEED)
+            self._bot.set_autotune_amount(autotune.DEFAULT_AMOUNT)
             if getattr(self._bot, "autotune_enabled", False):
                 self._bot.toggle_autotune()
             speak("Auto-Tune cleared. Your own voice again, and the scale, the "
-                  "key and the retune speed are back at their defaults: "
-                  "Chromatic in C, Normal speed.")
+                  "key, the retune speed and the tune amount are back at "
+                  "their defaults: Chromatic in C, Normal speed, 100%.")
             gp.pop_last_substate()
             self._open_settings_menu()
 
@@ -1639,6 +1654,59 @@ class MusicBotMenus:
         m = menu_mod.Menu(
             self._bot.game,
             f"Music Bot Auto-Tune Root: {autotune.root_name(opened_on)}",
+            parrent=gp,
+        )
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_autotune_amount_menu(self):
+        """How much of the correction is used: five steps of percent.
+
+        The one Auto-Tune choice that is taste rather than physics. The scale
+        decides how far the voice may move and Retune Speed how fast it gets
+        there, but a singer may legitimately want half of it -- close to the
+        note with the human wobble left in -- and no note set can express that.
+        100% is a ceiling, not a dial that goes further: the nearest note is the
+        whole correction, so more than all of it would carry the voice past the
+        note it was aiming for.
+        """
+        from .. import menu as menu_mod, menus
+        from . import autotune
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def pick(percent):
+            def apply():
+                self._bot.set_autotune_amount(percent)
+                speak(f"Tune amount: {autotune.amount_label(percent)}. "
+                      f"{autotune.amount_note(percent)}")
+                m.speak_current_item()
+            return apply
+
+        def make_label(percent):
+            # Read live, like the scale and key lists: the mark follows the
+            # choice on the list that is already open.
+            def label_fn():
+                current = autotune.clamp_amount(
+                    getattr(self._bot, "autotune_amount",
+                            autotune.DEFAULT_AMOUNT))
+                label = autotune.amount_label(percent)
+                return f"{label} (active)" if percent == current else label
+            return label_fn
+
+        items = [(make_label(percent), pick(percent), None, note)
+                 for percent, note in autotune.TUNE_AMOUNTS]
+        items.append(("Back", go_back, None,
+                      "Returns to Music Bot Settings."))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Tune Amount: {self._bot.autotune_amount_label()}",
             parrent=gp,
         )
         m.add_items(items)

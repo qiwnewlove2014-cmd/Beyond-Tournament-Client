@@ -77,12 +77,18 @@ THIRD-harmonic slip is a different thing -- a fifth -- and is what
 `MIN_CLARITY` and the glide are for: one frame that disagrees with its
 neighbours is a 20 ms wobble, not a jump.)
 
+How much of the note is taken, and how much of the singer is left
+-----------------------------------------------------------------
+`TUNE_AMOUNTS` scales the correction rather than widening it: 100% puts the
+voice on the nearest note of the scale, 50% takes half of the distance and
+leaves the other half in the voice, 0% is the voice as it was sung. It is the
+one dial here that is taste rather than physics -- nothing about a note set
+says how tuned a singer wants to sound -- and it cannot go past 100%: the
+nearest note IS the whole correction, so more of it would carry the voice past
+the note it was aiming for.
+
 What is deliberately not here
 -----------------------------
-* **No tune amount dial.** How far is given by the note set: half a semitone
-  at most on the chromatic grid, a whole one in a seven-note scale, a semitone
-  and a half in a five-note one. "How fast" is the dial people hear, and that
-  is Retune Speed.
 * **No formant preservation.** The chromatic correction is at most half a
   semitone, which does not move a voice's formants enough to hear -- that is
   why this stays inside the shifter the project already has instead of a
@@ -141,6 +147,8 @@ class AutoTuner:
         self.offset = 0.0
         #: The last clarity YIN reported, 0..1.
         self.clarity = 0.0
+        #: How much of the correction is used, in percent (see `TUNE_AMOUNTS`).
+        self.amount = DEFAULT_AMOUNT
 
     def reset(self):
         """Forget the press: the next frame is a fresh microphone."""
@@ -154,6 +162,11 @@ class AutoTuner:
         self.mode = clamp_mode(mode)
         self.root = clamp_root(root)
         return self.mode, self.root
+
+    def set_amount(self, percent):
+        """How much of the correction to use: 100 puts the voice on the note."""
+        self.amount = clamp_amount(percent)
+        return self.amount
 
     @staticmethod
     def grid_correction(hz):
@@ -252,8 +265,13 @@ class AutoTuner:
             self.detected_hz = None
             return None
         self.detected_hz = hz
-        self.offset = correction
-        return correction
+        # The amount is a share of the correction, never a wider one: at 100%
+        # the voice lands on the note, at 50% half the error is left in it, and
+        # at 0% the answer is zero with the note still named. 0.0 is not None:
+        # None means "keep the ratio you have", which would be the last note's
+        # correction, not the singer's own voice.
+        self.offset = correction * (self.amount / 100.0)
+        return self.offset
 
 
 # ----------------------------------------------------------------- the scales
@@ -469,3 +487,54 @@ def speed_note(index=None):
     """What the menu says this Retune Speed does (what Tab reads)."""
     index = DEFAULT_SPEED if index is None else clamp_speed(index)
     return SPEEDS[index][2]
+
+
+#: Tune Amount: how much of a correction is used, in percent. The percent
+#: scales the answer and never the range -- 100% puts the voice on the nearest
+#: note of the scale, 50% leaves half the error in it, 0% is the voice as it was
+#: sung -- so 100 is a ceiling of accuracy, not of effect quantity: there is no
+#: correction left to take past the note it was aiming for.
+#:
+#: ``(percent, what the amount does)`` -- the second field is what Tab reads on
+#: that line, because "50%" alone does not say what half of anything sounds like.
+TUNE_AMOUNTS = (
+    (0,
+     "None of the correction: the effect runs and the voice goes out as it was "
+     "sung. This is your own voice with Auto-Tune still switched on."),
+    (25,
+     "A hint of the note: enough to hear the voice lean toward it, not enough "
+     "to sound tuned."),
+    (50,
+     "Halfway: close to the note with the human wobble still in it -- the "
+     "half-tuned sound, half effect and half singer."),
+    (75,
+     "Nearly on the note: the note wins, with a little of the singer left in "
+     "it."),
+    (100,
+     "All of the correction: the voice sits on the notes of the scale, exactly "
+     "as Auto-Tune did before this dial existed."),
+)
+DEFAULT_AMOUNT = 100
+
+
+def clamp_amount(value):
+    """A tune amount in percent, snapped to the nearest step that exists."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_AMOUNT
+    return min(TUNE_AMOUNTS, key=lambda row: (abs(row[0] - number), -row[0]))[0]
+
+
+def amount_label(percent=None):
+    """The menu's words for an amount: '100%'."""
+    return f"{DEFAULT_AMOUNT if percent is None else clamp_amount(percent)}%"
+
+
+def amount_note(percent=None):
+    """What the menu says this amount does (what Tab reads)."""
+    wanted = DEFAULT_AMOUNT if percent is None else clamp_amount(percent)
+    for step, note in TUNE_AMOUNTS:
+        if step == wanted:
+            return note
+    return TUNE_AMOUNTS[-1][1]

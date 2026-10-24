@@ -233,6 +233,10 @@ AUTOTUNE_SPEED_OPTION = "music_bot_autotune_speed"
 # is the catalogue). Chromatic is the default, and the only mode with no key.
 AUTOTUNE_MODE_OPTION = "music_bot_autotune_mode"
 AUTOTUNE_ROOT_OPTION = "music_bot_autotune_root"
+# How much of the correction is used, in percent (`autotune.TUNE_AMOUNTS`):
+# 100 puts the voice on the note of its scale, 50 leaves half the error in it,
+# 0 is the voice as it was sung. Read per frame like the two above.
+AUTOTUNE_AMOUNT_OPTION = "music_bot_autotune_amount"
 
 
 def speech_key_semitones():
@@ -265,6 +269,13 @@ def autotune_scale():
                                            autotune.DEFAULT_MODE)),
             autotune.clamp_root(options.get(AUTOTUNE_ROOT_OPTION,
                                             autotune.DEFAULT_ROOT)))
+
+
+def autotune_amount():
+    """How much of the correction to use, in percent (100 = on the note)."""
+    from .music_bot import autotune
+    return autotune.clamp_amount(
+        options.get(AUTOTUNE_AMOUNT_OPTION, autotune.DEFAULT_AMOUNT))
 
 
 class SpeechKeyLine:
@@ -362,6 +373,7 @@ class AutoTuneLine:
                        else autotune.clamp_speed(speed))
         self.transposer.glide = autotune.speed_glide(self._speed)
         self._scale = (self.tuner.mode, self.tuner.root)
+        self._amount = self.tuner.amount
         self._lock = threading.Lock()
         # The press's recent samples, so the detector can be handed the audio
         # one look-ahead old (see the class docstring). Sized for the line's
@@ -413,6 +425,13 @@ class AutoTuneLine:
             if scale != self._scale:
                 self._scale = scale
                 self.tuner.set_scale(*scale)
+            # ...and so is how much of the correction is wanted: a player moving
+            # Tune Amount mid-sentence hears the tuning thin out or fill in on
+            # the words already leaving their mouth.
+            amount = autotune_amount()
+            if amount != self._amount:
+                self._amount = amount
+                self.tuner.set_amount(amount)
             samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
             self._history = np.concatenate((self._history, samples))
             if self._history.size > self._keep:

@@ -161,6 +161,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
 
     def test_every_line_of_the_settings_submenus_is_described(self):
         for opener in (self.handler._open_autotune_speed_menu,
+                       self.handler._open_autotune_amount_menu,
                        self.handler._open_eq_menu,
                        self.handler._open_transpose_menu,
                        self.handler._open_speech_transpose_menu):

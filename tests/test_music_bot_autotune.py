@@ -45,7 +45,8 @@ from libs.music_bot import gate as music_bot_gate  # noqa: E402
 from libs.music_bot import menus as menus_module  # noqa: E402
 from libs.music_bot.transpose import ChromaticTransposer  # noqa: E402
 from libs.pitch import yin_pitch, yin_pitch_and_clarity  # noqa: E402
-from libs.voice_chat import (AUTOTUNE_MODE_OPTION, AUTOTUNE_OPTION,  # noqa: E402
+from libs.voice_chat import (AUTOTUNE_AMOUNT_OPTION,  # noqa: E402
+                             AUTOTUNE_MODE_OPTION, AUTOTUNE_OPTION,
                              AUTOTUNE_ROOT_OPTION, AUTOTUNE_SPEED_OPTION,
                              AutoTuneLine, SpeechKeyLine, VOICE_FRAME_BYTES,
                              VoiceChatRecord)
@@ -689,6 +690,8 @@ class MenuTests(unittest.TestCase):
         self.bot.crossfade_enabled = False
         self.bot.autotune_enabled = False
         self.bot.autotune_speed = autotune.DEFAULT_SPEED
+        self.bot.autotune_amount = autotune.DEFAULT_AMOUNT
+        self.bot.autotune_amount_label.return_value = autotune.amount_label()
         self.bot.autotune_label.return_value = "OFF"
         self.bot.autotune_speed_label.return_value = autotune.speed_label(
             autotune.DEFAULT_SPEED)
@@ -720,11 +723,12 @@ class MenuTests(unittest.TestCase):
         # Auto-Tune lines that mostly do nothing bury the rest of the page.
         self.assertFalse([label for label in labels
                           if label.startswith(("Auto-Tune Scale",
-                                               "Retune Speed"))])
+                                               "Retune Speed",
+                                               "Tune Amount"))])
         # The muffle stays last (pinned by the speech key's own suite too).
         self.assertEqual(labels[-2], "Underwater Muffle: ON")
 
-    def test_turning_it_on_puts_the_two_dials_under_the_switch(self):
+    def test_turning_it_on_puts_the_three_dials_under_the_switch(self):
         self.bot.autotune_enabled = True
         self.bot.autotune_label.return_value = "ON"
         labels = self.settings_labels()
@@ -732,6 +736,8 @@ class MenuTests(unittest.TestCase):
                          labels.index(f"Retune Speed: {autotune.speed_label()}"))
         self.assertEqual(labels.index(f"Retune Speed: {autotune.speed_label()}") + 1,
                          labels.index("Auto-Tune Scale: Chromatic"))
+        self.assertEqual(labels.index("Auto-Tune Scale: Chromatic") + 1,
+                         labels.index("Tune Amount: 100%"))
 
     def test_the_speech_line_says_who_is_in_charge_while_autotune_is_on(self):
         self.bot.autotune_enabled = True
@@ -913,6 +919,34 @@ class ScaleTests(unittest.TestCase):
             tuner.track(chunk)
         self.assertLess(abs(tuner.offset), 0.05)
 
+    def test_the_amount_takes_a_share_and_never_widens_the_move(self):
+        # Forty cents flat: the whole correction is +0.40 semitones on the
+        # chromatic grid. Half of it is +0.20, and none of it is 0.0 -- not
+        # None, which would mean "hold the last correction".
+        flat = tone(0.6, cents=-40.0)
+        tuner = autotune.AutoTuner()
+        for chunk in frames_of(flat):
+            tuner.track(chunk)
+        full = tuner.offset
+        self.assertGreater(full, 0.0)
+        tuner.set_amount(50)
+        for chunk in frames_of(flat):
+            tuner.track(chunk)
+        self.assertAlmostEqual(tuner.offset, full * 0.5, delta=0.01)
+        tuner.set_amount(0)
+        for chunk in frames_of(flat):
+            tuner.track(chunk)
+        self.assertEqual(tuner.offset, 0.0)
+        # Still listening to the note: 0% is a share of zero, not a deaf tuner.
+        self.assertIsNotNone(tuner.detected_hz)
+
+    def test_the_amount_only_takes_values_that_exist(self):
+        self.assertEqual(autotune.clamp_amount(100), 100)
+        self.assertEqual(autotune.clamp_amount(60), 50)      # the nearest step
+        self.assertEqual(autotune.clamp_amount(250), 100)    # the note is the end
+        self.assertEqual(autotune.clamp_amount("rubbish"), 100)
+        self.assertEqual(autotune.amount_label(), "100%")
+
 
 class ScaleLineTests(unittest.TestCase):
     def test_the_line_reads_the_scale_per_frame(self):
@@ -923,6 +957,14 @@ class ScaleLineTests(unittest.TestCase):
             for chunk in frames_of(tone(0.6, freq=midi_hz(59.6))):
                 line.shape(to_pcm(chunk))
         self.assertEqual((line.tuner.mode, line.tuner.root), ("major", 9))
+
+    def test_the_line_reads_the_amount_per_frame(self):
+        line = AutoTuneLine(speed=0)
+        with mock.patch.object(voice_chat.options, "get", options_on(
+                **{AUTOTUNE_SPEED_OPTION: 0, AUTOTUNE_AMOUNT_OPTION: 50})):
+            for chunk in frames_of(tone(0.6, cents=-20.0)):
+                line.shape(to_pcm(chunk))
+        self.assertEqual(line.tuner.amount, 50)
 
     def test_a_note_outside_the_scale_is_moved_onto_it(self):
         d_sharp = midi_hz(63)          # D#4, one semitone above D
@@ -950,9 +992,13 @@ class ScaleMenuTests(unittest.TestCase):
         self.assertIn("Auto-Tune Scale: Chromatic", labels)
         self.assertEqual(labels.index("Auto-Tune Scale: Chromatic"),
                          labels.index(f"Retune Speed: {autotune.speed_label()}") + 1)
-        # The list did not grow into four Auto-Tune lines: three is all of it.
+        self.assertIn("Tune Amount: 100%", labels)
+        self.assertEqual(labels.index("Tune Amount: 100%"),
+                         labels.index("Auto-Tune Scale: Chromatic") + 1)
+        # The list did not grow into five Auto-Tune lines: four is all of it.
         self.assertEqual(len([label for label in labels
-                              if label.startswith(("Auto-Tune", "Retune"))]), 3)
+                              if label.startswith(("Auto-Tune", "Retune",
+                                                   "Tune Amount"))]), 4)
 
     def test_chromatic_offers_no_key_to_choose(self):
         self.handler._open_autotune_scale_menu()
@@ -1050,8 +1096,26 @@ class ScaleMenuTests(unittest.TestCase):
         labels = self.settings_labels()
         self.assertNotIn("Auto-Tune Scale: Chromatic", labels)
         self.assertNotIn(f"Retune Speed: {autotune.speed_label()}", labels)
+        self.assertNotIn("Tune Amount: 100%", labels)
         self.assertNotIn("Auto-Tune: ON", labels)
         self.assertIn("Speech Key: replaced by Auto-Tune", labels)
+
+    def test_the_amount_menu_lists_five_steps_and_marks_the_current(self):
+        self.bot.autotune_amount = 100
+        self.bot.set_autotune_amount.side_effect = (
+            lambda percent: setattr(self.bot, "autotune_amount", percent))
+        self.handler._open_autotune_amount_menu()
+        menu = FakeMenu.built[-1]
+        labels = labels_in(menu)
+        self.assertEqual(len(labels), len(autotune.TUNE_AMOUNTS) + 1)  # and Back
+        for percent, _note in autotune.TUNE_AMOUNTS:
+            expected = (f"{percent}% (active)" if percent == 100
+                        else f"{percent}%")
+            self.assertIn(expected, labels)
+        menu.items[labels.index("50%")][1]()
+        self.bot.set_autotune_amount.assert_called_with(50)
+        # The mark follows the choice on the list that is still open.
+        self.assertIn("50% (active)", labels_in(menu))
 
     def test_clear_puts_every_setting_back_and_switches_it_off(self):
         self.bot.autotune_enabled = True
@@ -1066,6 +1130,7 @@ class ScaleMenuTests(unittest.TestCase):
         self.bot.set_autotune_mode.assert_called_with(autotune.DEFAULT_MODE)
         self.bot.set_autotune_root.assert_called_with(autotune.DEFAULT_ROOT)
         self.bot.set_autotune_speed.assert_called_with(autotune.DEFAULT_SPEED)
+        self.bot.set_autotune_amount.assert_called_with(autotune.DEFAULT_AMOUNT)
         self.bot.toggle_autotune.assert_called_with()
         self.assertIn("cleared",
                       str(self.speak.call_args_list[-1].args[0]).lower())
