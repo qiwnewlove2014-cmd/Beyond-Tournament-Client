@@ -59,6 +59,7 @@ SAMPLES = FRAME // 2                  # the same frame, in samples
 #: grid it is, in cents (negative = flat).
 A4 = 440.0
 A3 = 220.0
+Bb3 = 233.0819   # a semitone above A3: the far side of the boundary below
 
 
 # --------------------------------------------------------------- the signals
@@ -262,6 +263,147 @@ class DetectorTests(unittest.TestCase):
             tone(0.2)[:2880], min_freq=70.0, max_freq=1000.0)
         self.assertLess(abs(cents_from(hz, A3)), 1.0)
         self.assertGreater(clarity, 0.9)
+
+
+class NoteHoldTests(unittest.TestCase):
+    """The decision layer: a note is held, a change is confirmed, a move ramps.
+
+    Three measured artifacts, one test each. A singer whose vibrato crosses the
+    boundary between two notes used to have the target flip by a semitone every
+    frame (heard as a wobble, not as tuning). A note change used to jump the
+    ratio in a single 20 ms frame (heard as a chirp on the consonant). And one
+    noisy frame used to name a note of its own (heard as the voice jumping away
+    and back).
+    """
+
+    #: One analysis window: the three frames `detect` is handed by the line.
+    WINDOW = SAMPLES * autotune.AutoTuner.WINDOW_FRAMES
+
+    def window(self, hz=A3, cents=0.0):
+        chunk = tone(self.WINDOW / float(SR), freq=hz, cents=cents)
+        self.assertEqual(len(chunk), self.WINDOW)   # one contiguous window
+        return chunk
+
+    def feed(self, tuner, count, hz=A3, cents=0.0):
+        return [tuner.detect(self.window(hz, cents)) for _ in range(count)]
+
+    def test_a_vibrato_across_a_note_boundary_does_not_move_the_target(self):
+        """A3+30c and Bb3-30c are the same distance either side of the line.
+
+        A vibrato that swings 20 cents around that boundary puts every other
+        run of frames nearer the other note. Held, the target never moves: the
+        correction then follows the singer's own pitch by a few tenths of a
+        semitone instead of swapping which note it is measured against.
+        """
+        tuner = autotune.AutoTuner()
+        self.feed(tuner, 6, A3, +30.0)
+        self.assertEqual(tuner.held_note, 57)
+        for _ in range(8):
+            self.feed(tuner, 3, A3, +30.0)
+            self.feed(tuner, 3, Bb3, -30.0)
+            self.assertEqual(
+                tuner.held_note, 57,
+                f"the target followed the vibrato to MIDI {tuner.held_note}")
+
+    def test_a_neighbouring_note_is_confirmed_before_the_target_moves(self):
+        """A pitch just over the line has to be meant before the target follows.
+
+        0.6 of a semitone above A3 is nearer Bb3 by 0.2 -- but a vibrato that
+        swings that far is not a note change, so the target waits out the vote.
+        The next test is the other half: a note a whole tone away is followed at
+        once, because nothing oscillates that widely and comes back.
+        """
+        tuner = autotune.AutoTuner()
+        self.feed(tuner, 8, A3)
+        self.assertEqual(tuner.held_note, 57)
+        just_over = A3 * 2.0 ** (60.0 / 1200.0)   # 0.6 of a semitone up
+        switched = None
+        for index in range(1, 21):
+            tuner.detect(self.window(just_over))
+            if tuner.held_note != 57:
+                switched = index
+                break
+        self.assertIsNotNone(switched, "the target never followed a sung Bb")
+        self.assertGreaterEqual(switched, autotune.AutoTuner.TARGET_CONFIRM)
+        self.assertEqual(tuner.held_note, 58)
+
+    def test_a_note_that_has_clearly_been_left_is_followed_at_once(self):
+        """A fifth up is not a wobble around the note; it is another note."""
+        tuner = autotune.AutoTuner()
+        self.feed(tuner, 8, A3)
+        switched = None
+        for index in range(1, 9):
+            tuner.detect(self.window(midi_hz(64)))
+            if tuner.held_note == 64:
+                switched = index
+                break
+        self.assertIsNotNone(switched, "a slide of a fifth waited out a vote")
+        self.assertLess(switched, autotune.AutoTuner.TARGET_CONFIRM)
+
+    def test_a_note_change_bends_over_frames_and_never_in_one_step(self):
+        """Half a semitone sharp to half a semitone flat, while the note holds."""
+        tuner = autotune.AutoTuner()
+        self.feed(tuner, 6, A3, +45.0)     # sharp: pushed down by 0.45
+        before = tuner.offset
+        self.assertAlmostEqual(before, -0.45, delta=0.02)
+        steps = []
+        for _ in range(6):
+            tuner.detect(self.window(A3, -45.0))   # flat: pushed up by 0.45
+            steps.append(tuner.offset)
+        previous = before
+        for step in steps:
+            self.assertLessEqual(
+                abs(step - previous), autotune.AutoTuner.RAMP_SEMITONES + 1e-6,
+                f"the ratio moved {abs(step - previous):.2f} semitones in one frame")
+            previous = step
+        self.assertAlmostEqual(steps[-1], +0.45, delta=0.02)
+        self.assertLess(abs(steps[0] - before), 0.9,
+                        "the whole bend arrived in the first frame")
+
+    def test_a_pending_vote_does_not_drag_the_voice_off_the_note(self):
+        """The measurement that asked for the freeze.
+
+        A tone 45 cents flat is tuned up by 0.45. The pitch then moves to 0.65
+        of a semitone above A3 -- nearer Bb3, but inside the quarter tone of
+        doubt, so the target is still held. Pulling onto A3 would now be a pull
+        of -0.5, the wrong way entirely, for the length of the vote; the
+        correction is frozen instead, and the vote's own answer is only 0.35
+        away from where the voice already is.
+        """
+        tuner = autotune.AutoTuner()
+        self.feed(tuner, 6, A3, -45.0)
+        applied = tuner.offset
+        self.assertAlmostEqual(applied, 0.45, delta=0.02)
+        just_over = A3 * 2.0 ** (65.0 / 1200.0)
+        answers = self.feed(tuner, autotune.AutoTuner.TARGET_CONFIRM - 1,
+                            just_over)
+        self.assertEqual(tuner.held_note, 57)
+        for answer in answers:
+            self.assertAlmostEqual(answer, applied, delta=0.02)
+        self.feed(tuner, 4, just_over)
+        self.assertEqual(tuner.held_note, 58)
+        self.assertLess(abs(tuner.offset - 0.35), 0.02,
+                        "the vote's answer did not arrive after it won")
+
+    def test_one_frame_cannot_name_a_note_of_its_own(self):
+        """A consonant or a click is one frame, and it is not a note."""
+        tuner = autotune.AutoTuner()
+        self.feed(tuner, 8, A3, -30.0)
+        held, before = tuner.held_note, tuner.offset
+        outlier = tuner.detect(self.window(midi_hz(69)))
+        self.assertEqual(tuner.held_note, held)
+        self.assertAlmostEqual(outlier, before, delta=0.01)
+
+    def test_a_breath_does_not_release_the_note(self):
+        """The ratio stands through silence, and so does the note under it."""
+        tuner = autotune.AutoTuner()
+        self.feed(tuner, 8, A3, -30.0)
+        held, before = tuner.held_note, tuner.offset
+        for _ in range(4):
+            self.assertIsNone(tuner.detect(
+                np.zeros(self.WINDOW, dtype=np.float32)))
+        self.assertEqual(tuner.held_note, held)
+        self.assertEqual(tuner.offset, before)
 
 
 class SpeedTests(unittest.TestCase):

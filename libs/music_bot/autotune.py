@@ -134,6 +134,15 @@ class AutoTuner:
     MAX_FREQ = 1000.0       # above a soprano; keeps the lag search honest
     RMS_GATE = 0.008        # below this the frame is silence, not a note
     MIN_CLARITY = 0.55      # 1 - YIN's aperiodicity; noise sits far below this
+    # The decision layer, which is what keeps a held note from wobbling: a
+    # pitch is read through three frames, a new note has to be the nearer one
+    # for 160 ms before the target follows it, and a note that has clearly been
+    # left (further than the scale's own pull plus a quarter tone) is followed
+    # at once.
+    PITCH_MEDIAN = 3        # frames of measured pitch; one frame's reading is not a note
+    TARGET_CONFIRM = 8      # frames a new note must stay nearer before it wins
+    SWITCH_MARGIN = 0.06    # semitones: merely nearer is not enough, it must be clearer
+    RAMP_SEMITONES = 0.35   # the most one frame may move the voice (see `_applied`)
 
     def __init__(self, sample_rate=SAMPLE_RATE, mode=None, root=None):
         self.sample_rate = int(sample_rate)
@@ -149,18 +158,39 @@ class AutoTuner:
         self.clarity = 0.0
         #: How much of the correction is used, in percent (see `TUNE_AMOUNTS`).
         self.amount = DEFAULT_AMOUNT
+        #: The note this press is being tuned to, as a MIDI number, or None.
+        self.held_note = None
+        #: The note that would take over, and how many frames it has asked for.
+        self._pending_note = None
+        self._pending_frames = 0
+        #: Measured pitch over a few frames, so one reading cannot name a note.
+        self._pitch = collections.deque(maxlen=self.PITCH_MEDIAN)
+        #: The correction the line is actually being sent, before Tune Amount.
+        self._applied = 0.0
 
     def reset(self):
         """Forget the press: the next frame is a fresh microphone."""
         self._window.clear()
+        self._pitch.clear()
+        self.held_note = None
+        self._pending_note = None
+        self._pending_frames = 0
+        self._applied = 0.0
         self.detected_hz = None
         self.offset = 0.0
         self.clarity = 0.0
 
     def set_scale(self, mode, root):
-        """Which notes this press may be moved to (a scale, in a key)."""
+        """Which notes this press may be moved to (a scale, in a key).
+
+        The held note is dropped: it was chosen from the note set that has just
+        changed, and a C-major D is not a note of a pentatonic.
+        """
         self.mode = clamp_mode(mode)
         self.root = clamp_root(root)
+        self.held_note = None
+        self._pending_note = None
+        self._pending_frames = 0
         return self.mode, self.root
 
     def set_amount(self, percent):
@@ -176,6 +206,32 @@ class AutoTuner:
         always inside +/-0.5. `scale_correction` is the general one.
         """
         return AutoTuner.scale_correction(hz, "chromatic", 0)
+
+    @staticmethod
+    def nearest_note(midi, mode=None, root=None):
+        """The MIDI number of the nearest note of the scale to ``midi``.
+
+        The single place the "which note does this belong to" question is
+        answered; `scale_correction` is this note minus the pitch, and the
+        decision layer holds this note across frames.
+        """
+        if midi is None:
+            return None
+        mode = DEFAULT_MODE if mode is None else mode
+        root = DEFAULT_ROOT if root is None else root
+        classes = scale_classes(mode)
+        if not classes:
+            best = float(np.round(midi))
+        else:
+            best = None
+            for offset in classes:
+                base = float(clamp_root(root) + offset)
+                candidate = 12.0 * round((midi - base) / 12.0) + base
+                if best is None or abs(candidate - midi) < abs(best - midi) - 1e-9:
+                    best = candidate
+        if best is None or best < 0.0 or best > 127.0:
+            return None
+        return best
 
     @staticmethod
     def scale_correction(hz, mode=None, root=None):
@@ -196,17 +252,8 @@ class AutoTuner:
         mode = DEFAULT_MODE if mode is None else mode
         root = DEFAULT_ROOT if root is None else root
         midi = 69.0 + 12.0 * float(np.log2(hz / 440.0))
-        classes = scale_classes(mode)
-        if not classes:
-            best = float(np.round(midi))
-        else:
-            best = None
-            for offset in classes:
-                base = float(clamp_root(root) + offset)
-                candidate = 12.0 * round((midi - base) / 12.0) + base
-                if best is None or abs(candidate - midi) < abs(best - midi) - 1e-9:
-                    best = candidate
-        if best is None or best < 0.0 or best > 127.0:
+        best = AutoTuner.nearest_note(midi, mode, root)
+        if best is None:
             return None
         return best - midi
 
@@ -244,6 +291,14 @@ class AutoTuner:
 
         The window must be contiguous audio of at least two or three frames:
         YIN needs two periods of the lowest frequency it is asked about.
+
+        The answer is the distance from the pitch to the note the press is
+        being held on (`_hold_note`), not to whatever note this one frame likes
+        best: a vibrato that crosses a note boundary must not drag the target
+        back and forth every 90 ms, and a note change must not jump the ratio
+        in a single frame. `RAMP_SEMITONES` is the most one frame may move, so
+        a note change is a short bend (about three frames for a semitone) and
+        a vibrato of a few cents is followed smoothly.
         """
         samples = np.asarray(window, dtype=np.float32)
         if samples.size == 0:
@@ -258,20 +313,105 @@ class AutoTuner:
         self.clarity = clarity
         if hz is None or clarity < self.MIN_CLARITY:
             # A breath, a consonant, a noisy frame: say nothing, hold the ratio.
+            # The pitch history is dropped too -- a note after a pause must not
+            # be averaged with the one before it -- but the held note stays, so
+            # the ratio does not fall back to the singer at every breath.
             self.detected_hz = None
-            return None
-        correction = self.scale_correction(hz, self.mode, self.root)
-        if correction is None:
-            self.detected_hz = None
+            self._pitch.clear()
             return None
         self.detected_hz = hz
+        self._pitch.append(hz)
+        pitch = float(np.median(self._pitch))
+        midi = 69.0 + 12.0 * float(np.log2(pitch / 440.0))
+        note = self.nearest_note(midi, self.mode, self.root)
+        if note is None:
+            return None
+        self._hold_note(note, midi)
+        correction = self.held_note - midi
+        # A held note can be left behind by a slide; the line's anti-aliasing
+        # filter was pinned at the widest pull the catalogue allows, so the
+        # correction never asks for more than that (`MAX_PULL`).
+        pull = widest_pull(self.mode)
+        correction = max(-pull, min(pull, correction))
+        if self._pending_note is not None:
+            # A vote is running, which means the pitch is nearer another note:
+            # pulling it onto the held one would drag the voice the WRONG way
+            # for the length of the vote -- a note change a semitone up, sung
+            # 30 cents flat, was dragged half a semitone down and then taken a
+            # semitone and a half back (measured: the output's largest step
+            # 0.37 against 0.20 with the old decision). Freeze the correction
+            # where it is: the vote either completes, and the ramp takes it to
+            # the new note, or it fails, and nothing moved at all.
+            correction = self._applied
+        # The ramp: a note change moves the voice over a few frames, so the
+        # shifter is never asked for a new interval in one 20 ms step. A
+        # correction this small (a vibrato, a drift) arrives on the frame it is
+        # measured, which is what keeps a fast passage in tune.
+        delta = correction - self._applied
+        if abs(delta) <= self.RAMP_SEMITONES:
+            self._applied = correction
+        else:
+            self._applied += (self.RAMP_SEMITONES if delta > 0
+                              else -self.RAMP_SEMITONES)
         # The amount is a share of the correction, never a wider one: at 100%
         # the voice lands on the note, at 50% half the error is left in it, and
         # at 0% the answer is zero with the note still named. 0.0 is not None:
         # None means "keep the ratio you have", which would be the last note's
         # correction, not the singer's own voice.
-        self.offset = correction * (self.amount / 100.0)
+        self.offset = self._applied * (self.amount / 100.0)
         return self.offset
+
+    def _hold_note(self, note, midi):
+        """Choose the note this press is tuned to, once, and keep it.
+
+        Three rules, and each of them is an artifact that is gone:
+
+        * **A held note is held.** A new note must be the nearer one by more
+          than `SWITCH_MARGIN` for `TARGET_CONFIRM` frames before the target
+          follows it. A singer sitting near the boundary between two notes --
+          or a vibrato that swings across it -- used to flip the interval by a
+          semitone every frame, which is heard as a wobble rather than as a
+          tuning, and no glide speed can hide a target that moves 100 cents at
+          50 Hz.
+        * **A note that has clearly been left is followed at once.** Further
+          than the scale's own pull plus a quarter tone, the pitch is not
+          wobbling around this note, it is on another one: a slide, a trill or
+          a fast passage should not wait out a confirmation window.
+        * **The comparison is against the pitch, not the note.** Two notes can
+          both be near a badly placed pitch; the one that is actually nearer
+          is the one the voice belongs to.
+        """
+        if self.held_note is None:
+            self.held_note = note
+            return self.held_note
+        pull = widest_pull(self.mode)
+        if abs(midi - self.held_note) > pull + 0.25:
+            self.held_note = note
+            self._pending_note = None
+            self._pending_frames = 0
+            return self.held_note
+        if abs(note - self.held_note) < 1e-9:
+            # The held note is still the nearest one: whatever the other side
+            # was asking for is forgotten, so a vibrato can cross the boundary
+            # and come back without ever accumulating a vote.
+            self._pending_note = None
+            self._pending_frames = 0
+            return self.held_note
+        if abs(midi - note) + self.SWITCH_MARGIN >= abs(midi - self.held_note):
+            self._pending_note = None
+            self._pending_frames = 0
+            return self.held_note
+        if (self._pending_note is not None
+                and abs(note - self._pending_note) < 1e-9):
+            self._pending_frames += 1
+        else:
+            self._pending_note = note
+            self._pending_frames = 1
+        if self._pending_frames >= self.TARGET_CONFIRM:
+            self.held_note = note
+            self._pending_note = None
+            self._pending_frames = 0
+        return self.held_note
 
 
 # ----------------------------------------------------------------- the scales
