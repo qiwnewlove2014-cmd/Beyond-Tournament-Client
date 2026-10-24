@@ -64,9 +64,19 @@ FALLBACK_PLAYLIST = ["1.ogg", "2.ogg", "3.ogg", "4.ogg", "5.ogg", "6.ogg", "7.og
 
 
 def format_track_position(seconds):
-    """Render a track position in seconds as m:ss for speech output."""
+    """Render a track position in seconds for speech output.
+
+    ``m:ss``, and ``h:mm:ss`` once the position passes an hour. A cabinet and a
+    concert recording are hours long, and the m:ss form of a three-hour set is
+    "211:00" -- not a time anyone hears as one. The hour is only printed when
+    there is one, so a normal song keeps exactly the read-out it always had.
+    """
     seconds = max(0, int(seconds))
-    return f"{seconds // 60}:{seconds % 60:02d}"
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 
 def clamp_seek_position(position, delta):

@@ -58,8 +58,15 @@ class TestPositionHelpers(unittest.TestCase):
         self.assertEqual(format_track_position(0), "0:00")
         self.assertEqual(format_track_position(5), "0:05")
         self.assertEqual(format_track_position(65), "1:05")
-        self.assertEqual(format_track_position(3600 + 125), "62:05")
+        self.assertEqual(format_track_position(3600 - 1), "59:59")
         self.assertEqual(format_track_position(-3), "0:00")
+
+    def test_format_track_position_gives_a_concert_its_hour(self):
+        # A cabinet plays songs of hours: m:ss would read a three-hour set as
+        # "211:00", so the hour appears exactly when there is one to print.
+        self.assertEqual(format_track_position(3600), "1:00:00")
+        self.assertEqual(format_track_position(3600 + 125), "1:02:05")
+        self.assertEqual(format_track_position(3 * 3600 + 61), "3:01:01")
 
 
 class TestAudioStreamerPausedStart(unittest.TestCase):
