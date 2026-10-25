@@ -99,6 +99,27 @@ def high_share(samples, corner=6000.0):
     return float(spectrum[freqs >= corner].sum() / max(1e-12, spectrum.sum()))
 
 
+def band_share(samples, low, high):
+    """The share of a signal's energy between two frequencies."""
+    window = np.hanning(len(samples))
+    spectrum = np.abs(np.fft.rfft(samples * window)) ** 2
+    freqs = np.fft.rfftfreq(len(samples), 1.0 / SR)
+    inside = (freqs >= low) & (freqs <= high)
+    return float(spectrum[inside].sum() / max(1e-12, spectrum.sum()))
+
+
+def saw(amplitude=0.3, seconds=1.0, freq=180.0):
+    t = np.arange(int(SR * seconds)) / SR
+    return (amplitude * (2.0 * ((t * freq) % 1.0) - 1.0)).astype(np.float32)
+
+
+def peak_freq(samples, floor=80.0):
+    spectrum = np.abs(np.fft.rfft(samples * np.hanning(len(samples))))
+    freqs = np.fft.rfftfreq(len(samples), 1.0 / SR)
+    above = freqs > floor
+    return float(freqs[above][int(np.argmax(spectrum[above]))])
+
+
 # --------------------------------------------------------------- the catalogue
 
 
@@ -120,7 +141,11 @@ class TheCatalogueTests(unittest.TestCase):
         self.assertIn("crush", ids)
         for effect_id in ("octave", "tremolo", "wah", "phaser", "echo",
                           "robot", "flanger", "vibrato", "stutter", "cave",
-                          "alien"):
+                          "alien", "sub_octave", "envelope_wah", "gate",
+                          "reverse", "chorus", "vinyl", "body", "shimmer",
+                          "whisper", "growl", "doubler", "vocoder",
+                          "talkbox", "hyperpop", "tapestop", "cloud",
+                          "air", "pump", "freeze", "step", "swell"):
             self.assertIn(effect_id, ids)
         for effect_id, label, note in voice_effects.VOICE_EFFECTS:
             with self.subTest(preset=effect_id):
@@ -167,7 +192,12 @@ class TheProcessorTests(unittest.TestCase):
         pcm = to_pcm(tone(seconds=0.5))
         for preset in ("amp", "clean", "fuzz", "radio", "crush", "octave",
                        "tremolo", "wah", "phaser", "echo", "robot",
-                       "flanger", "vibrato", "stutter", "cave", "alien"):
+                       "flanger", "vibrato", "stutter", "cave", "alien",
+                       "sub_octave", "envelope_wah", "gate", "reverse",
+                       "chorus", "vinyl", "body", "shimmer", "whisper",
+                       "growl", "doubler", "vocoder", "talkbox", "hyperpop",
+                       "tapestop", "cloud", "air", "pump", "freeze",
+                       "step", "swell"):
             with self.subTest(preset=preset):
                 processor = self.processor(preset)
                 for start in range(0, len(pcm) - FRAME + 1, FRAME):
@@ -178,7 +208,12 @@ class TheProcessorTests(unittest.TestCase):
         silence = bytes(FRAME)
         for preset in ("amp", "clean", "fuzz", "radio", "crush", "octave",
                        "tremolo", "wah", "phaser", "echo", "robot",
-                       "flanger", "vibrato", "stutter", "cave", "alien"):
+                       "flanger", "vibrato", "stutter", "cave", "alien",
+                       "sub_octave", "envelope_wah", "gate", "reverse",
+                       "chorus", "vinyl", "body", "shimmer", "whisper",
+                       "growl", "doubler", "vocoder", "talkbox", "hyperpop",
+                       "tapestop", "cloud", "air", "pump", "freeze",
+                       "step", "swell"):
             with self.subTest(preset=preset):
                 self.assertEqual(
                     self.processor(preset).process(silence), silence)
@@ -244,10 +279,18 @@ class TheProcessorTests(unittest.TestCase):
         loud = to_pcm(tone(amplitude=0.95, seconds=0.5))
         for preset in ("amp", "clean", "fuzz", "radio", "crush", "octave",
                        "tremolo", "wah", "phaser", "echo", "robot",
-                       "flanger", "vibrato", "stutter", "cave", "alien"):
+                       "flanger", "vibrato", "stutter", "cave", "alien",
+                       "sub_octave", "envelope_wah", "gate", "reverse",
+                       "chorus", "vinyl", "body", "shimmer", "whisper",
+                       "growl", "doubler", "vocoder", "talkbox", "hyperpop",
+                       "tapestop", "cloud", "air", "pump", "freeze",
+                       "step", "swell"):
             with self.subTest(preset=preset):
                 after = play(self.processor(preset), loud)
-                self.assertLessEqual(float(np.max(np.abs(after))), 1.0)
+                # The ceiling, not full scale: a pedal hands the PA and a cinema
+                # room's effect sends 3 dB of headroom (see PEAK_CEILING).
+                self.assertLessEqual(float(np.max(np.abs(after))),
+                                     voice_effects.PEAK_CEILING + 1e-3)
                 self.assertFalse(np.any(np.isnan(after)))
 
 
@@ -389,6 +432,309 @@ class TheAddOnPedalsTests(unittest.TestCase):
                            0.2 * energy(980.0, 1020.0))
         self.assertGreater(energy(1250.0, 1350.0),
                            0.2 * energy(980.0, 1020.0))
+
+
+class TheSecondWaveOfPedalsTests(unittest.TestCase):
+    """The last six: a divider, an envelope, a chop, a reverse, two rooms."""
+
+    @staticmethod
+    def bands(samples):
+        window = np.hanning(len(samples))
+        spectrum = np.abs(np.fft.rfft(samples * window)) ** 2
+        freqs = np.fft.rfftfreq(len(samples), 1.0 / SR)
+
+        def energy(low, high):
+            return float(spectrum[(freqs > low) & (freqs < high)].sum())
+
+        return energy
+
+    def test_the_sub_octave_adds_the_note_below(self):
+        signal = to_pcm(tone(amplitude=0.2, seconds=0.5))
+        after = play(voice_effects._EffectProcessor("sub_octave"), signal)
+        energy = self.bands(after[FRAME * 4:])
+        # The divider makes a square one octave down: 110 Hz, not a copy of
+        # the 220 Hz dry voice.
+        self.assertGreater(energy(100.0, 120.0), 2.0 * energy(210.0, 230.0))
+
+    def test_the_envelope_wah_follows_the_voice(self):
+        rng = np.random.default_rng(4)
+        ratios = {}
+        for name, amplitude in (("quiet", 0.02), ("loud", 0.2)):
+            signal = (rng.uniform(-1.0, 1.0, SR) * amplitude).astype(np.float32)
+            after = play(voice_effects._EffectProcessor("envelope_wah"),
+                         to_pcm(signal))
+            energy = self.bands(after[FRAME * 8:])
+            ratios[name] = (energy(1100.0, 2200.0)
+                            / max(1e-12, energy(250.0, 600.0)))
+        # A quiet voice sits low; a loud one opens the filter far above it.
+        self.assertGreater(ratios["loud"], 5.0 * ratios["quiet"])
+
+    def test_the_gate_chops_the_voice(self):
+        signal = to_pcm(tone(amplitude=0.2, seconds=1.0))
+        after = play(voice_effects._EffectProcessor("gate"), signal)
+        samples = after[FRAME * 4:]
+        window = int(0.005 * SR)
+        envelope = np.sqrt(np.convolve(samples ** 2,
+                                       np.ones(window) / window,
+                                       mode="valid"))
+        self.assertLess(float(envelope.min()), 0.1 * float(envelope.max()))
+
+    def test_the_reverse_plays_the_slice_backwards(self):
+        # Five frames, each a tone burst louder than the one before it. The
+        # reversed slice must start with the LOUDEST frame and end with the
+        # quietest, which is what makes it a reverse and not a stutter.
+        levels = (0.1, 0.2, 0.3, 0.4, 0.5)
+        frames = []
+        for level in levels:
+            frames.append(level * np.sin(2.0 * np.pi * 220.0
+                                         * np.arange(FRAME // 2) / SR))
+        signal = np.concatenate(frames).astype(np.float32)
+        silence = np.zeros(SR - len(signal), dtype=np.float32)
+        after = play(voice_effects._EffectProcessor("reverse"),
+                     to_pcm(np.concatenate((signal, silence))))
+        first = rms(after[int(0.12 * SR):int(0.14 * SR)])
+        last = rms(after[int(0.18 * SR):int(0.20 * SR)])
+        self.assertGreater(first, 0.03)
+        self.assertGreater(first, 2.0 * last)
+
+    def test_the_wood_body_resonates_on_its_own_a(self):
+        """The box answers a low A, not everything it is handed."""
+        near = play(voice_effects._EffectProcessor("body"),
+                    to_pcm(tone(freq=110.0, amplitude=0.2, seconds=0.6)))
+        far = play(voice_effects._EffectProcessor("body"),
+                   to_pcm(tone(freq=140.0, amplitude=0.2, seconds=0.6)))
+        self.assertGreater(rms(near[FRAME * 6:]), 1.5 * rms(far[FRAME * 6:]))
+
+    def test_the_chorus_carries_three_copies(self):
+        signal = to_pcm(tone(amplitude=0.2, seconds=0.5))
+        after = play(voice_effects._EffectProcessor("chorus"), signal)
+        dry = from_pcm(signal)[FRAME * 4:]
+        self.assertGreater(rms(after[FRAME * 4:] - dry), 0.2 * rms(dry))
+
+
+class TheThirdWaveOfPedalsTests(unittest.TestCase):
+    """The last six: a record, a box, a shifter, a hush, a chest, a double."""
+
+    def test_the_vinyl_crackles_only_while_the_voice_speaks(self):
+        silent = bytes(FRAME)
+        self.assertEqual(voice_effects._EffectProcessor("vinyl").process(silent),
+                         silent)
+        after = play(voice_effects._EffectProcessor("vinyl"),
+                     to_pcm(tone(amplitude=0.3, seconds=1.0)))
+        # A crackle is a jump far above a 220 Hz tone's own slope (~0.01).
+        self.assertGreater(float(np.abs(np.diff(after)).max()), 0.06)
+
+    def test_the_shimmer_moves_the_tone_up_by_its_hertz(self):
+        """A 440 Hz tone gains 454 and loses 426: a shifter, not a ring mod."""
+        after = play(voice_effects._EffectProcessor("shimmer"),
+                     to_pcm(tone(freq=440.0, amplitude=0.3, seconds=1.2)))
+        window = after[FRAME * 10:FRAME * 50]
+        spectrum = np.abs(np.fft.rfft(window * np.hanning(window.size)))
+        freqs = np.fft.rfftfreq(window.size, 1.0 / SR)
+
+        def level(hz):
+            return float(spectrum[int(np.argmin(np.abs(freqs - hz)))])
+
+        self.assertGreater(level(454.0), 3.0 * level(426.0))
+        self.assertGreater(level(454.0), 0.1 * level(440.0))
+
+    def test_the_whisper_is_breath_not_pitch(self):
+        signal = to_pcm(tone(amplitude=0.3, seconds=0.6))
+        dry = from_pcm(signal)[FRAME * 4:]
+        after = play(voice_effects._EffectProcessor("whisper"), signal)
+        self.assertGreater(high_share(after[FRAME * 4:], 4000.0), 0.25)
+        self.assertLess(rms(after[FRAME * 4:]), 2.0 * rms(dry))
+
+    def test_the_growl_keeps_the_chest_and_drops_the_top(self):
+        low = tone(freq=300.0, amplitude=0.3, seconds=0.4)
+        high = tone(freq=3000.0, amplitude=0.3, seconds=0.4)
+        low_after = play(voice_effects._EffectProcessor("growl"), to_pcm(low))
+        high_after = play(voice_effects._EffectProcessor("growl"), to_pcm(high))
+        # The chest is lifted over the dry voice; the top is taken away.
+        self.assertGreater(rms(low_after[FRAME * 4:]),
+                           1.1 * rms(low[FRAME * 2:]))
+        self.assertLess(rms(high_after[FRAME * 4:]),
+                        0.5 * rms(high[FRAME * 2:]))
+
+    def test_the_doubler_carries_one_copy_at_the_22ms_delay(self):
+        """What is left after the dry share is the voice, 22 ms late."""
+        # 80 Hz, so the correlation has one peak in the searched band: at
+        # 300 Hz a 22 ms delay is three periods off the nearest peak. The block
+        # is fed in 20 ms frames, the way the line feeds it -- its ring is a
+        # frame-sized delay line, not a whole-signal buffer.
+        dry = tone(freq=80.0, amplitude=0.2, seconds=0.5)
+        processor = voice_effects._EffectProcessor("doubler")
+        shaped = np.concatenate([processor._doubler_block(dry[start:start + 960])
+                                 for start in range(0, len(dry), 960)])
+        copy = shaped - (1.0 - 0.55) * dry
+        best, best_lag = -1.0, 0
+        for lag in range(int(0.018 * SR), int(0.026 * SR)):
+            score = float(np.dot(copy[lag:], dry[:-lag]))
+            if score > best:
+                best, best_lag = score, lag
+        self.assertAlmostEqual(best_lag / SR, 0.022, delta=0.0015)
+
+    def test_a_frame_boundary_is_not_a_click(self):
+        """The bug behind the buzz: a ring read before it was written.
+
+        Every wobbling delay here is shorter than a frame, so a block read
+        before its own write falls on the previous wrap of the ring for every
+        sample past the delay -- a step at every frame boundary, heard as a
+        50 Hz buzz under the effect. That is also why some presets seemed to
+        have no wobble: the wobble was there, buried in the buzz.
+        """
+        signal = to_pcm(tone(freq=300.0, amplitude=0.3, seconds=1.0))
+        samples = FRAME // 2          # 20 ms of mono16 at 48 kHz
+        for preset in ("vibrato", "flanger", "chorus", "vinyl", "doubler",
+                       "shimmer", "cloud", "tapestop", "swell", "pump",
+                       "step"):
+            with self.subTest(preset=preset):
+                after = play(voice_effects._EffectProcessor(preset), signal)
+                frames = after[samples * 4:samples * 44].reshape(-1, samples)
+                inside = float(np.abs(np.diff(frames, axis=1)).max())
+                edges = np.abs(frames[1:, 0] - frames[:-1, -1])
+                self.assertLessEqual(float(edges.max()), 1.6 * inside)
+
+
+class TheModernPedalsTests(unittest.TestCase):
+    """The ten production pedals: the sound a current record is made of."""
+
+    def test_the_vocoder_speaks_through_its_carrier(self):
+        """A 300 Hz voice comes out on the carrier's harmonics, not at 300.
+
+        That is the difference between a vocoder and an EQ: the excitation is
+        replaced, the envelopes are the voice's own.
+        """
+        after = play(voice_effects._EffectProcessor("vocoder"),
+                     to_pcm(tone(freq=300.0, amplitude=0.3, seconds=1.0)))
+        window = after[FRAME * 10:]
+        spectrum = np.abs(np.fft.rfft(window * np.hanning(window.size))) ** 2
+        freqs = np.fft.rfftfreq(window.size, 1.0 / SR)
+
+        def level(hz):
+            return float(spectrum[(freqs > hz - 12) & (freqs < hz + 12)].sum())
+
+        self.assertGreater(level(330.0), 6.0 * level(300.0))
+        self.assertGreater(level(330.0), 0.05 * level(220.0))
+
+    def test_the_vocoder_keeps_the_band_the_voice_used(self):
+        low = play(voice_effects._EffectProcessor("vocoder"),
+                   to_pcm(tone(freq=700.0, amplitude=0.3, seconds=1.0)))
+        high = play(voice_effects._EffectProcessor("vocoder"),
+                    to_pcm(tone(freq=2400.0, amplitude=0.3, seconds=1.0)))
+        low = low[FRAME * 10:]
+        high = high[FRAME * 10:]
+        self.assertGreater(band_share(low, 400.0, 1600.0),
+                           4.0 * band_share(low, 1600.0, 5000.0))
+        self.assertGreater(band_share(high, 1600.0, 5000.0),
+                           4.0 * band_share(high, 100.0, 400.0))
+
+    def test_the_talkbox_is_the_growl_the_other_way_up(self):
+        dry = saw(seconds=1.0)
+        after = play(voice_effects._EffectProcessor("talkbox"), to_pcm(dry))
+        self.assertGreater(band_share(after[FRAME * 5:], 800.0, 4000.0),
+                           2.5 * band_share(dry[FRAME * 5:],
+                                            800.0, 4000.0))
+
+    def test_air_grows_top_harmonics_that_were_not_there(self):
+        dry = saw(seconds=1.0)
+        after = play(voice_effects._EffectProcessor("air"), to_pcm(dry))
+        self.assertGreater(band_share(after[FRAME * 5:], 4000.0, 20000.0),
+                           2.0 * band_share(dry[FRAME * 5:],
+                                            4000.0, 20000.0))
+
+    def test_hyperpop_lifts_the_quiet_word_toward_the_loud_one(self):
+        levels = {}
+        for name, amplitude in (("quiet", 0.02), ("loud", 0.3)):
+            signal = tone(amplitude=amplitude, seconds=0.6)
+            after = play(voice_effects._EffectProcessor("hyperpop"),
+                         to_pcm(signal))
+            levels[name] = rms(after[FRAME * 5:])
+            levels[name + "_in"] = rms(signal[FRAME * 5:])
+        # The quiet voice is pushed up and the loud one is held down, so the
+        # gap between them closes -- which is the whole sound of the pedal.
+        self.assertGreater(levels["quiet"], 2.0 * levels["quiet_in"])
+        self.assertLess(levels["loud"], levels["loud_in"])
+        self.assertLess(levels["loud"] / levels["quiet"],
+                        0.5 * levels["loud_in"] / levels["quiet_in"])
+
+    def test_the_tape_stop_drops_the_pitch_and_starts_again(self):
+        after = play(voice_effects._EffectProcessor("tapestop"),
+                     to_pcm(tone(freq=400.0, amplitude=0.3, seconds=2.0)))
+
+        def at(seconds):
+            start = int(seconds * SR)
+            return peak_freq(after[start:start + 480])
+
+        self.assertAlmostEqual(at(0.20), 400.0, delta=15.0)
+        self.assertLess(at(1.20), 150.0)
+        self.assertAlmostEqual(at(1.55), 400.0, delta=20.0)
+
+    def test_the_pump_ducks_twice_a_second(self):
+        after = play(voice_effects._EffectProcessor("pump"),
+                     to_pcm(tone(amplitude=0.3, seconds=1.5)))
+        samples = after[FRAME * 4:]
+        # 40 ms of smoothing: shorter windows carry the tone's own ripple and
+        # would be counted as a dip of their own.
+        window = 1920
+        envelope = np.sqrt(np.convolve(samples ** 2,
+                                       np.ones(window) / window, mode="valid"))
+        self.assertLess(float(envelope.min()), 0.4 * float(envelope.max()))
+        quiet = envelope < 0.5 * float(envelope.max())
+        dips = int(np.sum(quiet[1:] & ~quiet[:-1]))
+        self.assertGreaterEqual(dips, 2)
+        self.assertLessEqual(dips, 4)
+
+    def test_the_cloud_leaves_a_haze_behind_the_word(self):
+        burst = np.concatenate((tone(300.0, 0.3, 0.4),
+                                np.zeros(int(0.8 * SR), dtype=np.float32)))
+        after = play(voice_effects._EffectProcessor("cloud"), to_pcm(burst))
+        self.assertGreater(rms(after[int(0.42 * SR):int(0.44 * SR)]), 0.02)
+        self.assertLess(rms(after[int(0.85 * SR):int(0.90 * SR)]), 0.002)
+
+    def test_the_freeze_holds_the_slice_then_lets_it_go(self):
+        burst = np.concatenate((tone(300.0, 0.3, 0.5),
+                                np.zeros(int(2.0 * SR), dtype=np.float32)))
+        after = play(voice_effects._EffectProcessor("freeze"), to_pcm(burst))
+        # Held while the recapture is still the words that were spoken...
+        self.assertGreater(rms(after[int(0.80 * SR):int(0.82 * SR)]), 0.04)
+        # ...and gone once the recapture has caught silence: a freeze must not
+        # leave the room humming for ever.
+        self.assertLess(rms(after[int(1.85 * SR):int(1.90 * SR)]), 0.005)
+
+    def test_the_step_filter_moves_between_bands(self):
+        after = play(voice_effects._EffectProcessor("step"),
+                     to_pcm(saw(seconds=1.0)))
+        ratios = []
+        samples = FRAME // 2                     # 20 ms of mono16 at 48 kHz
+        for start in range(samples * 3, samples * 40, samples):
+            frame = after[start:start + samples]
+            if rms(frame) < 0.01:
+                continue
+            ratios.append(band_share(frame, 1800.0, 5000.0)
+                          / max(1e-9, band_share(frame, 100.0, 600.0)))
+        # The pattern's bright steps and its dark steps, in one second.
+        self.assertGreater(max(ratios), 3.0 * min(ratios))
+
+    def test_the_swell_grows_a_ghost_and_cuts_it(self):
+        """Measured on the block itself, so what is left *is* the ghost.
+
+        The chain's own filters would swamp this measurement, so the pedal is
+        fed raw blocks: what comes back minus what went in is exactly the
+        backwards copy, and its envelope over a cycle is the pedal's shape.
+        """
+        processor = voice_effects._EffectProcessor("swell")
+        dry = tone(220.0, 0.2, 2.0)
+        ghosts = []
+        for start in range(0, len(dry) - 960 + 1, 960):
+            chunk = dry[start:start + 960]
+            ghosts.append(rms(processor._swell_block(chunk) - chunk))
+        # The first cycle has nothing behind it to play; the ghost is measured
+        # where the ring holds a second of the voice. Frame 50 is 1.00 s (early
+        # in the swell), 72 is 1.45 s (its peak), 77 is 1.55 s (cut).
+        self.assertLess(ghosts[50], 0.3 * ghosts[72])
+        self.assertGreater(ghosts[72], 0.01)
+        self.assertEqual(ghosts[77], 0.0)
 
 
 # ------------------------------------------------------------------- the line

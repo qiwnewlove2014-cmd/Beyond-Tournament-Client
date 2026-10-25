@@ -49,7 +49,16 @@ The chain, in order
    tremolo (5.2 Hz, depth 0.85), an auto-wah (a resonant band swept 360-1800 Hz
    at 1.25 Hz), a two-stage phaser (all-passes swept 320-1500 Hz at 0.4 Hz), a
    slapback echo (145 ms, 0.35 feedback) and a ring modulator (55 Hz).
-9. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
+9. The modern pedals (2026-10-25): an exciter (Air), a raised formant
+   (Talkbox), a channel vocoder, an upward-and-downward compressor (Hyperpop),
+   a stepped three-band filter, a beat duck (Pump), four drifting taps (Cloud),
+   a backwards ghost (Swell), a held slice (Freeze) and a varispeed that slows
+   to a stop (Tape Stop). Two rules keep them out of trouble: **a gain that
+   moves once per frame is a 50 Hz buzz**, so Hyperpop's follower runs per
+   sample and the step filter crossfades the frame its band changes in; and **a
+   varispeed is a delay that grows faster than real time** (rate `1 -
+   d(delay)/dt`), so every gain is zero where a head jumps.
+10. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
    thin the top of any distortion it is handed; the cabinet is deliberately
    below the range where that hurts, and the ceiling keeps the encoder from
    being handed a clipped frame.
@@ -84,84 +93,14 @@ import numpy as np
 
 from .. import options
 from . import gate
+from .voice_effect_catalogue import (DEFAULT_EFFECT, VOICE_EFFECTS,
+                                     clamp_effect, effect_label, effect_note)
 
 #: One microphone frame: 20 ms of 48 kHz mono16, the unit every voice line is
 #: fed (`libs/voice_chat.VOICE_FRAME_BYTES`).
 FRAME_BYTES = 1920
 SAMPLE_RATE = 48000
 
-#: ``(id, menu name, what Tab reads on that line)``. The menu name is short
-#: enough to arrow past; the description is where the pedal explains itself.
-VOICE_EFFECTS = (
-    ("off", "Off",
-     "Your own voice, dry: no amp, no pedal. This is the same voice you had "
-     "before the feature existed."),
-    ("amp", "Guitar Amp",        "A distorted guitar amp: pre-gain, a valve-ish soft clip and a 4x12 "
-     "cabinet's dark top, with a noise gate between the words. Your words are "
-     "still words -- it is the voice through the amp, not a guitar. Adds about "
-     "3 milliseconds."),
-    ("clean", "Clean Guitar",
-     "A clean amp with a chorus pedal: no distortion, a bright cabinet and a "
-     "slow wide doubling, heard as a shimmering second copy of the voice. This "
-     "is the one preset with the pedal's own 12 milliseconds."),
-    ("fuzz", "Fuzz",
-     "A fuzz pedal: hard, asymmetric clipping with a thicker low end and a "
-     "darker cabinet. The most aggressive of the set -- consonants turn into "
-     "splinters and the voice bites."),
-    ("radio", "Radio",
-     "A guitar amp heard through a small speaker: the voice is band-passed to "
-     "a narrow midrange and then driven, so it sounds like a broadcast coming "
-     "from another room."),
-    ("crush", "Crush",
-     "A bitcrusher pedal: the voice is sampled at a lower rate and quantised, "
-     "adding a gritty digital buzz under the words. The cleanest way to make a "
-     "sentence sound broken."),
-    ("octave", "Octave Up",
-     "An octave pedal's oldest trick: the voice is rectified and mixed back "
-     "with itself, which adds a note an octave above. It is dirty rather than "
-     "clean -- a fuzz with a second voice on top, not a pitch shifter."),
-    ("tremolo", "Tremolo",
-     "A tremolo pedal: the voice pulses about five times a second, from full "
-     "to nearly silent. The oldest way to make a spoken sentence sound like it "
-     "is coming and going."),
-    ("wah", "Wah",
-     "An auto-wah: a narrow band sweeps up and down the voice about once a "
-     "second, so consonants turn into a talking wah-wah and the words ride "
-     "under it."),
-    ("phaser", "Phaser",
-     "A phaser: swept all-pass stages are mixed with the dry voice, so the two "
-     "cancel and reinforce as they move. The effect is a slow whoosh under the "
-     "words rather than a copy beside them."),
-    ("echo", "Echo",
-     "A slapback delay: what you said comes back about a seventh of a second "
-     "later, quieter, and again after that. Long enough to be a repeat, short "
-     "enough to stay under the next word."),
-    ("robot", "Robot",
-     "A ring modulator: the voice is multiplied by a 55 Hz tone, which "
-     "replaces its pitch with metallic sidebands. It sounds like a machine -- "
-     "the words are what gets lost first."),
-    ("flanger", "Flanger",
-     "A flanger: a very short delay sweeps across the voice and feeds back, "
-     "so a jet-like whoosh moves through the words. Shorter and sharper than "
-     "the clean amp's chorus."),
-    ("vibrato", "Vibrato",
-     "A vibrato pedal: the tape speed wobbles about five times a second, so "
-     "the pitch rises and falls. Every note of the voice moves; the words do "
-     "not change."),
-    ("stutter", "Stutter",
-     "A stutter: the last tenth of a second repeats twice, then the voice "
-     "carries on, five times a second. The glitch a DJ makes with a delay "
-     "pedal, on speech."),
-    ("cave", "Cave",
-     "A cave: four short echoes at different distances feed each other, so "
-     "the voice rings in a big stone room. Longer and darker than the Echo "
-     "pedal."),
-    ("alien", "Alien",
-     "An alien: a ring modulator whose carrier slides up and down, so the "
-     "metallic sidebands move with it. Sings like a machine from a 1950s "
-     "film."),
-)
-DEFAULT_EFFECT = "off"
 
 #: The two saved option keys live here, beside the catalogue and the only reader.
 OPTION = "music_bot_voice_effect"
@@ -206,37 +145,113 @@ _SPECS = {
                  cave=((31.0, 47.0, 61.0, 83.0), 0.45, 0.55)),
     "alien": dict(hp=120.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
                   gate=0.004, out=0.92, alien=(300.0, 0.7, 0.72)),
+    "sub_octave": dict(hp=90.0, lp=5000.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.005, out=0.95, sub_octave=0.5),
+    "envelope_wah": dict(hp=110.0, lp=5200.0, drive=1.0, shape=None, bias=0.0,
+                         gate=0.004, out=0.90,
+                         envelope_wah=(300.0, 1900.0, 3.0, 10.0)),
+    "gate": dict(hp=100.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                 gate=0.004, out=0.95, chop=(8.0, 0.06)),
+    "reverse": dict(hp=100.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.004, out=0.95, reverse=(5, 10)),
+    "chorus": dict(hp=100.0, lp=6800.0, drive=1.0, shape=None, bias=0.0,
+                   gate=0.004, out=0.92,
+                   chorus3=((7.0, 9.0, 12.0), 0.35, 1.6, 0.5)),
+    "vinyl": dict(hp=80.0, lp=5500.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.005, out=0.98, vinyl=(0.6, 0.45, 0.30)),
+    "body": dict(hp=90.0, lp=5200.0, drive=1.0, shape=None, bias=0.0,
+                 gate=0.005, out=1.0, body=(110.0, 0.72, 0.55)),
+    "shimmer": dict(hp=100.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.004, out=0.95, shimmer=(14.0, 0.62)),
+    "whisper": dict(hp=900.0, lp=7000.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.003, out=1.30, whisper=(0.45, 0.50)),
+    "growl": dict(hp=80.0, lp=6000.0, drive=2.2, shape="tanh", bias=0.04,
+                  gate=0.005, out=0.95, growl=(450.0, 0.80)),
+    "doubler": dict(hp=100.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.004, out=0.95,
+                    doubler=(22.0, 1.5, 0.33, 0.55)),
+    # The modern pedals. A talkbox is a formant pushed up (Growl is the same
+    # trick down), a vocoder replaces the excitation and keeps the envelopes,
+    # and the rest are a production gesture each.
+    "vocoder": dict(hp=90.0, lp=7500.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.004, out=1.3, vocoder=(2.6, 0.9)),
+    "talkbox": dict(hp=300.0, lp=7200.0, drive=3.4, shape="tanh", bias=0.06,
+                    gate=0.006, out=0.72, formant=(2300.0, 1.1, 0.55, 1.9)),
+    "hyperpop": dict(hp=80.0, lp=9000.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.004, out=1.5, ott=(0.9, 0.35)),
+    "tapestop": dict(hp=120.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.004, out=0.95, tapestop=(0.55, 0.85)),
+    "cloud": dict(hp=120.0, lp=5200.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.005, out=1.3,
+                  cloud=((95.0, 160.0, 240.0, 330.0), 0.11, 16.0, 0.62)),
+    "air": dict(hp=150.0, lp=12000.0, drive=1.0, shape=None, bias=0.0,
+                gate=0.004, out=0.95, air=(4200.0, 2.6, 0.45)),
+    "pump": dict(hp=100.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
+                 gate=0.004, out=0.95, pump=(128.0, 0.8, 0.22)),
+    "freeze": dict(hp=110.0, lp=5200.0, drive=1.0, shape=None, bias=0.0,
+                   gate=0.004, out=0.95, freeze=(8, 60)),
+    "step": dict(hp=120.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
+                 gate=0.004, out=1.35,
+                 step=(7.0, (250.0, 900.0, 3000.0), 1.4)),
+    "swell": dict(hp=110.0, lp=5500.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.004, out=0.95, swell=(0.06, 1.10, 0.55, 0.9, 0.5)),
 }
+
+#: The loudest a pedal may hand over, in full scale. The PA and a cinema cabinet
+#: both put the voice through effect sends *on top of* the dry voice -- the PA two
+#: (its cabinet EQ and its compressor), a cinema room up to four (the room's
+#: reverb, the cabinet's EQ, the same voice EQ and the compressor). A preamp
+#: pushing the frame to 1.0 left that chain no headroom at all: the mixer clipped
+#: on every syllable, heard as a buzz under the words and as a compressor that
+#: worked so hard a tremolo arrived flattened. 0.7 is 3 dB of room for the chain
+#: and still a loud pedal -- unity below the knee, so a quiet voice is untouched.
+PEAK_CEILING = 0.70
+
+#: The vocoder's six bands, in hertz. A channel vocoder is a bank of band-pass
+#: filters on both sides: the voice's bands supply the envelopes, a fixed saw
+#: supplies the excitation, and the result keeps the words and loses the voice.
+#: Six is the narrowest bank that still separates vowels; every extra band is
+#: another per-sample filter on the talker's own thread.
+VOCODER_BANDS = (180.0, 360.0, 700.0, 1300.0, 2400.0, 4200.0)
+
+#: The saw the vocoder speaks through, and each band's own level on it --
+#: measured once per process, because the carrier is a fixed waveform and its
+#: band levels are constants. Dividing the voice's envelope by them is what
+#: keeps a band with a quiet harmonic as loud as one with a strong harmonic.
+VOCODER_CARRIER_HZ = 110.0
+_vocoder_carrier_levels = None
+
+#: The step filter's pattern: which of the three bands is heard on each
+#: sixteenth. Eight steps is a bar's worth of movement, not a melody.
+STEP_PATTERN = (0, 0, 1, 2, 1, 0, 2, 1)
+
+
+def _carrier_band_levels(q):
+    """The carrier's RMS in each vocoder band, measured once and cached."""
+    global _vocoder_carrier_levels
+    if _vocoder_carrier_levels is not None and _vocoder_carrier_levels[0] == q:
+        return _vocoder_carrier_levels[1]
+    frames = 3
+    samples = frames * 960
+    cycle = np.arange(samples) / SAMPLE_RATE * VOCODER_CARRIER_HZ
+    carrier = (2.0 * (cycle % 1.0) - 1.0).astype(np.float32)
+    levels = []
+    for hz in VOCODER_BANDS:
+        band = _Biquad.bandpass(hz, q)
+        shaped = np.concatenate([
+            band.process(carrier[start:start + 960])
+            for start in range(0, samples, 960)])
+        # The last frame only: the filters have settled by then.
+        levels.append(max(1e-3, float(np.sqrt(np.mean(
+            np.square(shaped[-960:]))))))
+    _vocoder_carrier_levels = (q, tuple(levels))
+    return _vocoder_carrier_levels[1]
 
 #: The gate's two speeds, per frame. Opening is quick (a word must not lose its
 #: first consonant); closing is slow enough that a breath holds the gate open
 #: rather than chopping the tail of a sentence into pieces.
 GATE_OPEN = 0.5
 GATE_CLOSE = 0.12
-
-
-def clamp_effect(value):
-    """A preset id that exists, whatever was saved or handed in."""
-    for effect_id_, _label, _note in VOICE_EFFECTS:
-        if value == effect_id_:
-            return effect_id_
-    return DEFAULT_EFFECT
-
-
-def effect_label(value):
-    """The menu's words for a preset: 'Guitar Amp'."""
-    for effect_id_, label, _note in VOICE_EFFECTS:
-        if effect_id_ == clamp_effect(value):
-            return label
-    return VOICE_EFFECTS[0][1]
-
-
-def effect_note(value):
-    """What Tab reads on that preset's line."""
-    for effect_id_, _label, note in VOICE_EFFECTS:
-        if effect_id_ == clamp_effect(value):
-            return note
-    return VOICE_EFFECTS[0][2]
 
 
 def selected():
@@ -273,6 +288,31 @@ def _lowpass(hz, taps):
     if abs(total) < 1e-12:
         return np.zeros(taps, dtype=np.float32)
     return (kernel / total).astype(np.float32)
+
+
+def _tick(taps):
+    """A short one-sided click: what a record's scratch sounds like in a frame."""
+    window = np.hanning(taps)
+    total = float(window.sum())
+    return (window / total if total else window).astype(np.float32)
+
+
+def _hilbert(taps):
+    """A windowed Hilbert kernel: the quadrature branch of a 90-degree shift.
+
+    Odd length, antisymmetric, zero at the centre; a Hamming window keeps the
+    stop band from ringing into the voice's top octave. The branch it produces
+    lags by 90 degrees at every frequency the kernel covers, which is what makes
+    a frequency shifter shift every partial by the same number of hertz instead
+    of multiplying the spectrum the way a ring modulator does.
+    """
+    centre = (taps - 1) // 2
+    index = np.arange(taps) - centre
+    kernel = np.zeros(taps, dtype=np.float32)
+    odd = (np.arange(taps) - centre) % 2 != 0
+    kernel[odd] = 2.0 / (np.pi * index[odd])
+    kernel *= np.hamming(taps)
+    return kernel.astype(np.float32)
 
 
 class _Biquad:
@@ -440,6 +480,115 @@ class _EffectProcessor:
         self._cave_pos = 0
         self._alien = spec.get("alien")
         self._alien_phase = 0.0
+        self._sub_octave = spec.get("sub_octave")
+        self._divider_filter = (_Fir(_lowpass(700.0, 129))
+                                if self._sub_octave else None)
+        self._divider_state = 0
+        self._divider_negative = False
+        self._divider_level = 0.0
+        self._envelope_wah = spec.get("envelope_wah")
+        self._env_filter = (_Biquad.bandpass(self._envelope_wah[0],
+                                            self._envelope_wah[2])
+                            if self._envelope_wah else None)
+        self._env = 0.0
+        self._gate_pedal = spec.get("chop")
+        self._gate_fir = (_Fir(np.ones(48, dtype=np.float32) / 48.0)
+                          if self._gate_pedal else None)
+        self._reverse = spec.get("reverse")
+        self._reverse_history = collections.deque(
+            maxlen=int(self._reverse[0]) if self._reverse else 0)
+        self._reverse_loop = None
+        self._reverse_pos = 0
+        self._chorus3 = spec.get("chorus3")
+        self._chorus_ring = (np.zeros(4096, dtype=np.float32)
+                            if self._chorus3 else None)
+        self._chorus_pos = 0
+        # Vinyl: a short delay whose length drifts (a tape's wow) plus the odd
+        # click. Doubler: one copy at 22 ms, almost still.
+        self._vinyl = spec.get("vinyl")
+        self._vinyl_ring = (np.zeros(4096, dtype=np.float32)
+                            if self._vinyl else None)
+        self._vinyl_pos = 0
+        self._vinyl_pop = (_Fir(_tick(7)) if self._vinyl else None)
+        self._vinyl_level = 0.0
+        self._rng = np.random.default_rng(0x5EED)
+        self._doubler = spec.get("doubler")
+        self._doubler_ring = (np.zeros(4096, dtype=np.float32)
+                              if self._doubler else None)
+        self._doubler_pos = 0
+        # Wood Body: one resonant comb, the air of a guitar's box.
+        self._body = spec.get("body")
+        self._body_ring = (np.zeros(8192, dtype=np.float32)
+                           if self._body else None)
+        self._body_pos = 0
+        # Shimmer: a single-sideband shifter. The Hilbert branch is a short FIR
+        # and the real branch is delayed to meet it, so the sideband that is
+        # cancelled stays cancelled at the top of the voice.
+        self._shimmer = spec.get("shimmer")
+        self._shimmer_phase = 0.0
+        self._shimmer_delay = (np.zeros(4096, dtype=np.float32)
+                               if self._shimmer else None)
+        self._shimmer_pos = 0
+        self._shimmer_fir = (_Fir(_hilbert(127)) if self._shimmer else None)
+        # Whisper: filtered noise shaped by the voice's own envelope.
+        self._whisper = spec.get("whisper")
+        self._whisper_noise = (_Biquad.bandpass(2500.0, 0.8)
+                               if self._whisper else None)
+        self._whisper_level = 0.0
+        # Growl: two formants moved down, so the voice sits in its chest.
+        self._growl = spec.get("growl")
+        self._growl_filter = (_Fir(_lowpass(self._growl[0], 129))
+                              if self._growl else None)
+        # The modern pedals: a vocoder bank, a raised formant, an exciter, an
+        # up-and-down compressor, a varispeed delay, a cloud, a beat duck, a
+        # held slice, a stepped band-bank and a backwards ghost.
+        self._vocoder = spec.get("vocoder")
+        self._vocoder_filters = ([_Biquad.bandpass(hz, self._vocoder[0])
+                                  for hz in VOCODER_BANDS]
+                                 if self._vocoder else None)
+        self._vocoder_envelopes = [0.0] * len(VOCODER_BANDS)
+        self._vocoder_gains = [0.0] * len(VOCODER_BANDS)
+        self._vocoder_cycle = 0.0
+        self._formant = spec.get("formant")
+        self._formant_filter = (_Biquad.bandpass(self._formant[0],
+                                                 self._formant[1])
+                                if self._formant else None)
+        self._ott = spec.get("ott")
+        self._ott_env = 0.0
+        self._tapestop = spec.get("tapestop")
+        self._tapestop_ring = (np.zeros(32768, dtype=np.float32)
+                               if self._tapestop else None)
+        self._tapestop_pos = 0
+        self._tapestop_clock = 0.0
+        self._cloud = spec.get("cloud")
+        self._cloud_ring = (np.zeros(32768, dtype=np.float32)
+                            if self._cloud else None)
+        self._cloud_pos = 0
+        self._cloud_phase = 0.0
+        self._air = spec.get("air")
+        self._air_filter = (_Biquad.highpass(self._air[0], 1.1)
+                            if self._air else None)
+        self._pump = spec.get("pump")
+        self._pump_phase = 0.0
+        self._freeze = spec.get("freeze")
+        self._freeze_history = collections.deque(
+            maxlen=int(self._freeze[0]) if self._freeze else 0)
+        self._freeze_loop = None
+        self._freeze_pos = 0
+        self._freeze_counter = 0
+        self._freeze_seam = None
+        self._step = spec.get("step")
+        self._step_filters = ([_Biquad.bandpass(hz, self._step[2])
+                               for hz in self._step[1]]
+                              if self._step else None)
+        self._step_index = 0
+        self._step_counter = 0
+        self._step_band = 0
+        self._swell = spec.get("swell")
+        self._swell_ring = (np.zeros(65536, dtype=np.float32)
+                            if self._swell else None)
+        self._swell_pos = 0
+        self._swell_clock = 0.0
 
     # ------------------------------------------------------------------ the gate
     def _gate(self, block):
@@ -616,47 +765,71 @@ class _EffectProcessor:
         return block * (1.0 - mix) + block * carrier * mix
 
     def _flanger_block(self, block):
-        """A short swept delay that feeds back -- the jet sound."""
+        """A short swept delay that feeds back -- the jet sound.
+
+        One sample at a time, unlike the pure delays: the ring is fed the
+        output, and the delay (1.5-5.5 ms) is shorter than a frame, so the
+        sample being read can have been written by this very block. Reading a
+        whole block first and writing it afterwards -- what this used to do --
+        means every read past the delay lands on the *previous* wrap of the
+        ring, 4096 samples old: a step at every 20 ms boundary, heard as a
+        50 Hz buzz under the jet.
+        """
         if not self._flanger:
             return block
         base, sweep, rate, feedback, mix = self._flanger
         ring, size = self._flanger_ring, self._flanger_ring.size
-        positions = np.arange(block.size)
-        phase = self._lfo + 2.0 * np.pi * rate * positions / SAMPLE_RATE
-        delay = ((base + sweep * (0.5 + 0.5 * np.sin(phase)))
-                 * SAMPLE_RATE / 1000.0)
         start = self._flanger_pos
-        read = (start + positions - delay) % size
+        samples = block.tolist()
+        out = [0.0] * len(samples)
+        step = 2.0 * np.pi * rate / SAMPLE_RATE
+        angle = self._lfo
+        gain = 1.0 - float(mix)
+        for index, dry in enumerate(samples):
+            delay = ((base + sweep * (0.5 + 0.5 * float(np.sin(angle))))
+                     * SAMPLE_RATE / 1000.0)
+            read = start + index - delay
+            lower = int(np.floor(read))
+            fraction = read - lower
+            delayed = (ring[lower % size] * (1.0 - fraction)
+                       + ring[(lower + 1) % size] * fraction)
+            ring[(start + index) % size] = dry + float(feedback) * delayed
+            out[index] = dry * gain + delayed * float(mix)
+            angle += step
+        self._flanger_pos = int((start + block.size) % size)
+        self._lfo = float(angle % (2.0 * np.pi))
+        return np.asarray(out, dtype=np.float32)
+
+    def _delay_frame(self, block, ring, start, delay_samples):
+        """Write the frame, then read the delay -- the correct order.
+
+        A delay shorter than a frame (every wobbling pedal here) has to see the
+        samples this frame has just written: read-before-write makes the read
+        fall on the previous wrap of the ring for every sample past the delay, a
+        step at the frame boundary. Writing first is exact and still
+        vectorised; the ring must be longer than the frame plus the longest
+        delay, which is why they are powers of two far above both.
+        """
+        size = ring.size
+        positions = np.arange(block.size)
+        ring[(start + positions) % size] = block
+        read = (start + positions - delay_samples) % size
         lower = np.floor(read).astype(np.int64)
         fraction = (read - lower).astype(np.float32)
         delayed = (ring[lower % size] * (1.0 - fraction)
                    + ring[(lower + 1) % size] * fraction)
-        write = (start + positions) % size
-        ring[write] = block + float(feedback) * delayed
-        self._flanger_pos = int((start + block.size) % size)
-        self._lfo = ((self._lfo
-                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
-                     % (2.0 * np.pi))
-        return block * (1.0 - mix) + delayed * mix
+        return delayed, int((start + block.size) % size)
 
     def _vibrato_block(self, block):
         """A delay that only wobbles, fully wet: pitch, not an echo."""
         if not self._vibrato:
             return block
         base, sweep, rate = self._vibrato
-        ring, size = self._vibrato_ring, self._vibrato_ring.size
         positions = np.arange(block.size)
         phase = self._lfo + 2.0 * np.pi * rate * positions / SAMPLE_RATE
         delay = (base + sweep * np.sin(phase)) * SAMPLE_RATE / 1000.0
-        start = self._vibrato_pos
-        read = (start + positions - delay) % size
-        lower = np.floor(read).astype(np.int64)
-        fraction = (read - lower).astype(np.float32)
-        delayed = (ring[lower % size] * (1.0 - fraction)
-                   + ring[(lower + 1) % size] * fraction)
-        write = (start + positions) % size
-        ring[write] = block
-        self._vibrato_pos = int((start + block.size) % size)
+        delayed, self._vibrato_pos = self._delay_frame(
+            block, self._vibrato_ring, self._vibrato_pos, delay)
         self._lfo = ((self._lfo
                       + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
                      % (2.0 * np.pi))
@@ -689,23 +862,279 @@ class _EffectProcessor:
         self._stutter_pos = (position + 1) % period_frames
         return out
 
+    @staticmethod
+    def _multi_tap(block, taps, gains, feedback, mix, ring, position):
+        """A bank of taps feeding one another; returns the frame and the next
+        write position. Delays are longer than a frame, which is what makes
+        read-before-write safe and the whole thing vectorised."""
+        size = ring.size
+        positions = np.arange(block.size)
+        wet = np.zeros(block.size, dtype=np.float32)
+        for tap_ms, gain in zip(taps, gains):
+            delay = int(round(float(tap_ms) * SAMPLE_RATE / 1000.0))
+            read = (position + positions - delay) % size
+            wet += ring[read] * gain
+        ring[(position + positions) % size] = (block
+                                              + float(feedback) * wet)
+        return (block * (1.0 - mix) + wet * mix,
+                int((position + block.size) % size))
+
     def _cave_block(self, block):
         """Four taps that feed one another: a room rather than one repeat."""
         if not self._cave:
             return block
         taps, feedback, mix = self._cave
-        ring, size = self._cave_ring, self._cave_ring.size
+        out, self._cave_pos = self._multi_tap(
+            block, taps, (0.7, 0.55, 0.4, 0.3), feedback, mix,
+            self._cave_ring, self._cave_pos)
+        return out
+
+    def _sub_octave_block(self, block):
+        """An octave down with a divider, not a pitch shifter.
+
+        A square wave toggles at every positive-going zero crossing of the
+        (low-passed) voice, so its period is two of the voice's cycles: an
+        octave below. This is the oldest sub-octave pedal there is, and it is
+        cheap and has no latency -- at the cost of a buzzy, square copy. The
+        700 Hz filter before the crossing detector keeps a formant from adding
+        crossings of its own and turning the note into noise.
+        """
+        if not self._sub_octave:
+            return block
+        mix = float(self._sub_octave)
+        smooth = self._divider_filter.process(block)
+        negative = smooth < 0.0
+        rise = np.empty(block.size, dtype=bool)
+        rise[0] = self._divider_negative and not bool(negative[0])
+        rise[1:] = negative[:-1] & ~negative[1:]
+        toggles = np.cumsum(rise) % 2
+        levels = ((toggles ^ self._divider_state).astype(np.float32)
+                  * 2.0 - 1.0)
+        self._divider_state = int(self._divider_state
+                                  ^ int(toggles[-1]))
+        self._divider_negative = bool(negative[-1])
+        # A square's own DC must not make silence audible: the divider fades
+        # with the voice, and a frame that was never voiced stays exactly zero.
+        level = (float(np.sqrt(np.mean(np.square(smooth))))
+                 if smooth.size else 0.0)
+        self._divider_level += (min(1.0, level / 0.02)
+                                - self._divider_level) * 0.5
+        return block * (1.0 - mix) + levels * (mix * self._divider_level)
+
+    def _envelope_wah_block(self, block):
+        """A band that follows the voice's level, not a clock."""
+        if not self._envelope_wah:
+            return block
+        low, high, q, boost = self._envelope_wah
+        level = (float(np.sqrt(np.mean(np.square(block))))
+                 if block.size else 0.0)
+        target = min(1.0, level / 0.12)
+        # Opening is quick (a word pushes the filter up); closing is slow, so a
+        # gap between words does not slam it shut and open on the next one.
+        speed = 0.45 if target > self._env else 0.08
+        self._env += (target - self._env) * speed
+        self._env_filter.retune_bandpass(low + (high - low) * self._env, q)
+        return self._env_filter.process(block) * boost
+
+    def _gate_pedal_block(self, block):
+        """A hard 8 Hz chop, smoothed over a millisecond so it is not a click."""
+        if not self._gate_pedal:
+            return block
+        rate, depth = self._gate_pedal
         positions = np.arange(block.size)
-        start = self._cave_pos
+        phase = self._lfo + 2.0 * np.pi * rate * positions / SAMPLE_RATE
+        raw = np.where(np.sin(phase) >= 0.0, 1.0, depth).astype(np.float32)
+        gain = self._gate_fir.process(raw)
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        return block * gain
+
+    def _reverse_block(self, block):
+        """Play the last slice backwards, then let the voice carry on."""
+        if not self._reverse:
+            return block
+        slice_frames, period_frames = self._reverse
+        history = self._reverse_history
+        if len(history) < slice_frames:
+            history.append(block.copy())
+            return block
+        position = self._reverse_pos
+        if position == 0:
+            self._reverse_loop = [np.ascontiguousarray(frame[::-1])
+                                  for frame in reversed(list(history))]
+        out = block
+        looped = (self._reverse_loop[position]
+                  if position < slice_frames and self._reverse_loop else None)
+        if looped is not None and looped.size == block.size:
+            out = looped
+        history.append(block.copy())
+        self._reverse_pos = (position + 1) % period_frames
+        return out
+
+    def _vinyl_block(self, block):
+        """A record: a delay that drifts a few cents, and the odd click.
+
+        The drift is a delay of 2.5 ms whose length breathes by a third of a
+        millisecond at 0.6 Hz -- about 3 cents of wow, the amount a turntable's
+        motor gives a sustained note. The crackle is sparse by construction
+        (four sigma of white noise) and smoothed to a millisecond so a click is
+        a tick rather than a sample-wide snap.
+        """
+        if not self._vinyl:
+            return block
+        rate, depth_ms, crackle = self._vinyl
+        positions = np.arange(block.size)
+        phase = self._lfo + 2.0 * np.pi * rate * positions / SAMPLE_RATE
+        delay = ((2.5 + 0.5 * depth_ms * (1.0 + np.sin(phase)))
+                 * SAMPLE_RATE / 1000.0)
+        delayed, self._vinyl_pos = self._delay_frame(
+            block, self._vinyl_ring, self._vinyl_pos, delay)
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        noise = self._rng.standard_normal(block.size).astype(np.float32)
+        pops = (np.abs(noise) > 3.0).astype(np.float32) * np.sign(noise)
+        # The crackle rides the voice: an empty frame stays exactly empty, and
+        # silence never turns into a hiss of its own.
+        level = (float(np.sqrt(np.mean(np.square(block))))
+                 if block.size else 0.0)
+        self._vinyl_level += (min(1.0, level / 0.03)
+                              - self._vinyl_level) * 0.5
+        return delayed + (self._vinyl_pop.process(pops) * float(crackle)
+                          * self._vinyl_level)
+
+    def _body_block(self, block):
+        """A voice inside a guitar's box: one resonant comb.
+
+        `y[n] = x[n] + g*y[n-D]` with D the period of 110 Hz is the shortest
+        honest model of a wooden body -- it puts a resonance on a low A and its
+        harmonics, so the voice gains a hollow knock rather than a reverb tail.
+        """
+        if not self._body:
+            return block
+        hz, feedback, mix = self._body
+        ring, size = self._body_ring, self._body_ring.size
+        delay = max(1, int(round(SAMPLE_RATE / float(hz))))
+        start = self._body_pos
+        samples = block.tolist()
+        out = [0.0] * len(samples)
+        gain = 1.0 - float(mix)
+        for index, dry in enumerate(samples):
+            wet = dry + float(feedback) * ring[(start + index - delay) % size]
+            ring[(start + index) % size] = wet
+            out[index] = dry * gain + wet * float(mix)
+        self._body_pos = int((start + block.size) % size)
+        return np.asarray(out, dtype=np.float32)
+
+    def _shimmer_block(self, block):
+        """A single-sideband frequency shifter: every partial moves by 14 Hz.
+
+        Unlike the ring modulator (which mirrors the spectrum around a carrier
+        and so sounds robotic), shifting *up* every partial by the same number
+        of hertz keeps the voice's own shape and makes it glide -- the sound a
+        ring-mod with a moving carrier only imitates. The quadrature branch is
+        a 31-tap Hilbert FIR; the real branch waits the FIR's own delay so the
+        two still cancel the lower sideband.
+        """
+        if not self._shimmer:
+            return block
+        hz, mix = self._shimmer
+        quadrature = self._shimmer_fir.process(block)
+        # `_Fir` correlates with its kernel, and a Hilbert kernel is
+        # antisymmetric: what comes back is minus the 90-degree copy, aligned
+        # with the frame. Pairing it with the voice delayed by half the kernel
+        # (its own group delay) is what makes the pair add up to the *upper*
+        # sideband only; the sign here is the difference between a shimmer and
+        # a plain ring modulator.
+        delay = (self._shimmer_fir.kernel.size - 1) // 2
+        in_phase, self._shimmer_pos = self._delay_frame(
+            block, self._shimmer_delay, self._shimmer_pos, delay)
+        positions = np.arange(block.size)
+        phase = (self._shimmer_phase
+                 + 2.0 * np.pi * hz * positions / SAMPLE_RATE)
+        shifted = (in_phase * np.cos(phase)
+                   - quadrature * np.sin(phase)).astype(np.float32)
+        self._shimmer_phase = ((self._shimmer_phase
+                                + 2.0 * np.pi * hz * block.size / SAMPLE_RATE)
+                               % (2.0 * np.pi))
+        return block * (1.0 - float(mix)) + shifted * float(mix)
+
+    def _whisper_block(self, block):
+        """A hush: the voice thinned, with breath riding its own envelope.
+
+        A whisper has no pitch, only noise shaped by the mouth -- so the noise
+        here is filtered noise multiplied by the frame's own level, added under
+        a voice that has already lost everything below 900 Hz. The envelope is
+        smoothed over two frames, because a per-frame gain would chop the noise
+        into 20 ms steps.
+        """
+        if not self._whisper:
+            return block
+        noise_mix, voice_mix = self._whisper
+        level = (float(np.sqrt(np.mean(np.square(block))))
+                 if block.size else 0.0)
+        self._whisper_level += (level - self._whisper_level) * 0.5
+        noise = self._whisper_noise.process(
+            self._rng.standard_normal(block.size).astype(np.float32))
+        breath = noise * min(1.0, self._whisper_level / 0.12)
+        return block * float(voice_mix) + breath * float(noise_mix)
+
+    def _growl_block(self, block):
+        """Everything below 450 Hz lifted into a driven chest.
+
+        A band-pass at two fixed formants made a voice quieter and hollow; what
+        makes a growl is weight, not a notch. The low half of the voice is mixed
+        back 1.6 times over the dry one, and the pre-gain in the chain has
+        already made it dirty, so the result is a bigger body rather than a
+        filter.
+        """
+        if not self._growl:
+            return block
+        _hz, mix = self._growl
+        dark = self._growl_filter.process(block)
+        return block * (1.0 - float(mix)) + dark * float(mix) * 1.6
+
+    def _doubler_block(self, block):
+        """One copy, 22 ms behind and barely moving: a double-tracked voice."""
+        if not self._doubler:
+            return block
+        base, drift, rate, mix = self._doubler
+        positions = np.arange(block.size)
+        phase = self._lfo + 2.0 * np.pi * rate * positions / SAMPLE_RATE
+        delay = (base + drift * 0.5 * (1.0 + np.sin(phase))) \
+            * SAMPLE_RATE / 1000.0
+        doubled, self._doubler_pos = self._delay_frame(
+            block, self._doubler_ring, self._doubler_pos, delay)
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        return block * (1.0 - float(mix)) + doubled * float(mix)
+
+    def _chorus3_block(self, block):
+        """Three drifting copies, one LFO at three phase offsets."""
+        if not self._chorus3:
+            return block
+        bases, rate, sweep, mix = self._chorus3
+        ring, size = self._chorus_ring, self._chorus_ring.size
+        positions = np.arange(block.size)
+        start = self._chorus_pos
+        ring[(start + positions) % size] = block
         wet = np.zeros(block.size, dtype=np.float32)
-        for tap_ms, gain in zip(taps, (0.7, 0.55, 0.4, 0.3)):
-            delay = int(round(float(tap_ms) * SAMPLE_RATE / 1000.0))
+        for index, base in enumerate(bases):
+            phase = (self._lfo + index * 2.1
+                     + 2.0 * np.pi * rate * positions / SAMPLE_RATE)
+            delay = (base + sweep * np.sin(phase)) * SAMPLE_RATE / 1000.0
             read = (start + positions - delay) % size
-            wet += ring[read] * gain
-        write = (start + positions) % size
-        ring[write] = block + float(feedback) * wet
-        self._cave_pos = int((start + block.size) % size)
-        return block * (1.0 - mix) + wet * mix
+            lower = np.floor(read).astype(np.int64)
+            fraction = (read - lower).astype(np.float32)
+            wet += (ring[lower % size] * (1.0 - fraction)
+                    + ring[(lower + 1) % size] * fraction)
+        self._chorus_pos = int((start + block.size) % size)
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        return block * (1.0 - mix) + (wet / 3.0) * mix
 
     def _alien_block(self, block):
         """Ring modulation with a carrier that slides, not a fixed pitch."""
@@ -724,6 +1153,254 @@ class _EffectProcessor:
                      % (2.0 * np.pi))
         return block * (1.0 - mix) + block * carrier * mix
 
+    # -------------------------------------------------------------- the modern
+    def _air_block(self, block):
+        """An exciter: the top filtered out, driven, and added back.
+
+        A voice recorded close has nothing above four kilohertz to work with,
+        and an EQ can only take away from what is there. Driving the top makes
+        new harmonics above it, which is why this opens a dull voice instead of
+        merely brightening it.
+        """
+        if not self._air:
+            return block
+        _hz, drive, mix = self._air
+        top = self._air_filter.process(block)
+        return block + np.tanh(top * float(drive)) * float(mix)
+
+    def _formant_block(self, block):
+        """One band lifted and driven: a talkbox's tube, a chest's weight."""
+        if not self._formant:
+            return block
+        _hz, _q, mix, gain = self._formant
+        band = self._formant_filter.process(block)
+        return block * (1.0 - float(mix)) + band * (float(mix) * float(gain))
+
+    def _vocoder_block(self, block):
+        """The voice's six band envelopes, spoken by a saw instead of by you.
+
+        A channel vocoder does not shift pitch: it keeps *what* the mouth did
+        and throws away *what* made the sound, then rebuilds it from a fixed
+        saw through the same six bands. That is why the words survive and the
+        voice does not. The envelopes are read as one spectrum per frame (six
+        more filters on the voice would be six more per-sample loops), and each
+        band's gain ramps across the frame, so a syllable's edge is not a step
+        at a frame boundary.
+        """
+        if not self._vocoder:
+            return block
+        q, mix = self._vocoder
+        count = block.size
+        positions = np.arange(count)
+        cycle = ((self._vocoder_cycle
+                  + VOCODER_CARRIER_HZ * positions / SAMPLE_RATE) % 1.0)
+        carrier = (2.0 * cycle - 1.0).astype(np.float32)
+        self._vocoder_cycle = ((self._vocoder_cycle
+                                + VOCODER_CARRIER_HZ * count / SAMPLE_RATE)
+                               % 1.0)
+        spectrum = np.abs(np.fft.rfft(block)) ** 2
+        bin_hz = SAMPLE_RATE / float(count)
+        levels = _carrier_band_levels(q)
+        half = 2.0 ** 0.35
+        wet = np.zeros(count, dtype=np.float32)
+        for index, hz in enumerate(VOCODER_BANDS):
+            first = max(1, int(hz / half / bin_hz))
+            last = max(first + 1, int(hz * half / bin_hz))
+            energy = float(spectrum[first:last].sum()) * 2.0 / (count * count)
+            wanted = float(np.sqrt(energy))
+            envelope = self._vocoder_envelopes[index]
+            # Up fast, down slowly: a consonant is an envelope step and a vowel
+            # is a steady band, so only the release may be slow.
+            envelope = (wanted if wanted > envelope
+                        else envelope + (wanted - envelope) * 0.45)
+            self._vocoder_envelopes[index] = envelope
+            gain = min(6.0, envelope / levels[index])
+            band = self._vocoder_filters[index].process(carrier)
+            wet += band * np.linspace(self._vocoder_gains[index], gain, count,
+                                      endpoint=False)
+            self._vocoder_gains[index] = gain
+        return block * (1.0 - float(mix)) + wet * float(mix)
+
+    def _ott_block(self, block):
+        """A pop vocal's loudness: quiet lifted, loud held, no dials.
+
+        Per sample, not per frame: a gain that moves at frame rate is a 50 Hz
+        amplitude modulation under the words, the same buzz the wobbling delays
+        had. The follower's attack is instant and its release is about forty
+        milliseconds, which is what makes a compressor sound like a compressor.
+        """
+        if not self._ott:
+            return block
+        upward, downward = self._ott
+        target = 0.05
+        samples = block.tolist()
+        out = [0.0] * len(samples)
+        env = self._ott_env
+        for index, sample in enumerate(samples):
+            level = sample if sample >= 0.0 else -sample
+            env = level if level > env else env + (level - env) * 0.0018
+            if env > 1e-4:
+                if env > target:
+                    gain = (target / env) ** downward
+                else:
+                    gain = (target / env) ** upward
+                if gain > 4.0:
+                    gain = 4.0
+            else:
+                gain = 1.0
+            out[index] = sample * gain
+        self._ott_env = env
+        return np.asarray(out, dtype=np.float32)
+
+    def _pump_block(self, block):
+        """A four-to-the-floor duck: the voice steps back into every beat."""
+        if not self._pump:
+            return block
+        bpm, depth, release = self._pump
+        beats = float(bpm) / 60.0
+        positions = np.arange(block.size)
+        phase = (self._pump_phase + beats * positions / SAMPLE_RATE) % 1.0
+        gain = 1.0 - float(depth) * np.exp(-phase / float(release))
+        self._pump_phase = float((self._pump_phase
+                                  + beats * block.size / SAMPLE_RATE) % 1.0)
+        return block * gain.astype(np.float32)
+
+    def _step_block(self, block):
+        """Three bands, one heard at a time, the choice on sixteenths."""
+        if not self._step:
+            return block
+        rate, _bands, _q = self._step
+        step_frames = max(1, int(round(1.0 / (float(rate) * 0.020))))
+        bands = [filt.process(block) for filt in self._step_filters]
+        self._step_counter += 1
+        if self._step_counter >= step_frames:
+            self._step_counter = 0
+            self._step_index += 1
+        wanted = STEP_PATTERN[self._step_index % len(STEP_PATTERN)]
+        previous = self._step_band
+        if wanted == previous:
+            return bands[previous]
+        # The band changes between frames, so the frame it changes in
+        # crossfades from the old band into the new one: a hard switch between
+        # two filters is a step, and a step is a click.
+        ramp = np.linspace(0.0, 1.0, block.size, endpoint=False,
+                           dtype=np.float32)
+        self._step_band = wanted
+        return bands[previous] * (1.0 - ramp) + bands[wanted] * ramp
+
+    def _cloud_block(self, block):
+        """Four drifting copies of the last third of a second."""
+        if not self._cloud:
+            return block
+        taps, rate, depth, mix = self._cloud
+        ring, size = self._cloud_ring, self._cloud_ring.size
+        positions = np.arange(block.size)
+        start = self._cloud_pos
+        ring[(start + positions) % size] = block
+        wet = np.zeros(block.size, dtype=np.float32)
+        for index, tap in enumerate(taps):
+            phase = (self._cloud_phase + index * 1.7
+                     + 2.0 * np.pi * rate * positions / SAMPLE_RATE)
+            delay = ((float(tap) + float(depth) * np.sin(phase))
+                     * SAMPLE_RATE / 1000.0)
+            read = (start + positions - delay) % size
+            lower = np.floor(read).astype(np.int64)
+            fraction = (read - lower).astype(np.float32)
+            copy = (ring[lower % size] * (1.0 - fraction)
+                    + ring[(lower + 1) % size] * fraction)
+            # Each tap swells and fades at its own speed, so the haze moves
+            # instead of being four fixed echoes.
+            wet += copy * (0.55 + 0.45 * np.sin(phase * 0.5))
+        self._cloud_pos = int((start + block.size) % size)
+        self._cloud_phase = ((self._cloud_phase
+                              + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                             % (2.0 * np.pi))
+        return block * (1.0 - float(mix)) + (wet / 4.0) * float(mix)
+
+    def _tapestop_block(self, block):
+        """The head slows to a stop, then the tape starts again.
+
+        A varispeed: the read head runs at a rate that falls to zero, so the
+        pitch falls with it. The gain is zero while the head resets to the live
+        sample, which is what keeps the jump back inaudible; the ring is
+        written all the while, so the voice is never lost.
+        """
+        if not self._tapestop:
+            return block
+        hold, fall = self._tapestop
+        count = block.size
+        positions = np.arange(count)
+        cycle = float(hold) + float(fall)
+        phase = np.mod(self._tapestop_clock + positions / SAMPLE_RATE, cycle)
+        progress = np.clip((phase - float(hold)) / float(fall), 0.0, 1.0)
+        # A 20 ms delay through the hold, then the delay grows as p-squared, so
+        # the playback rate (1 - d(delay)/dt) reaches exactly zero at its end.
+        delay = (0.020 + (float(fall) * 0.5) * progress * progress) * SAMPLE_RATE
+        fade_in = np.clip(phase / 0.12, 0.0, 1.0)
+        fade_out = np.clip((1.0 - progress) / 0.20, 0.0, 1.0)
+        self._tapestop_clock = float((self._tapestop_clock
+                                      + count / SAMPLE_RATE) % cycle)
+        slowed, self._tapestop_pos = self._delay_frame(
+            block, self._tapestop_ring, self._tapestop_pos, delay)
+        return slowed * np.minimum(fade_in, fade_out)
+
+    def _swell_block(self, block):
+        """A backwards ghost of the last word, growing under this one.
+
+        The read head walks backwards (the delay grows faster than real time),
+        so what is heard under the voice is a slice of the recent past played
+        in reverse, with an envelope that grows into the cut. It is the reverse
+        reverb of a trailer, made without the look-ahead a real one would need.
+        """
+        if not self._swell:
+            return block
+        near, far, active, cycle, mix = self._swell
+        count = block.size
+        positions = np.arange(count)
+        clock = np.mod(self._swell_clock + positions / SAMPLE_RATE, float(cycle))
+        progress = np.clip(clock / float(active), 0.0, 1.0)
+        delay = (float(near) + (float(far) - float(near)) * progress) \
+            * SAMPLE_RATE
+        gain = np.where(clock < float(active), progress * progress, 0.0)
+        self._swell_clock = float((self._swell_clock
+                                   + count / SAMPLE_RATE) % float(cycle))
+        ghost, self._swell_pos = self._delay_frame(
+            block, self._swell_ring, self._swell_pos, delay)
+        return block + ghost * (gain.astype(np.float32) * float(mix))
+
+    def _freeze_block(self, block):
+        """The last sixth of a second held, with a crossfade at its seam."""
+        if not self._freeze:
+            return block
+        length, refresh = self._freeze
+        history = self._freeze_history
+        history.append(block.copy())
+        if len(history) < length:
+            return block
+        self._freeze_counter += 1
+        if self._freeze_loop is None:
+            self._freeze_loop = list(history)
+            self._freeze_pos = 0
+        elif self._freeze_counter % int(refresh) == 0:
+            # The drone follows the newest words without cutting the loop: the
+            # position and the seam both survive the capture.
+            self._freeze_loop = list(history)
+        loop = self._freeze_loop
+        position = self._freeze_pos
+        out = loop[position]
+        seam = self._freeze_seam
+        if seam is not None and seam.shape == out.shape:
+            # Two frames of blend: the slice ends on one phoneme and starts on
+            # another, and that join is the one place this drone can click.
+            if position == 0:
+                out = loop[0] * 0.7 + seam * 0.3
+            elif position == 1:
+                out = loop[1] * 0.9 + seam * 0.1
+        if position == length - 1:
+            self._freeze_seam = loop[-1]
+        self._freeze_pos = (position + 1) % length
+        return out
+
     # ------------------------------------------------------------------ the frame
     def process(self, pcm):
         """Shape one frame; the same number of bytes comes back."""
@@ -737,6 +1414,10 @@ class _EffectProcessor:
         block = self._octave_block(block)
         block = self.dc.process(block)
         block = self.post.process(block)
+        block = self._air_block(block)
+        block = self._formant_block(block)
+        block = self._vocoder_block(block)
+        block = self._ott_block(block)
         block = self._chorus_block(block)
         block = self._tremolo_block(block)
         block = self._wah_block(block)
@@ -748,9 +1429,27 @@ class _EffectProcessor:
         block = self._stutter_block(block)
         block = self._cave_block(block)
         block = self._alien_block(block)
-        # A soft ceiling rather than a hard clip: the encoder is handed a frame
-        # that is already inside full scale, and the last harmonics fold gently.
-        shaped = np.tanh(block * self._out * 1.1) / np.tanh(1.1)
+        block = self._sub_octave_block(block)
+        block = self._envelope_wah_block(block)
+        block = self._gate_pedal_block(block)
+        block = self._reverse_block(block)
+        block = self._chorus3_block(block)
+        block = self._vinyl_block(block)
+        block = self._body_block(block)
+        block = self._shimmer_block(block)
+        block = self._whisper_block(block)
+        block = self._growl_block(block)
+        block = self._doubler_block(block)
+        block = self._step_block(block)
+        block = self._pump_block(block)
+        block = self._cloud_block(block)
+        block = self._swell_block(block)
+        block = self._freeze_block(block)
+        block = self._tapestop_block(block)
+        # Unity below the knee and a hard asymptotic ceiling at PEAK_CEILING:
+        # the encoder is handed a frame with room left for the effect sends the
+        # PA and a cinema room put on top of it (see PEAK_CEILING).
+        shaped = PEAK_CEILING * np.tanh(block * self._out / PEAK_CEILING)
         return (np.clip(shaped, -1.0, 1.0) * 32767.0).round().astype(
             "<i2").tobytes()
 
