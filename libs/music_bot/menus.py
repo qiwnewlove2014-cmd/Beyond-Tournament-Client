@@ -2000,19 +2000,20 @@ class MusicBotMenus:
         -- and `Chromatic` falls back to the major scale's spelling of each
         interval, because a grid with a note every semitone has no key to
         harmonise in. With Auto-Tune OFF there is no scale in play at all: the
-        copy is the plain size of the interval (`autotune.harmony_plain_offset`),
+        copy is the plain size of the interval (`harmony.harmony_plain_offset`),
         sung from the voice as it is, because Harmony is a mode of its own. The
         rows below `Octave` take the copy DOWN instead: a bass
         voice, mixed quieter than the lead and low-passed, so it hums under the
-        words rather than doubling them (`autotune.harmony_share`).
+        words rather than doubling them (`harmony.harmony_share`).
 
         The copy is part of the ONE broadcast voice: it is mixed into the same
-        20 ms frame (`libs/voice_chat.HarmonyVoice`), so a listener hears it
+        20 ms frame (`libs/music_bot/harmony.py`'s `HarmonyVoice`), so a
+        listener hears it
         without anything extra being sent, and a PA slot or a cinema room still
         gets exactly the frames it always did.
         """
         from .. import menu as menu_mod, menus
-        from . import autotune
+        from . import harmony
         gp = self._bot._find_gameplay()
         if not gp:
             return
@@ -2026,7 +2027,7 @@ class MusicBotMenus:
                 self._bot.set_autotune_harmony(interval_id, second=second)
                 speak(f"Harmony {'2' if second else '1'}: "
                       f"{self._bot.autotune_harmony_label(second=second)}. "
-                      f"{autotune.harmony_note(interval_id)}")
+                      f"{harmony.harmony_note(interval_id)}")
                 m.speak_current_item()
             return apply
 
@@ -2035,15 +2036,15 @@ class MusicBotMenus:
             # the choice on the list that is already open.
             def label_fn():
                 attribute = "autotune_harmony2" if second else "autotune_harmony"
-                current = autotune.clamp_harmony(
-                    getattr(self._bot, attribute, autotune.DEFAULT_HARMONY))
-                label = autotune.harmony_label(interval_id)
+                current = harmony.clamp_harmony(
+                    getattr(self._bot, attribute, harmony.DEFAULT_HARMONY))
+                label = harmony.harmony_label(interval_id)
                 return f"{label} (active)" if interval_id == current else label
             return label_fn
 
         items = [(make_label(interval_id), pick(interval_id), None, note)
                  for interval_id, _label, _semitones, note
-                 in autotune.HARMONY_INTERVALS]
+                 in harmony.HARMONY_INTERVALS]
         items.append(("Back", go_back, None,
                       "Returns to the Harmony page."))
         m = menu_mod.Menu(

@@ -117,6 +117,10 @@ import collections
 import numpy as np
 
 from ..pitch import NOTE_NAMES, yin_pitch_and_clarity
+# The intervals a copy is placed from. The catalogue and the copies' own DSP live
+# in `music_bot/harmony.py`; the tuner only needs to read an interval's size and
+# clamp an id, because the note a copy is sung from is the LEAD's corrected one.
+from .harmony import DEFAULT_HARMONY, clamp_harmony, harmony_semitones
 from .transpose import ChromaticTransposer
 
 #: One microphone frame: 20 ms of 48 kHz mono, the unit the whole voice path is
@@ -177,7 +181,7 @@ class AutoTuner:
         self._pitch = collections.deque(maxlen=self.PITCH_MEDIAN)
         #: The correction the line is actually being sent, before Tune Amount.
         self._applied = 0.0
-        #: The two harmony copies' intervals (see `HARMONY_INTERVALS`).
+        #: The two harmony copies' intervals (see `music_bot/harmony.py`).
         self.harmony = (DEFAULT_HARMONY, DEFAULT_HARMONY)
         #: The pitch this press is singing right now, as a MIDI number, or None.
         #: The harmony copies are placed from it, so one detection serves three
@@ -672,147 +676,6 @@ def scale_label(mode=DEFAULT_MODE, root=DEFAULT_ROOT):
     if clamp_mode(mode) == "chromatic":
         return mode_name(mode)
     return f"{root_name(root)} {mode_name(mode)}"
-
-
-# ------------------------------------------------------------- the harmony voices
-
-#: A harmony voice is a second copy of the tuned voice, an interval above it.
-#: The interval is counted in the note set, not in semitones: a third above C
-#: in C major is E (four semitones) and above D it is F (three), which is why a
-#: harmony that follows the scale is always in key while a fixed shift is not.
-#: A chromatic grid has no scale to count in, so it counts in the major scale --
-#: what everyone means by "a third" when no key has been chosen.
-#:
-#: ``(id, menu name, semitones above the tuned note, what Tab reads)``. The
-#: third field is the size the note is looked for from, and `AutoTuner.
-#: nearest_note` snaps it to the scale, so a pentatonic answers with the nearest
-#: note it actually has rather than inventing one.
-#:
-#: A NEGATIVE size is a copy BELOW the voice -- the bass half of the catalogue.
-#: It is the same arithmetic (a third below C in C major is A, below D it is B)
-#: and the same one-frame mix, but it is mixed as a bass voice rather than as a
-#: second singer (`harmony_share`, `BASS_TONE_HZ`): quieter than the lead and
-#: low-passed, because a copy an octave down at the lead's own level is heard as
-#: the voice doubling and smearing rather than as a low voice under it.
-HARMONY_INTERVALS = (
-    ("off", "Off", 0,
-     "No second voice: the tuned voice on its own."),
-    ("third", "Third", 4,
-     "A second copy of the voice a third above: the nearest note your scale "
-     "has there while Auto-Tune is tuning you, so it is a major third over "
-     "some notes and a minor third over others -- the interval a second "
-     "singer would take. With Auto-Tune off it is a plain major third."),
-    ("fifth", "Fifth", 7,
-     "A second copy a fifth above: the strongest harmony there is, because "
-     "it sounds like the same chord one voice higher."),
-    ("sixth", "Sixth", 9,
-     "A second copy a sixth above: wider and softer than a third, and the "
-     "one that sounds like a duet rather than a chord."),
-    ("seventh", "Seventh", 11,
-     "A second copy a seventh above, a whole tone under the octave. It is the "
-     "jazzier, more open harmony, and it wants a scale that has one -- while "
-     "Auto-Tune is on a pentatonic answers with its own nearest note. With "
-     "Auto-Tune off it is a plain major seventh."),
-    ("octave", "Octave", 12,
-     "A second copy an octave above: the same note, higher, which thickens "
-     "the voice instead of adding a note to it."),
-    ("bass_third", "Bass Third", -3,
-     "A copy a third BELOW the voice: a low voice singing the note under "
-     "yours, taken from your scale so it stays in key while Auto-Tune is on "
-     "(a plain minor third with it off). It is mixed quieter than you and "
-     "low-passed, so it hums under the words instead of competing with them."),
-    ("bass_fifth", "Bass Fifth", -5,
-     "A copy a fifth below: the low root under your note, which is what a "
-     "choir puts under a melody. Quieter than the lead and low-passed, so it "
-     "hums under you rather than doubling you."),
-    ("bass_octave", "Bass Octave", -12,
-     "A copy an octave below: the same note one octave down, which thickens "
-     "the voice from underneath without adding a note to it. Quieter than "
-     "the lead and low-passed, so it hums."),
-)
-DEFAULT_HARMONY = "off"
-
-#: How loud a copy below the voice is against the lead's own 1.0. An upper copy
-#: is a second singer and takes an equal share; a bass copy is an undertone and
-#: takes a little over half of one, which is what keeps the words clear while
-#: the low voice is heard under them.
-BASS_SHARE = 0.55
-
-#: Where a bass copy is low-passed, in Hz. A copy an octave down is otherwise the
-#: voice again, an octave lower -- heard as the same words doubled and smeared.
-#: Below this the fundamental and first harmonics are kept and the consonants are
-#: gone, which is the hum a bass voice is: a note, not a second talker.
-BASS_TONE_HZ = 380.0
-
-
-def clamp_harmony(value):
-    """A harmony interval id that exists, whatever was handed in or saved."""
-    for interval_id, _label, _semitones, _note in HARMONY_INTERVALS:
-        if value == interval_id:
-            return interval_id
-    return DEFAULT_HARMONY
-
-
-def harmony_semitones(interval_id):
-    """The size a harmony voice is looked for at, in semitones (0 for Off)."""
-    for interval_id_, _label, semitones, _note in HARMONY_INTERVALS:
-        if interval_id_ == clamp_harmony(interval_id):
-            return semitones
-    return 0
-
-
-def harmony_label(interval_id):
-    """The menu's words for a harmony interval: 'Third', 'Off'..."""
-    for interval_id_, label, _semitones, _note in HARMONY_INTERVALS:
-        if interval_id_ == clamp_harmony(interval_id):
-            return label
-    return HARMONY_INTERVALS[0][1]
-
-
-def harmony_note(interval_id):
-    """What the menu says this harmony is, for a player meeting it first."""
-    for interval_id_, _label, _semitones, note in HARMONY_INTERVALS:
-        if interval_id_ == clamp_harmony(interval_id):
-            return note
-    return HARMONY_INTERVALS[0][3]
-
-
-def harmony_is_bass(interval_id):
-    """True when this copy sings BELOW the voice rather than above it."""
-    return harmony_semitones(interval_id) < 0
-
-
-def harmony_share(interval_id):
-    """This copy's weight in the one frame, against the lead's own 1.0."""
-    return BASS_SHARE if harmony_is_bass(interval_id) else 1.0
-
-
-def harmony_plain_offset(interval_id):
-    """What a copy shifts by while the lead is NOT being tuned, or None.
-
-    Harmony is a mode of its own: it sings with Auto-Tune off as well as on.
-    With the tuner off there is no note set to count an interval in and no
-    corrected note to place it from, so the copy is the plain musical interval
-    the catalogue names (`harmony_semitones`: a major third, a perfect fifth,
-    an octave) measured from the voice as it is actually sung -- the lead is not
-    moved, so the copy is exactly that far from it, ear or not. None is Off.
-    """
-    if clamp_harmony(interval_id) == DEFAULT_HARMONY:
-        return None
-    return float(harmony_semitones(interval_id))
-
-
-def harmony_pitch_limit(semitones):
-    """The widest interval a harmony copy may ask its shifter for.
-
-    The copy is the interval PLUS the tuning correction the lead is holding, and
-    the transposer clamps what it is asked for. An octave above a voice that is
-    a semitone and a half flat is 13.5 semitones -- and so is an octave BELOW
-    it, because the limit is a distance; the sign only says which way the copy
-    is taken (`HarmonyVoice` reads it) -- so the line this copy runs on is given
-    its own limit and a look-ahead to match (`transpose.py`).
-    """
-    return abs(float(semitones)) + MAX_PULL + 0.01
 
 
 # ------------------------------------------------------------------ the dials

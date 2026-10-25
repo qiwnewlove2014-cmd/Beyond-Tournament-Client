@@ -37,6 +37,7 @@ from .music_downloader import MusicDownloadManager, is_supported_music_url
 from ..speech import speak
 from ..audio_health import probe as audio_health
 from . import autotune
+from . import harmony
 from . import output_device
 from . import song_requests
 from . import subtitles
@@ -1580,8 +1581,8 @@ class MapMusicBot:
     def autotune_harmony_label(self, second=False):
         """What one harmony copy is set to: 'Off', 'Third', 'Octave'..."""
         attribute = "autotune_harmony2" if second else "autotune_harmony"
-        return autotune.harmony_label(getattr(self, attribute,
-                                              autotune.DEFAULT_HARMONY))
+        return harmony.harmony_label(getattr(self, attribute,
+                                              harmony.DEFAULT_HARMONY))
 
     def autotune_harmony_summary(self):
         """What both copies are set to, in one Settings line.
@@ -1594,14 +1595,14 @@ class MapMusicBot:
         """
         intervals = [interval for interval
                      in (getattr(self, "autotune_harmony",
-                                 autotune.DEFAULT_HARMONY),
+                                 harmony.DEFAULT_HARMONY),
                          getattr(self, "autotune_harmony2",
-                                 autotune.DEFAULT_HARMONY))
-                     if autotune.clamp_harmony(interval) != autotune.DEFAULT_HARMONY]
+                                 harmony.DEFAULT_HARMONY))
+                     if harmony.clamp_harmony(interval) != harmony.DEFAULT_HARMONY]
         if not intervals:
             return "Off"
         count = "1 voice" if len(intervals) == 1 else f"{len(intervals)} voices"
-        names = " + ".join(autotune.harmony_label(interval)
+        names = " + ".join(harmony.harmony_label(interval)
                            for interval in intervals)
         return f"{count} ({names})"
 
@@ -1614,10 +1615,10 @@ class MapMusicBot:
         copy: the same one-frame mix, quieter than the lead and low-passed, so
         it hums under the words rather than doubling them. The copy is built
         from the same microphone frame and mixed into the same 20 ms frame
-        (`libs/voice_chat.HarmonyVoice`), so a listener, a PA slot and a cinema
-        room still count exactly the frames they always did.
+        (`libs/music_bot/harmony.py`'s `HarmonyVoice`), so a listener, a PA slot
+        and a cinema room still count exactly the frames they always did.
         """
-        value = autotune.clamp_harmony(interval_id)
+        value = harmony.clamp_harmony(interval_id)
         if second:
             self.autotune_harmony2 = value
             options.set("music_bot_autotune_harmony2", value)

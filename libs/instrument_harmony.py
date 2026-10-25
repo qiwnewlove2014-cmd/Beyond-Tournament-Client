@@ -5,14 +5,16 @@ but it can use the second voice. This line is that voice and nothing else: the
 Music Bot's Harmony 1 and Harmony 2 intervals, built from the captured frame and
 mixed into the SAME 20 ms frame, so what leaves the machine is still one stream
 for the voice channel, the PA, a cinema room's speech leg and the bot's own
-broadcast. The copies are the microphone's own (`voice_chat.HarmonyVoice`), so
+broadcast. The copies are the microphone's own (`music_bot/harmony.py`'s
+`HarmonyVoice`), so
 a bass copy is still quieter and low-passed while an upper one is an equal
 singer, and each is still placed at its fixed interval from the note as played
-(`music_bot/autotune.harmony_plain_offset`): nothing here reads a scale or a
+(`music_bot/harmony.harmony_plain_offset`): nothing here reads a scale or a
 pitch, because nothing here is tuning the lead.
 
-**The DSP is not this module's.** `voice_chat.FastHarmonyLine` is the line
-itself -- written here for a guitar, and since shared with the microphone's
+**The DSP is not this module's.** `music_bot/harmony.py`'s `FastHarmonyLine`
+is the line itself -- written here for a guitar, and since shared with the
+microphone's
 press that only wants the copies (`voice_chat._speech_line_for`). One
 implementation, two callers. What is this module's is the *scene*: the
 Instrument page's switch, the Auto-Tune lock that hides it, and the rule for
@@ -44,9 +46,9 @@ live one, ramped over three frames, and a copy is faded -- never cut -- when it
 is switched off. The same rule drops the copies when the Music Bot's intervals
 change under a sounding chord.
 """
-from .voice_chat import FastHarmonyLine
-from .voice_chat import copy_delay as _copy_delay
-from .voice_chat import harmony_ids as _harmony_ids
+from .music_bot.harmony import FastHarmonyLine
+from .music_bot.harmony import copy_delay as _copy_delay
+from .music_bot.harmony import ids as _harmony_ids
 
 #: The Instrument page's switch. Off by default: a guitar is loud on its own,
 #: and a player who has not asked for a second voice should not get one.
@@ -65,8 +67,8 @@ def switch_label(text="Guitar Harmony"):
     ids = harmony_ids()
     if not ids:
         return f"{text}. on, but both harmony voices are Off in the Music Bot"
-    from .music_bot import autotune
-    return (f"{text}. on ({' + '.join(autotune.harmony_label(i) for i in ids)})")
+    from .music_bot import harmony
+    return (f"{text}. on ({' + '.join(harmony.harmony_label(i) for i in ids)})")
 
 
 def enabled():
@@ -97,7 +99,7 @@ def menu_item(toggle):
 def harmony_ids():
     """The Music Bot's two intervals, in order, without Off and without a twin.
 
-    The list both harmony lines sing (`voice_chat.harmony_ids` has the rule);
+    The list both harmony lines sing (`music_bot.harmony.ids` has the rule);
     this name stays because the switch's label and both menus read it.
     """
     return _harmony_ids()
@@ -106,7 +108,7 @@ def harmony_ids():
 def copy_delay(interval_id, lookahead):
     """How far behind its own source one copy lands, in samples.
 
-    `voice_chat.copy_delay` owns the arithmetic; kept here for the guitar's
+    `music_bot.harmony.copy_delay` owns the arithmetic; kept here for the
     callers and its tests, which ask a string's question.
     """
     return _copy_delay(interval_id, lookahead)

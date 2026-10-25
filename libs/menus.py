@@ -704,8 +704,8 @@ def instrument_menu(game, func_call, replace_call=None, parent=None,
                 "Guitar Harmony on, but both Music Bot harmony voices are Off. "
                 "Set Harmony 1 or Harmony 2 in the Music Bot menu first.")
             return
-        from .music_bot import autotune
-        names = " plus ".join(autotune.harmony_label(i) for i in ids)
+        from .music_bot import harmony
+        names = " plus ".join(harmony.harmony_label(i) for i in ids)
         speech.speak(
             f"Guitar Harmony on: {names}. The copies go out with your guitar -- "
             "the PA, voice chat, cinema rooms and the broadcast hear them, "

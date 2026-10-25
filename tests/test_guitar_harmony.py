@@ -19,6 +19,7 @@ from unittest import mock
 import numpy as np
 
 from libs import instrument_harmony, instrument_input, options, voice_chat
+from libs.music_bot import harmony
 
 SR = 48000
 FRAME = 960
@@ -131,13 +132,12 @@ class TheCopiesTests(unittest.TestCase):
         line, audio = run(tone(2.0), values(
             **{"music_bot_autotune_harmony": "bass_octave"}))
         block = audio[SR:SR + 28800]
-        from libs.music_bot import autotune
         lead = band_level(block, 220.0)
         bass = band_level(block, 110.0)
         self.assertGreater(bass, 0.04)
-        self.assertAlmostEqual(lead, 0.3 / (1.0 + autotune.BASS_SHARE),
+        self.assertAlmostEqual(lead, 0.3 / (1.0 + harmony.BASS_SHARE),
                                delta=0.03)
-        self.assertAlmostEqual(bass / lead, autotune.BASS_SHARE, delta=0.15)
+        self.assertAlmostEqual(bass / lead, harmony.BASS_SHARE, delta=0.15)
 
     def test_the_same_interval_in_both_slots_is_one_copy(self):
         lookup = values(**{"music_bot_autotune_harmony": "third",
@@ -561,27 +561,27 @@ class TheMicrophoneSharesTheLineTests(unittest.TestCase):
         return out
 
     def test_a_third_holds_the_lead_26_point_7_ms(self):
-        line = voice_chat.FastHarmonyLine(active=lambda: True)
+        line = harmony.FastHarmonyLine(active=lambda: True)
         with mock.patch.object(options, "get", values()):
             self.feed(line, tone(0.2), 4)
             self.assertEqual(line.latency_samples(),
-                             voice_chat.FastHarmonyLine.LOOKAHEAD)
+                             harmony.FastHarmonyLine.LOOKAHEAD)
             self.assertEqual(len(line._voices), 1)
         self.assertAlmostEqual(
             line.latency_samples() / 48.0, 26.67, places=2)
 
     def test_a_bass_copy_holds_the_lead_for_the_slower_copy(self):
-        line = voice_chat.FastHarmonyLine(active=lambda: True)
+        line = harmony.FastHarmonyLine(active=lambda: True)
         with mock.patch.object(options, "get", values(
                 **{"music_bot_autotune_harmony": "bass_octave"})):
             self.feed(line, tone(0.2), 4)
             self.assertEqual(line.latency_samples(),
-                             voice_chat.FastHarmonyLine.MAX_LEAD)
+                             harmony.FastHarmonyLine.MAX_LEAD)
         self.assertAlmostEqual(
             line.latency_samples() / 48.0, 53.33, places=2)
 
     def test_the_release_hands_back_the_audio_the_line_was_holding(self):
-        line = voice_chat.FastHarmonyLine(active=lambda: True)
+        line = harmony.FastHarmonyLine(active=lambda: True)
         with mock.patch.object(options, "get", values()):
             self.feed(line, tone(0.2), 4)
             tail = line.tail_frames()
@@ -590,7 +590,7 @@ class TheMicrophoneSharesTheLineTests(unittest.TestCase):
 
     def test_switching_off_hands_the_live_lead_back(self):
         state = {"on": True}
-        line = voice_chat.FastHarmonyLine(active=lambda: state["on"])
+        line = harmony.FastHarmonyLine(active=lambda: state["on"])
         with mock.patch.object(options, "get", values()):
             self.feed(line, tone(0.2), 4)
             state["on"] = False
