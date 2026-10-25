@@ -119,7 +119,8 @@ class TheCatalogueTests(unittest.TestCase):
         self.assertIn("radio", ids)
         self.assertIn("crush", ids)
         for effect_id in ("octave", "tremolo", "wah", "phaser", "echo",
-                          "robot"):
+                          "robot", "flanger", "vibrato", "stutter", "cave",
+                          "alien"):
             self.assertIn(effect_id, ids)
         for effect_id, label, note in voice_effects.VOICE_EFFECTS:
             with self.subTest(preset=effect_id):
@@ -165,7 +166,8 @@ class TheProcessorTests(unittest.TestCase):
     def test_a_frame_in_is_a_frame_out(self):
         pcm = to_pcm(tone(seconds=0.5))
         for preset in ("amp", "clean", "fuzz", "radio", "crush", "octave",
-                       "tremolo", "wah", "phaser", "echo", "robot"):
+                       "tremolo", "wah", "phaser", "echo", "robot",
+                       "flanger", "vibrato", "stutter", "cave", "alien"):
             with self.subTest(preset=preset):
                 processor = self.processor(preset)
                 for start in range(0, len(pcm) - FRAME + 1, FRAME):
@@ -175,7 +177,8 @@ class TheProcessorTests(unittest.TestCase):
     def test_a_silent_frame_stays_silent(self):
         silence = bytes(FRAME)
         for preset in ("amp", "clean", "fuzz", "radio", "crush", "octave",
-                       "tremolo", "wah", "phaser", "echo", "robot"):
+                       "tremolo", "wah", "phaser", "echo", "robot",
+                       "flanger", "vibrato", "stutter", "cave", "alien"):
             with self.subTest(preset=preset):
                 self.assertEqual(
                     self.processor(preset).process(silence), silence)
@@ -240,7 +243,8 @@ class TheProcessorTests(unittest.TestCase):
     def test_no_preset_ever_leaves_full_scale(self):
         loud = to_pcm(tone(amplitude=0.95, seconds=0.5))
         for preset in ("amp", "clean", "fuzz", "radio", "crush", "octave",
-                       "tremolo", "wah", "phaser", "echo", "robot"):
+                       "tremolo", "wah", "phaser", "echo", "robot",
+                       "flanger", "vibrato", "stutter", "cave", "alien"):
             with self.subTest(preset=preset):
                 after = play(self.processor(preset), loud)
                 self.assertLessEqual(float(np.max(np.abs(after))), 1.0)
@@ -327,6 +331,64 @@ class TheAddOnPedalsTests(unittest.TestCase):
         # 220 multiplied by a 55 Hz carrier: 165 and 275 appear, and the
         # original pitch is reduced rather than doubled.
         self.assertGreater(energy(275.0), 2.0 * energy(220.0))
+
+    def test_the_flanger_mixes_a_swept_short_copy(self):
+        signal = to_pcm(tone(amplitude=0.2, seconds=0.5))
+        after = play(voice_effects._EffectProcessor("flanger"), signal)
+        dry = from_pcm(signal)[FRAME * 4:]
+        difference = after[FRAME * 4:] - dry
+        self.assertGreater(rms(difference), 0.25 * rms(dry))
+
+    def test_the_vibrato_moves_the_pitch(self):
+        """A delay that only wobbles makes the pitch rise and fall."""
+        signal = to_pcm(tone(freq=1000.0, amplitude=0.2, seconds=1.0))
+        after = play(voice_effects._EffectProcessor("vibrato"), signal)
+        window = int(0.1 * SR)
+        rates = []
+        for start in range(FRAME * 2, len(after) - window, window):
+            segment = after[start:start + window]
+            crossings = np.count_nonzero(np.diff(np.signbit(segment)))
+            rates.append(crossings / (2.0 * window / SR))
+        self.assertGreater(max(rates) / min(rates), 1.08)
+
+    def test_the_stutter_repeats_what_was_just_said(self):
+        # Five frames of a tone, then silence: the repeat window must still
+        # carry the tone, and the dry window after it must be silent.
+        signal = np.zeros(SR, dtype=np.float32)
+        half = FRAME // 2
+        signal[:half] = (0.4 * np.sin(2.0 * np.pi * 220.0
+                                       * np.arange(half) / SR)).astype(np.float32)
+        after = play(voice_effects._EffectProcessor("stutter"),
+                     to_pcm(signal))
+        self.assertGreater(rms(after[int(0.10 * SR):int(0.20 * SR)]), 0.02)
+        self.assertLess(rms(after[int(0.20 * SR):int(0.30 * SR)]), 0.001)
+
+    def test_the_cave_rings_after_the_voice_stops(self):
+        burst = np.zeros(SR, dtype=np.float32)
+        burst[:240] = 0.5
+        after = play(voice_effects._EffectProcessor("cave"), to_pcm(burst))
+        early = rms(after[int(0.08 * SR):int(0.12 * SR)])
+        late = rms(after[int(0.20 * SR):int(0.30 * SR)])
+        self.assertGreater(early, 0.002)
+        self.assertGreater(early, late)
+
+    def test_the_alien_slides_its_sidebands(self):
+        # One second, because the carrier's own sweep is 0.7 Hz: half a second
+        # has not visited enough of the slide for the sidebands to appear.
+        signal = to_pcm(tone(freq=1000.0, amplitude=0.2, seconds=1.0))
+        after = play(voice_effects._EffectProcessor("alien"), signal)
+        samples = after[FRAME * 4:]
+        window = np.hanning(len(samples))
+        spectrum = np.abs(np.fft.rfft(samples * window)) ** 2
+        freqs = np.fft.rfftfreq(len(samples), 1.0 / SR)
+
+        def energy(low, high):
+            return float(spectrum[(freqs > low) & (freqs < high)].sum())
+
+        self.assertGreater(energy(650.0, 750.0),
+                           0.2 * energy(980.0, 1020.0))
+        self.assertGreater(energy(1250.0, 1350.0),
+                           0.2 * energy(980.0, 1020.0))
 
 
 # ------------------------------------------------------------------- the line

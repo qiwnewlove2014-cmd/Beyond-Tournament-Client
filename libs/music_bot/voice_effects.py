@@ -77,6 +77,7 @@ Settings line is hidden by the same gate.
 Pinned by `client/tests/test_voice_effects.py`.
 """
 
+import collections
 import threading
 
 import numpy as np
@@ -139,6 +140,26 @@ VOICE_EFFECTS = (
      "A ring modulator: the voice is multiplied by a 55 Hz tone, which "
      "replaces its pitch with metallic sidebands. It sounds like a machine -- "
      "the words are what gets lost first."),
+    ("flanger", "Flanger",
+     "A flanger: a very short delay sweeps across the voice and feeds back, "
+     "so a jet-like whoosh moves through the words. Shorter and sharper than "
+     "the clean amp's chorus."),
+    ("vibrato", "Vibrato",
+     "A vibrato pedal: the tape speed wobbles about five times a second, so "
+     "the pitch rises and falls. Every note of the voice moves; the words do "
+     "not change."),
+    ("stutter", "Stutter",
+     "A stutter: the last tenth of a second repeats twice, then the voice "
+     "carries on, five times a second. The glitch a DJ makes with a delay "
+     "pedal, on speech."),
+    ("cave", "Cave",
+     "A cave: four short echoes at different distances feed each other, so "
+     "the voice rings in a big stone room. Longer and darker than the Echo "
+     "pedal."),
+    ("alien", "Alien",
+     "An alien: a ring modulator whose carrier slides up and down, so the "
+     "metallic sidebands move with it. Sings like a machine from a 1950s "
+     "film."),
 )
 DEFAULT_EFFECT = "off"
 
@@ -173,6 +194,18 @@ _SPECS = {
                  gate=0.005, out=0.94, echo=(0.145, 0.35, 0.45)),
     "robot": dict(hp=120.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
                   gate=0.004, out=0.90, robot=(55.0, 0.78)),
+    "flanger": dict(hp=100.0, lp=6200.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.004, out=0.95,
+                    flanger=(1.5, 4.0, 0.25, 0.45, 0.55)),
+    "vibrato": dict(hp=100.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.004, out=0.95, vibrato=(6.0, 2.5, 5.5)),
+    "stutter": dict(hp=100.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.004, out=0.95, stutter=(5, 10)),
+    "cave": dict(hp=110.0, lp=4800.0, drive=1.0, shape=None, bias=0.0,
+                 gate=0.005, out=1.5,
+                 cave=((31.0, 47.0, 61.0, 83.0), 0.45, 0.55)),
+    "alien": dict(hp=120.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.004, out=0.92, alien=(300.0, 0.7, 0.72)),
 }
 
 #: The gate's two speeds, per frame. Opening is quick (a word must not lose its
@@ -383,6 +416,30 @@ class _EffectProcessor:
         self._robot = spec.get("robot")
         self._robot_phase = 0.0
         self._lfo = 0.0
+        self._flanger = spec.get("flanger")
+        self._flanger_ring = (np.zeros(4096, dtype=np.float32)
+                              if self._flanger else None)
+        self._flanger_pos = 0
+        self._vibrato = spec.get("vibrato")
+        self._vibrato_ring = (np.zeros(4096, dtype=np.float32)
+                              if self._vibrato else None)
+        self._vibrato_pos = 0
+        self._stutter = spec.get("stutter")
+        self._stutter_history = collections.deque(
+            maxlen=int(self._stutter[0]) if self._stutter else 0)
+        self._stutter_loop = None
+        self._stutter_pos = 0
+        self._cave = spec.get("cave")
+        if self._cave:
+            longest = max(float(tap) for tap in self._cave[0])
+            self._cave_ring = np.zeros(
+                int(round(longest * SAMPLE_RATE / 1000.0)) + 4096,
+                dtype=np.float32)
+        else:
+            self._cave_ring = None
+        self._cave_pos = 0
+        self._alien = spec.get("alien")
+        self._alien_phase = 0.0
 
     # ------------------------------------------------------------------ the gate
     def _gate(self, block):
@@ -558,6 +615,115 @@ class _EffectProcessor:
                              % (2.0 * np.pi))
         return block * (1.0 - mix) + block * carrier * mix
 
+    def _flanger_block(self, block):
+        """A short swept delay that feeds back -- the jet sound."""
+        if not self._flanger:
+            return block
+        base, sweep, rate, feedback, mix = self._flanger
+        ring, size = self._flanger_ring, self._flanger_ring.size
+        positions = np.arange(block.size)
+        phase = self._lfo + 2.0 * np.pi * rate * positions / SAMPLE_RATE
+        delay = ((base + sweep * (0.5 + 0.5 * np.sin(phase)))
+                 * SAMPLE_RATE / 1000.0)
+        start = self._flanger_pos
+        read = (start + positions - delay) % size
+        lower = np.floor(read).astype(np.int64)
+        fraction = (read - lower).astype(np.float32)
+        delayed = (ring[lower % size] * (1.0 - fraction)
+                   + ring[(lower + 1) % size] * fraction)
+        write = (start + positions) % size
+        ring[write] = block + float(feedback) * delayed
+        self._flanger_pos = int((start + block.size) % size)
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        return block * (1.0 - mix) + delayed * mix
+
+    def _vibrato_block(self, block):
+        """A delay that only wobbles, fully wet: pitch, not an echo."""
+        if not self._vibrato:
+            return block
+        base, sweep, rate = self._vibrato
+        ring, size = self._vibrato_ring, self._vibrato_ring.size
+        positions = np.arange(block.size)
+        phase = self._lfo + 2.0 * np.pi * rate * positions / SAMPLE_RATE
+        delay = (base + sweep * np.sin(phase)) * SAMPLE_RATE / 1000.0
+        start = self._vibrato_pos
+        read = (start + positions - delay) % size
+        lower = np.floor(read).astype(np.int64)
+        fraction = (read - lower).astype(np.float32)
+        delayed = (ring[lower % size] * (1.0 - fraction)
+                   + ring[(lower + 1) % size] * fraction)
+        write = (start + positions) % size
+        ring[write] = block
+        self._vibrato_pos = int((start + block.size) % size)
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        return delayed
+
+    def _stutter_block(self, block):
+        """Repeat the last tenth of a second, five times a second.
+
+        Frames are the unit because the effect is a rhythm, not a sample
+        operation: every period the last `slice` frames are captured and played
+        back, then the voice carries on. The first slice waits until there is
+        something to repeat, so a press never opens with silence.
+        """
+        if not self._stutter:
+            return block
+        slice_frames, period_frames = self._stutter
+        history = self._stutter_history
+        if len(history) < slice_frames:
+            history.append(block.copy())
+            return block
+        position = self._stutter_pos
+        if position == 0:
+            self._stutter_loop = list(history)
+        out = block
+        looped = (self._stutter_loop[position]
+                  if position < slice_frames and self._stutter_loop else None)
+        if looped is not None and looped.size == block.size:
+            out = looped
+        history.append(block.copy())
+        self._stutter_pos = (position + 1) % period_frames
+        return out
+
+    def _cave_block(self, block):
+        """Four taps that feed one another: a room rather than one repeat."""
+        if not self._cave:
+            return block
+        taps, feedback, mix = self._cave
+        ring, size = self._cave_ring, self._cave_ring.size
+        positions = np.arange(block.size)
+        start = self._cave_pos
+        wet = np.zeros(block.size, dtype=np.float32)
+        for tap_ms, gain in zip(taps, (0.7, 0.55, 0.4, 0.3)):
+            delay = int(round(float(tap_ms) * SAMPLE_RATE / 1000.0))
+            read = (start + positions - delay) % size
+            wet += ring[read] * gain
+        write = (start + positions) % size
+        ring[write] = block + float(feedback) * wet
+        self._cave_pos = int((start + block.size) % size)
+        return block * (1.0 - mix) + wet * mix
+
+    def _alien_block(self, block):
+        """Ring modulation with a carrier that slides, not a fixed pitch."""
+        if not self._alien:
+            return block
+        hz, rate, mix = self._alien
+        centre = hz * (1.0 + 0.5 * np.sin(self._lfo))
+        phase = (self._alien_phase
+                 + 2.0 * np.pi * centre * np.arange(block.size) / SAMPLE_RATE)
+        carrier = np.sin(phase)
+        self._alien_phase = ((self._alien_phase
+                              + 2.0 * np.pi * centre * block.size
+                              / SAMPLE_RATE) % (2.0 * np.pi))
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        return block * (1.0 - mix) + block * carrier * mix
+
     # ------------------------------------------------------------------ the frame
     def process(self, pcm):
         """Shape one frame; the same number of bytes comes back."""
@@ -577,6 +743,11 @@ class _EffectProcessor:
         block = self._phaser_block(block)
         block = self._echo_block(block)
         block = self._robot_block(block)
+        block = self._flanger_block(block)
+        block = self._vibrato_block(block)
+        block = self._stutter_block(block)
+        block = self._cave_block(block)
+        block = self._alien_block(block)
         # A soft ceiling rather than a hard clip: the encoder is handed a frame
         # that is already inside full scale, and the last harmonics fold gently.
         shaped = np.tanh(block * self._out * 1.1) / np.tanh(1.1)
