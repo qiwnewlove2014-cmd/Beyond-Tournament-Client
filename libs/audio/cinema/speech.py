@@ -841,6 +841,18 @@ class RoomSpeechLeg:
         if efx is None:
             return
         reverb_slot, eq_slot, tone_slot, dynamics_slot = environment
+        # One tuning, not two. Once the voice carries the PA's own tone chain (a
+        # 3.5 dB shelf at 250 Hz and its compressor), the cabinet's *music* EQ is
+        # a second copy of that same shelf -- and it is the builder's preset for a
+        # full-scale song, so its curve can be anything, including a bass boost a
+        # voice cannot afford. A voice arrives at the PA's 0.85 limit and every
+        # send here is full wet, so the fourth copy was the one that pushed the
+        # room's mix past full scale: reported as a buzz under the words and a
+        # compressor working so hard a tremolo came out flat. The cabinet's EQ
+        # still shapes the song, and still shapes a voice on a map with no voice
+        # chain of its own (``tone_slot`` None), which is what the fallback is.
+        if tone_slot is not None:
+            eq_slot = None
         for index, slot in ((REVERB_SEND, reverb_slot),
                             (EQ_SEND, eq_slot),
                             (VOICE_EQ_SEND, tone_slot),

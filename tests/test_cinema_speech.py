@@ -855,6 +855,25 @@ class RoomAcousticsTests(unittest.TestCase):
             self.assertEqual({send[0] for send in self.sends(efx, index)},
                              set(leg.sources.values()))
 
+    def test_the_voice_chain_replaces_the_cabinets_music_eq(self):
+        """One tuning, not two -- the reason a voice in a room stopped buzzing.
+
+        The cabinet's EQ is the builder's preset for a full-scale song; once the
+        voice carries the PA's own shelf, sending both put a third wet copy on a
+        voice that already arrives at 0.85. With no voice chain (the test below)
+        the cabinet's EQ is still the fallback.
+        """
+        game, efx = self.make(cabinet_eq=self.EQ, reverb=self.REVERB)
+        game.gameplay.megaphone = SimpleNamespace(
+            player_sources={}, eq_slot="pa-eq", compressor_slot="pa-compressor")
+        self.feed(game)
+        self.assertEqual(
+            {send[2] for send in self.sends(efx, cinema_speech.EQ_SEND)},
+            {None})
+        self.assertEqual(
+            {send[2] for send in self.sends(efx, cinema_speech.VOICE_EQ_SEND)},
+            {"pa-eq"})
+
     def test_a_map_with_no_voice_chain_clears_those_sends(self):
         # No megaphone (or one whose effects could not be made): the two sends
         # are *cleared*, never left holding whatever a previous map put there.
