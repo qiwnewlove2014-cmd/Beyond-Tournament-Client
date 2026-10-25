@@ -36,12 +36,20 @@ The chain, in order
    asymmetric soft clip), a hard, more biased clip for the fuzz, and nothing for
    the clean amp or the crusher.
 4. The crusher, when the preset has one: sample-and-hold at 8 kHz and 6 bits.
-5. The cabinet: a linear-phase low-pass at 4.2 kHz (3.4 for the fuzz, 6.5 for
+5. The octave, when the preset wants one: the rectified voice mixed back with
+   the dry one. Rectification is the oldest octave trick there is -- it adds a
+   copy an octave up without a pitch shifter, and it is dirty on purpose. It
+   runs BEFORE the DC block because a rectified waveform has a large offset.
+6. The cabinet: a linear-phase low-pass at 4.2 kHz (3.4 for the fuzz, 6.5 for
    the clean amp), then a 20 Hz high-pass that removes the DC the asymmetric
    shaper leaves behind.
-6. The chorus, on the clean preset: a 12 ms delay swept 3 ms either way at
-   0.45 Hz, mixed a third in. It is the only preset with a delay of its own.
-7. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
+7. The chorus, on the clean preset: a 12 ms delay swept 3 ms either way at
+   0.45 Hz, mixed a third in.
+8. The pedals that are one block each, off unless the preset names them: a
+   tremolo (5.2 Hz, depth 0.85), an auto-wah (a resonant band swept 360-1800 Hz
+   at 1.25 Hz), a two-stage phaser (all-passes swept 320-1500 Hz at 0.4 Hz), a
+   slapback echo (145 ms, 0.35 feedback) and a ring modulator (55 Hz).
+9. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
    thin the top of any distortion it is handed; the cabinet is deliberately
    below the range where that hurts, and the ceiling keeps the encoder from
    being handed a clipped frame.
@@ -107,6 +115,30 @@ VOICE_EFFECTS = (
      "A bitcrusher pedal: the voice is sampled at a lower rate and quantised, "
      "adding a gritty digital buzz under the words. The cleanest way to make a "
      "sentence sound broken."),
+    ("octave", "Octave Up",
+     "An octave pedal's oldest trick: the voice is rectified and mixed back "
+     "with itself, which adds a note an octave above. It is dirty rather than "
+     "clean -- a fuzz with a second voice on top, not a pitch shifter."),
+    ("tremolo", "Tremolo",
+     "A tremolo pedal: the voice pulses about five times a second, from full "
+     "to nearly silent. The oldest way to make a spoken sentence sound like it "
+     "is coming and going."),
+    ("wah", "Wah",
+     "An auto-wah: a narrow band sweeps up and down the voice about once a "
+     "second, so consonants turn into a talking wah-wah and the words ride "
+     "under it."),
+    ("phaser", "Phaser",
+     "A phaser: swept all-pass stages are mixed with the dry voice, so the two "
+     "cancel and reinforce as they move. The effect is a slow whoosh under the "
+     "words rather than a copy beside them."),
+    ("echo", "Echo",
+     "A slapback delay: what you said comes back about a seventh of a second "
+     "later, quieter, and again after that. Long enough to be a repeat, short "
+     "enough to stay under the next word."),
+    ("robot", "Robot",
+     "A ring modulator: the voice is multiplied by a 55 Hz tone, which "
+     "replaces its pitch with metallic sidebands. It sounds like a machine -- "
+     "the words are what gets lost first."),
 )
 DEFAULT_EFFECT = "off"
 
@@ -127,6 +159,20 @@ _SPECS = {
                   gate=0.008, out=0.85, chorus=0.0, crush=None),
     "crush": dict(hp=80.0, lp=5000.0, drive=1.0, shape=None, bias=0.0,
                   gate=0.006, out=0.80, chorus=0.0, crush=(6, 8000.0)),
+    # The pedals below reuse the same chain and add one block each; every
+    # setting is read with `.get` so an older preset carries no dead keys.
+    "octave": dict(hp=110.0, lp=5500.0, drive=1.0, shape=None, bias=0.0,
+                   gate=0.006, out=1.55, octave=0.65),
+    "tremolo": dict(hp=100.0, lp=6200.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.004, out=0.94, tremolo=(5.2, 0.85)),
+    "wah": dict(hp=120.0, lp=5000.0, drive=1.0, shape=None, bias=0.0,
+                gate=0.005, out=0.95, wah=(360.0, 1800.0, 1.25, 3.2, 4.6)),
+    "phaser": dict(hp=100.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
+                   gate=0.004, out=1.0, phaser=(0.4, 320.0, 1500.0)),
+    "echo": dict(hp=100.0, lp=5200.0, drive=1.0, shape=None, bias=0.0,
+                 gate=0.005, out=0.94, echo=(0.145, 0.35, 0.45)),
+    "robot": dict(hp=120.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.004, out=0.90, robot=(55.0, 0.78)),
 }
 
 #: The gate's two speeds, per frame. Opening is quick (a word must not lose its
@@ -214,6 +260,25 @@ class _Biquad:
         self._z1 = 0.0
         self._z2 = 0.0
 
+    @staticmethod
+    def _bandpass_coefficients(hz, q):
+        """RBJ's band-pass, normalised so the peak gain is exactly 1."""
+        w0 = 2.0 * np.pi * float(hz) / SAMPLE_RATE
+        cos_w0 = float(np.cos(w0))
+        alpha = float(np.sin(w0)) / (2.0 * float(q))
+        a0 = 1.0 + alpha
+        return ((alpha / a0, 0.0, -alpha / a0),
+                (1.0, -2.0 * cos_w0 / a0, (1.0 - alpha) / a0))
+
+    @classmethod
+    def bandpass(cls, hz, q=1.0):
+        b, a = cls._bandpass_coefficients(hz, q)
+        return cls(b, a)
+
+    def retune_bandpass(self, hz, q=1.0):
+        """Move a running band-pass, keeping its state (a sweep, not a reset)."""
+        self.b, self.a = self._bandpass_coefficients(hz, q)
+
     @classmethod
     def highpass(cls, hz, q=0.7071067811865476):
         """RBJ's cookbook high-pass, at a Butterworth's Q."""
@@ -230,18 +295,21 @@ class _Biquad:
                    (1.0, a1 / a0, a2 / a0))
 
     def process(self, block):
-        b0, b1, b2 = self.b
-        _unity, a1, a2 = self.a
+        b0, b1, b2 = (float(value) for value in self.b)
+        _unity, a1, a2 = (float(value) for value in self.a)
         z1, z2 = self._z1, self._z2
-        out = np.empty_like(block)
-        for index in range(block.size):
-            x = float(block[index])
+        # A list of Python floats, not the numpy array: a per-sample loop over
+        # numpy scalars is several times slower than one over floats, and this
+        # loop runs 50 times a second on the talker's capture thread.
+        samples = block.tolist()
+        out = [0.0] * len(samples)
+        for index, x in enumerate(samples):
             y = b0 * x + z1
             z1 = b1 * x - a1 * y + z2
             z2 = b2 * x - a2 * y
             out[index] = y
         self._z1, self._z2 = z1, z2
-        return out
+        return np.asarray(out, dtype=np.float32)
 
 
 class _Fir:
@@ -284,16 +352,37 @@ class _EffectProcessor:
         self._out = float(spec["out"])
         # A chorus is a modulated delay; the ring is long enough for the base
         # delay plus its whole sweep.
-        self._chorus = float(spec["chorus"])
+        self._chorus = float(spec.get("chorus", 0.0))
         self._ring = None
         self._ring_pos = 0
         self._phase = 0.0
         if self._chorus:
             self._ring = np.zeros(4096, dtype=np.float32)
         # A bitcrusher holds one sample for several and rounds what it holds.
-        self._crush = spec["crush"]
+        self._crush = spec.get("crush")
         self._crush_value = 0.0
         self._crush_phase = 0.0
+        # The pedals below are one block each, off unless their spec names
+        # them, so a preset pays only for what it uses. One LFO is shared by
+        # whichever sweep pedal a preset has (only one preset runs at a time).
+        self._octave = float(spec.get("octave", 0.0))
+        self._tremolo = spec.get("tremolo")
+        self._wah = spec.get("wah")
+        self._wah_filter = (_Biquad.bandpass(self._wah[0], self._wah[3])
+                            if self._wah else None)
+        self._phaser = spec.get("phaser")
+        self._phaser_state = [[0.0, 0.0], [0.0, 0.0]]
+        self._echo = spec.get("echo")
+        if self._echo:
+            seconds = float(self._echo[0])
+            self._echo_ring = np.zeros(
+                int(round(seconds * SAMPLE_RATE)) + 4096, dtype=np.float32)
+        else:
+            self._echo_ring = None
+        self._echo_pos = 0
+        self._robot = spec.get("robot")
+        self._robot_phase = 0.0
+        self._lfo = 0.0
 
     # ------------------------------------------------------------------ the gate
     def _gate(self, block):
@@ -375,6 +464,100 @@ class _EffectProcessor:
                            2.0 * np.pi)
         return block * (1.0 - self._chorus) + delayed * self._chorus
 
+    # ------------------------------------------------- the one-block pedals
+    def _octave_block(self, block):
+        """The rectified copy that adds the octave, before the DC block."""
+        if not self._octave:
+            return block
+        return block * (1.0 - self._octave) + np.abs(block) * self._octave
+
+    def _tremolo_block(self, block):
+        if not self._tremolo:
+            return block
+        rate, depth = self._tremolo
+        positions = np.arange(block.size)
+        phase = self._lfo + 2.0 * np.pi * rate * positions / SAMPLE_RATE
+        # Depth 0.85 reaches 0.15 at the bottom: a pulse, not a mute.
+        gain = (1.0 - depth) + depth * (0.5 + 0.5 * np.sin(phase))
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        return block * gain
+
+    def _wah_block(self, block):
+        if not self._wah:
+            return block
+        low, high, rate, q, boost = self._wah
+        sweep = 0.5 - 0.5 * np.cos(self._lfo)
+        self._wah_filter.retune_bandpass(low + (high - low) * sweep, q)
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        return self._wah_filter.process(block) * boost
+
+    def _phaser_block(self, block):
+        """Two swept all-pass stages mixed with the dry voice.
+
+        Two, not four: each stage is a sample loop in Python, and two already
+        put a pair of moving notches in the voice -- four cost twice the frame
+        time for a shade more depth, which is the wrong trade on a talker's own
+        machine.
+        """
+        if not self._phaser:
+            return block
+        rate, low, high = self._phaser
+        sweep = 0.5 - 0.5 * np.cos(self._lfo)
+        centre = low + (high - low) * sweep
+        self._lfo = ((self._lfo
+                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                     % (2.0 * np.pi))
+        coefficients = []
+        for multiplier in (1.0, 1.6):
+            hz = min(centre * multiplier, SAMPLE_RATE * 0.45)
+            tangent = float(np.tan(np.pi * hz / SAMPLE_RATE))
+            coefficients.append((1.0 - tangent) / (1.0 + tangent))
+        state = self._phaser_state
+        samples = block.tolist()
+        out = [0.0] * len(samples)
+        for index, dry in enumerate(samples):
+            sample = dry
+            for stage in range(2):
+                a = coefficients[stage]
+                stage_state = state[stage]
+                y = a * sample + stage_state[0] - a * stage_state[1]
+                stage_state[0] = sample
+                stage_state[1] = y
+                sample = y
+            out[index] = 0.5 * dry + 0.5 * sample
+        return np.asarray(out, dtype=np.float32)
+
+    def _echo_block(self, block):
+        """A single tap with feedback; the delay is longer than a frame."""
+        if not self._echo:
+            return block
+        seconds, feedback, mix = self._echo
+        delay = int(round(float(seconds) * SAMPLE_RATE))
+        ring, size = self._echo_ring, self._echo_ring.size
+        positions = np.arange(block.size)
+        read = (self._echo_pos + positions - delay) % size
+        write = (self._echo_pos + positions) % size
+        delayed = ring[read].copy()
+        ring[write] = block + float(feedback) * delayed
+        self._echo_pos = int((self._echo_pos + block.size) % size)
+        return block * (1.0 - mix) + delayed * mix
+
+    def _robot_block(self, block):
+        if not self._robot:
+            return block
+        hz, mix = self._robot
+        phase = (self._robot_phase
+                 + 2.0 * np.pi * hz * np.arange(block.size) / SAMPLE_RATE)
+        carrier = np.sin(phase)
+        self._robot_phase = ((self._robot_phase
+                              + 2.0 * np.pi * hz * block.size / SAMPLE_RATE)
+                             % (2.0 * np.pi))
+        return block * (1.0 - mix) + block * carrier * mix
+
     # ------------------------------------------------------------------ the frame
     def process(self, pcm):
         """Shape one frame; the same number of bytes comes back."""
@@ -385,9 +568,15 @@ class _EffectProcessor:
         block = self._gate(block)
         block = self._shape_block(block)
         block = self._crush_block(block)
+        block = self._octave_block(block)
         block = self.dc.process(block)
         block = self.post.process(block)
         block = self._chorus_block(block)
+        block = self._tremolo_block(block)
+        block = self._wah_block(block)
+        block = self._phaser_block(block)
+        block = self._echo_block(block)
+        block = self._robot_block(block)
         # A soft ceiling rather than a hard clip: the encoder is handed a frame
         # that is already inside full scale, and the last harmonics fold gently.
         shaped = np.tanh(block * self._out * 1.1) / np.tanh(1.1)

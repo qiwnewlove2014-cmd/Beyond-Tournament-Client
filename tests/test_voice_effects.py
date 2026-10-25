@@ -118,6 +118,9 @@ class TheCatalogueTests(unittest.TestCase):
         self.assertIn("fuzz", ids)
         self.assertIn("radio", ids)
         self.assertIn("crush", ids)
+        for effect_id in ("octave", "tremolo", "wah", "phaser", "echo",
+                          "robot"):
+            self.assertIn(effect_id, ids)
         for effect_id, label, note in voice_effects.VOICE_EFFECTS:
             with self.subTest(preset=effect_id):
                 self.assertTrue(label.strip())
@@ -161,7 +164,8 @@ class TheProcessorTests(unittest.TestCase):
 
     def test_a_frame_in_is_a_frame_out(self):
         pcm = to_pcm(tone(seconds=0.5))
-        for preset in ("amp", "clean", "fuzz", "radio", "crush"):
+        for preset in ("amp", "clean", "fuzz", "radio", "crush", "octave",
+                       "tremolo", "wah", "phaser", "echo", "robot"):
             with self.subTest(preset=preset):
                 processor = self.processor(preset)
                 for start in range(0, len(pcm) - FRAME + 1, FRAME):
@@ -170,7 +174,8 @@ class TheProcessorTests(unittest.TestCase):
 
     def test_a_silent_frame_stays_silent(self):
         silence = bytes(FRAME)
-        for preset in ("amp", "clean", "fuzz", "radio", "crush"):
+        for preset in ("amp", "clean", "fuzz", "radio", "crush", "octave",
+                       "tremolo", "wah", "phaser", "echo", "robot"):
             with self.subTest(preset=preset):
                 self.assertEqual(
                     self.processor(preset).process(silence), silence)
@@ -234,11 +239,94 @@ class TheProcessorTests(unittest.TestCase):
 
     def test_no_preset_ever_leaves_full_scale(self):
         loud = to_pcm(tone(amplitude=0.95, seconds=0.5))
-        for preset in ("amp", "clean", "fuzz", "radio", "crush"):
+        for preset in ("amp", "clean", "fuzz", "radio", "crush", "octave",
+                       "tremolo", "wah", "phaser", "echo", "robot"):
             with self.subTest(preset=preset):
                 after = play(self.processor(preset), loud)
                 self.assertLessEqual(float(np.max(np.abs(after))), 1.0)
                 self.assertFalse(np.any(np.isnan(after)))
+
+
+class TheAddOnPedalsTests(unittest.TestCase):
+    """The pedals that are one block each: what they add is what is measured."""
+
+    def test_the_octave_adds_the_octave(self):
+        signal = to_pcm(tone(amplitude=0.2, seconds=0.5))
+        after = play(voice_effects._EffectProcessor("octave"), signal)
+        samples = after[FRAME * 4:]
+        window = np.hanning(len(samples))
+        spectrum = np.abs(np.fft.rfft(samples * window)) ** 2
+        freqs = np.fft.rfftfreq(len(samples), 1.0 / SR)
+
+        def energy(hz):
+            return float(spectrum[(freqs > hz - 15) & (freqs < hz + 15)].sum())
+
+        # A clean voice has almost nothing at the second harmonic; this pedal
+        # is there for that note.
+        self.assertGreater(energy(440.0), 0.15 * energy(220.0))
+        dry = from_pcm(signal)[FRAME * 4:]
+        self.assertFalse(np.allclose(samples, dry))
+
+    def test_the_tremolo_pulses_at_its_rate(self):
+        signal = to_pcm(tone(amplitude=0.2, seconds=1.0))
+        after = play(voice_effects._EffectProcessor("tremolo"), signal)
+        samples = after[FRAME * 2:]
+        # A 5 ms RMS envelope, then its own spectrum: the pulse rate is what a
+        # listener hears as the speed, not a number in the spec.
+        powers = samples ** 2
+        window = max(1, int(0.005 * SR))
+        envelope = np.sqrt(np.convolve(powers, np.ones(window) / window,
+                                       mode="valid"))
+        # The pulse itself: about a tenth of full level at the bottom.
+        self.assertLess(float(envelope.min()), 0.35 * float(envelope.max()))
+        centred = envelope - envelope.mean()
+        spectrum = np.abs(np.fft.rfft(centred * np.hanning(len(centred))))
+        rate = float(np.argmax(spectrum)) * SR / len(envelope)
+        self.assertGreater(rate, 4.0)
+        self.assertLess(rate, 7.0)
+
+    def test_the_wah_is_a_band_pass(self):
+        signal = to_pcm(noise(amplitude=0.15, seconds=1.0))
+        after = play(voice_effects._EffectProcessor("wah"), signal)
+        samples = after[FRAME * 4:]
+        window = np.hanning(len(samples))
+        spectrum = np.abs(np.fft.rfft(samples * window)) ** 2
+        freqs = np.fft.rfftfreq(len(samples), 1.0 / SR)
+        total = spectrum.sum()
+        self.assertLess(float(spectrum[freqs < 200.0].sum()) / total, 0.02)
+        self.assertLess(float(spectrum[freqs > 4000.0].sum()) / total, 0.02)
+
+    def test_the_phaser_mixes_a_swept_copy(self):
+        signal = to_pcm(tone(amplitude=0.2, seconds=0.5))
+        after = play(voice_effects._EffectProcessor("phaser"), signal)
+        dry = from_pcm(signal)
+        difference = after[FRAME * 4:] - dry[FRAME * 4:]
+        self.assertGreater(rms(difference), 0.5 * rms(dry[FRAME * 4:]))
+
+    def test_the_echo_repeats_at_its_delay(self):
+        burst = np.zeros(SR, dtype=np.float32)
+        burst[:FRAME // 2] = 0.5
+        after = play(voice_effects._EffectProcessor("echo"), to_pcm(burst))
+        first = rms(after[int(0.12 * SR):int(0.18 * SR)])
+        second = rms(after[int(0.26 * SR):int(0.32 * SR)])
+        self.assertGreater(first, 0.005)
+        self.assertGreater(second, 0.001)
+        self.assertLess(second, first)
+
+    def test_the_robot_puts_sidebands_around_the_voice(self):
+        signal = to_pcm(tone(amplitude=0.2, seconds=0.5))
+        after = play(voice_effects._EffectProcessor("robot"), signal)
+        samples = after[FRAME * 4:]
+        window = np.hanning(len(samples))
+        spectrum = np.abs(np.fft.rfft(samples * window)) ** 2
+        freqs = np.fft.rfftfreq(len(samples), 1.0 / SR)
+
+        def energy(hz):
+            return float(spectrum[(freqs > hz - 20) & (freqs < hz + 20)].sum())
+
+        # 220 multiplied by a 55 Hz carrier: 165 and 275 appear, and the
+        # original pitch is reduced rather than doubled.
+        self.assertGreater(energy(275.0), 2.0 * energy(220.0))
 
 
 # ------------------------------------------------------------------- the line
