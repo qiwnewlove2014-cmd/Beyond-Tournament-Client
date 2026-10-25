@@ -197,6 +197,9 @@ class InstrumentInput(threading.Thread):
         #: The guitar's own harmony line (`libs/instrument_harmony.py`). Built
         #: on the first frame: a session that never uses it pays nothing.
         self._harmony = None
+        #: The Music Bot's chosen Voice Effect, on the way out
+        #: (`_amplified`). Built the same way, and for the same reason.
+        self._amp_line = None
         self.notes = collections.deque(maxlen=self.NOTE_BUFFER_NOTES)
         # Raw guitar Opus streamed on the normal 3D voice channel (so chords
         # are heard near the player without needing the music bot broadcast).
@@ -297,10 +300,13 @@ class InstrumentInput(threading.Thread):
         getattr(self, "_monitor_pending", bytearray()).clear()
         getattr(self, "_relay_pending", bytearray()).clear()
         # The harmony line holds the last frames of dry audio for its lead
-        # delay; a new session must not start by playing the old one back.
+        # delay; a new session must not start by playing the old one back. The
+        # pedal board holds a processor's whole state -- a gate, a cabinet's
+        # tail, a delay ring -- so it is dropped rather than reset.
         harmony = getattr(self, "_harmony", None)
         if harmony is not None:
             harmony.reset()
+        self._amp_line = None
         if voice is not None:
             with contextlib.suppress(Exception):
                 close = getattr(voice, "close", None)
@@ -421,12 +427,15 @@ class InstrumentInput(threading.Thread):
 
         What LEAVES the machine may be shaped on the way out -- the guitar's
         Harmony line (``libs/instrument_harmony.py``) adds its second voice to
-        this frame only when the Options switch is on. The pitch tracker below
-        is handed the DRY frame (`raw`) either way: it names the notes the
-        strings played, and a copy in the mix is not a note it should hear.
+        this frame only when the Options switch is on, and the Music Bot's
+        pedal board (``_amplified``) puts it through the chosen Voice Effect.
+        The pitch tracker below is handed the DRY frame (`raw`) either way: it
+        names the notes the strings played, and a copy -- or an amp's harmonics
+        -- is not a note it should hear.
         """
         raw = buf16
         buf16 = self._harmonised(buf16)
+        buf16 = self._amplified(buf16)
         # Check for Megaphone routing
         gp = None
         if hasattr(self.game, 'stack'):
@@ -496,6 +505,32 @@ class InstrumentInput(threading.Thread):
         if line is None:
             from .instrument_harmony import GuitarHarmony
             line = self._harmony = GuitarHarmony()
+        return line.shape(buf16)
+
+    def _amplified(self, buf16):
+        """This frame through the pedal board, when one is chosen.
+
+        The line-in guitar and the broadcast voice share one board: whatever a
+        player picked on `Music Bot -> Voice Effect` shapes what LEAVES this
+        machine, so an amp chosen for their voice is also the amp a plugged-in
+        guitar is played through -- no second switch, no second menu, and the
+        Custom Amp board's knobs reach a string as well as a word.
+
+        Only what leaves. `_stage` has already handed the player's own ear its
+        10 ms chunks (before a 20 ms frame exists), so the string under the
+        fingers stays dry and at the latency it always had; the note tracker is
+        handed the dry frame too, for the same reason the harmony line leaves
+        it alone -- an amp's harmonics are not notes and must not be named.
+
+        Lazy, like the harmony line: a session that never chooses a pedal never
+        builds one, and Off hands the frame straight back, byte for byte.
+        """
+        from .music_bot import voice_effects
+        if not voice_effects.enabled():
+            return buf16
+        line = getattr(self, "_amp_line", None)
+        if line is None:
+            line = self._amp_line = voice_effects.VoiceEffectLine()
         return line.shape(buf16)
 
     def _feed_guitar_voice(self, raw, force_mega=False):

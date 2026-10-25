@@ -32,6 +32,10 @@ from libs.menu import Menu  # noqa: E402
 from libs.music_bot import autotune  # noqa: E402
 from libs.music_bot import gate as music_bot_gate  # noqa: E402
 from libs.music_bot import menus as menus_module  # noqa: E402
+from libs.music_bot import voice_effect_builder  # noqa: E402
+from libs.music_bot import voice_effect_custom  # noqa: E402
+from libs.music_bot import voice_effect_recipes  # noqa: E402
+from libs.music_bot import voice_effects  # noqa: E402
 
 
 class FakeMenu:
@@ -179,6 +183,14 @@ class EveryLineIsDescribedTests(unittest.TestCase):
                        self.handler._open_harmony_menu,
                        self.handler._open_autotune_harmony_menu,
                        self.handler._open_voice_effect_menu,
+                       self.handler._open_custom_effect_menu,
+                       lambda: self.handler._open_custom_param_menu("drive"),
+                       self.handler._open_voice_builder_menu,
+                       self.handler._open_builder_recipes_menu,
+                       lambda: self.handler._open_builder_recipes_menu(
+                           "machine"),
+                       lambda: self.handler._open_custom_param_menu(
+                           "space", voice_effect_builder),
                        self.handler._open_eq_menu,
                        self.handler._open_transpose_menu,
                        self.handler._open_speech_transpose_menu):
@@ -204,16 +216,195 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         self.assertIn("Off (active)", [label_of(item) for item in menu.items])
         self.bot.voice_effect = "amp"
         labels = [label_of(item) for item in menu.items]
-        self.assertIn("Guitar Amp (active)", labels)
+        # The family that holds it says which pedal is chosen, so the top page
+        # answers "where am I" without being opened.
+        self.assertIn("Amp & Drive: Guitar Amp (active)", labels)
         self.assertNotIn("Off (active)", labels)
-        # Picking the line is what the keyboard does, not a direct setter.
+        # Picking a pedal is what the keyboard does, not a direct setter.
         for item in menu.items:
+            if label_of(item) == "Amp & Drive: Guitar Amp (active)":
+                item[1]()
+                break
+        else:
+            self.fail("the top page has no Amp & Drive line")
+        group = self.last_menu()
+        for item in group.items:
             if label_of(item) == "Fuzz":
                 item[1]()
                 break
         else:
-            self.fail("the page has no Fuzz line")
+            self.fail("the family page has no Fuzz line")
         self.bot.set_voice_effect.assert_called_once_with("fuzz")
+
+    def test_the_amp_page_puts_the_custom_board_last_and_opens_it(self):
+        """The board is the bottom line of Amp & Drive, and it is not a pedal."""
+        self.handler._open_voice_effect_menu("drive")
+        menu = self.last_menu()
+        labels = [label_of(item) for item in menu.items]
+        self.assertEqual(labels[-1], "Back")
+        self.assertTrue(labels[-2].startswith("Custom Amp:"), labels[-2])
+        self.assertEqual(
+            sum(1 for label in labels if label.startswith("Custom Amp")), 1)
+        for item in menu.items:
+            if label_of(item).startswith("Custom Amp:"):
+                item[1]()
+                break
+        else:
+            self.fail("the amp page has no Custom Amp line")
+        # Opening it chooses it: a player who asked for their own amp has
+        # already decided, and the knobs are on the page that opens.
+        self.bot.set_voice_effect.assert_called_once_with("custom")
+        board = self.last_menu()
+        names = [label_of(item).split(":")[0] for item in board.items]
+        for _param_id, name, _note, _choices, _default in (
+                voice_effect_custom.PARAMS):
+            self.assertIn(name, names)
+        for item in board.items:
+            self.assertGreaterEqual(len(item), 4)
+            self.assertTrue(text_of(item).strip())
+
+    def test_a_knob_page_writes_the_board_and_applies_it(self):
+        board = {}
+        mock.patch.object(
+            voice_effect_custom.options, "get",
+            side_effect=lambda key, default=None: board.get(key, default)
+        ).start()
+        mock.patch.object(
+            voice_effect_custom.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            board.__setitem__(key, value)
+        ).start()
+        self.handler._open_custom_effect_menu()
+        self.handler._open_custom_param_menu("drive")
+        menu = self.last_menu()
+        labels = [label_of(item) for item in menu.items]
+        self.assertIn("Crunch (active)", labels)
+        self.assertEqual(labels[-1], "Back")
+        for item in menu.items:
+            if label_of(item) == "Saturated":
+                item[1]()
+                break
+        else:
+            self.fail("the drive page has no Saturated line")
+        self.bot.set_voice_effect.assert_called_with("custom")
+        self.assertEqual(voice_effect_custom.values()["drive"], "sat")
+
+    def test_the_voice_effect_page_ends_with_the_voice_builder(self):
+        """Custom Voice is the page's last choice, after the seven families."""
+        self.handler._open_voice_effect_menu()
+        menu = self.last_menu()
+        labels = [label_of(item) for item in menu.items]
+        self.assertEqual(labels[-1], "Back")
+        self.assertTrue(labels[-2].startswith("Custom Voice:"), labels[-2])
+        # It is a line of its own, not a family: the seven are above it.
+        for _group_id, name, _note, _members in voice_effects.VOICE_EFFECT_GROUPS:
+            self.assertTrue(any(label.startswith(name) for label in labels))
+        for item in menu.items:
+            if label_of(item).startswith("Custom Voice:"):
+                item[1]()
+                break
+        else:
+            self.fail("the Voice Effect page has no Custom Voice line")
+        self.bot.set_voice_effect.assert_called_once_with("voice_build")
+        board = self.last_menu()
+        names = [label_of(item).split(":")[0] for item in board.items]
+        for _param_id, name, _note, _choices, _default in (
+                voice_effect_builder.PARAMS):
+            self.assertIn(name, names)
+        # The ten slots, the starting line above them, and Back.
+        self.assertEqual(len(board.items), len(voice_effect_builder.PARAMS) + 2)
+        for item in board.items:
+            self.assertGreaterEqual(len(item), 4)
+            self.assertTrue(text_of(item).strip())
+
+    def test_a_voice_builder_slot_page_writes_the_board_and_applies_it(self):
+        board = {}
+        mock.patch.object(
+            voice_effect_builder.options, "get",
+            side_effect=lambda key, default=None: board.get(key, default)
+        ).start()
+        mock.patch.object(
+            voice_effect_builder.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            board.__setitem__(key, value)
+        ).start()
+        self.handler._open_voice_builder_menu()
+        self.handler._open_custom_param_menu("space", voice_effect_builder)
+        menu = self.last_menu()
+        labels = [label_of(item) for item in menu.items]
+        self.assertIn("Off (active)", labels)
+        self.assertGreaterEqual(len(labels), 11)
+        for item in menu.items:
+            if label_of(item) == "Cave":
+                item[1]()
+                break
+        else:
+            self.fail("the Space page has no Cave line")
+        self.bot.set_voice_effect.assert_called_with("voice_build")
+        self.assertEqual(voice_effect_builder.values()["space"], "cave")
+
+    def test_the_voice_board_begins_with_fifty_finished_voices(self):
+        """`Start From:` is the board's first line, and a press is a sound."""
+        saved = {}
+        mock.patch.object(
+            voice_effect_builder.options, "get",
+            side_effect=lambda key, default=None: saved.get(key, default)
+        ).start()
+        mock.patch.object(
+            voice_effect_builder.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            saved.__setitem__(key, value)
+        ).start()
+        self.handler._open_voice_builder_menu()
+        self.assertTrue(label_of(self.last_menu().items[0]).startswith(
+            "Start From:"), label_of(self.last_menu().items[0]))
+        self.last_menu().items[0][1]()
+        families = [label_of(item) for item in self.last_menu().items]
+        self.assertEqual(
+            families,
+            [name for _id, name, _note in voice_effect_recipes.FAMILIES]
+            + ["Back"])
+        for item in self.last_menu().items:
+            if label_of(item) == "Machine":
+                item[1]()
+                break
+        else:
+            self.fail("the starting points have no Machine family")
+        page = self.last_menu()
+        self.assertIn("Machine", page.title)
+        self.assertEqual(len(page.items), 11)
+        for item in page.items:
+            if label_of(item) == "Vocoder Stack":
+                item[1]()
+                break
+        else:
+            self.fail("the Machine family has no Vocoder Stack")
+        self.bot.set_voice_effect.assert_called_with("voice_build")
+        self.assertEqual(voice_effect_builder.values()["texture"], "vocoder")
+        self.assertEqual(voice_effect_builder.values()["pitch"], "octave")
+        self.assertEqual(voice_effect_recipes.current_label(), "Vocoder Stack")
+        said = menus_module.speak.call_args.args[0]
+        self.assertIn("Vocoder Stack", said)
+        self.assertIn("synth", said)
+        # The board is rebuilt, not revealed: its slots read live but its title
+        # is a snapshot, and "...: Crunch" over a vocoder is a lie.
+        page = self.last_menu()
+        self.assertTrue(page.title.startswith("Music Bot Custom Voice:"),
+                        page.title)
+        self.assertNotIn("Crunch", page.title)
+        self.assertIn("Vocoder", page.title)
+        self.assertTrue(label_of(page.items[0]).startswith("Start From:"))
+        self.assertIn("Vocoder Stack", label_of(page.items[0]))
+
+    def test_every_pedal_is_in_exactly_one_family(self):
+        """Two levels can lose a row and still look complete; this is the check."""
+        self.assertEqual(voice_effects.catalogue_problems(), [])
+        self.handler._open_voice_effect_menu()
+        top = [label_of(item) for item in self.last_menu().items]
+        for _group_id, name, _note, members in voice_effects.VOICE_EFFECT_GROUPS:
+            self.assertTrue(any(label.split(":")[0] == name for label in top),
+                            f"{name} is not on the top page")
+            self.assertTrue(members)
 
     def test_the_scale_menu_describes_every_scale_it_lists(self):
         self.handler._open_autotune_scale_menu()
@@ -534,6 +725,24 @@ class TabSpeaksTheDescriptionTests(unittest.TestCase):
             menu.update([tab()])
         self.assertEqual(menu.pos, index)
         self.assertEqual(chosen, [])
+
+    def test_tab_on_a_custom_knob_says_what_the_knob_does(self):
+        menu = self.menu_with(self.handler._open_custom_effect_menu)
+        self.at(menu, "Drive: Crunch")
+        with mock.patch.object(menu_module.speech, "speak") as speak:
+            menu.update([tab()])
+        self.assertIn("hard the amp is pushed",
+                      speak.call_args.args[0].lower())
+        self.assertEqual(speak.call_args.kwargs.get("id"), "menu_help")
+
+    def test_tab_on_a_voice_builder_slot_says_what_the_slot_does(self):
+        menu = self.menu_with(self.handler._open_voice_builder_menu)
+        self.at(menu, "Space: Off")
+        with mock.patch.object(menu_module.speech, "speak") as speak:
+            menu.update([tab()])
+        self.assertIn("where the voice is heard from",
+                      speak.call_args.args[0].lower())
+        self.assertEqual(speak.call_args.kwargs.get("id"), "menu_help")
 
     def test_tab_speaks_the_recording_menu_lines(self):
         menu = self.menu_with(self.handler._open_recording_menu)

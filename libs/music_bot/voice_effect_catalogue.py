@@ -12,7 +12,18 @@ short enough to arrow past; the description is where the pedal explains itself.
 The DSP for a preset lives in `voice_effects._SPECS` under the same id, and the
 two must agree -- `voice_effects._EffectProcessor` raises on an id that has no
 spec, and a spec with no row is a pedal nobody can choose.
+
+Two rows are not fixed presets: ``custom`` is the Custom Amp board
+(`voice_effect_custom.py`) and ``voice_build`` is the Custom Voice board
+(`voice_effect_builder.py`), and their DSP is built from those boards instead
+of being written into ``_SPECS``. Both are catalogued like the others so the
+pedal list, the family check and the clamp all treat them the same way; the
+builder is in ``STANDALONE_EFFECTS`` because it sits on the Voice Effect page's
+top level rather than inside a family.
 """
+
+from .voice_effect_builder import EFFECT_ID as BUILDER_EFFECT
+from .voice_effect_custom import EFFECT_ID as CUSTOM_EFFECT
 
 #: Every preset, in the order the page lists them.
 VOICE_EFFECTS = (
@@ -163,7 +174,246 @@ VOICE_EFFECTS = (
      "A swell: a backwards ghost of what was said a moment ago grows under "
      "the voice and is cut off, over and over. The reverse reverb of a "
      "trailer, made from words already spoken."),
+    # ---- the studio ten: the chain a record's vocal is actually built from
+    ("tube", "Tube Warmth",
+     "A valve stage at low gain: even harmonics and a soft knee, no cabinet "
+     "and no fizz. What a singer is given when a take is too clean -- it adds "
+     "weight, not distortion."),
+    ("presence", "Presence",
+     "The three-kilohertz band lifted and its top opened, which is what puts a "
+     "voice in front of a mix. No distortion: this is an EQ with a singer's "
+     "name on it."),
+    ("plate", "Plate",
+     "A plate: six short bright taps between eighteen and a hundred "
+     "milliseconds, feeding one another. Denser and brighter than Cave, and "
+     "gone by the next word."),
+    ("gated", "Gated Reverb",
+     "A big room chopped by a timer: the tail blooms when you speak and is cut "
+     "about a fifth of a second later. The sound of every drum of 1983, on a "
+     "voice."),
+    ("throw", "Delay Throw",
+     "A quarter-second repeat at three-eighths of a second, the last word of a "
+     "line thrown into a darker echo. Each repeat is filtered, so it fades "
+     "away rather than piling up."),
+    ("dub", "Dub Delay",
+     "A dark feedback delay: the repeats come back lower and darker each time, "
+     "until they are a rumble. The vocal dub a sound system uses."),
+    ("wash", "Wash",
+     "Almost all room and almost no voice: the voice is sent into a wide, "
+     "bright space and only a quarter of the dry stays. For a layer under a "
+     "chorus, not for words."),
+    ("choir", "Choir",
+     "An octave above the voice, doubled into three drifting copies: a small "
+     "choir singing the same words. Clean of distortion -- the copies carry "
+     "the pitch, not a fuzz."),
+    ("riser", "Riser",
+     "The voice's pitch climbs and the head catches back up to the live "
+     "sample, over and over. The build before a drop, made from one word."),
+    ("scream", "Scream",
+     "A hard clip with the midrange pushed: the modern scream, where the words "
+     "survive the distortion. Louder and more forward than Fuzz, and shorter "
+     "in the tail."),
+    # ---- the twenty amps: the Amp & Drive family's second shelf
+    ("crunch", "Crunch",
+     "A cranked small amp at the edge of its headroom: the chords grind and "
+     "still show their notes, and a quiet syllable stays clean. The rhythm "
+     "sound, with a mid that pushes back."),
+    ("overdrive", "Overdrive",
+     "A pedal in front of a crunchy amp: a mid hump and a soft clip, so the "
+     "voice thickens and the top stays open. Less dirt than Guitar Amp, more "
+     "push than Clean."),
+    ("boost", "Clean Boost",
+     "A clean boost: the voice lifted a couple of decibels through a valve's "
+     "soft knee, with no cabinet and almost no distortion. For a quiet voice "
+     "that has to be heard."),
+    ("lead", "Lead",
+     "A lead channel: high gain with a mid pushed forward and the cabinet kept "
+     "dark, so a syllable sings and still lands. The most sustain of any amp "
+     "here."),
+    ("modern", "Modern Gain",
+     "A modern high-gain amp: the bass cut tight before the shaper and a hard "
+     "clip after it, so a chug stays a chug. Bright, tight and unforgiving."),
+    ("tweed", "Tweed",
+     "A small tweed combo breaking up: a dark cabinet, strong mids and an "
+     "asymmetric clip, so the voice sounds like it comes out of a box with one "
+     "speaker in it."),
+    ("brown", "Brown Sound",
+     "A cranked British head with the mids forward and the top rolled back: "
+     "the brown sound of a hot-rodded amp -- all bark and no fizz."),
+    ("hotrod", "Hot Rod",
+     "A hot-rodded amp: more gain than the brown one and a bright cap on the "
+     "top, so the pick and the consonants cut through the dirt."),
+    ("chime", "Chime",
+     "A class-A amp's chime: barely any clipping, a bright cabinet and the top "
+     "opened by an exciter. Clean, glassy, and it rings."),
+    ("sag", "Sag",
+     "A valve rectifier's sag: the supply dips under a loud passage and "
+     "recovers slowly, so the voice breathes under its own weight instead of "
+     "staying pinned flat."),
+    ("direct", "Direct",
+     "A DI box: no cabinet and no shaper, the whole range of the voice with a "
+     "gentle compressor's glue. The clean reference the other amps are heard "
+     "against."),
+    ("acoustic", "Acoustic DI",
+     "A piezo pickup's amp: the quack around three kilohertz lifted, the top "
+     "opened and the bottom kept out of the way. For a voice that should sound "
+     "like a guitar's box."),
+    ("jazz", "Jazz Clean",
+     "A jazz clean: the top rolled off at three kilohertz and a warm low-mid "
+     "lift, so the voice is round and dark and nothing hisses."),
+    ("room_cab", "Cab Room",
+     "A cabinet in a small room: the amp's own cabinet plus four short taps "
+     "under thirty milliseconds, so a chord is heard with the room it was "
+     "played in."),
+    ("doom", "Doom",
+     "A doom amp: the drive at the top of the range, an octave down under it "
+     "and the cabinet down at two kilohertz. Slow, enormous, and muddy on "
+     "purpose."),
+    ("stoner", "Stoner",
+     "A stoner fuzz with a slow filter riding it: a hard clip and a narrow "
+     "band sweeping once every five seconds, so a held syllable opens and "
+     "closes."),
+    ("velcro", "Velcro Fuzz",
+     "A velcro fuzz: a hard clip chopped thirteen times a second, so a note "
+     "tears instead of ringing. Sputtering, and deliberately broken."),
+    ("octavia", "Octave Fuzz",
+     "An octave fuzz: a hard clip with the rectified copy mixed back in, adding "
+     "a note an octave up. The oldest fuzz trick, and the dirtiest way to sing "
+     "higher."),
+    ("fuzzsub", "Fuzz Sub",
+     "A fuzz with an octave down: the bass cut low before a hard clip and a "
+     "half-speed copy under it, so one voice becomes a riff and its floor."),
+    ("twelve", "Twelve String",
+     "A twelve-string's shimmer: a clean amp with the rectified octave mixed "
+     "lightly, so every word gains a second, brighter string above it."),
+    # ---- the board: not a preset, the player's own
+    ("custom", "Custom Amp",
+     "Your own amp, built on a page of knobs: drive, character, bass, mid, "
+     "treble, gate and output. It is the same chain every fixed pedal uses, so "
+     "it can be anything from a clean DI to a saturated fuzz, and a guitar "
+     "plugged into the line-in is shaped by it too."),
+    (BUILDER_EFFECT, "Custom Voice",
+     "Your own effect, assembled from the blocks the fixed pedals are made of: "
+     "colour, tone, body, movement, pitch, space, texture, rhythm, a gate and "
+     "the output. Ten slots and seventy-one choices between them, so a fuzz in "
+     "a cave with a slow chorus is a sound you can build rather than one the "
+     "list happens not to have."),
 )
+
+#: Rows that are reachable from the Voice Effect page's *top* level rather than
+#: from a family. `catalogue_problems` treats them as reachable -- the check
+#: exists to catch a preset nobody can choose, not to force every row into a
+#: category -- and `menus._open_voice_effect_menu` puts each one on that page by
+#: hand, which is the thing a new standalone row has to remember.
+STANDALONE_EFFECTS = (BUILDER_EFFECT,)
+
+#: The page is too long to read as one list, so it is a page of families and a
+#: page of pedals under each: ``(id, menu name, what Tab reads, (members,))``.
+#: A preset that is in no family cannot be reached, and one in two is reachable
+#: twice -- ``catalogue_problems`` is what the tests hold this to.
+VOICE_EFFECT_GROUPS = (
+    ("drive", "Amp & Drive",
+     "The amp, the fuzz, the radio and the pedals that add dirt or a "
+     "cabinet's colour -- twenty-six of them, and the Custom Amp board at the "
+     "end of the list.",
+     ("amp", "clean", "fuzz", "radio", "crush", "growl",
+      "crunch", "overdrive", "boost", "lead", "modern", "tweed", "brown",
+      "hotrod", "chime", "sag", "direct", "acoustic", "jazz", "room_cab",
+      "doom", "stoner", "velcro", "octavia", "fuzzsub", "twelve",
+      "custom")),
+    ("motion", "Motion",
+     "Tremolo, wah, phaser, flanger, vibrato and chorus: the pedals that move "
+     "the voice rather than colour it.",
+     ("tremolo", "wah", "envelope_wah", "phaser", "flanger", "vibrato",
+      "chorus")),
+    ("machine", "Machine",
+     "Octave, sub octave, ring modulation and the vocoder: the pedals that "
+     "turn a voice into a machine.",
+     ("octave", "sub_octave", "robot", "alien", "vocoder", "shimmer")),
+    ("space", "Space",
+     "Echoes, a cave and a cloud: the pedals that put the voice in a room "
+     "bigger than the one you are in.",
+     ("echo", "cave", "cloud", "swell", "reverse")),
+    ("character", "Character",
+     "Vinyl, wood, breath, air, a double and a talkbox: the pedals that change "
+     "what the voice is made of.",
+     ("vinyl", "body", "whisper", "air", "doubler", "talkbox")),
+    ("rhythm", "Rhythm & Glitch",
+     "Stutter, gate, step, pump, tape stop, hyperpop and freeze: the pedals "
+     "that play the voice in time.",
+     ("stutter", "gate", "step", "pump", "tapestop", "hyperpop", "freeze")),
+    ("studio", "Studio Vocals",
+     "The ten a record's vocal chain is made of: warmth, presence, a plate, a "
+     "gated tail, throws, dub, a wash, a choir, a riser and a scream.",
+     ("tube", "presence", "plate", "gated", "throw", "dub", "wash", "choir",
+      "riser", "scream")),
+)
+
+
+def group_members(group_id):
+    """The presets in one family, in the order the page lists them."""
+    for wanted, _label, _note, members in VOICE_EFFECT_GROUPS:
+        if wanted == group_id:
+            return members
+    return ()
+
+
+def group_label(group_id):
+    """The family's name, or the first family's for an unknown id."""
+    for wanted, label, _note, _members in VOICE_EFFECT_GROUPS:
+        if wanted == group_id:
+            return label
+    return VOICE_EFFECT_GROUPS[0][1]
+
+
+def group_note(group_id):
+    """What Tab reads on the family's line."""
+    for wanted, _label, note, _members in VOICE_EFFECT_GROUPS:
+        if wanted == group_id:
+            return note
+    return VOICE_EFFECT_GROUPS[0][2]
+
+
+def group_of(effect_id):
+    """Which family holds a preset, or None for an id that is not listed."""
+    for group_id, _label, _note, members in VOICE_EFFECT_GROUPS:
+        if effect_id in members:
+            return group_id
+    return None
+
+
+def catalogue_problems():
+    """What is wrong with the page: a pedal lost, listed twice, or unknown.
+
+    A flat list cannot lose a row and still look complete; two levels can. This
+    is the check the tests run, so adding a preset and forgetting its family is
+    a red test rather than a pedal nobody can choose.
+    """
+    problems = []
+    listed = []
+    for group_id, _label, _note, members in VOICE_EFFECT_GROUPS:
+        for effect_id in members:
+            if effect_id not in {row[0] for row in VOICE_EFFECTS}:
+                problems.append(f"{group_id} names a preset that is not "
+                                f"catalogued: {effect_id}")
+            listed.append(effect_id)
+    seen = set()
+    for effect_id in listed:
+        if effect_id in seen:
+            problems.append(f"listed twice: {effect_id}")
+        seen.add(effect_id)
+    catalogued = {row[0] for row in VOICE_EFFECTS}
+    for effect_id, _label, _note in VOICE_EFFECTS:
+        if effect_id == DEFAULT_EFFECT or effect_id in STANDALONE_EFFECTS:
+            continue
+        if effect_id not in seen:
+            problems.append(f"no family holds it: {effect_id}")
+    for effect_id in STANDALONE_EFFECTS:
+        if effect_id not in catalogued:
+            problems.append(f"standalone line is not catalogued: {effect_id}")
+        if effect_id in seen:
+            problems.append(f"standalone line is also in a family: {effect_id}")
+    return problems
 
 DEFAULT_EFFECT = "off"
 
@@ -186,8 +436,19 @@ def effect_label(value):
 
 
 def effect_note(value):
-    """What Tab reads on that preset's line."""
+    """What Tab reads on that preset's line.
+
+    The Custom Amp is the one row whose answer changes: its line has to say
+    what the board is set to now, not what the board is, or Tab on the pedal
+    list would describe a page the player already left.
+    """
     wanted = clamp_effect(value)
+    if wanted == CUSTOM_EFFECT:
+        from . import voice_effect_custom
+        return voice_effect_custom.note()
+    if wanted == BUILDER_EFFECT:
+        from . import voice_effect_builder
+        return voice_effect_builder.note()
     for effect_id, _label, note in VOICE_EFFECTS:
         if effect_id == wanted:
             return note

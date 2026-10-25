@@ -58,7 +58,11 @@ The chain, in order
    sample and the step filter crossfades the frame its band changes in; and **a
    varispeed is a delay that grows faster than real time** (rate `1 -
    d(delay)/dt`), so every gain is zero where a head jumps.
-10. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
+10. The valve sag, on `Sag` and on the Custom Amp's own chain: the supply's
+   gain rather than the output's. It dips under a loud passage and recovers
+   over about six frames, interpolated across the frame so the recovery cannot
+   step -- the same rule as the follower above, for the same reason.
+11. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
    thin the top of any distortion it is handed; the cabinet is deliberately
    below the range where that hurts, and the ceiling keeps the encoder from
    being handed a clipped frame.
@@ -77,6 +81,16 @@ hard switch is a step the size of the waveform -- and that is heard as a click.
 The first frame of a press has nothing to crossfade from (the microphone was
 silent), so it starts clean.
 
+The two shelves and the board
+-----------------------------
+The Amp & Drive family holds the original six pedals, the twenty amps added on
+2026-10-26 (`Crunch` to `Twelve String` -- each one a different corner, band,
+cabinet and bias on this same chain) and `Custom Amp`, which is not a preset at
+all: `voice_effect_custom.py` holds a table of knobs, and its spec is built from
+the board the player set. A knob change bumps the board's revision, and the line
+rebuilds its processor on the next frame and crossfades into it -- the knobs
+land on the next 20 ms rather than at the next pedal change.
+
 The Developer's lock
 --------------------
 `voice_fx` is a row in `server/libs/music_bot_gate.ts`. While it is locked the
@@ -93,8 +107,12 @@ import numpy as np
 
 from .. import options
 from . import gate
-from .voice_effect_catalogue import (DEFAULT_EFFECT, VOICE_EFFECTS,
-                                     clamp_effect, effect_label, effect_note)
+from .voice_effect_catalogue import (BUILDER_EFFECT, CUSTOM_EFFECT,
+                                     DEFAULT_EFFECT, STANDALONE_EFFECTS,
+                                     VOICE_EFFECTS, VOICE_EFFECT_GROUPS,
+                                     catalogue_problems, clamp_effect,
+                                     effect_label, effect_note, group_label,
+                                     group_members, group_note, group_of)
 
 #: One microphone frame: 20 ms of 48 kHz mono16, the unit every voice line is
 #: fed (`libs/voice_chat.VOICE_FRAME_BYTES`).
@@ -195,7 +213,110 @@ _SPECS = {
                  step=(7.0, (250.0, 900.0, 3000.0), 1.4)),
     "swell": dict(hp=110.0, lp=5500.0, drive=1.0, shape=None, bias=0.0,
                   gate=0.004, out=0.95, swell=(0.06, 1.10, 0.55, 0.9, 0.5)),
+    # The studio ten: a record's vocal chain, one piece at a time.
+    "tube": dict(hp=90.0, lp=9000.0, drive=1.9, shape="tanh", bias=0.15,
+                 gate=0.005, out=0.92),
+    "presence": dict(hp=140.0, lp=13000.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.004, out=1.15,
+                     formant=(3200.0, 1.15, 0.45, 1.7),
+                     air=(9000.0, 1.8, 0.18)),
+    "plate": dict(hp=220.0, lp=7500.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.004, out=0.95,
+                  cluster=((18.0, 27.0, 41.0, 58.0, 79.0, 97.0),
+                           (0.8, 0.7, 0.6, 0.5, 0.42, 0.35), 0.22, 0.42)),
+    "gated": dict(hp=180.0, lp=7000.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.004, out=0.95,
+                  gated=((14.0, 23.0, 34.0, 47.0, 63.0, 81.0),
+                         (0.8, 0.72, 0.62, 0.54, 0.46, 0.4), 0.22, 0.55,
+                         0.22, 0.02)),
+    "throw": dict(hp=120.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.004, out=0.95,
+                  dark_echo=(0.375, 0.45, 0.5, 2400.0)),
+    "dub": dict(hp=100.0, lp=5000.0, drive=1.0, shape=None, bias=0.0,
+                gate=0.004, out=0.95,
+                dark_echo=(0.24, 0.68, 0.6, 1100.0)),
+    "wash": dict(hp=160.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                 gate=0.004, out=0.95,
+                 cluster=((90.0, 150.0, 220.0, 300.0),
+                          (0.7, 0.6, 0.5, 0.4), 0.34, 0.8)),
+    "choir": dict(hp=110.0, lp=7500.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.004, out=0.95, octave=0.30,
+                  chorus3=((9.0, 14.0, 19.0), 0.24, 1.2, 0.45)),
+    "riser": dict(hp=110.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
+                  gate=0.004, out=0.95, riser=(0.42, 0.55, 1.3, 0.55)),
+    "scream": dict(hp=150.0, lp=5200.0, drive=16.0, shape="hard", bias=0.2,
+                   gate=0.012, out=0.50,
+                   formant=(1700.0, 1.3, 0.35, 1.5)),
+    # The twenty amps (2026-10-26): the same chain, one voicing each. The
+    # shelves are built from the four things that make an amp an amp -- where
+    # the bass is cut, which band is lifted, where the cabinet stops and how
+    # the clip is biased -- so no two of them answer the same way even when
+    # they share a drive.
+    "crunch": dict(hp=110.0, lp=4600.0, drive=4.6, shape="tanh", bias=0.08,
+                   gate=0.006, out=0.82, formant=(800.0, 1.1, 0.35, 1.6)),
+    "overdrive": dict(hp=140.0, lp=3900.0, drive=6.8, shape="tanh",
+                      bias=0.06, gate=0.006, out=0.80,
+                      formant=(700.0, 1.2, 0.45, 1.7)),
+    "boost": dict(hp=100.0, lp=5200.0, drive=2.0, shape="tanh", bias=0.03,
+                  gate=0.004, out=1.05),
+    "lead": dict(hp=130.0, lp=4800.0, drive=13.0, shape="tanh", bias=0.10,
+                 gate=0.010, out=0.60, formant=(1100.0, 1.1, 0.40, 1.6)),
+    "modern": dict(hp=150.0, lp=4200.0, drive=19.0, shape="hard", bias=0.10,
+                   gate=0.010, out=0.52),
+    "tweed": dict(hp=130.0, lp=3100.0, drive=5.8, shape="tanh", bias=0.14,
+                  gate=0.008, out=0.80, formant=(850.0, 1.3, 0.40, 1.6)),
+    "brown": dict(hp=120.0, lp=3600.0, drive=8.5, shape="tanh", bias=0.12,
+                  gate=0.008, out=0.72, formant=(650.0, 1.2, 0.40, 1.6)),
+    "hotrod": dict(hp=150.0, lp=3300.0, drive=11.0, shape="tanh", bias=0.12,
+                   gate=0.009, out=0.66, air=(6500.0, 2.0, 0.22)),
+    "chime": dict(hp=110.0, lp=7000.0, drive=3.2, shape="tanh", bias=0.05,
+                  gate=0.005, out=0.92, air=(7500.0, 2.2, 0.30)),
+    "sag": dict(hp=100.0, lp=4400.0, drive=5.4, shape="tanh", bias=0.09,
+                gate=0.006, out=0.78, sag=(0.45, 0.16)),
+    "direct": dict(hp=70.0, lp=11000.0, drive=1.0, shape=None, bias=0.0,
+                   gate=0.004, out=0.98),
+    "acoustic": dict(hp=60.0, lp=10500.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.003, out=0.98,
+                     formant=(2700.0, 1.4, 0.30, 1.7),
+                     air=(8000.0, 1.8, 0.20)),
+    "jazz": dict(hp=90.0, lp=2800.0, drive=1.0, shape=None, bias=0.0,
+                 gate=0.004, out=0.95, formant=(520.0, 1.2, 0.45, 1.5)),
+    "room_cab": dict(hp=120.0, lp=4300.0, drive=7.0, shape="tanh",
+                     bias=0.08, gate=0.008, out=0.70,
+                     cluster=((9.0, 14.0, 19.0, 26.0),
+                              (0.5, 0.42, 0.34, 0.28), 0.25, 0.22)),
+    "doom": dict(hp=60.0, lp=2300.0, drive=24.0, shape="tanh", bias=0.16,
+                 gate=0.012, out=0.48, sub_octave=0.45),
+    "stoner": dict(hp=100.0, lp=3200.0, drive=15.0, shape="hard", bias=0.12,
+                   gate=0.010, out=0.55,
+                   wah=(300.0, 1200.0, 0.20, 2.6, 2.4)),
+    "velcro": dict(hp=140.0, lp=3000.0, drive=21.0, shape="hard", bias=0.22,
+                   gate=0.015, out=0.55, chop=(13.0, 0.10)),
+    "octavia": dict(hp=120.0, lp=4800.0, drive=11.0, shape="hard",
+                    bias=0.16, gate=0.008, out=0.70, octave=0.60),
+    "fuzzsub": dict(hp=70.0, lp=2600.0, drive=18.0, shape="hard", bias=0.20,
+                    gate=0.010, out=0.52, sub_octave=0.50),
+    "twelve": dict(hp=90.0, lp=8200.0, drive=1.0, shape=None, bias=0.0,
+                   gate=0.004, out=1.05, octave=0.26),
+
 }
+
+
+def spec_for(effect_id):
+    """The filter settings for one pedal: a fixed row, or a player's board.
+
+    Every preset's numbers live in `_SPECS`; the two boards' do not exist until
+    a player sets them, so they are built from their tables instead. All three
+    answers go to the same processor, which is what keeps a board a preset
+    rather than a second feature.
+    """
+    if effect_id == CUSTOM_EFFECT:
+        from . import voice_effect_custom
+        return voice_effect_custom.spec()
+    if effect_id == BUILDER_EFFECT:
+        from . import voice_effect_builder
+        return voice_effect_builder.spec()
+    return _SPECS[effect_id]
 
 #: The loudest a pedal may hand over, in full scale. The PA and a cinema cabinet
 #: both put the voice through effect sends *on top of* the dry voice -- the PA two
@@ -252,6 +373,14 @@ def _carrier_band_levels(q):
 #: rather than chopping the tail of a sentence into pieces.
 GATE_OPEN = 0.5
 GATE_CLOSE = 0.12
+
+#: The sag's two speeds, per frame. A valve rectifier gives its current up at
+#: once (the supply dips under a loud passage) and recovers slowly -- that slow
+#: recovery is the swell everyone recognises as sag. Both are interpolated
+#: across the frame, so the recovery cannot step (a step is the 50 Hz buzz the
+#: modern pedals were fixed for).
+SAG_FALL = 0.55
+SAG_RISE = 0.12
 
 
 def selected():
@@ -353,6 +482,21 @@ class _Biquad:
         self.b, self.a = self._bandpass_coefficients(hz, q)
 
     @classmethod
+    def lowpass(cls, hz, q=0.7071067811865476):
+        """RBJ's cookbook low-pass, at a Butterworth's Q (the delay's darkening)."""
+        w0 = 2.0 * np.pi * float(hz) / SAMPLE_RATE
+        cos_w0 = float(np.cos(w0))
+        alpha = float(np.sin(w0)) / (2.0 * q)
+        b0 = (1.0 - cos_w0) / 2.0
+        b1 = 1.0 - cos_w0
+        b2 = (1.0 - cos_w0) / 2.0
+        a0 = 1.0 + alpha
+        a1 = -2.0 * cos_w0
+        a2 = 1.0 - alpha
+        return cls((b0 / a0, b1 / a0, b2 / a0),
+                   (1.0, a1 / a0, a2 / a0))
+
+    @classmethod
     def highpass(cls, hz, q=0.7071067811865476):
         """RBJ's cookbook high-pass, at a Butterworth's Q."""
         w0 = 2.0 * np.pi * float(hz) / SAMPLE_RATE
@@ -411,7 +555,7 @@ class _EffectProcessor:
     TAPS = 257
 
     def __init__(self, preset):
-        spec = _SPECS[preset]
+        spec = spec_for(preset)
         self.preset = preset
         self.spec = spec
         self.pre = _Biquad.highpass(spec["hp"])
@@ -494,6 +638,11 @@ class _EffectProcessor:
         self._gate_pedal = spec.get("chop")
         self._gate_fir = (_Fir(np.ones(48, dtype=np.float32) / 48.0)
                           if self._gate_pedal else None)
+        # The chop keeps its own phase: the Custom Voice board may run a Chop
+        # in the Rhythm slot and a Tremolo in Movement at once, and two blocks
+        # advancing one oscillator would make each run at the sum of the two
+        # rates. Every other block here already owns its phase.
+        self._chop_phase = 0.0
         self._reverse = spec.get("reverse")
         self._reverse_history = collections.deque(
             maxlen=int(self._reverse[0]) if self._reverse else 0)
@@ -555,6 +704,9 @@ class _EffectProcessor:
                                 if self._formant else None)
         self._ott = spec.get("ott")
         self._ott_env = 0.0
+        # Sag: the amp's supply, not its output -- see `_sag_block`.
+        self._sag = spec.get("sag")
+        self._sag_gain = 1.0
         self._tapestop = spec.get("tapestop")
         self._tapestop_ring = (np.zeros(32768, dtype=np.float32)
                                if self._tapestop else None)
@@ -589,6 +741,43 @@ class _EffectProcessor:
                             if self._swell else None)
         self._swell_pos = 0
         self._swell_clock = 0.0
+        # The studio pedals: a generic tap cluster (a plate, a room, a wash),
+        # a dark feedback echo, a gated reverb and a riser.
+        self._cluster = spec.get("cluster")
+        if self._cluster:
+            longest = max(float(tap) for tap in self._cluster[0])
+            self._cluster_ring = np.zeros(
+                int(round(longest * SAMPLE_RATE / 1000.0)) + 4096,
+                dtype=np.float32)
+        else:
+            self._cluster_ring = None
+        self._cluster_pos = 0
+        self._dark_echo = spec.get("dark_echo")
+        if self._dark_echo:
+            self._dark_ring = np.zeros(
+                int(round(float(self._dark_echo[0]) * SAMPLE_RATE)) + 4096,
+                dtype=np.float32)
+        else:
+            self._dark_ring = None
+        self._dark_pos = 0
+        self._dark_filter = (_Biquad.lowpass(self._dark_echo[3])
+                             if self._dark_echo else None)
+        self._gated = spec.get("gated")
+        if self._gated:
+            longest = max(float(tap) for tap in self._gated[0])
+            self._gated_ring = np.zeros(
+                int(round(longest * SAMPLE_RATE / 1000.0)) + 4096,
+                dtype=np.float32)
+        else:
+            self._gated_ring = None
+        self._gated_pos = 0
+        self._gated_gain = 0.0
+        self._gated_left = 0.0
+        self._riser = spec.get("riser")
+        self._riser_ring = (np.zeros(32768, dtype=np.float32)
+                            if self._riser else None)
+        self._riser_pos = 0
+        self._riser_clock = 0.0
 
     # ------------------------------------------------------------------ the gate
     def _gate(self, block):
@@ -942,12 +1131,12 @@ class _EffectProcessor:
             return block
         rate, depth = self._gate_pedal
         positions = np.arange(block.size)
-        phase = self._lfo + 2.0 * np.pi * rate * positions / SAMPLE_RATE
+        phase = self._chop_phase + 2.0 * np.pi * rate * positions / SAMPLE_RATE
         raw = np.where(np.sin(phase) >= 0.0, 1.0, depth).astype(np.float32)
         gain = self._gate_fir.process(raw)
-        self._lfo = ((self._lfo
-                      + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
-                     % (2.0 * np.pi))
+        self._chop_phase = ((self._chop_phase
+                             + 2.0 * np.pi * rate * block.size / SAMPLE_RATE)
+                            % (2.0 * np.pi))
         return block * gain
 
     def _reverse_block(self, block):
@@ -1252,6 +1441,32 @@ class _EffectProcessor:
         self._ott_env = env
         return np.asarray(out, dtype=np.float32)
 
+    def _sag_block(self, block):
+        """A valve rectifier's sag: the supply dips, then comes back slowly.
+
+        Not a compressor on the output but the amp's own behaviour: a loud
+        passage draws more current than the rectifier can supply, so the whole
+        amp gets quieter and only recovers once the passage ends. That is why
+        it is *felt* on a chord rather than heard as an effect -- and why the
+        recovery is much slower than the dip. The gain is ramped across the
+        frame; a gain that jumps once per frame is the 50 Hz buzz the modern
+        pedals were fixed for.
+        """
+        if not self._sag:
+            return block
+        depth, reference = self._sag
+        level = (float(np.sqrt(np.mean(np.square(block))))
+                 if block.size else 0.0)
+        wanted = 1.0 / (1.0 + float(depth) * (level / float(reference)))
+        before = self._sag_gain
+        rate = SAG_FALL if wanted < before else SAG_RISE
+        after = before + (wanted - before) * rate
+        self._sag_gain = after
+        if before == after:
+            return block * after
+        return block * np.linspace(before, after, block.size,
+                                   endpoint=False, dtype=np.float32)
+
     def _pump_block(self, block):
         """A four-to-the-floor duck: the voice steps back into every beat."""
         if not self._pump:
@@ -1401,6 +1616,93 @@ class _EffectProcessor:
         self._freeze_pos = (position + 1) % length
         return out
 
+    # ------------------------------------------------------ the studio pedals
+    def _cluster_block(self, block):
+        """A bank of taps feeding one another: a plate, a room, a wash."""
+        if not self._cluster:
+            return block
+        taps, gains, feedback, mix = self._cluster
+        out, self._cluster_pos = self._multi_tap(
+            block, taps, gains, feedback, mix, self._cluster_ring,
+            self._cluster_pos)
+        return out
+
+    def _dark_echo_block(self, block):
+        """An echo whose every repeat is darker than the one before it.
+
+        The low-pass sits *inside* the feedback path, so a repeat passes it
+        once per round trip: the second is darker than the first, the third
+        darker again, and a dub tail falls away instead of piling up.
+        """
+        if not self._dark_echo:
+            return block
+        seconds, feedback, mix, _corner = self._dark_echo
+        delay = int(round(float(seconds) * SAMPLE_RATE))
+        ring, size = self._dark_ring, self._dark_ring.size
+        positions = np.arange(block.size)
+        read = (self._dark_pos + positions - delay) % size
+        write = (self._dark_pos + positions) % size
+        delayed = ring[read].copy()
+        ring[write] = block + float(feedback) * self._dark_filter.process(
+            delayed)
+        self._dark_pos = int((self._dark_pos + block.size) % size)
+        return block * (1.0 - float(mix)) + delayed * float(mix)
+
+    def _gated_block(self, block):
+        """A reverb with a timer on its tail: the gated sound.
+
+        The tail opens with the voice and is cut a fixed time later whatever
+        the voice does -- that is what separates a gated room from a plate. The
+        gain is ramped across each frame, because a gate that steps is a click.
+        """
+        if not self._gated:
+            return block
+        taps, gains, feedback, mix, hold, threshold = self._gated
+        wet, self._gated_pos = self._multi_tap(
+            block, taps, gains, feedback, 1.0, self._gated_ring,
+            self._gated_pos)
+        level = (float(np.sqrt(np.mean(np.square(block))))
+                 if block.size else 0.0)
+        if level >= float(threshold):
+            self._gated_left = float(hold)
+        before = self._gated_gain
+        self._gated_gain = min(1.0, max(0.0, self._gated_left / float(hold)))
+        self._gated_left = max(0.0, self._gated_left
+                               - block.size / SAMPLE_RATE)
+        ramp = np.linspace(before, self._gated_gain, block.size,
+                           endpoint=False)
+        return block * (1.0 - float(mix)) + wet * (float(mix) * ramp)
+
+    def _riser_block(self, block):
+        """The pitch climbs, and the head catches the live sample again.
+
+        The delay falls, so the read head runs faster than real time -- rate
+        `1 - d(delay)/dt` is above one and the pitch climbs with it. The wet is
+        silent where the head resets to the top of the ramp, so the jump back
+        is not heard; the dry voice carries the words throughout.
+        """
+        if not self._riser:
+            return block
+        start_delay, rise, cycle, mix = self._riser
+        count = block.size
+        positions = np.arange(count)
+        clock = np.mod(self._riser_clock + positions / SAMPLE_RATE,
+                       float(cycle))
+        progress = np.clip(clock / float(rise), 0.0, 1.0)
+        # The delay holds, then falls as p-squared: the playback rate is
+        # 1 + 2*start*p/rise, so the note starts *in tune* and climbs -- a fall
+        # in the delay from the first sample would arrive already sharp.
+        delay = ((float(start_delay) * (1.0 - progress ** 2) + 0.02)
+                 * SAMPLE_RATE)
+        gain = (np.clip((1.0 - progress) / 0.12, 0.0, 1.0)
+                * np.clip(clock / 0.08, 0.0, 1.0))
+        self._riser_clock = float((self._riser_clock
+                                   + count / SAMPLE_RATE) % float(cycle))
+        climbed, self._riser_pos = self._delay_frame(
+            block, self._riser_ring, self._riser_pos, delay)
+        return block * (1.0 - float(mix)) + climbed * (
+            gain.astype(np.float32) * float(mix))
+
     # ------------------------------------------------------------------ the frame
     def process(self, pcm):
         """Shape one frame; the same number of bytes comes back."""
@@ -1416,6 +1718,7 @@ class _EffectProcessor:
         block = self.post.process(block)
         block = self._air_block(block)
         block = self._formant_block(block)
+        block = self._sag_block(block)
         block = self._vocoder_block(block)
         block = self._ott_block(block)
         block = self._chorus_block(block)
@@ -1423,6 +1726,9 @@ class _EffectProcessor:
         block = self._wah_block(block)
         block = self._phaser_block(block)
         block = self._echo_block(block)
+        block = self._dark_echo_block(block)
+        block = self._gated_block(block)
+        block = self._cluster_block(block)
         block = self._robot_block(block)
         block = self._flanger_block(block)
         block = self._vibrato_block(block)
@@ -1445,6 +1751,7 @@ class _EffectProcessor:
         block = self._cloud_block(block)
         block = self._swell_block(block)
         block = self._freeze_block(block)
+        block = self._riser_block(block)
         block = self._tapestop_block(block)
         # Unity below the knee and a hard asymptotic ceiling at PEAK_CEILING:
         # the encoder is handed a frame with room left for the effect sends the
@@ -1452,6 +1759,21 @@ class _EffectProcessor:
         shaped = PEAK_CEILING * np.tanh(block * self._out / PEAK_CEILING)
         return (np.clip(shaped, -1.0, 1.0) * 32767.0).round().astype(
             "<i2").tobytes()
+
+
+def _board_revision(effect_id):
+    """A board's change count, or 0 for a fixed pedal.
+
+    Imported inside the call: a board's module reads the options file, and a
+    voice path that never chooses it should not carry it at import time.
+    """
+    if effect_id == CUSTOM_EFFECT:
+        from . import voice_effect_custom
+        return voice_effect_custom.revision()
+    if effect_id == BUILDER_EFFECT:
+        from . import voice_effect_builder
+        return voice_effect_builder.revision()
+    return 0
 
 
 def _crossfade(previous, fresh):
@@ -1486,6 +1808,7 @@ class VoiceEffectLine:
         self._lock = threading.Lock()
         self._processor = None
         self._preset = DEFAULT_EFFECT
+        self._revision = 0
         self._last = b""
 
     @property
@@ -1512,15 +1835,23 @@ class VoiceEffectLine:
                 out = _crossfade(self._last, data)
                 self._processor = None
                 self._preset = DEFAULT_EFFECT
+                self._revision = 0
                 self._last = out
                 return out
-            if self._processor is None or wanted != self._preset:
+            # The Custom Amp's knobs are read when its processor is built, so a
+            # board that moved needs a fresh one -- crossfaded in, exactly like
+            # a preset change, because two gains of the same waveform are still
+            # a step at the frame boundary.
+            revision = _board_revision(wanted)
+            if (self._processor is None or wanted != self._preset
+                    or revision != self._revision):
                 switching = self._processor is not None
                 self._processor = _EffectProcessor(wanted)
                 out = self._processor.process(data)
                 if switching:
                     out = _crossfade(self._last, out)
                 self._preset = wanted
+                self._revision = revision
                 self._last = out
                 return out
             out = self._processor.process(data)
@@ -1538,6 +1869,8 @@ class VoiceEffectLine:
             if wanted == DEFAULT_EFFECT:
                 return frames
             processor = self._processor
-            if processor is None or wanted != self._preset:
+            revision = _board_revision(wanted)
+            if (processor is None or wanted != self._preset
+                    or revision != self._revision):
                 processor = _EffectProcessor(wanted)
             return [processor.process(frame) for frame in frames]

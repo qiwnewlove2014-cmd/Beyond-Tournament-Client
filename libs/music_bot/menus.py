@@ -1946,18 +1946,39 @@ class MusicBotMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _open_voice_effect_menu(self):
+    def _open_voice_effect_menu(self, group=None):
         """The pedals a player can put their broadcast voice through.
 
-        One line each, and Tab says what the pedal does to the voice. The
-        effect is a WRAPPER around the line a press already has, so choosing one
-        here does not replace Auto-Tune or Harmony -- it is measured after them
-        -- and the preset is read per frame, so it can be changed mid-sentence
-        (crossfaded, never cut). Presets only: a drive knob would invite a
-        player to look for a guitar that is not there.
+        Two levels: the families, then the pedals in one of them. Sixty-eight
+        pedals in one list is a list you scroll rather than read, and a name
+        like `Plate` says nothing until something explains it -- a family is
+        where that explanation fits without every line carrying all of it. Off
+        stays on the top page, so turning the effect off never means drilling
+        into a family.
+
+        The effect is a WRAPPER around the line a press already has, so choosing
+        one here does not replace Auto-Tune or Harmony -- it is measured after
+        them -- and the preset is read per frame, so it can be changed
+        mid-sentence (crossfaded, never cut).
+
+        Amp & Drive ends with one line that is not a pedal: `Custom Amp` opens
+        the board (`_open_custom_effect_menu`), where the drive, the character,
+        the three tone knobs and the gate are the player's own. It sits at the
+        bottom of that family and nowhere else, because a board with no amp
+        around it is a page of filters with nothing to filter.
+
+        This page ends with a board too: `Custom Voice`
+        (`_open_voice_builder_menu`) assembles a whole effect out of the blocks
+        the families are made of -- ten slots, seventy-one choices, and fifty
+        ready-made voices on the board's first line (`voice_effect_recipes`) --
+        and it is a line *on* this page rather than a family under it, because
+        it is one choice rather than a category (`voice_effect_catalogue.
+        STANDALONE_EFFECTS`).
         """
         from .. import menu as menu_mod, menus
         from . import gate as music_bot_gate
+        from . import voice_effect_builder
+        from . import voice_effect_custom
         from . import voice_effects
         gp = self._bot._find_gameplay()
         if not gp:
@@ -1965,9 +1986,24 @@ class MusicBotMenus:
         if music_bot_gate.blocked("voice_fx"):
             return
 
+        def current():
+            return voice_effects.clamp_effect(
+                getattr(self._bot, "voice_effect",
+                        voice_effects.DEFAULT_EFFECT))
+
         def go_back():
             gp.pop_last_substate()
             self._open_settings_menu()
+
+        def go_to_groups():
+            gp.pop_last_substate()
+            self._open_voice_effect_menu()
+
+        def open_group(group_id):
+            def apply():
+                gp.pop_last_substate()
+                self._open_voice_effect_menu(group_id)
+            return apply
 
         def pick(effect_id):
             def apply():
@@ -1981,20 +2017,337 @@ class MusicBotMenus:
             # Read live, like the Harmony list: the mark follows the choice on
             # the list that is already open.
             def label_fn():
-                current = voice_effects.clamp_effect(
-                    getattr(self._bot, "voice_effect",
-                            voice_effects.DEFAULT_EFFECT))
                 label = voice_effects.effect_label(effect_id)
-                return f"{label} (active)" if effect_id == current else label
+                return f"{label} (active)" if effect_id == current() else label
             return label_fn
 
-        items = [(make_label(effect_id), pick(effect_id), None, note)
-                 for effect_id, _label, note in voice_effects.VOICE_EFFECTS]
-        items.append(("Back", go_back, None,
-                      "Returns to Music Bot Settings."))
+        def make_group_label(group_id, name, members):
+            # The chosen pedal is named on its family's line, so the top page
+            # answers "where am I" without being opened.
+            def label_fn():
+                now = current()
+                if now in members:
+                    return (f"{name}: {voice_effects.effect_label(now)} "
+                            f"(active)")
+                return name
+            return label_fn
+
+        def make_custom_label():
+            # The board's own line carries what it is set to, so the family
+            # page answers "what am I playing through" without being opened.
+            def label_fn():
+                label = voice_effects.effect_label(voice_effects.CUSTOM_EFFECT)
+                label = f"{label}: {voice_effect_custom.summary()}"
+                if current() == voice_effects.CUSTOM_EFFECT:
+                    return f"{label} (active)"
+                return label
+            return label_fn
+
+        def go_custom():
+            # Opening the board is choosing it: a player who wants their own
+            # amp has already decided, and a board that changed nothing until
+            # another line was pressed would look broken. The knobs' own page
+            # is where the first change lands.
+            gp.pop_last_substate()
+            self._bot.set_voice_effect(voice_effects.CUSTOM_EFFECT)
+            self._open_custom_effect_menu()
+
+        def make_builder_label():
+            # Same rule for the whole-voice board: its line carries what the
+            # player built, so the top page answers without being opened.
+            def label_fn():
+                label = voice_effects.effect_label(voice_effects.BUILDER_EFFECT)
+                label = f"{label}: {voice_effect_builder.summary()}"
+                if current() == voice_effects.BUILDER_EFFECT:
+                    return f"{label} (active)"
+                return label
+            return label_fn
+
+        def go_builder():
+            gp.pop_last_substate()
+            self._bot.set_voice_effect(voice_effects.BUILDER_EFFECT)
+            self._open_voice_builder_menu()
+
         m = menu_mod.Menu(
             self._bot.game,
-            f"Music Bot Voice Effect: {self._bot.voice_effect_label()}",
+            f"Music Bot Voice Effect: {self._bot.voice_effect_label()}"
+            if group is None else
+            f"Music Bot Voice Effect: {voice_effects.group_label(group)}",
+            parrent=gp,
+        )
+        if group is None:
+            items = [(make_label(voice_effects.DEFAULT_EFFECT),
+                      pick(voice_effects.DEFAULT_EFFECT), None,
+                      voice_effects.effect_note(voice_effects.DEFAULT_EFFECT))]
+            for group_id, name, note, members in (
+                    voice_effects.VOICE_EFFECT_GROUPS):
+                items.append((make_group_label(group_id, name, members),
+                              open_group(group_id), None, note))
+            # The builder is the page's last choice, not a family: it opens a
+            # board rather than a list of pedals.
+            for effect_id in voice_effects.STANDALONE_EFFECTS:
+                items.append((make_builder_label(), go_builder, None,
+                              voice_effects.effect_note(effect_id)))
+            items.append(("Back", go_back, None,
+                          "Returns to Music Bot Settings."))
+        else:
+            # The board is in the family (so the top page can name it when it
+            # is chosen) but it is not a pedal to pick: it opens a page, so the
+            # plain list leaves it out and its own line goes at the bottom.
+            items = [(make_label(effect_id), pick(effect_id), None,
+                      voice_effects.effect_note(effect_id))
+                     for effect_id in voice_effects.group_members(group)
+                     if effect_id != voice_effects.CUSTOM_EFFECT]
+            if group == "drive":
+                items.append((make_custom_label(), go_custom, None,
+                              voice_effects.effect_note(
+                                  voice_effects.CUSTOM_EFFECT)))
+            items.append(("Back", go_to_groups, None,
+                          "Returns to the list of voice effect families."))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_voice_builder_menu(self):
+        """The Custom Voice board: the last line of the Voice Effect page.
+
+        The same generated page as the amp board, over the ten slots in
+        `voice_effect_builder.PARAMS` -- colour, tone, body, movement, pitch,
+        space, texture, rhythm, gate and output. Back returns to the Voice
+        Effect page it came from, not into Amp & Drive.
+        """
+        from . import voice_effect_builder
+        return self._open_custom_effect_menu(voice_effect_builder,
+                                             back_to_top=True)
+
+    def _open_builder_recipes_menu(self, family_id=None):
+        """The Custom Voice board's starting points: five pages of ten.
+
+        The board is ten slots of seventy-one choices, and a player opening it
+        for the first time is looking at ten lines reading their defaults. This
+        page is the way in: fifty finished voices (`voice_effect_recipes`),
+        each one the same ten slots with values in them, so a press is a sound
+        and every slot underneath stays the player's afterwards.
+
+        One method for both levels -- the five families, and then one family's
+        ten -- because the family is a field of each recipe's row: the page in
+        front of the player and the table behind it are the same object, so a
+        recipe cannot be offered under a family it does not belong to. Back
+        pops this page and reveals whatever opened it (the board underneath, or
+        the family list), and picking one pops both pages *and* the board and
+        rebuilds it -- the slots read live but the title is a snapshot, and a
+        board titled "Crunch" over a vocoder is the kind of lie a live label
+        exists to prevent.
+        """
+        from .. import menu as menu_mod, menus
+        from . import gate as music_bot_gate
+        from . import voice_effect_builder
+        from . import voice_effect_recipes
+        from . import voice_effects
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+        if music_bot_gate.blocked("voice_fx"):
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+
+        def open_family(group_id):
+            def apply():
+                self._open_builder_recipes_menu(group_id)
+            return apply
+
+        def make_family_label(group_id, name):
+            # The family names the recipe it is currently playing, so the page
+            # answers "which voice am I on" without being opened -- the same
+            # rule the pedal families follow.
+            def label_fn():
+                now = voice_effect_recipes.current_id()
+                row = voice_effect_recipes.recipe(now)
+                if row is not None and row[2] == group_id:
+                    return f"{name}: {row[1]}"
+                return name
+            return label_fn
+
+        def pick(recipe_id):
+            def apply():
+                voice_effect_recipes.apply(recipe_id)
+                self._bot.set_voice_effect(voice_effects.BUILDER_EFFECT)
+                speak(f"Custom Voice: "
+                      f"{voice_effect_recipes.recipe_label(recipe_id)}. "
+                      f"{voice_effect_recipes.recipe_note(recipe_id)}")
+                # Two pages, and the board underneath them: its lines read
+                # live, but its TITLE was written when it opened ("...: Crunch"
+                # over a board that is no longer crunchy), so the board is
+                # rebuilt rather than revealed. The stack ends where it began.
+                gp.pop_last_substate()
+                gp.pop_last_substate()
+                gp.pop_last_substate()
+                self._open_voice_builder_menu()
+            return apply
+
+        def make_label(recipe_id):
+            def label_fn():
+                label = voice_effect_recipes.recipe_label(recipe_id)
+                return (f"{label} (active)"
+                        if voice_effect_recipes.current_id() == recipe_id
+                        else label)
+            return label_fn
+
+        if family_id is None:
+            items = [(make_family_label(group_id, name), open_family(group_id),
+                      None, note)
+                     for group_id, name, note in voice_effect_recipes.FAMILIES]
+            items.append(("Back", go_back, None,
+                          "Returns to the Custom Voice board. The board keeps "
+                          "everything set here."))
+            title = "Music Bot Custom Voice: Start From"
+        else:
+            items = [(make_label(recipe_id), pick(recipe_id), None,
+                      voice_effect_recipes.recipe_note(recipe_id))
+                     for recipe_id in
+                     voice_effect_recipes.family_members(family_id)]
+            items.append(("Back", go_back, None,
+                          "Returns to the five families of starting "
+                          "points."))
+            title = ("Music Bot Custom Voice: "
+                     f"{voice_effect_recipes.family_label(family_id)}")
+        m = menu_mod.Menu(self._bot.game, title, parrent=gp)
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_custom_effect_menu(self, board=None, back_to_top=False):
+        """A board page: one line per knob, straight from the board's table.
+
+        Generated rather than written out -- `PARAMS` holds the knobs, their
+        choices and every word Tab says, and this method walks it. A new knob
+        is one row in that table; a whole new board is a new table and this
+        same loop, which is why the menu has no list of its own to fall out of
+        step with the DSP, and the DSP has no table of its own to fall out of
+        step with the words.
+
+        `board` is either board module (the Custom Amp by default);
+        `back_to_top` says which page its Back returns to.
+        """
+        from .. import menu as menu_mod, menus
+        from . import gate as music_bot_gate
+        from . import voice_effect_custom
+        from . import voice_effect_recipes
+        from . import voice_effects
+        board = board if board is not None else voice_effect_custom
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+        if music_bot_gate.blocked("voice_fx"):
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            if back_to_top:
+                self._open_voice_effect_menu()
+            else:
+                self._open_voice_effect_menu("drive")
+
+        def open_param(param_id):
+            def apply():
+                gp.pop_last_substate()
+                self._open_custom_param_menu(param_id, board)
+            return apply
+
+        def make_label(param_id, name):
+            def label_fn():
+                return f"{name}: {board.choice_label(param_id)}"
+            return label_fn
+
+        def open_recipes():
+            # The board stays on the stack underneath, so Back on the families
+            # page reveals it again with its lines already re-read.
+            self._open_builder_recipes_menu()
+
+        def make_recipes_label():
+            def label_fn():
+                return ("Start From: "
+                        f"{voice_effect_recipes.current_label()}")
+            return label_fn
+
+        items = [(make_label(param_id, name), open_param(param_id), None, note)
+                 for param_id, name, note, _choices, _default in board.PARAMS]
+        if board.EFFECT_ID == voice_effects.BUILDER_EFFECT:
+            # The whole-voice board's first line is where to start, above the
+            # ten slots it fills: ten lines reading their defaults is not a
+            # choice, and "what is a Colour?" is not the first question a
+            # player wants to answer.
+            items.insert(0, (make_recipes_label(), open_recipes, None,
+                             voice_effect_recipes.start_note()))
+        items.append(("Back", go_back, None,
+                      "Returns to the Voice Effect page. The board keeps "
+                      "everything set here." if back_to_top else
+                      "Returns to the Amp & Drive list. The board keeps "
+                      "everything set here."))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot {voice_effects.effect_label(board.EFFECT_ID)}: "
+            f"{board.summary()}",
+            parrent=gp,
+        )
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_custom_param_menu(self, param_id, board=None):
+        """One knob's choices, and the only place a board is written to.
+
+        A choice applies the board and closes this list; the board underneath
+        is still open and reads the new value on its next line (the labels are
+        live). Picking a choice here is also what makes the board the chosen
+        pedal: a player who turns a knob has chosen it.
+        """
+        from .. import menu as menu_mod, menus
+        from . import gate as music_bot_gate
+        from . import voice_effect_custom
+        from . import voice_effects
+        board = board if board is not None else voice_effect_custom
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+        if music_bot_gate.blocked("voice_fx"):
+            return
+        row = board.param(param_id)
+        # (the param page imports its own modules above; the board decides
+        # which table it walks and which id it applies)
+        if row is None:
+            return
+        _param_id, name, _note, choices, _default = row
+
+        def go_back():
+            gp.pop_last_substate()
+
+        def pick(value):
+            def apply():
+                chosen = board.set_value(param_id, value)
+                self._bot.set_voice_effect(board.EFFECT_ID)
+                speak(f"{name}: {board.choice_label(param_id, chosen)}. "
+                      f"{board.choice_note(param_id, chosen)}")
+                gp.pop_last_substate()
+            return apply
+
+        def make_label(value):
+            def label_fn():
+                label = board.choice_label(param_id, value)
+                return (f"{label} (active)"
+                        if board.values()[param_id] == value else label)
+            return label_fn
+
+        items = [(make_label(stored), pick(stored), None, note)
+                 for _label, stored, note in choices]
+        items.append(("Back", go_back, None,
+                      "Returns to the board. Everything on it is kept."))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot {voice_effects.effect_label(board.EFFECT_ID)} "
+            f"{name}: {board.choice_label(param_id)}",
             parrent=gp,
         )
         m.add_items(items)

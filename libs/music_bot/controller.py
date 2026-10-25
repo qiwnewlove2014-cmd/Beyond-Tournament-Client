@@ -1509,6 +1509,18 @@ class MapMusicBot:
     def _open_voice_effect_menu(self):
         return self._menus()._open_voice_effect_menu()
 
+    def _open_builder_recipes_menu(self, family_id=None):
+        return self._menus()._open_builder_recipes_menu(family_id)
+
+    def _open_custom_effect_menu(self):
+        return self._menus()._open_custom_effect_menu()
+
+    def _open_voice_builder_menu(self):
+        return self._menus()._open_voice_builder_menu()
+
+    def _open_custom_param_menu(self, param_id):
+        return self._menus()._open_custom_param_menu(param_id)
+
     def _open_autotune_harmony_menu(self, second=False):
         return self._menus()._open_autotune_harmony_menu(second=second)
 

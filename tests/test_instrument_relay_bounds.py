@@ -29,6 +29,7 @@ from unittest import mock
 import cyal
 
 from libs import instrument_input, voice_chat
+from libs.music_bot import voice_effects
 
 
 # --------------------------------------------------------------------------
@@ -229,6 +230,98 @@ class FrameRoutingTests(unittest.TestCase):
                         if len(getattr(bot, name))]
         self.assertEqual(destinations, [])
         self.assertEqual(len(rec.voice_leg), 1)
+
+
+# --------------------------------------------------------------------------
+# The pedal board: the Music Bot's Voice Effect, on the way out
+# --------------------------------------------------------------------------
+class RecordingTracker:
+    """Remembers what the note tracker was handed."""
+
+    def __init__(self):
+        self.frames = []
+
+    def feed(self, frame):
+        self.frames.append(frame.copy())
+        return None
+
+
+class PedalBoardTests(unittest.TestCase):
+    """A chosen pedal shapes what leaves -- and only what leaves.
+
+    The line-in guitar and the broadcast voice share one board, so an amp
+    chosen in the Music Bot is the amp a plugged-in guitar is played through.
+    The player's own ear and the note tracker are handed the dry frame, for the
+    same reason the guitar's Harmony line leaves them alone: the string under
+    the fingers is dry, and an amp's harmonics are not notes.
+    """
+
+    # A frame with sharp steps at every sample pair: any filter, shaper or
+    # gate changes it, and the comparison needs no audio device.
+    FRAME = (bytes(range(256)) * 8)[
+        :instrument_input.InstrumentInput.FRAME_SAMPLES * 2]
+
+    def effect(self, chosen):
+        """Answer the options the way a player who chose `chosen` would."""
+        return mock.patch.object(
+            voice_effects.options, "get",
+            side_effect=lambda key, default=None: (
+                chosen if key == voice_effects.OPTION else default))
+
+    def rec(self, bot, chosen):
+        rec = routing_input(bot)
+        rec.tracker = RecordingTracker()
+        self.patcher = self.effect(chosen)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+        self.locked = mock.patch.object(voice_effects.gate, "is_locked",
+                                        return_value=False)
+        self.locked.start()
+        self.addCleanup(self.locked.stop)
+        return rec
+
+    def test_a_chosen_amp_shapes_the_frame_that_leaves(self):
+        bot = FakeRouteBot()
+        bot.broadcast_enabled = True
+        rec = self.rec(bot, "amp")
+        rec._emit_frame(self.FRAME)
+        self.assertEqual(len(bot.guitar_pcm_queue), 1)
+        self.assertNotEqual(bytes(bot.guitar_pcm_queue[0]), self.FRAME)
+        # ...and the notes the strings played are named from the dry frame.
+        self.assertEqual(len(rec.tracker.frames), 1)
+        dry = [sample / 32768.0 for sample in struct.unpack(
+            f"<{len(self.FRAME) // 2}h", self.FRAME)]
+        heard = rec.tracker.frames[0].tolist()
+        self.assertEqual(len(heard), len(dry))
+        self.assertLess(max(abs(a - b) for a, b in zip(heard, dry)), 1e-6)
+
+    def test_the_custom_amps_board_reaches_a_string_too(self):
+        bot = FakeRouteBot()
+        rec = self.rec(bot, voice_effects.CUSTOM_EFFECT)
+        rec._emit_frame(self.FRAME)
+        self.assertEqual(len(rec.voice_leg), 1)
+        self.assertNotEqual(rec.voice_leg[0][0], self.FRAME)
+
+    def test_off_hands_the_frame_back_byte_for_byte(self):
+        rec = self.rec(FakeRouteBot(), "off")
+        self.assertEqual(rec._amplified(self.FRAME), self.FRAME)
+
+    def test_the_developers_lock_silences_the_board_on_a_string(self):
+        rec = self.rec(FakeRouteBot(), "amp")
+        with mock.patch.object(voice_effects.gate, "is_locked",
+                               return_value=True):
+            self.assertEqual(rec._amplified(self.FRAME), self.FRAME)
+
+    def test_one_line_serves_the_whole_session(self):
+        rec = self.rec(FakeRouteBot(), "amp")
+        rec._amplified(self.FRAME)
+        line = rec._amp_line
+        rec._amplified(self.FRAME)
+        self.assertIs(rec._amp_line, line)
+        # A new session starts dry: the gate, the cabinet's tail and the delay
+        # rings are that session's state, not the next one's.
+        rec._amp_line = None
+        self.assertIsNone(getattr(rec, "_amp_line", None))
 
 
 # --------------------------------------------------------------------------
