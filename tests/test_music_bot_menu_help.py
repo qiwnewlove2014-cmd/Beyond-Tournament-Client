@@ -83,6 +83,8 @@ def make_bot():
     bot.autotune_scale_label.return_value = autotune.scale_label()
     bot.autotune_harmony_label.return_value = "Off"
     bot.autotune_harmony_summary.return_value = "Off"
+    bot.voice_effect = "off"
+    bot.voice_effect_label.return_value = "Off"
     bot.subtitle_label.return_value = "Subtitles: OFF"
     bot.cinema_routing_allowed.return_value = True
     bot.cinema_listening_allowed.return_value = True
@@ -176,6 +178,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
                        self.handler._open_autotune_amount_menu,
                        self.handler._open_harmony_menu,
                        self.handler._open_autotune_harmony_menu,
+                       self.handler._open_voice_effect_menu,
                        self.handler._open_eq_menu,
                        self.handler._open_transpose_menu,
                        self.handler._open_speech_transpose_menu):
@@ -185,6 +188,32 @@ class EveryLineIsDescribedTests(unittest.TestCase):
                     self.assertGreaterEqual(len(item), 4,
                                             f"{item[0]} has no description")
                     self.assertTrue(text_of(item).strip())
+
+    def test_the_settings_page_offers_the_voice_effect(self):
+        self.handler._open_settings_menu()
+        labels = [label_of(item) for item in self.last_menu().items]
+        self.assertIn("Voice Effect: Off", labels)
+        for item in self.last_menu().items:
+            if label_of(item) == "Voice Effect: Off":
+                self.assertIn("guitar amp", text_of(item).lower())
+
+    def test_the_voice_effect_page_marks_the_chosen_pedal(self):
+        """The mark follows the choice on the page that is already open."""
+        self.handler._open_voice_effect_menu()
+        menu = self.last_menu()
+        self.assertIn("Off (active)", [label_of(item) for item in menu.items])
+        self.bot.voice_effect = "amp"
+        labels = [label_of(item) for item in menu.items]
+        self.assertIn("Guitar Amp (active)", labels)
+        self.assertNotIn("Off (active)", labels)
+        # Picking the line is what the keyboard does, not a direct setter.
+        for item in menu.items:
+            if label_of(item) == "Fuzz":
+                item[1]()
+                break
+        else:
+            self.fail("the page has no Fuzz line")
+        self.bot.set_voice_effect.assert_called_once_with("fuzz")
 
     def test_the_scale_menu_describes_every_scale_it_lists(self):
         self.handler._open_autotune_scale_menu()

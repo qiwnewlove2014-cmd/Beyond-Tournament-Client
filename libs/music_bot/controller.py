@@ -39,6 +39,7 @@ from ..audio_health import probe as audio_health
 from . import autotune
 from . import harmony
 from . import output_device
+from . import voice_effects
 from . import song_requests
 from . import subtitles
 from .media import (FFMPEG_PATH, DEFAULT_MAP_MUSIC, FALLBACK_PLAYLIST,
@@ -224,6 +225,13 @@ class MapMusicBot:
         # the nearest note (see `autotune.TUNE_AMOUNTS`).
         self.autotune_amount = autotune.clamp_amount(
             options.get("music_bot_autotune_amount", autotune.DEFAULT_AMOUNT))
+        # The VOICE EFFECT (Settings -> Voice Effect): a guitar amp, a clean
+        # amp with a chorus, a fuzz, a radio or a bitcrusher on the broadcast
+        # voice (libs/music_bot/voice_effects.py). It WRAPS whichever line the
+        # press already has, so Auto-Tune and Harmony keep working and this is
+        # the last thing measured before the frame leaves.
+        self.voice_effect = voice_effects.clamp_effect(
+            options.get(voice_effects.OPTION, voice_effects.DEFAULT_EFFECT))
 
         # A shuffled Favorites feed. It preserves the user's current broadcast
         # routing and never changes saved playlists.
@@ -1498,6 +1506,9 @@ class MapMusicBot:
     def _open_harmony_menu(self):
         return self._menus()._open_harmony_menu()
 
+    def _open_voice_effect_menu(self):
+        return self._menus()._open_voice_effect_menu()
+
     def _open_autotune_harmony_menu(self, second=False):
         return self._menus()._open_autotune_harmony_menu(second=second)
 
@@ -1605,6 +1616,24 @@ class MapMusicBot:
         names = " + ".join(harmony.harmony_label(interval)
                            for interval in intervals)
         return f"{count} ({names})"
+
+    def voice_effect_label(self):
+        """What the Voice Effect row says: 'Off', 'Guitar Amp'..."""
+        return voice_effects.effect_label(
+            getattr(self, "voice_effect", voice_effects.DEFAULT_EFFECT))
+
+    def set_voice_effect(self, effect_id):
+        """Choose a vocal pedal (or Off). Persisted, and read per frame.
+
+        The capture thread reads the option itself, so a preset chosen
+        mid-sentence lands on the words already leaving the mouth -- the line
+        crossfades rather than cutting, because the two sides of a preset change
+        are different waveforms.
+        """
+        value = voice_effects.clamp_effect(effect_id)
+        self.voice_effect = value
+        options.set(voice_effects.OPTION, value)
+        return value
 
     def set_autotune_harmony(self, interval_id, second=False):
         """Choose the interval one harmony copy sings (or Off for none).

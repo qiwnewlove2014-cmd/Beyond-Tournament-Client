@@ -1928,34 +1928,55 @@ class VoiceChatRecord(threading.Thread):
         Turning it ON mid-press starts tuning only if the press had no line at
         all -- a press already wearing its key line keeps it until the next
         press, because a tuner needs a look-ahead a running line cannot grow.
+
+        The Voice Effect is a WRAPPER, not another line beside this one: it is
+        the last thing measured before the frame leaves, and it wraps whichever
+        line the press has (or none). Wrapping preserves everything the lines
+        promise -- one frame in, one out, the same look-ahead, the same tail on
+        release -- and it is why turning the effect on mid-sentence needs no new
+        press: the wrapper reads the preset every frame, like the tuner's switch.
         """
         if not mega:
             return None
-        from .music_bot import harmony
+        from .music_bot import harmony, voice_effects
+        effect = voice_effects.enabled()
         line = getattr(self, "_speech_line", None)
-        if isinstance(line, (AutoTuneLine, harmony.FastHarmonyLine)):
+        if (line is not None and effect
+                and not isinstance(line, voice_effects.VoiceEffectLine)):
+            # A preset chosen after the press began: keep the line it is already
+            # holding (and its look-ahead) and put the pedal after it.
+            line = voice_effects.VoiceEffectLine(line)
+            self._speech_line = line
+        base = (line.inner if isinstance(line, voice_effects.VoiceEffectLine)
+                else line)
+        if isinstance(base, (AutoTuneLine, harmony.FastHarmonyLine)):
             return line
         key = speech_key_semitones()
         if line is None:
+            inner = None
             if autotune_enabled():
-                line = AutoTuneLine()
+                inner = AutoTuneLine()
             elif harmony_enabled():
                 # The copies alone, so nothing is tuning the lead and nothing
                 # needs the tuner's look-ahead: the fast line holds 26.7 ms
                 # (53.3 ms when a bass copy is singing) instead of 58. The
                 # switch is read per frame, so turning Harmony off mid-sentence
                 # fades the copies and hands the lead back, never cuts it.
-                line = harmony.FastHarmonyLine(active=harmony_enabled)
-            elif not key:
+                inner = harmony.FastHarmonyLine(active=harmony_enabled)
+            elif key:
+                inner = SpeechKeyLine(semitones=key)
+            if inner is None and not effect:
                 return None
+            if effect:
+                line = voice_effects.VoiceEffectLine(inner)
             else:
-                line = SpeechKeyLine(semitones=key)
+                line = inner
             self._speech_line = line
-        elif key != line.semitones:
+        elif base is not None and key != base.semitones:
             # The dial moved mid-sentence: the line glides into the new key
             # the way the song's does, instead of jumping. Through the line's
             # own lock -- the release may be flushing this object right now.
-            line.set_semitones(key)
+            base.set_semitones(key)
         return line
 
     def run(self):

@@ -865,6 +865,8 @@ class MenuTests(unittest.TestCase):
         self.bot.autotune_harmony_label.side_effect = (
             lambda second=False: harmony.harmony_label(harmony.DEFAULT_HARMONY))
         self.bot.autotune_harmony_summary.return_value = "Off"
+        self.bot.voice_effect = "off"
+        self.bot.voice_effect_label.return_value = "Off"
         self.bot._find_gameplay.return_value = SimpleNamespace(
             add_substate=lambda item: None, pop_last_substate=lambda: None)
         self.handler = menus_module.MusicBotMenus(self.bot)
@@ -952,10 +954,12 @@ class MenuTests(unittest.TestCase):
         labels = self.settings_labels()
         # ONE line, not one per copy: the page under it is where the copies are
         # chosen. It sits after the tuner's own three dials, so the block the
-        # switch opens stays one block and the muffle is still last.
+        # switch opens stays one block; the Voice Effect row follows it (a mode
+        # of its own too), and the muffle is still last.
         amount = labels.index("Tune Amount: 100%")
         self.assertEqual(labels[amount + 1], "Harmony: Off")
-        self.assertEqual(labels[amount + 2], "Underwater Muffle: ON")
+        self.assertEqual(labels[amount + 2], "Voice Effect: Off")
+        self.assertEqual(labels[amount + 3], "Underwater Muffle: ON")
 
     def test_every_autotune_line_says_what_it_does(self):
         self.bot.autotune_enabled = True

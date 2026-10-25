@@ -1181,7 +1181,7 @@ class MusicBotMenus:
         gp.add_substate(m)
 
     def _open_settings_menu(self):
-        """Music Bot settings: output device first, then reverb, crossfade, EQ, key, speech key, auto-tune, its three dials (speed, scale, amount), harmony, muffle.
+        """Music Bot settings: output device first, then reverb, crossfade, EQ, key, speech key, auto-tune, its three dials (speed, scale, amount), harmony, voice effect, muffle.
 
                     Harmony is its own line and its own mode: it is not one of the dials
                     that the Auto-Tune switch adds and removes, and it sings whether the
@@ -1317,6 +1317,13 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._open_harmony_menu()
 
+        def get_voice_effect_label():
+            return f"Voice Effect: {self._bot.voice_effect_label()}"
+
+        def go_voice_effect():
+            gp.pop_last_substate()
+            self._open_voice_effect_menu()
+
         # The dials are only in the list while the switch is on: off, they
         # change nothing a player can hear, and Auto-Tune lines that do nothing
         # are noise between the player and the rest of the page. Turning it on
@@ -1390,6 +1397,12 @@ class MusicBotMenus:
              "tuner off each copy is its plain interval from your voice -- and "
              "switching the tuner never silences it. Every copy rides in the "
              "one broadcast you send. Off is your own voice alone."),
+            ("voice_fx", get_voice_effect_label, go_voice_effect,
+             "Turns your broadcast voice into an instrument: a distorted "
+             "guitar amp, a clean amp with a chorus, a fuzz pedal, a small "
+             "radio or a bitcrusher. Your words are still words -- it is the "
+             "voice through the pedal, not a guitar -- and Auto-Tune and "
+             "Harmony keep working underneath it. Off is your own voice."),
             ("muffle", get_water_label, toggle_water,
              "Muffles the song the way being underwater does, for a player "
              "who dives while it plays."),
@@ -1927,6 +1940,61 @@ class MusicBotMenus:
         m = menu_mod.Menu(
             self._bot.game,
             f"Music Bot Tune Amount: {self._bot.autotune_amount_label()}",
+            parrent=gp,
+        )
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_voice_effect_menu(self):
+        """The pedals a player can put their broadcast voice through.
+
+        One line each, and Tab says what the pedal does to the voice. The
+        effect is a WRAPPER around the line a press already has, so choosing one
+        here does not replace Auto-Tune or Harmony -- it is measured after them
+        -- and the preset is read per frame, so it can be changed mid-sentence
+        (crossfaded, never cut). Presets only: a drive knob would invite a
+        player to look for a guitar that is not there.
+        """
+        from .. import menu as menu_mod, menus
+        from . import gate as music_bot_gate
+        from . import voice_effects
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+        if music_bot_gate.blocked("voice_fx"):
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def pick(effect_id):
+            def apply():
+                self._bot.set_voice_effect(effect_id)
+                speak(f"Voice effect: {voice_effects.effect_label(effect_id)}. "
+                      f"{voice_effects.effect_note(effect_id)}")
+                m.speak_current_item()
+            return apply
+
+        def make_label(effect_id):
+            # Read live, like the Harmony list: the mark follows the choice on
+            # the list that is already open.
+            def label_fn():
+                current = voice_effects.clamp_effect(
+                    getattr(self._bot, "voice_effect",
+                            voice_effects.DEFAULT_EFFECT))
+                label = voice_effects.effect_label(effect_id)
+                return f"{label} (active)" if effect_id == current else label
+            return label_fn
+
+        items = [(make_label(effect_id), pick(effect_id), None, note)
+                 for effect_id, _label, note in voice_effects.VOICE_EFFECTS]
+        items.append(("Back", go_back, None,
+                      "Returns to Music Bot Settings."))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Voice Effect: {self._bot.voice_effect_label()}",
             parrent=gp,
         )
         m.add_items(items)
