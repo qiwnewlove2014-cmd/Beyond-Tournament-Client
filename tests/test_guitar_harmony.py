@@ -18,7 +18,7 @@ from unittest import mock
 
 import numpy as np
 
-from libs import instrument_harmony, instrument_input, options
+from libs import instrument_harmony, instrument_input, options, voice_chat
 
 SR = 48000
 FRAME = 960
@@ -541,6 +541,63 @@ class TheInstrumentPageTests(unittest.TestCase):
         with mock.patch.object(menus, "instrument_menu") as rebuild:
             captured["func_call"]()
         rebuild.assert_called_once()
+
+
+class TheMicrophoneSharesTheLineTests(unittest.TestCase):
+    """A press with copies and no tuner is this line, at 26.7 ms.
+
+    Nothing is tuning the lead, so nothing needs the tuner's look-ahead: the
+    microphone's Harmony-only press used to build `AutoTuneLine` (107 ms) and
+    hold a tenth of a second for a detection it never ran. These pin the
+    shared line's numbers from the microphone's side, and the release, which a
+    guitar never asks for.
+    """
+
+    def feed(self, line, samples, frames):
+        data = to_pcm(samples)
+        out = bytearray()
+        for start in range(0, frames * FRAME_SAMPLES * 2, FRAME_SAMPLES * 2):
+            out += line.shape(data[start:start + FRAME_SAMPLES * 2])
+        return out
+
+    def test_a_third_holds_the_lead_26_point_7_ms(self):
+        line = voice_chat.FastHarmonyLine(active=lambda: True)
+        with mock.patch.object(options, "get", values()):
+            self.feed(line, tone(0.2), 4)
+            self.assertEqual(line.latency_samples(),
+                             voice_chat.FastHarmonyLine.LOOKAHEAD)
+            self.assertEqual(len(line._voices), 1)
+        self.assertAlmostEqual(
+            line.latency_samples() / 48.0, 26.67, places=2)
+
+    def test_a_bass_copy_holds_the_lead_for_the_slower_copy(self):
+        line = voice_chat.FastHarmonyLine(active=lambda: True)
+        with mock.patch.object(options, "get", values(
+                **{"music_bot_autotune_harmony": "bass_octave"})):
+            self.feed(line, tone(0.2), 4)
+            self.assertEqual(line.latency_samples(),
+                             voice_chat.FastHarmonyLine.MAX_LEAD)
+        self.assertAlmostEqual(
+            line.latency_samples() / 48.0, 53.33, places=2)
+
+    def test_the_release_hands_back_the_audio_the_line_was_holding(self):
+        line = voice_chat.FastHarmonyLine(active=lambda: True)
+        with mock.patch.object(options, "get", values()):
+            self.feed(line, tone(0.2), 4)
+            tail = line.tail_frames()
+        self.assertEqual(len(tail), 1)          # 1280 samples: one 20 ms frame
+        self.assertGreater(float(np.abs(from_pcm(tail[0])).max()), 0.05)
+
+    def test_switching_off_hands_the_live_lead_back(self):
+        state = {"on": True}
+        line = voice_chat.FastHarmonyLine(active=lambda: state["on"])
+        with mock.patch.object(options, "get", values()):
+            self.feed(line, tone(0.2), 4)
+            state["on"] = False
+            self.feed(line, tone(0.2), 4)
+            self.assertEqual(line.latency_samples(), 0)
+            silence = bytes(FRAME_SAMPLES * 2)
+            self.assertEqual(line.shape(silence), silence)
 
 
 class TheLatencyReportTests(unittest.TestCase):

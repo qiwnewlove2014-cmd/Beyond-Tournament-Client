@@ -665,13 +665,20 @@ class RecorderGateTests(unittest.TestCase):
         self.assertEqual(line.semitones, 7)
 
     def test_a_harmony_copy_builds_the_line_with_the_tuner_off(self):
-        """The copies sing in the tuner's line, so the press needs one."""
+        """A copy without the tuner is the FAST line, not the tuner's 107 ms.
+
+        Nothing is tuning the lead, so nothing needs the tuner's look-ahead: a
+        press that only wants the copies holds 26.7 ms and the copies arrive
+        with it. The tuner's line is for a press that is actually tuning.
+        """
         rec = self.recorder()
         with mock.patch.object(voice_chat, "autotune_enabled", lambda: False), \
                 mock.patch.object(voice_chat, "harmony_enabled", lambda: True), \
                 mock.patch.object(voice_chat, "speech_key_semitones", lambda: 0):
             line = rec._speech_line_for(True)
-        self.assertIsInstance(line, AutoTuneLine)
+        self.assertIsInstance(line, voice_chat.FastHarmonyLine)
+        self.assertNotIsInstance(line, AutoTuneLine)
+        self.assertEqual(line.LOOKAHEAD, 1280)
 
     def test_no_dial_and_no_autotune_is_no_line_at_all(self):
         rec = self.recorder()
@@ -1697,6 +1704,78 @@ class HarmonyIntervalTests(unittest.TestCase):
         self.assertEqual(tuner.harmony_offsets(), (None, None))
 
 
+class TheFastTunerLineTests(unittest.TestCase):
+    """The tuner's line is sized for the tuner, not for Speech Key's +12.
+
+    `ChromaticTransposer.LOOKAHEAD` holds 5120 stretched samples because the
+    key dial can ask for an octave up. The tuner never can: its own bound is
+    `MAX_PULL` (a semitone and a half), so the same window needs 2792. That
+    is 58.2 ms at the voice's own key instead of 107 -- and the bass copies,
+    which read slower than they are written, still get their 5120 when they
+    are chosen, because their floor is the vocoder's own window.
+    """
+
+    def play(self, values, frames=6, frequency=A3):
+        from libs.music_bot.transpose import ChromaticTransposer
+        with mock.patch.object(voice_chat.options, "get", options_from(
+                dict({AUTOTUNE_OPTION: True, AUTOTUNE_SPEED_OPTION: 0},
+                     **values))):
+            line = AutoTuneLine(speed=0)
+            for chunk in frames_of(tone(0.5, freq=frequency))[:frames]:
+                line.shape(to_pcm(chunk))
+        return line
+
+    def test_the_line_holds_58_ms_instead_of_the_key_lines_107(self):
+        from libs.music_bot import autotune
+        from libs.music_bot.transpose import ChromaticTransposer
+        line = self.play({})
+        self.assertEqual(line.lookahead,
+                         ChromaticTransposer.lookahead_for(autotune.MAX_PULL))
+        self.assertEqual(line.lookahead, 2792)
+        self.assertAlmostEqual(line.transposer.delay_samples() / 48.0, 58.17,
+                               places=1)
+        self.assertLess(line.lookahead, ChromaticTransposer.LOOKAHEAD * 0.6)
+
+    def test_the_whole_pull_range_still_never_invents_silence(self):
+        """Shorter opening silence, same arithmetic: no padded samples."""
+        from libs.music_bot import autotune
+        line = self.play({})
+        data = to_pcm(tone(1.0, freq=A3))
+        for offset in (0.0, autotune.MAX_PULL, -autotune.MAX_PULL):
+            line.transposer.set_pitch_offset(offset)
+            for start in range(0, len(data), FRAME):
+                line.transposer.process(data[start:start + FRAME])
+            self.assertEqual(line.transposer.padded_samples, 0,
+                             f"invented silence at {offset:+.1f}")
+
+    def test_a_bass_copy_brings_the_longer_line_back(self):
+        """A copy below the voice cannot open with less than 43 ms."""
+        line = self.play({AUTOTUNE_HARMONY_OPTION: "bass_octave"}, frames=10)
+        self.assertEqual(line.lookahead, 5120)
+        self.assertEqual(len(line._harmonies), 1)
+        voice = line._harmonies[0]
+        # The copy opens with the vocoder's own window (2560 stretched
+        # samples), read at half speed: the lead's 5120 by construction.
+        self.assertEqual(voice.transposer.lookahead, 2560)
+        self.assertEqual(voice._align, 0.0)
+
+    def test_a_bass_copy_chosen_mid_press_waits_for_the_next_press(self):
+        """The line is built at press start; a copy it cannot line up is not sung."""
+        values = {AUTOTUNE_OPTION: True, AUTOTUNE_SPEED_OPTION: 0,
+                  AUTOTUNE_HARMONY_OPTION: "third"}
+        with mock.patch.object(voice_chat.options, "get",
+                               options_from(values)):
+            line = AutoTuneLine(speed=0)
+            for chunk in frames_of(tone(0.6, freq=A3))[:6]:
+                line.shape(to_pcm(chunk))
+            values[AUTOTUNE_HARMONY_OPTION] = "bass_octave"
+            for chunk in frames_of(tone(0.6, freq=A3))[:6]:
+                line.shape(to_pcm(chunk))
+        self.assertEqual(line.lookahead, 2792)
+        self.assertFalse(any(voice.interval == "bass_octave"
+                             for voice in line._harmonies))
+
+
 class HarmonyLineTests(unittest.TestCase):
     """The copies are part of the ONE broadcast frame.
 
@@ -1707,11 +1786,14 @@ class HarmonyLineTests(unittest.TestCase):
     """
 
     def play_with(self, values, signal):
-        line = AutoTuneLine(speed=0)
         out = bytearray()
         with mock.patch.object(voice_chat.options, "get",
                                options_on(**dict({AUTOTUNE_SPEED_OPTION: 0},
                                                  **values))):
+            # The line is built at press start, when these options are what the
+            # player has chosen -- which is also what sizes its lead delay (a
+            # bass copy needs the longer one).
+            line = AutoTuneLine(speed=0)
             for chunk in frames_of(signal):
                 shaped = line.shape(to_pcm(chunk))
                 self.assertEqual(len(shaped), FRAME)
@@ -1819,12 +1901,14 @@ class HarmonyLineTests(unittest.TestCase):
 
     def play_with_switch(self, switch, values, signal):
         """The same frame-by-frame contract, with the tuner's switch set."""
-        line = AutoTuneLine(speed=0)
         out = bytearray()
         with mock.patch.object(voice_chat.options, "get",
                                options_returning(**dict(
                                    {AUTOTUNE_OPTION: switch,
                                     AUTOTUNE_SPEED_OPTION: 0}, **values))):
+            # Built here, under the press's own options: the chosen intervals
+            # size the line's lead delay (a bass copy needs the longer one).
+            line = AutoTuneLine(speed=0)
             for chunk in frames_of(signal):
                 shaped = line.shape(to_pcm(chunk))
                 self.assertEqual(len(shaped), FRAME)
@@ -1898,8 +1982,12 @@ class HarmonyLineTests(unittest.TestCase):
         self.assertGreater(voice.transposer.lookahead,
                            ChromaticTransposer.LOOKAHEAD)
         self.assertGreater(voice.transposer.pitch_limit, 12.0)
-        # Delayed to the lead's timeline, not left where its own ratio put it.
-        self.assertGreater(voice._align, 0.0)
+        # Built on the lead's timeline: its own window is sized for the lead's
+        # look-ahead at this interval, so no ring is needed (the old 5120 lead
+        # left a 2.3 s ring step here -- this line has nothing to correct).
+        self.assertEqual(voice._align, 0.0)
+        self.assertAlmostEqual(voice.transposer.lookahead / 2.0,
+                               line.transposer.lookahead, delta=3)
 
     def test_the_copy_silences_with_the_lead_on_the_same_frame(self):
         """A gap is the transient: a copy 22 ms out is heard as a slap, not a chord."""
