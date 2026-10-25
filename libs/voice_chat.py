@@ -239,7 +239,9 @@ AUTOTUNE_MODE_OPTION = "music_bot_autotune_mode"
 AUTOTUNE_ROOT_OPTION = "music_bot_autotune_root"
 # How much of the correction is used, in percent (`autotune.TUNE_AMOUNTS`):
 # 100 puts the voice on the note of its scale, 50 leaves half the error in it,
-# 0 is the voice as it was sung. Read per frame like the two above.
+# 0 is the voice as it was sung, and 200 is the hard lock (the same correction,
+# taken on the frame it is measured instead of over the next few). Read per
+# frame like the two above.
 AUTOTUNE_AMOUNT_OPTION = "music_bot_autotune_amount"
 # The two harmony copies' intervals (`music_bot/autotune.HARMONY_INTERVALS`).
 # Two rows rather than one "pair" preset: a singer who wants a third and a

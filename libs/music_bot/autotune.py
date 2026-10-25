@@ -83,9 +83,19 @@ How much of the note is taken, and how much of the singer is left
 voice on the nearest note of the scale, 50% takes half of the distance and
 leaves the other half in the voice, 0% is the voice as it was sung. It is the
 one dial here that is taste rather than physics -- nothing about a note set
-says how tuned a singer wants to sound -- and it cannot go past 100%: the
-nearest note IS the whole correction, so more of it would carry the voice past
-the note it was aiming for.
+says how tuned a singer wants to sound.
+
+**Up to 100% the dial is a share of the correction; past it the dial spends the
+tuner's own lag.** 100% IS the whole correction, so taking "more of it" would
+carry the voice the same distance past the note it was aiming for -- a
+mirror-image detune with twice the vibrato, which is the opposite of a lock. So
+101..200% leaves the target where it is and closes the two lags instead: the
+ramp that keeps a note change smooth (`RAMP_SEMITONES`) is filled in, and the
+vote that decides a new note (`TARGET_CONFIRM`) shortens toward nothing. At
+200% the voice is moved by the full measured correction on the frame it is
+measured, toward whichever note of the scale is nearest that frame -- the hard
+lock. It is never asked for more than `MAX_PULL`, so the line's anti-aliasing
+filter is still pinned at the widest interval it will ever see.
 
 What is deliberately not here
 -----------------------------
@@ -201,7 +211,11 @@ class AutoTuner:
         return self.mode, self.root
 
     def set_amount(self, percent):
-        """How much of the correction to use: 100 puts the voice on the note."""
+        """How much of the correction to use: 100 puts the voice on the note.
+
+        Past 100 the amount stops being a share and starts filling the tuner's
+        own lag (`_apply_amount`, `confirm_frames`), up to the hard lock at 200.
+        """
         self.amount = clamp_amount(percent)
         return self.amount
 
@@ -404,13 +418,47 @@ class AutoTuner:
         else:
             self._applied += (self.RAMP_SEMITONES if delta > 0
                               else -self.RAMP_SEMITONES)
-        # The amount is a share of the correction, never a wider one: at 100%
-        # the voice lands on the note, at 50% half the error is left in it, and
-        # at 0% the answer is zero with the note still named. 0.0 is not None:
-        # None means "keep the ratio you have", which would be the last note's
-        # correction, not the singer's own voice.
-        self.offset = self._applied * (self.amount / 100.0)
+        # The amount: up to 100% it is a share of the correction -- at 100 the
+        # voice lands on the note, at 50 half the error is left in it, at 0 the
+        # answer is zero with the note still named. 0.0 is not None: None means
+        # "keep the ratio you have", which would be the last note's correction,
+        # not the singer's own voice. Past 100% the target is left alone and the
+        # extra spends the tuner's own lag instead (see `_apply_amount`).
+        self.offset = self._apply_amount(correction)
         return self.offset
+
+    def _apply_amount(self, correction):
+        """The offset this frame asks for, from the correction and the amount.
+
+        Below `DEFAULT_AMOUNT` the gentle half: a share of the correction, the
+        dial the players already know, unchanged to the sample. Above it, the
+        share is full and the extra is spent on the gap between what the ramp
+        is holding (`_applied`) and what was actually measured (`correction`),
+        reaching the measured value at 200%. That gap is the only lag left once
+        the correction itself is complete -- which is why a bigger percentage
+        can no longer be a bigger move: `correction` is already clamped to the
+        scale's widest pull, and this never asks for more than it.
+        """
+        if self.amount <= DEFAULT_AMOUNT:
+            return self._applied * (self.amount / float(DEFAULT_AMOUNT))
+        extra = ((self.amount - DEFAULT_AMOUNT)
+                 / float(MAX_AMOUNT - DEFAULT_AMOUNT))
+        return self._applied + (correction - self._applied) * extra
+
+    def confirm_frames(self):
+        """How many frames a new note must stay nearer before it wins.
+
+        `TARGET_CONFIRM` at 100% and below: the vote that stops a vibrato
+        crossing a note boundary from flipping the interval. Past 100% it
+        shortens with `_apply_amount`'s ramp filling, reaching zero at 200% --
+        so the hard lock also takes the near note at once instead of waiting
+        out a vote the voice has already left behind.
+        """
+        if self.amount <= DEFAULT_AMOUNT:
+            return self.TARGET_CONFIRM
+        extra = ((self.amount - DEFAULT_AMOUNT)
+                 / float(MAX_AMOUNT - DEFAULT_AMOUNT))
+        return int(round(self.TARGET_CONFIRM * (1.0 - extra)))
 
     def _hold_note(self, note, midi):
         """Choose the note this press is tuned to, once, and keep it.
@@ -458,7 +506,7 @@ class AutoTuner:
         else:
             self._pending_note = note
             self._pending_frames = 1
-        if self._pending_frames >= self.TARGET_CONFIRM:
+        if self._pending_frames >= self.confirm_frames():
             self.held_note = note
             self._pending_note = None
             self._pending_frames = 0
@@ -821,16 +869,18 @@ def speed_note(index=None):
     return SPEEDS[index][2]
 
 
-#: Tune Amount: how much of a correction is used, in percent. The percent
-#: scales the answer and never the range -- 100% puts the voice on the nearest
-#: note of the scale, 50% leaves half the error in it, 0% is the voice as it was
-#: sung -- so 100 is a ceiling of accuracy, not of effect quantity: there is no
-#: correction left to take past the note it was aiming for.
+#: Tune Amount: how much of a correction is used, in percent. Up to 100 the
+#: percent scales the answer and never the range -- 100% puts the voice on the
+#: nearest note of the scale, 50% leaves half the error in it, 0% is the voice as
+#: it was sung. Past 100 it scales something else: the tuner's own lag, so the
+#: voice is moved onto the nearest note on the frame it is measured (200%) with
+#: the note vote skipped rather than waited out. Both halves of that are bounded
+#: by the correction itself, so no amount reaches past `MAX_PULL`.
 #:
 #: ``(percent, what the amount does)`` -- the second field is what Tab reads on
 #: that line, because "50%" alone does not say what half of anything sounds like.
-#: The five rows are the menu's quick answers, not the only values: the Custom
-#: Percentage row takes any whole number between 0 and 100 (`parse_amount`).
+#: The six rows are the menu's quick answers, not the only values: the Custom
+#: Percentage row takes any whole number between 0 and 200 (`parse_amount`).
 TUNE_AMOUNTS = (
     (0,
      "None of the correction: the effect runs and the voice goes out as it was "
@@ -847,26 +897,36 @@ TUNE_AMOUNTS = (
     (100,
      "All of the correction: the voice sits on the notes of the scale, exactly "
      "as Auto-Tune did before this dial existed."),
+    (200,
+     "The hard lock, past the dial's normal end: the note is taken on the "
+     "frame it is measured instead of over the next few, so no part of a "
+     "spoken word is left leaning off the scale. Heard with a fast Retune "
+     "Speed it is a robot; with a slow one it is a pull that never lets go. "
+     "It still moves only to the notes of the scale you chose."),
 )
 DEFAULT_AMOUNT = 100
+#: Where the dial ends. Half of the range is a share of the correction and the
+#: other half is the lag it spends (see `_apply_amount`), so 200 is the hard lock.
+MAX_AMOUNT = 200
 
 
 def clamp_amount(value):
-    """A tune amount in percent: any whole number 0..100, whatever was saved.
+    """A tune amount in percent: any whole number 0..200, whatever was saved.
 
-    It clamps and rounds rather than snapping to a step: the five rows in
+    It clamps and rounds rather than snapping to a step: the six rows in
     `TUNE_AMOUNTS` are the menu's quick answers, and a player who typed 63%
-    means 63%.
+    means 63%. 100 is still the default and the end of the plain correction;
+    200 is the hard lock.
     """
     try:
         number = int(round(float(value)))
     except (TypeError, ValueError):
         return DEFAULT_AMOUNT
-    return max(0, min(100, number))
+    return max(0, min(MAX_AMOUNT, number))
 
 
 def parse_amount(text):
-    """A percentage a player typed: 0..100, or None when it is not a number.
+    """A percentage a player typed: 0..200, or None when it is not a number.
 
     Accepts what somebody actually types into a percentage field -- "63",
     "63%", " 63 " -- and nothing else. "half" and "63.5" are refused rather
@@ -897,5 +957,12 @@ def amount_note(percent=None):
     for step, note in TUNE_AMOUNTS:
         if step == wanted:
             return note
+    if wanted > DEFAULT_AMOUNT:
+        extra = ((wanted - DEFAULT_AMOUNT)
+                 / float(MAX_AMOUNT - DEFAULT_AMOUNT))
+        return (f"{wanted}% is past the plain correction, so it is a lock "
+                f"{int(round(extra * 100))}% of the way to the hard one: the "
+                f"note is taken sooner instead of the voice being moved "
+                f"further, which would only land it off the note.")
     return (f"{wanted}% of the correction: the voice is moved {wanted}% of the "
             f"distance to the nearest note of the scale.")

@@ -1213,14 +1213,68 @@ class ScaleTests(unittest.TestCase):
     def test_the_amount_takes_any_whole_percent_and_no_more(self):
         # Typed values are kept, not snapped to a step: 63% is 63%.
         self.assertEqual(autotune.clamp_amount(63), 63)
-        self.assertEqual(autotune.clamp_amount(250), 100)    # the note is the end
+        # 100 is the plain correction, 200 the hard lock, and nothing past it.
+        self.assertEqual(autotune.clamp_amount(150), 150)
+        self.assertEqual(autotune.clamp_amount(200), 200)
+        self.assertEqual(autotune.clamp_amount(250), autotune.MAX_AMOUNT)
         self.assertEqual(autotune.clamp_amount(-5), 0)
         self.assertEqual(autotune.clamp_amount("rubbish"), 100)
         self.assertEqual(autotune.amount_label(), "100%")
         self.assertEqual(autotune.parse_amount("63"), 63)
         self.assertEqual(autotune.parse_amount(" 63% "), 63)
+        self.assertEqual(autotune.parse_amount("200"), 200)
         self.assertIsNone(autotune.parse_amount("half"))
         self.assertIsNone(autotune.parse_amount("63.5"))
+
+    def test_the_amount_past_the_note_fills_the_ramp_and_goes_no_further(self):
+        """Past 100% the extra is the tuner's lag spent, not a wider move.
+
+        A wider move would land the voice the same distance past the note --
+        the mirror image of the error, with the vibrato twice as wide -- which
+        is the opposite of a lock. The measured correction is the ceiling at
+        200%, so no amount can ask the shifter for more than the scale's own
+        pull, which is what the line's filter was pinned at.
+        """
+        flat = tone(0.6, cents=-40.0)
+        tuner = autotune.AutoTuner()
+        for chunk in frames_of(flat):
+            tuner.track(chunk)
+        full = tuner.offset                    # 0.40 semitones at 100%
+        self.assertAlmostEqual(full, 0.40, delta=0.02)
+        window = flat[int(0.3 * 48000):int(0.3 * 48000) + 3 * SAMPLES]
+        # The ramp has not caught up with a fresh reading: at 100% that gap is
+        # left in the voice, at 200% it is the thing the extra is spent on.
+        tuner.set_amount(100)
+        tuner._applied = 0.0
+        at_full = tuner.detect(window)
+        tuner.set_amount(200)
+        tuner._applied = 0.0
+        locked = tuner.detect(window)
+        # A full frame of ramp is all 100% takes; 200% takes the whole reading.
+        self.assertAlmostEqual(
+            at_full, autotune.AutoTuner.RAMP_SEMITONES, delta=0.02)
+        self.assertAlmostEqual(locked, full, delta=0.01)
+        self.assertLessEqual(locked, autotune.MAX_PULL)
+        # Not the mirror image a multiplied correction would be.
+        self.assertNotAlmostEqual(locked, full * 2.0, delta=0.05)
+
+    def test_the_amount_past_the_note_takes_the_nearer_note_at_once(self):
+        """The other half of the lock: the note vote shortens to nothing."""
+        tuner = autotune.AutoTuner(mode="chromatic", root=0)
+        tuner.held_note = 69
+        tuner.set_amount(100)
+        self.assertEqual(tuner.confirm_frames(),
+                         autotune.AutoTuner.TARGET_CONFIRM)
+        self.assertEqual(tuner._hold_note(70, 69.6), 69)    # a vote starts
+        tuner.set_amount(200)
+        self.assertEqual(tuner.confirm_frames(), 0)
+        self.assertEqual(tuner._hold_note(70, 69.6), 70)    # and is taken at once
+        # The lock moves the voice to the nearest note of the scale; it never
+        # invents a note outside the set the player chose.
+        landed = tuner.nearest_note(70, "major", 0)
+        classes = {note % 12 for note in range(60, 72)
+                   if tuner.nearest_note(note, "major", 0) == note}
+        self.assertIn(int(round(landed)) % 12, classes)
 
 
 class ScaleLineTests(unittest.TestCase):
@@ -1375,23 +1429,28 @@ class ScaleMenuTests(unittest.TestCase):
         self.assertNotIn("Auto-Tune: ON", labels)
         self.assertIn("Speech Key: replaced by Auto-Tune", labels)
 
-    def test_the_amount_menu_lists_five_steps_and_marks_the_current(self):
+    def test_the_amount_menu_lists_every_step_and_marks_the_current(self):
         self.bot.autotune_amount = 100
         self.bot.set_autotune_amount.side_effect = (
             lambda percent: setattr(self.bot, "autotune_amount", percent))
         self.handler._open_autotune_amount_menu()
         menu = FakeMenu.built[-1]
         labels = labels_in(menu)
-        # Five steps, the Custom Percentage row, and Back.
+        # Six steps, the Custom Percentage row, and Back.
         self.assertEqual(len(labels), len(autotune.TUNE_AMOUNTS) + 2)
         for percent, _note in autotune.TUNE_AMOUNTS:
             expected = (f"{percent}% (active)" if percent == 100
                         else f"{percent}%")
             self.assertIn(expected, labels)
+        self.assertIn("200%", labels)
         menu.items[labels.index("50%")][1]()
         self.bot.set_autotune_amount.assert_called_with(50)
         # The mark follows the choice on the list that is still open.
         self.assertIn("50% (active)", labels_in(menu))
+        # ...and the lock is a step of the same list, not a hidden value.
+        menu.items[labels_in(menu).index("200%")][1]()
+        self.bot.set_autotune_amount.assert_called_with(200)
+        self.assertIn("200% (active)", labels_in(menu))
 
     def test_the_custom_row_takes_a_percentage_that_is_not_a_step(self):
         self.bot.autotune_amount = 100
@@ -1404,8 +1463,9 @@ class ScaleMenuTests(unittest.TestCase):
         run = self.bot.game.input.run
         self.assertTrue(run.called)
         kwargs = run.call_args.kwargs
-        # The field itself refuses anything outside 0..100 while typing.
-        self.assertEqual((kwargs.get("min_val"), kwargs.get("max_val")), (0, 100))
+        # The field itself refuses anything outside 0..200 while typing.
+        self.assertEqual((kwargs.get("min_val"), kwargs.get("max_val")),
+                         (0, autotune.MAX_AMOUNT))
         kwargs["handeler"]("63")
         self.bot.set_autotune_amount.assert_called_with(63)
         self.assertIn("63%", str(self.speak.call_args_list[-1].args[0]))
@@ -1537,6 +1597,17 @@ class CustomAmountFieldTests(unittest.TestCase):
         self.press(pygame.K_RETURN)
         self.assertEqual(len(self.gp.substates), 1)
         self.bot.set_autotune_amount.assert_called_with(63)
+
+    def test_the_field_takes_the_hard_lock_at_two_hundred(self):
+        """The top of the range, through the field's own range check."""
+        self.open_custom()
+        for digit in "200":
+            self.game.events = [pygame.event.Event(
+                pygame.KEYDOWN, key=ord(digit), unicode=digit, mod=0)]
+            self.gp.update(self.game.events)
+        self.press(pygame.K_RETURN)
+        self.assertEqual(len(self.gp.substates), 1)
+        self.bot.set_autotune_amount.assert_called_with(200)
 
     def test_nothing_blocks_the_player_after_the_field_closes(self):
         """What the report called frozen: the next frame reaches the game."""
