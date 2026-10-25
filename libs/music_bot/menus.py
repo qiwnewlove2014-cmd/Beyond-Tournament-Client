@@ -2120,7 +2120,58 @@ class MusicBotMenus:
         return self._open_custom_effect_menu(voice_effect_builder,
                                              back_to_top=True)
 
-    def _open_builder_recipes_menu(self, family_id=None):
+    def _open_builder_clear_menu(self, board_menu=None):
+        """The Custom Voice board's Clear line, behind a question.
+
+        Every other line on that page is a choice that can be changed again by
+        pressing the same line; `Clear` is ten slots at once, and it sits
+        directly above `Back` -- exactly where an overshoot lands. So the press
+        opens a two-line question instead, and `No, keep it` is a Back.
+
+        `Yes` clears, speaks once, and returns to the board with its title
+        rewritten in place (`board_menu`): the slots' labels are live, and a
+        rebuilt page would re-read its own title over the sentence that says
+        what just happened. With no board handed in (a direct call), the
+        question simply pops and the board underneath is already right.
+        """
+        from .. import menu as menu_mod, menus
+        from . import gate as music_bot_gate
+        from . import voice_effect_builder
+        from . import voice_effects
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+        if music_bot_gate.blocked("voice_fx"):
+            return
+
+        def keep():
+            gp.pop_last_substate()
+
+        def do_clear():
+            voice_effect_builder.clear()
+            if board_menu is not None:
+                board_menu.title = (
+                    f"Music Bot "
+                    f"{voice_effects.effect_label(voice_effects.BUILDER_EFFECT)}: "
+                    f"{voice_effect_builder.summary()}")
+            gp.pop_last_substate()
+            speak("Custom Voice cleared. Every slot is back at its default, "
+                  "and the board says My Own.")
+
+        m = menu_mod.Menu(self._bot.game,
+                          "Music Bot Custom Voice: Clear the board?",
+                          parrent=gp)
+        m.add_items([
+            ("Yes, clear the board", do_clear, None,
+             "Puts all ten slots back to their defaults and forgets the "
+             "starting point. Custom Voice stays chosen."),
+            ("No, keep it", keep, None,
+             "Returns to the board with everything on it kept."),
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_builder_recipes_menu(self, family_id=None, from_board=False):
         """The Custom Voice board's starting points: five pages of ten.
 
         The board is ten slots of seventy-one choices, and a player opening it
@@ -2133,11 +2184,18 @@ class MusicBotMenus:
         ten -- because the family is a field of each recipe's row: the page in
         front of the player and the table behind it are the same object, so a
         recipe cannot be offered under a family it does not belong to. Back
-        pops this page and reveals whatever opened it (the board underneath, or
-        the family list), and picking one pops both pages *and* the board and
-        rebuilds it -- the slots read live but the title is a snapshot, and a
-        board titled "Crunch" over a vocoder is the kind of lie a live label
-        exists to prevent.
+        pops one level and reveals whatever opened it (the family list, or the
+        board).
+
+        **A pick does not leave the page.** The fifty exist to be tried one
+        after another, and a page that closed on every press turned "listen to
+        the Machine family" into fifty round trips through the board; the mark
+        on the chosen line is a live label, so it follows the press on the page
+        already open. The board underneath is rebuilt on the way back instead
+        (`from_board` remembers it is there), because its slots read live but
+        its TITLE was written when it opened -- a board titled "Crunch" over a
+        vocoder is the kind of lie a live label exists to prevent -- and the
+        stack still ends where it began.
         """
         from .. import menu as menu_mod, menus
         from . import gate as music_bot_gate
@@ -2152,6 +2210,13 @@ class MusicBotMenus:
 
         def go_back():
             gp.pop_last_substate()
+            if family_id is None and from_board:
+                # Off the families page and back onto the board it came from:
+                # rebuilt, not revealed, for the reason in the docstring -- a
+                # recipe picked since then moved the slots under a title that
+                # was written when the board opened.
+                gp.pop_last_substate()
+                self._open_voice_builder_menu()
 
         def open_family(group_id):
             def apply():
@@ -2177,14 +2242,9 @@ class MusicBotMenus:
                 speak(f"Custom Voice: "
                       f"{voice_effect_recipes.recipe_label(recipe_id)}. "
                       f"{voice_effect_recipes.recipe_note(recipe_id)}")
-                # Two pages, and the board underneath them: its lines read
-                # live, but its TITLE was written when it opened ("...: Crunch"
-                # over a board that is no longer crunchy), so the board is
-                # rebuilt rather than revealed. The stack ends where it began.
-                gp.pop_last_substate()
-                gp.pop_last_substate()
-                gp.pop_last_substate()
-                self._open_voice_builder_menu()
+                # The page stays open -- the mark and the board's first line
+                # are live labels, and the board underneath is rebuilt when
+                # this page is left (go_back), so nothing said here is stale.
             return apply
 
         def make_label(recipe_id):
@@ -2262,15 +2322,19 @@ class MusicBotMenus:
             return label_fn
 
         def open_recipes():
-            # The board stays on the stack underneath, so Back on the families
-            # page reveals it again with its lines already re-read.
-            self._open_builder_recipes_menu()
+            # The board stays on the stack underneath, and says so: the
+            # families page rebuilds it on the way back (a recipe picked in
+            # between moved the slots under a title written when it opened).
+            self._open_builder_recipes_menu(from_board=True)
 
         def make_recipes_label():
             def label_fn():
                 return ("Start From: "
                         f"{voice_effect_recipes.current_label()}")
             return label_fn
+
+        def open_clear():
+            self._open_builder_clear_menu(m)
 
         items = [(make_label(param_id, name), open_param(param_id), None, note)
                  for param_id, name, note, _choices, _default in board.PARAMS]
@@ -2281,6 +2345,12 @@ class MusicBotMenus:
             # player wants to answer.
             items.insert(0, (make_recipes_label(), open_recipes, None,
                              voice_effect_recipes.start_note()))
+            # ... and the board's last line above Back is the way out of one
+            # that has been played with: ten slots at once is the only change
+            # here a single extra press cannot undo, so it asks first.
+            items.append(("Clear: back to the defaults", open_clear, None,
+                          "Every slot back to its default and the starting "
+                          "point forgotten. It asks before it clears."))
         items.append(("Back", go_back, None,
                       "Returns to the Voice Effect page. The board keeps "
                       "everything set here." if back_to_top else
@@ -2299,10 +2369,17 @@ class MusicBotMenus:
     def _open_custom_param_menu(self, param_id, board=None):
         """One knob's choices, and the only place a board is written to.
 
-        A choice applies the board and closes this list; the board underneath
-        is still open and reads the new value on its next line (the labels are
-        live). Picking a choice here is also what makes the board the chosen
-        pedal: a player who turns a knob has chosen it.
+        A choice applies the board and leaves this list OPEN. A page of values
+        is a set to try -- which body, which room, which texture -- and closing
+        it on every press turned one question into a round trip through the
+        board for each answer. The choices' own labels are live, so the
+        `(active)` mark moves to the press on the page already open; only the
+        page's TITLE is a snapshot, and it is rewritten here rather than the
+        page being rebuilt, because a rebuild would re-read the title over the
+        sentence that names the value.
+
+        Picking a choice here is also what makes the board the chosen pedal: a
+        player who turns a knob has chosen it.
         """
         from .. import menu as menu_mod, menus
         from . import gate as music_bot_gate
@@ -2330,7 +2407,13 @@ class MusicBotMenus:
                 self._bot.set_voice_effect(board.EFFECT_ID)
                 speak(f"{name}: {board.choice_label(param_id, chosen)}. "
                       f"{board.choice_note(param_id, chosen)}")
-                gp.pop_last_substate()
+                # Nothing is popped: this page is where the next choice is.
+                # The mark follows by itself (see `make_label`); the title is
+                # the one snapshot on the page, so it is rewritten here.
+                m.title = (
+                    f"Music Bot "
+                    f"{voice_effects.effect_label(board.EFFECT_ID)} "
+                    f"{name}: {board.choice_label(param_id, chosen)}")
             return apply
 
         def make_label(value):

@@ -311,8 +311,8 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         for _param_id, name, _note, _choices, _default in (
                 voice_effect_builder.PARAMS):
             self.assertIn(name, names)
-        # The ten slots, the starting line above them, and Back.
-        self.assertEqual(len(board.items), len(voice_effect_builder.PARAMS) + 2)
+        # The ten slots, the starting line above them, Clear below them, Back.
+        self.assertEqual(len(board.items), len(voice_effect_builder.PARAMS) + 3)
         for item in board.items:
             self.assertGreaterEqual(len(item), 4)
             self.assertTrue(text_of(item).strip())
@@ -386,15 +386,12 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         said = menus_module.speak.call_args.args[0]
         self.assertIn("Vocoder Stack", said)
         self.assertIn("synth", said)
-        # The board is rebuilt, not revealed: its slots read live but its title
-        # is a snapshot, and "...: Crunch" over a vocoder is a lie.
-        page = self.last_menu()
-        self.assertTrue(page.title.startswith("Music Bot Custom Voice:"),
-                        page.title)
-        self.assertNotIn("Crunch", page.title)
-        self.assertIn("Vocoder", page.title)
-        self.assertTrue(label_of(page.items[0]).startswith("Start From:"))
-        self.assertIn("Vocoder Stack", label_of(page.items[0]))
+        # The pick stays on the family page -- fifty voices are for trying one
+        # after another -- and the mark moves on the page already open.
+        self.assertIs(self.last_menu(), page)
+        self.assertEqual(page.title, "Music Bot Custom Voice: Machine")
+        self.assertIn("Vocoder Stack (active)",
+                      [label_of(item) for item in page.items])
 
     def test_every_pedal_is_in_exactly_one_family(self):
         """Two levels can lose a row and still look complete; this is the check."""
@@ -428,6 +425,151 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         self.assertTrue(menu.items[0][0].startswith("Tab"))
         self.assertIn("Tab", menu.intro)
         self.assertGreaterEqual(len(menu.items[0]), 4)
+
+
+class ThePagesStayOpenTests(unittest.TestCase):
+    """Choosing is not leaving, and the board is rebuilt on the way back.
+
+    A page of values is a set to try -- which body, which room, which texture,
+    which of the fifty voices -- so a pick leaves the page open and its
+    `(active)` mark moves on the page already open. The board underneath is the
+    one thing that cannot be updated in place, because its title is a snapshot
+    of the summary it opened with; it is rebuilt when the player walks back to
+    it, never on the press, so trying ten recipes is ten voices and not ten
+    rebuilds.
+    """
+
+    def setUp(self):
+        FakeMenu.built = []
+        self.addCleanup(mock.patch.stopall)
+        self.addCleanup(music_bot_gate.clear)
+        music_bot_gate.clear()
+        self.bot = make_bot()
+        self.stack = []
+        gp = SimpleNamespace(
+            add_substate=self.stack.append,
+            pop_last_substate=lambda: self.stack.pop() if self.stack else None,
+            can_broadcast_megaphone=True)
+        self.bot._find_gameplay.return_value = gp
+        self.handler = menus_module.MusicBotMenus(self.bot)
+        mock.patch("libs.menu.Menu", FakeMenu).start()
+        mock.patch("libs.menus.set_default_sounds").start()
+        mock.patch("libs.music_bot.menus.speak").start()
+        # A board in memory: the player's own settings file is never read.
+        self.saved = {}
+        mock.patch.object(
+            voice_effect_builder.options, "get",
+            side_effect=lambda key, default=None: self.saved.get(key, default)
+        ).start()
+        mock.patch.object(
+            voice_effect_builder.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            self.saved.__setitem__(key, value)
+        ).start()
+
+    def top(self):
+        return self.stack[-1]
+
+    def press(self, menu, label):
+        """Press the line that speaks `label`, wherever it sits on the page."""
+        for item in menu.items:
+            if label_of(item) == label:
+                item[1]()
+                return
+        self.fail(f"{label!r} is not on the page")
+
+    def test_a_slot_page_stays_open_and_its_title_follows_the_value(self):
+        self.handler._open_voice_builder_menu()
+        self.handler._open_custom_param_menu("space", voice_effect_builder)
+        page = self.top()
+        self.assertEqual(len(self.stack), 2)
+        self.press(page, "Cave")
+        # The same page, still on the stack, with nothing rebuilt.
+        self.assertIs(self.top(), page)
+        self.assertEqual(len(self.stack), 2)
+        self.assertEqual(voice_effect_builder.values()["space"], "cave")
+        self.assertEqual(page.title, "Music Bot Custom Voice Space: Cave")
+        labels = [label_of(item) for item in page.items]
+        self.assertIn("Cave (active)", labels)
+        self.assertNotIn("Off (active)", labels)
+        self.assertEqual(menus_module.speak.call_args.args[0].split(".")[0],
+                         "Space: Cave")
+
+    def test_the_starting_points_stay_and_the_board_is_rebuilt_on_the_way_back(self):
+        self.handler._open_voice_builder_menu()
+        board = self.top()
+        self.assertTrue(label_of(board.items[0]).startswith("Start From:"))
+        self.press(board, label_of(board.items[0]))
+        families = self.top()
+        self.press(families, "Machine")
+        page = self.top()
+        self.assertEqual(len(self.stack), 3)
+        self.press(page, "Vocoder Stack")
+        # A pick is not a departure: the family page is still where we are,
+        # and the board underneath is the same object it was.
+        self.assertIs(self.top(), page)
+        self.assertEqual(len(self.stack), 3)
+        self.assertIs(self.stack[0], board)
+        self.assertEqual(voice_effect_recipes.current_label(), "Vocoder Stack")
+        self.assertIn("Vocoder Stack (active)",
+                      [label_of(item) for item in page.items])
+        # Back once returns to the five families, still above the board.
+        self.press(page, "Back")
+        self.assertIs(self.top(), families)
+        self.assertEqual(len(self.stack), 2)
+        # Back again lands on the board -- rebuilt, because its title was a
+        # snapshot written before the recipe moved the slots.
+        self.press(families, "Back")
+        self.assertEqual(len(self.stack), 1)
+        rebuilt = self.top()
+        self.assertIsNot(rebuilt, board)
+        self.assertIn("Vocoder", rebuilt.title)
+        self.assertTrue(label_of(rebuilt.items[0]).startswith("Start From:"))
+        self.assertIn("Vocoder Stack", label_of(rebuilt.items[0]))
+
+    def test_clear_is_the_voice_boards_line_and_sits_above_back(self):
+        self.handler._open_voice_builder_menu()
+        labels = [label_of(item) for item in self.top().items]
+        self.assertEqual(labels[-1], "Back")
+        self.assertTrue(labels[-2].startswith("Clear:"), labels[-2])
+        # The amp board has its own page and no Clear: one board, one way out.
+        self.handler._open_custom_effect_menu()
+        self.assertFalse(any(label_of(item).startswith("Clear:")
+                             for item in self.top().items))
+
+    def test_clear_asks_first_and_no_keeps_everything(self):
+        self.handler._open_voice_builder_menu()
+        board = self.top()
+        voice_effect_builder.set_value("space", "cave")
+        self.press(board, "Clear: back to the defaults")
+        question = self.top()
+        self.assertIsNot(question, board)
+        self.assertEqual([label_of(item) for item in question.items],
+                         ["Yes, clear the board", "No, keep it"])
+        self.press(question, "No, keep it")
+        self.assertIs(self.top(), board)
+        self.assertEqual(voice_effect_builder.values()["space"], "cave")
+
+    def test_yes_clears_ten_slots_and_forgets_the_starting_point(self):
+        self.handler._open_voice_builder_menu()
+        board = self.top()
+        voice_effect_recipes.apply("vocoder")
+        self.assertEqual(voice_effect_recipes.current_label(), "Vocoder Stack")
+        self.press(board, "Clear: back to the defaults")
+        self.press(self.top(), "Yes, clear the board")
+        # The board is still the page: its slots and its title are read fresh.
+        self.assertIs(self.top(), board)
+        self.assertEqual(voice_effect_builder.values(),
+                         voice_effect_builder.filled({}))
+        self.assertEqual(voice_effect_recipes.current_label(),
+                         voice_effect_recipes.MY_OWN)
+        self.assertEqual(
+            board.title,
+            f"Music Bot {voice_effects.effect_label(voice_effects.BUILDER_EFFECT)}: "
+            f"{voice_effect_builder.summary()}")
+        self.assertIn("My Own", label_of(board.items[0]))
+        self.assertIn("cleared",
+                      menus_module.speak.call_args.args[0].lower())
 
 
 class TheRestOfTheFeatureMenusAreDescribedTests(unittest.TestCase):

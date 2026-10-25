@@ -53,6 +53,11 @@ finished voices (`voice_effect_recipes.py`) in five families, because ten lines
 reading their defaults is not a way in. A recipe is a saved board and nothing
 else -- `set_values` is what it calls, so all ten slots move in one save and one
 revision (one crossfade), and `spec()` still builds the sound.
+
+**Its last line above Back is `Clear:`**, which is also not a slot: `clear()`
+puts the ten back at their defaults and forgets the recipe, in one save. The
+menu asks first, because it is the one line on this page a single extra press
+cannot undo.
 """
 
 from .. import options
@@ -507,6 +512,26 @@ def set_values(board, recipe=None):
 def recipe():
     """The starting point the board was last filled from, or empty."""
     return str(options.get(_RECIPE_OPTION, "") or "")
+
+
+def clear():
+    """Every slot back to its table default, and the starting point forgotten.
+
+    The board's `Clear` line, and the only change on that page that cannot be
+    read from the page and undone by pressing the same line again -- ten slots
+    move at once -- so the menu asks before it calls this.
+
+    It writes an EMPTY board rather than the defaults written out: `values()`
+    fills the holes from `PARAMS`, so the two are the same board today, and an
+    empty one follows the table if a default moves tomorrow. One save and one
+    revision, like `set_values`, because ten slot writes would be ten heard
+    rebuilds.
+    """
+    global _revision
+    options.set(_OPTION, {})
+    options.set(_RECIPE_OPTION, "")
+    _revision += 1
+    return values()
 
 
 def revision():

@@ -61,11 +61,15 @@ The chain, in order
 10. The valve sag, on `Sag` and on the Custom Amp's own chain: the supply's
    gain rather than the output's. It dips under a loud passage and recovers
    over about six frames, interpolated across the frame so the recovery cannot
-   step -- the same rule as the follower above, for the same reason.
-11. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
-   thin the top of any distortion it is handed; the cabinet is deliberately
-   below the range where that hurts, and the ceiling keeps the encoder from
-   being handed a clipped frame.
+   step -- the same rule as the follower above, for the same reason.11. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
+    thin the top of any distortion it is handed; the cabinet is deliberately
+    below the range where that hurts, and the ceiling keeps the encoder from
+    being handed a clipped frame. A **board** also gets a loudness trim here
+    (`VOICE_LOUDNESS`): a fixed preset was tuned by ear against a PA, while ten
+    slots can stack a shaper, a crusher, a sub octave and `Output: Loud` into a
+    square wave whose average is sixteen decibels above a voice's -- the level
+    a room's bass shelf, speech compressor and receive-side limiter were never
+    built for.
 
 The cabinet is FIR (windowed sinc, 257 taps), so its delay is a known constant:
 128 samples after the shaper, 2.7 ms, well inside the 20 ms frame. `_Fir` carries
@@ -328,6 +332,31 @@ def spec_for(effect_id):
 #: and still a loud pedal -- unity below the knee, so a quiet voice is untouched.
 PEAK_CEILING = 0.70
 
+#: The AVERAGE level a BOARD may hand over, in full scale. A peak ceiling alone
+#: does not protect a room: a fuzz at `PEAK_CEILING` is a square wave, so its
+#: RMS is 0.5 where a spoken voice's is 0.08 -- the same peak, sixteen decibels
+#: hotter on average. A PA and a cinema room are built for the second: their EQ
+#: lifts the low end (+3.5 dB below 250 Hz), their compressor is calibrated for
+#: speech, and the PA's own receive-side limiter only engages above 0.85, which
+#: a clipped pedal never reaches. A dense effect therefore arrived unattenuated
+#: and broke up in the room -- a buzz or a torn syllable out of a PA speaker or
+#: a cinema cabinet (2026-10-26).
+#:
+#: It is the two BOARDS that get this, not the fixed pedals: every one of the
+#: sixty-odd presets was tuned by ear against a PA (its drive, its cabinet and
+#: its `out`), while a board is combinatorics -- ten slots can stack a shaper, a
+#: crusher, a sub octave and `Output: Loud`, a voice no preset ever hands over.
+#: 0.22 is a voice's own 0.08 plus about 9 dB: still a loud board, and no longer
+#: a square wave pretending to be one.
+VOICE_LOUDNESS = 0.22
+
+#: How much of the way to the trim the gain moves in one frame, down and up.
+#: Down quickly, because a syllable must not arrive 16 dB hot; up slowly, so a
+#: quiet word is not pumped; interpolated across the frame either way, because
+#: a gain that moves once per frame is the 50 Hz buzz this file warns about.
+LOUDNESS_ATTACK = 0.5
+LOUDNESS_RELEASE = 0.06
+
 #: The vocoder's six bands, in hertz. A channel vocoder is a bank of band-pass
 #: filters on both sides: the voice's bands supply the envelopes, a fixed saw
 #: supplies the excitation, and the result keeps the words and loses the voice.
@@ -567,6 +596,12 @@ class _EffectProcessor:
         self._bias = float(spec["bias"])
         self._shape = spec["shape"]
         self._out = float(spec["out"])
+        # The loudness trim, for the two boards only (see VOICE_LOUDNESS): the
+        # fixed presets were tuned against a PA and are left exactly as they
+        # were. `_loudness_gain` is the gain the last frame ended on, so the
+        # next frame starts there rather than stepping.
+        self._levelled = preset in (CUSTOM_EFFECT, BUILDER_EFFECT)
+        self._loudness_gain = 1.0
         # A chorus is a modulated delay; the ring is long enough for the base
         # delay plus its whole sweep.
         self._chorus = float(spec.get("chorus", 0.0))
@@ -1703,6 +1738,41 @@ class _EffectProcessor:
         return block * (1.0 - float(mix)) + climbed * (
             gain.astype(np.float32) * float(mix))
 
+    def _loudness_trim(self, block):
+        """Pull a dense effect back to the average a voice arrives at.
+
+        The peak ceiling is not enough on its own. A fuzz, a crusher or a board
+        that stacks a shaper with a sub octave hands over a nearly square wave:
+        the same 0.70 peak as a thin pedal, but an RMS four to six times a
+        spoken voice's. The room's chain -- a bass shelf, a speech compressor, a
+        PA safety limiter that does not engage below 0.85 -- was built for the
+        voice, so the square arrives unattenuated and the speaker breaks up.
+
+        So the trim is on the RMS, not the peak: attenuating only (a quiet voice
+        and a quiet board pass byte for byte), aimed at `VOICE_LOUDNESS`, fast
+        on the way down and slow on the way up, and interpolated across the
+        frame so the gain cannot step. A fixed pedal is not trimmed: it was
+        tuned for a room when it was made, and `self._levelled` says so.
+        """
+        if not self._levelled:
+            return block
+        level = (float(np.sqrt(np.mean(np.square(block))))
+                 if block.size else 0.0)
+        target = (VOICE_LOUDNESS / level) if level > VOICE_LOUDNESS else 1.0
+        rate = (LOUDNESS_ATTACK if target < self._loudness_gain
+                else LOUDNESS_RELEASE)
+        goal = self._loudness_gain + (target - self._loudness_gain) * rate
+        if target >= 1.0 and goal > 0.9995:
+            # Nothing to trim and nothing to slide: hand the frame back exactly
+            # as the chain made it, rather than multiplying it by 1.0 (which
+            # would round every sample for no reason).
+            self._loudness_gain = 1.0
+            return block
+        gains = np.linspace(self._loudness_gain, goal, block.size,
+                            dtype=np.float32)
+        self._loudness_gain = float(goal)
+        return block * gains
+
     # ------------------------------------------------------------------ the frame
     def process(self, pcm):
         """Shape one frame; the same number of bytes comes back."""
@@ -1757,6 +1827,9 @@ class _EffectProcessor:
         # the encoder is handed a frame with room left for the effect sends the
         # PA and a cinema room put on top of it (see PEAK_CEILING).
         shaped = PEAK_CEILING * np.tanh(block * self._out / PEAK_CEILING)
+        # ... and then the average, which is what a room actually takes (see
+        # VOICE_LOUDNESS). The peak ceiling above stays the hard one.
+        shaped = self._loudness_trim(shaped)
         return (np.clip(shaped, -1.0, 1.0) * 32767.0).round().astype(
             "<i2").tobytes()
 

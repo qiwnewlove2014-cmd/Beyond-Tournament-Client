@@ -1509,14 +1509,17 @@ class MapMusicBot:
     def _open_voice_effect_menu(self):
         return self._menus()._open_voice_effect_menu()
 
-    def _open_builder_recipes_menu(self, family_id=None):
-        return self._menus()._open_builder_recipes_menu(family_id)
+    def _open_builder_recipes_menu(self, family_id=None, from_board=False):
+        return self._menus()._open_builder_recipes_menu(family_id, from_board)
 
     def _open_custom_effect_menu(self):
         return self._menus()._open_custom_effect_menu()
 
     def _open_voice_builder_menu(self):
         return self._menus()._open_voice_builder_menu()
+
+    def _open_builder_clear_menu(self, board_menu=None):
+        return self._menus()._open_builder_clear_menu(board_menu)
 
     def _open_custom_param_menu(self, param_id):
         return self._menus()._open_custom_param_menu(param_id)

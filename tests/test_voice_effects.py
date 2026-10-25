@@ -1246,6 +1246,33 @@ class TheVoiceBuilderTests(unittest.TestCase):
         voice_effect_builder.set_value("space", "cave")
         self.assertGreater(voice_effect_builder.revision(), before)
 
+    def test_clear_puts_every_slot_back_and_forgets_the_starting_point(self):
+        """The board's Clear line: ten slots, one save, nothing remembered."""
+        voice_effect_recipes.apply("oracle")
+        self.assertEqual(voice_effect_recipes.current_label(), "Dub Oracle")
+        before = voice_effect_builder.revision()
+        cleared = voice_effect_builder.clear()
+        self.assertEqual(cleared, voice_effect_builder.filled({}))
+        self.assertEqual(voice_effect_builder.values(), cleared)
+        for param_id, _name, _note, _choices, default in (
+                voice_effect_builder.PARAMS):
+            self.assertEqual(voice_effect_builder.values()[param_id], default)
+        self.assertEqual(voice_effect_recipes.current_label(),
+                         voice_effect_recipes.MY_OWN)
+        self.assertEqual(voice_effect_builder.recipe(), "")
+        # One save and one rebuild, like a recipe: ten writes would be ten
+        # heard crossfades.
+        self.assertEqual(voice_effect_builder.revision(), before + 1)
+
+    def test_a_cleared_board_is_still_a_sound(self):
+        voice_effect_builder.clear()
+        processor = voice_effects._EffectProcessor(voice_effects.BUILDER_EFFECT)
+        out = play(processor, to_pcm(tone(seconds=0.30, amplitude=0.4)))
+        self.assertTrue(np.all(np.isfinite(out)))
+        self.assertGreater(rms(out), 0.01)
+        self.assertLessEqual(float(np.max(np.abs(out))),
+                             voice_effects.PEAK_CEILING + 1e-6)
+
     def test_the_line_rebuilds_when_a_slot_moves(self):
         line = voice_effects.VoiceEffectLine()
         pcm = to_pcm(tone(seconds=0.2))
@@ -1265,6 +1292,105 @@ class TheVoiceBuilderTests(unittest.TestCase):
         self.assertEqual(voice_effect_builder.values()["movement"], "off")
         voice_effect_builder.set_value("space", "space")
         self.assertEqual(voice_effect_builder.values()["space"], "off")
+
+
+class TheRoomLevelTests(unittest.TestCase):
+    """What a board hands a PA or a cinema cabinet, in average level.
+
+    A peak ceiling alone let a board be a square wave at 0.70: RMS 0.5 where a
+    spoken voice is 0.08. The room's chain (a bass shelf, a speech compressor, a
+    safety limiter that only engages above 0.85) was built for the voice, so the
+    square went through and broke up -- reported as a buzz out of a PA speaker
+    or a cinema cabinet. The two boards are levelled on the way out; the fixed
+    pedals were each tuned against a PA when they were made, and are left alone.
+    """
+
+    def setUp(self):
+        self.addCleanup(mock.patch.stopall)
+        self.builder = {}
+        self.amp = {}
+        mock.patch.object(
+            voice_effect_builder.options, "get",
+            side_effect=lambda key, default=None: self.builder.get(key, default)
+        ).start()
+        mock.patch.object(
+            voice_effect_builder.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            self.builder.__setitem__(key, value)
+        ).start()
+        mock.patch.object(
+            voice_effect_custom.options, "get",
+            side_effect=lambda key, default=None: self.amp.get(key, default)
+        ).start()
+        mock.patch.object(
+            voice_effect_custom.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            self.amp.__setitem__(key, value)
+        ).start()
+
+    def settled(self, processor, signal):
+        """The output after the trim has caught up (the first frames may be hot)."""
+        return play(processor, signal)
+
+    def test_every_recipe_hands_a_room_a_voice_average(self):
+        signal = to_pcm(tone(seconds=1.2, amplitude=0.30))
+        for recipe_id, label, _family, _note, _board in (
+                voice_effect_recipes.RECIPES):
+            with self.subTest(recipe=label):
+                voice_effect_recipes.apply(recipe_id)
+                processor = voice_effects._EffectProcessor(
+                    voice_effects.BUILDER_EFFECT)
+                out = self.settled(processor, signal)
+                self.assertLessEqual(
+                    rms(out), voice_effects.VOICE_LOUDNESS * 1.10,
+                    f"{label} is louder than a voice a room can take")
+                self.assertLessEqual(float(np.max(np.abs(out))),
+                                     voice_effects.PEAK_CEILING + 1e-6)
+
+    def test_the_worst_amp_board_is_levelled_too(self):
+        # The loudest a player can make the amp board: every knob at its top,
+        # the gate open and the output trim up (a fuzz, a bright cabinet and a
+        # presence lift at once).
+        for slot, value in (("drive", "sat"), ("character", "fuzz"),
+                            ("bass", "full"), ("mid", "presence"),
+                            ("treble", "bright"), ("gate", "off"),
+                            ("output", "loud")):
+            voice_effect_custom.set_value(slot, value)
+        processor = voice_effects._EffectProcessor(voice_effects.CUSTOM_EFFECT)
+        out = self.settled(processor, to_pcm(tone(seconds=1.2, amplitude=0.30)))
+        self.assertLessEqual(rms(out), voice_effects.VOICE_LOUDNESS * 1.10)
+        self.assertLessEqual(float(np.max(np.abs(out))),
+                             voice_effects.PEAK_CEILING + 1e-6)
+
+    def test_a_fixed_pedal_is_left_exactly_as_it_was(self):
+        """The presets were tuned against a PA; only the boards are levelled."""
+        self.assertFalse(voice_effects._EffectProcessor("amp")._levelled)
+        self.assertTrue(voice_effects._EffectProcessor(
+            voice_effects.CUSTOM_EFFECT)._levelled)
+        self.assertTrue(voice_effects._EffectProcessor(
+            voice_effects.BUILDER_EFFECT)._levelled)
+
+    def test_a_quiet_board_is_handed_back_untouched(self):
+        processor = voice_effects._EffectProcessor(voice_effects.BUILDER_EFFECT)
+        quiet = np.full(voice_effects.FRAME_BYTES // 2, 0.05, dtype=np.float32)
+        self.assertIs(processor._loudness_trim(quiet), quiet)
+        self.assertEqual(processor._loudness_gain, 1.0)
+
+    def test_the_trim_continues_across_the_frame_it_ends_on(self):
+        """No step between frames: the last sample of one is the first of next.
+
+        A gain that jumps between frames is a 50 Hz buzz (the same rule the
+        Hyperpop follower and the step filter follow), so the ramp starts where
+        the previous frame ended.
+        """
+        processor = voice_effects._EffectProcessor(voice_effects.BUILDER_EFFECT)
+        block = np.full(voice_effects.FRAME_BYTES // 2, 0.60, dtype=np.float32)
+        first = processor._loudness_trim(block)
+        gain = processor._loudness_gain
+        self.assertLess(gain, 1.0)
+        second = processor._loudness_trim(block)
+        self.assertAlmostEqual(float(second[0]), float(first[-1]), places=6)
+        self.assertLess(float(np.max(np.diff(second))), 1e-3)
 
 
 class TheRecipeTests(unittest.TestCase):
