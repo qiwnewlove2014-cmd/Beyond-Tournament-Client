@@ -639,13 +639,21 @@ def scale_label(mode=DEFAULT_MODE, root=DEFAULT_ROOT):
 #: third field is the size the note is looked for from, and `AutoTuner.
 #: nearest_note` snaps it to the scale, so a pentatonic answers with the nearest
 #: note it actually has rather than inventing one.
+#:
+#: A NEGATIVE size is a copy BELOW the voice -- the bass half of the catalogue.
+#: It is the same arithmetic (a third below C in C major is A, below D it is B)
+#: and the same one-frame mix, but it is mixed as a bass voice rather than as a
+#: second singer (`harmony_share`, `BASS_TONE_HZ`): quieter than the lead and
+#: low-passed, because a copy an octave down at the lead's own level is heard as
+#: the voice doubling and smearing rather than as a low voice under it.
 HARMONY_INTERVALS = (
     ("off", "Off", 0,
      "No second voice: the tuned voice on its own."),
     ("third", "Third", 4,
      "A second copy of the voice a third above: the nearest note your scale "
-     "has there, so it is a major third over some notes and a minor third "
-     "over others -- the interval a second singer would take."),
+     "has there while Auto-Tune is tuning you, so it is a major third over "
+     "some notes and a minor third over others -- the interval a second "
+     "singer would take. With Auto-Tune off it is a plain major third."),
     ("fifth", "Fifth", 7,
      "A second copy a fifth above: the strongest harmony there is, because "
      "it sounds like the same chord one voice higher."),
@@ -654,13 +662,39 @@ HARMONY_INTERVALS = (
      "one that sounds like a duet rather than a chord."),
     ("seventh", "Seventh", 11,
      "A second copy a seventh above, a whole tone under the octave. It is the "
-     "jazzier, more open harmony, and it wants a scale that has one -- a "
-     "pentatonic answers with its own nearest note."),
+     "jazzier, more open harmony, and it wants a scale that has one -- while "
+     "Auto-Tune is on a pentatonic answers with its own nearest note. With "
+     "Auto-Tune off it is a plain major seventh."),
     ("octave", "Octave", 12,
      "A second copy an octave above: the same note, higher, which thickens "
      "the voice instead of adding a note to it."),
+    ("bass_third", "Bass Third", -3,
+     "A copy a third BELOW the voice: a low voice singing the note under "
+     "yours, taken from your scale so it stays in key while Auto-Tune is on "
+     "(a plain minor third with it off). It is mixed quieter than you and "
+     "low-passed, so it hums under the words instead of competing with them."),
+    ("bass_fifth", "Bass Fifth", -5,
+     "A copy a fifth below: the low root under your note, which is what a "
+     "choir puts under a melody. Quieter than the lead and low-passed, so it "
+     "hums under you rather than doubling you."),
+    ("bass_octave", "Bass Octave", -12,
+     "A copy an octave below: the same note one octave down, which thickens "
+     "the voice from underneath without adding a note to it. Quieter than "
+     "the lead and low-passed, so it hums."),
 )
 DEFAULT_HARMONY = "off"
+
+#: How loud a copy below the voice is against the lead's own 1.0. An upper copy
+#: is a second singer and takes an equal share; a bass copy is an undertone and
+#: takes a little over half of one, which is what keeps the words clear while
+#: the low voice is heard under them.
+BASS_SHARE = 0.55
+
+#: Where a bass copy is low-passed, in Hz. A copy an octave down is otherwise the
+#: voice again, an octave lower -- heard as the same words doubled and smeared.
+#: Below this the fundamental and first harmonics are kept and the consonants are
+#: gone, which is the hum a bass voice is: a note, not a second talker.
+BASS_TONE_HZ = 380.0
 
 
 def clamp_harmony(value):
@@ -695,13 +729,40 @@ def harmony_note(interval_id):
     return HARMONY_INTERVALS[0][3]
 
 
+def harmony_is_bass(interval_id):
+    """True when this copy sings BELOW the voice rather than above it."""
+    return harmony_semitones(interval_id) < 0
+
+
+def harmony_share(interval_id):
+    """This copy's weight in the one frame, against the lead's own 1.0."""
+    return BASS_SHARE if harmony_is_bass(interval_id) else 1.0
+
+
+def harmony_plain_offset(interval_id):
+    """What a copy shifts by while the lead is NOT being tuned, or None.
+
+    Harmony is a mode of its own: it sings with Auto-Tune off as well as on.
+    With the tuner off there is no note set to count an interval in and no
+    corrected note to place it from, so the copy is the plain musical interval
+    the catalogue names (`harmony_semitones`: a major third, a perfect fifth,
+    an octave) measured from the voice as it is actually sung -- the lead is not
+    moved, so the copy is exactly that far from it, ear or not. None is Off.
+    """
+    if clamp_harmony(interval_id) == DEFAULT_HARMONY:
+        return None
+    return float(harmony_semitones(interval_id))
+
+
 def harmony_pitch_limit(semitones):
     """The widest interval a harmony copy may ask its shifter for.
 
     The copy is the interval PLUS the tuning correction the lead is holding, and
     the transposer clamps what it is asked for. An octave above a voice that is
-    a semitone and a half flat is 13.5 semitones, so the line this copy runs on
-    is given its own limit and a look-ahead to match (`transpose.py`).
+    a semitone and a half flat is 13.5 semitones -- and so is an octave BELOW
+    it, because the limit is a distance; the sign only says which way the copy
+    is taken (`HarmonyVoice` reads it) -- so the line this copy runs on is given
+    its own limit and a look-ahead to match (`transpose.py`).
     """
     return abs(float(semitones)) + MAX_PULL + 0.01
 

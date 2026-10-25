@@ -292,6 +292,18 @@ def autotune_harmony():
                 options.get(AUTOTUNE_HARMONY2_OPTION, autotune.DEFAULT_HARMONY)))
 
 
+def harmony_enabled():
+    """Whether either harmony copy is switched on.
+
+    Harmony is a mode of its own, not a dial of Auto-Tune: it sings with the
+    tuner off (each copy at its plain interval) exactly as it does with the
+    tuner on, so a press that only wants the copies still needs a line.
+    """
+    from .music_bot import autotune
+    return any(interval != autotune.DEFAULT_HARMONY
+               for interval in autotune_harmony())
+
+
 class SpeechKeyLine:
     """The microphone's key line: the song's transposer, on one voice.
 
@@ -348,7 +360,7 @@ class SpeechKeyLine:
 
 
 class HarmonyVoice:
-    """One extra copy of the tuned voice, an interval above it.
+    """One extra copy of the tuned voice, an interval above -- or below -- it.
 
     The copy is the SAME microphone frame through a shifter of its own, set to
     the lead's correction plus the interval (`AutoTuner.harmony_offset`), mixed
@@ -366,16 +378,50 @@ class HarmonyVoice:
     difference, read out of a ring by how far the lead is ahead, and the
     distance is slewed a few samples per frame instead of jumped when a glide
     moves the ratio.
+
+    **A copy BELOW the voice is the other case, and it needs the opposite
+    arithmetic.** Its ratio is under 1, so reading slower than the source turns
+    the same opening silence into a LONGER delay -- an octave down would arrive
+    107 ms after the lead, and no ring can read audio the vocoder has not
+    produced yet. Its line is therefore built with exactly `LOOKAHEAD * ratio`
+    of opening silence (`ChromaticTransposer(exact_lookahead=True)`), which puts
+    its delay at `LOOKAHEAD / ratio_lead` -- the lead's own delay, whatever the
+    correction does -- so `_align` comes out zero and the copy needs no ring.
+
+    **A bass copy is mixed as an undertone, not as a second singer.** It is
+    quieter than the lead (`autotune.harmony_share`) and low-passed
+    (`autotune.BASS_TONE_HZ`), because an octave below at the lead's own level is
+    the same words doubled and smeared; what a bass voice is, is a note without
+    the consonants.
     """
 
     #: How long the copy takes to join or leave the mix, in frames. A copy
     #: switched off mid-sentence is faded; cutting it is a click.
     FADE_FRAMES = 3
+    #: Taps in the bass copy's own low-pass. A corner this low needs a long
+    #: kernel: the transition band of a windowed sinc is about `rate / taps`, and
+    #: 63 taps would smear a 380 Hz corner over 763 Hz -- the note it is meant to
+    #: keep lands in the roll-off (measured 0.0004 of its level). 511 makes that
+    #: 94 Hz, so the fundamental and its first harmonics are kept whole.
+    TONE_TAPS = 511
 
-    def __init__(self, interval_id):
+    def __init__(self, interval_id, transposer_cls=None, lookahead=None,
+                 lead_delay=None):
+        """One copy of a voice or a string, an interval above it -- or below.
+
+        The three optional dials are for a line that is NOT the broadcast
+        voice: the line-in guitar's harmony (`libs/instrument_harmony.py`) is
+        played back under a ringing string, so it needs a shorter window
+        (`GuitarTransposer`), a fixed opening silence, and a lead whose own
+        delay is 26.7 ms rather than the tuner's 107. They default to the
+        voice's own numbers, so a caller that passes none gets the same line it
+        always got, byte for byte.
+        """
         import numpy as np
         from .music_bot import autotune
         from .music_bot.transpose import ChromaticTransposer
+        if transposer_cls is None:
+            transposer_cls = ChromaticTransposer
         self.interval = autotune.clamp_harmony(interval_id)
         step = autotune.harmony_semitones(self.interval)
         # This copy may be asked for the interval PLUS the lead's correction,
@@ -383,10 +429,31 @@ class HarmonyVoice:
         # semitones: the line gets its own limit, its own anti-aliasing filter
         # ceiling and a look-ahead that reaches (`transpose.py`).
         limit = autotune.harmony_pitch_limit(step)
-        self.transposer = ChromaticTransposer(
-            channels=1, lookahead=ChromaticTransposer.lookahead_for(limit))
+        nominal = 2.0 ** (step / 12.0)
+        if step < 0:
+            # Below the voice: the opening silence is SHORTER by the ratio, so
+            # the delay (silence / ratio) is the lead's own -- see the class
+            # docstring. Its output never runs faster than its input, so the
+            # anti-aliasing filter it pins for an upward copy is not engaged.
+            base = (transposer_cls.LOOKAHEAD if lookahead is None
+                    else float(lookahead))
+            self.transposer = transposer_cls(
+                channels=1, lookahead=int(round(base * nominal)),
+                exact_lookahead=True)
+        elif lookahead is None:
+            self.transposer = transposer_cls(
+                channels=1, lookahead=transposer_cls.lookahead_for(limit))
+        else:
+            # An explicit opening silence, sized in the copy's own time: read
+            # at `nominal`, it lands `lookahead` samples behind the source
+            # whatever the interval is -- which is how every copy of a guitar
+            # chord arrives on the same beat.
+            self.transposer = transposer_cls(
+                channels=1, lookahead=int(round(float(lookahead) * nominal)),
+                exact_lookahead=True)
         self.transposer.pitch_limit = limit
-        self.transposer.pin_lowpass(2.0 ** (limit / 12.0))
+        if step >= 0:
+            self.transposer.pin_lowpass(2.0 ** (limit / 12.0))
         self._buffer = np.zeros((0,), dtype=np.float32)
         #: How far the copy's output is held back so it lines up with the lead.
         #:
@@ -397,13 +464,53 @@ class HarmonyVoice:
         #: pitch bend, not an alignment). Fixed, the copy is a few samples out of
         #: place when the correction moves instead, which is a fraction of a
         #: millisecond: under 2 ms against two frames of detune.
-        nominal = 2.0 ** (step / 12.0)
-        self._align = max(0.0, float(ChromaticTransposer.LOOKAHEAD
-                                     - self.transposer.lookahead / nominal))
+        target = (transposer_cls.LOOKAHEAD if lead_delay is None
+                  else float(lead_delay))
+        self._align = max(0.0, target - self.transposer.lookahead / nominal)
+        #: The bass copy's low-pass kernel and the samples it is still holding
+        #: from the frame before, or None for a copy above the voice, which is
+        #: passed through untouched.
+        self._tone = None
+        self._tone_tail = None
+        if autotune.harmony_is_bass(self.interval):
+            self._tone = self._tone_kernel(autotune.BASS_TONE_HZ)
         #: 1.0 while it sings, 0.0 once it has faded out and can be dropped.
         self.gain = 0.0
         #: Whether the menu still asks for it (a fade-out keeps it alive).
         self.wanted = True
+
+    @classmethod
+    def _tone_kernel(cls, hz):
+        """A windowed-sinc low-pass at ``hz``: the bass copy's own voice.
+
+        Linear phase, like the transposer's anti-aliasing filter, so it is a
+        delay and never a smear: 255 samples at 511 taps, 5 ms. That lands the
+        bass copy a quarter of a frame behind the lead, which on a hum with no
+        consonants in it is not a slap -- and buying it back would take the
+        opening silence below the vocoder's own arithmetic.
+        """
+        import numpy as np
+        taps = np.arange(cls.TONE_TAPS) - (cls.TONE_TAPS - 1) / 2.0
+        cutoff = float(hz) / 48000.0          # cycles/sample; Nyquist is 0.5
+        kernel = (2.0 * cutoff * np.sinc(2.0 * cutoff * taps)
+                  * np.hamming(cls.TONE_TAPS))
+        total = kernel.sum()
+        if abs(total) < 1e-9:
+            return None
+        return (kernel / total).astype(np.float32)
+
+    def _voice_tone(self, piece):
+        """One block of the copy through its low-pass, or untouched if it has none."""
+        if self._tone is None:
+            return piece
+        import numpy as np
+        needed = len(self._tone) - 1
+        tail = (self._tone_tail if self._tone_tail is not None
+                else np.zeros(needed, dtype=np.float32))
+        data = np.concatenate((tail, piece.astype(np.float32)))
+        out = np.convolve(data, self._tone, mode="valid")
+        self._tone_tail = np.array(data[-needed:], copy=True)
+        return out
 
     def advance_gain(self):
         """One frame's step of the join/leave fade; answers the gain to use."""
@@ -430,7 +537,7 @@ class HarmonyVoice:
         keep = frames + align + 2 * frames
         if self._buffer.size > keep:
             self._buffer = self._buffer[-keep:]
-        return piece
+        return self._voice_tone(piece)
 
     def flush(self):
         """Hand the copy's own look-ahead into the ring, for the tail."""
@@ -450,7 +557,7 @@ class HarmonyVoice:
             self._buffer = self._buffer[frames:]
         else:
             self._buffer = np.zeros((0,), dtype=np.float32)
-        return piece
+        return self._voice_tone(piece)
 
 
 class AutoTuneLine:
@@ -503,8 +610,9 @@ class AutoTuneLine:
         self._keep = (self.transposer.LOOKAHEAD * 2
                       + (autotune.AutoTuner.WINDOW_FRAMES + 2) * self._frames)
         # The harmony copies (a second and a third voice, an interval above the
-        # lead). They are built only while Auto-Tune is on and the menu asks for
-        # one, so a press that never uses them pays nothing for them.
+        # lead). They are a MODE OF THEIR OWN: the tuner's switch above them
+        # does not silence them, so a press that only wants the copies gets a
+        # line too. A press that never uses them pays nothing for them.
         self._harmony_ids = (autotune.DEFAULT_HARMONY, autotune.DEFAULT_HARMONY)
         self._harmonies = []
 
@@ -571,11 +679,14 @@ class AutoTuneLine:
                 # Off (or turned off mid-sentence): stop deciding and glide the
                 # voice back to the interval it arrived with. The frames keep
                 # flowing through the line, so the delay is unchanged and the
-                # release still hands the look-ahead back. A harmony copy that
-                # is still in the mix is faded out here rather than cut.
+                # release still hands the look-ahead back.
+                #
+                # The copies are NOT touched by this switch: Harmony is its own
+                # mode, so a copy that is singing keeps singing, at the plain
+                # size the menu named (`autotune.harmony_plain_offset`). Turning
+                # Auto-Tune off moves the LEAD's pitch and nothing else.
                 self.transposer.set_pitch_offset(0.0)
-                for voice in self._harmonies:
-                    voice.wanted = False
+                self._shape_harmonies(pcm, offsets=self._plain_offsets())
                 return self._mix(self.transposer.process(bytes(pcm)), pcm)
             # The audio reaching the read head right now, as ONE contiguous
             # window: the detector is handed the slice itself, never frames to
@@ -591,6 +702,20 @@ class AutoTuneLine:
                 self._shape_harmonies(pcm, offsets=self.tuner.harmony_offsets())
             lead = self.transposer.process(bytes(pcm))
             return self._mix(lead, pcm)
+
+    def _plain_offsets(self):
+        """What the copies shift by while the lead is not being tuned.
+
+        With Auto-Tune off there is no tuned note to count an interval in, so a
+        copy is the catalogue's own size in semitones -- a major third, a
+        perfect fifth, an octave -- measured from the voice as it is actually
+        sung. Reading it here rather than from the tuner keeps the two modes
+        from ever having to agree: the copy is the same distance above (or
+        below) the lead whether the tuner is running or not.
+        """
+        from .music_bot import autotune
+        return tuple(autotune.harmony_plain_offset(interval)
+                     for interval in self._harmony_ids)
 
     def _shape_harmonies(self, pcm, offsets):
         """Build or drop the copies the menu asks for, and aim each one.
@@ -621,14 +746,21 @@ class AutoTuneLine:
             voice.transposer.set_pitch_offset(offsets[slot])
 
     def _mix(self, lead_pcm, pcm):
-        """Sum the lead and its copies into ONE frame, in equal shares.
+        """Sum the lead and its copies into ONE frame, in their own shares.
 
-        A share of ``1 / (1 + copies)`` each keeps the sum inside full scale
-        without a limiter, and makes one copy exactly half and half: the lead is
-        never louder than the harmony it is singing with, which is what makes it
-        a duet rather than a voice with an echo behind it.
+        A copy ABOVE the voice is a second singer and takes an equal share, so
+        one copy is half and half and two make three equal voices (`1 / (1 +
+        copies)` keeps the sum inside full scale without a limiter). A copy
+        BELOW it takes `autotune.harmony_share` of that -- a little over half --
+        so the words stay the lead's own and the bass hums under them.
+
+        The share is counted with each copy's FADE, not with its presence: the
+        lead ducks as a copy actually arrives over its three frames and comes
+        back the same way when it leaves, instead of stepping down the frame the
+        menu was pressed (a step in the lead's level is a click).
         """
         import numpy as np
+        from .music_bot import autotune
         if not self._harmonies:
             return lead_pcm
         frames = len(lead_pcm) // 2
@@ -638,14 +770,16 @@ class AutoTuneLine:
         if not voices:
             self._harmonies = []
             return lead_pcm
-        share = 1.0 / (1.0 + len(voices))
+        faded = [(voice, voice.advance_gain()) for voice in voices]
+        total = 1.0 + sum(autotune.harmony_share(voice.interval) * gain
+                          for voice, gain in faded)
         mix = (np.frombuffer(lead_pcm, dtype="<i2").astype(np.float32)
-               / 32768.0) * share
-        for voice in voices:
+               / 32768.0) * (1.0 / total)
+        for voice, gain in faded:
             piece = voice.process(pcm)
-            gain = voice.advance_gain()
             if gain > 0.0:
-                mix[:frames] += piece[:frames] * (share * gain)
+                share = autotune.harmony_share(voice.interval) * gain / total
+                mix[:frames] += piece[:frames] * share
             if not voice.wanted and gain <= 0.0 and voice in self._harmonies:
                 self._harmonies.remove(voice)
         return (np.clip(mix, -1.0, 1.0) * 32767.0).round().astype("<i2").tobytes()
@@ -671,6 +805,7 @@ class AutoTuneLine:
     def _mix_tail(self, lead_tail, step):
         """The release, mixed like a frame: the last tenth of a second, tuned."""
         import numpy as np
+        from .music_bot import autotune
         voices = [v for v in self._harmonies if v.wanted or v.gain > 0.0]
         if not voices:
             out = []
@@ -679,17 +814,20 @@ class AutoTuneLine:
                 lead_tail = lead_tail[step:]
             return out
         per_frame = step // 2
-        share = 1.0 / (1.0 + len(voices))
+        weights = [(voice, autotune.harmony_share(voice.interval))
+                   for voice in voices]
         out = []
         while len(lead_tail) >= step:
             piece = lead_tail[:step]
             lead_tail = lead_tail[step:]
+            faded = [(voice, share, voice.advance_gain())
+                     for voice, share in weights]
+            total = 1.0 + sum(share * gain for _voice, share, gain in faded)
             mix = (np.frombuffer(piece, dtype="<i2").astype(np.float32)
-                   / 32768.0) * share
-            for voice in voices:
-                gain = voice.advance_gain()
+                   / 32768.0) * (1.0 / total)
+            for voice, share, gain in faded:
                 if gain > 0.0:
-                    mix += voice.tail(per_frame) * (share * gain)
+                    mix += voice.tail(per_frame) * (share * gain / total)
                 else:
                     voice.tail(per_frame)   # keep the ring advancing
             out.append((np.clip(mix, -1.0, 1.0) * 32767.0)
@@ -1910,8 +2048,9 @@ class VoiceChatRecord(threading.Thread):
 
         Only the broadcast leg is shaped (PA Test Mode, the megaphone weapon, or
         a mic joined to the Music Bot's broadcast): proximity voice is left
-        alone, and a microphone with neither a moved key nor Auto-Tune has no
-        line at all, so its frames are byte-for-byte what they were. A line that
+        alone, and a microphone with a key that has not moved, no Auto-Tune and
+        no harmony copy has no line at all, so its frames are byte-for-byte what
+        they were. A line that
         is already open stays open until the press ends even if the dial goes
         back to the original key -- it holds the delay it was built with,
         exactly as a song does.
@@ -1921,6 +2060,11 @@ class VoiceChatRecord(threading.Thread):
         look-ahead it is holding, which is the last tenth of a second the
         player already spoke. Auto-Tune wins over the key dial while it is on
         (`libs/music_bot/autotune.py` says why the two cannot both be right).
+
+        Harmony needs no switch of its own on this path: a copy is placed inside
+        the tuner's line and is independent of the Auto-Tune switch, so a press
+        with only `Harmony:` set gets an `AutoTuneLine` and hears the copies at
+        their plain intervals, with the lead untouched.
 
         The SWITCH is live all the same: `AutoTuneLine.shape` reads it every
         frame, so turning Auto-Tune off mid-sentence hands the voice back then
@@ -1936,7 +2080,7 @@ class VoiceChatRecord(threading.Thread):
             return line
         key = speech_key_semitones()
         if line is None:
-            if autotune_enabled():
+            if autotune_enabled() or harmony_enabled():
                 line = AutoTuneLine()
                 self._speech_line = line
                 return line

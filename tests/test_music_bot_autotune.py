@@ -664,9 +664,19 @@ class RecorderGateTests(unittest.TestCase):
         self.assertIsInstance(line, SpeechKeyLine)
         self.assertEqual(line.semitones, 7)
 
+    def test_a_harmony_copy_builds_the_line_with_the_tuner_off(self):
+        """The copies sing in the tuner's line, so the press needs one."""
+        rec = self.recorder()
+        with mock.patch.object(voice_chat, "autotune_enabled", lambda: False), \
+                mock.patch.object(voice_chat, "harmony_enabled", lambda: True), \
+                mock.patch.object(voice_chat, "speech_key_semitones", lambda: 0):
+            line = rec._speech_line_for(True)
+        self.assertIsInstance(line, AutoTuneLine)
+
     def test_no_dial_and_no_autotune_is_no_line_at_all(self):
         rec = self.recorder()
         with mock.patch.object(voice_chat, "autotune_enabled", lambda: False), \
+                mock.patch.object(voice_chat, "harmony_enabled", lambda: False), \
                 mock.patch.object(voice_chat, "speech_key_semitones", lambda: 0):
             self.assertIsNone(rec._speech_line_for(True))
 
@@ -846,6 +856,7 @@ class MenuTests(unittest.TestCase):
             autotune.DEFAULT_MODE, autotune.DEFAULT_ROOT)
         self.bot.autotune_harmony_label.side_effect = (
             lambda second=False: autotune.harmony_label(autotune.DEFAULT_HARMONY))
+        self.bot.autotune_harmony_summary.return_value = "Off"
         self.bot._find_gameplay.return_value = SimpleNamespace(
             add_substate=lambda item: None, pop_last_substate=lambda: None)
         self.handler = menus_module.MusicBotMenus(self.bot)
@@ -917,23 +928,36 @@ class MenuTests(unittest.TestCase):
         menu.items[index][1]()
         self.bot.set_autotune_speed.assert_called_with(0)
 
-    def test_turning_it_on_puts_both_harmony_rows_under_the_amount(self):
-        self.bot.autotune_enabled = True
+    def test_the_harmony_line_is_a_mode_of_its_own(self):
+        """Harmony is NOT one of the dials the Auto-Tune switch opens.
+
+        It was, and a player turning the tuner off lost the copies with it. The
+        two modes are separate: the line is in the list with the switch off, and
+        the switch only adds and removes its own three dials around it.
+        """
         labels = self.settings_labels()
+        self.assertEqual(labels.index("Harmony: Off"),
+                         labels.index("Auto-Tune: OFF") + 1)
+        self.assertEqual(labels[-2], "Underwater Muffle: ON")
+        self.bot.autotune_enabled = True
+        self.bot.autotune_label.return_value = "ON"
+        labels = self.settings_labels()
+        # ONE line, not one per copy: the page under it is where the copies are
+        # chosen. It sits after the tuner's own three dials, so the block the
+        # switch opens stays one block and the muffle is still last.
         amount = labels.index("Tune Amount: 100%")
-        self.assertEqual(labels[amount + 1], "Harmony 1: Off")
-        self.assertEqual(labels[amount + 2], "Harmony 2: Off")
-        self.assertEqual(labels[amount + 3], "Underwater Muffle: ON")
+        self.assertEqual(labels[amount + 1], "Harmony: Off")
+        self.assertEqual(labels[amount + 2], "Underwater Muffle: ON")
 
     def test_every_autotune_line_says_what_it_does(self):
         self.bot.autotune_enabled = True
         self.handler._open_settings_menu()
         names = ("Auto-Tune", "Retune Speed", "Auto-Tune Scale",
-                 "Tune Amount", "Harmony 1", "Harmony 2")
+                 "Tune Amount", "Harmony")
         lines = [item for item in FakeMenu.built[-1].items
                  if str(item[0]() if callable(item[0]) else item[0]).split(":")[0]
                  in names]
-        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(lines), 5)
         for line in lines:
             self.assertGreaterEqual(len(line), 4, f"{line[0]} has no description")
             self.assertTrue(str(line[3]).strip(), f"{line[0]} has no description")
@@ -952,6 +976,18 @@ class MenuTests(unittest.TestCase):
         self.assertIn("Harmony 1: Off", str(self.speak.call_args_list[-1].args[0]))
         self.assertEqual(menu.title, "Music Bot Harmony 1: Off")
 
+    def test_the_interval_list_offers_the_bass_copies_and_takes_them(self):
+        self.handler._open_autotune_harmony_menu()
+        menu = FakeMenu.built[-1]
+        labels = labels_in(menu)
+        for label in ("Bass Third", "Bass Fifth", "Bass Octave"):
+            self.assertIn(label, labels)
+        menu.items[labels.index("Bass Octave")][1]()
+        self.bot.set_autotune_harmony.assert_called_with("bass_octave",
+                                                        second=False)
+        help_text = str(menu.items[labels.index("Bass Octave")][3]).lower()
+        self.assertIn("below", help_text)
+
     def test_the_second_harmony_menu_is_the_second_copy(self):
         self.handler._open_autotune_harmony_menu(second=True)
         menu = FakeMenu.built[-1]
@@ -960,12 +996,49 @@ class MenuTests(unittest.TestCase):
         self.bot.set_autotune_harmony.assert_called_with("sixth", second=True)
         self.assertEqual(menu.title, "Music Bot Harmony 2: Off")
 
+    def test_the_settings_line_counts_the_voices_that_are_singing(self):
+        bot = SimpleNamespace(autotune_harmony="off", autotune_harmony2="off")
+        summary = MapMusicBot.autotune_harmony_summary
+        self.assertEqual(summary(bot), "Off")
+        bot.autotune_harmony = "third"
+        self.assertEqual(summary(bot), "1 voice (Third)")
+        bot.autotune_harmony2 = "bass_octave"
+        self.assertEqual(summary(bot), "2 voices (Third + Bass Octave)")
+        # A saved value that no longer exists is Off, not a crash and not a
+        # ghost voice in the count.
+        bot.autotune_harmony2 = "not-an-interval"
+        self.assertEqual(summary(bot), "1 voice (Third)")
+
+    def test_the_harmony_page_holds_both_copies(self):
+        self.handler._open_harmony_menu()
+        menu = FakeMenu.built[-1]
+        labels = labels_in(menu)
+        self.assertEqual(labels[:2], ["Harmony 1: Off", "Harmony 2: Off"])
+        self.assertEqual(labels[-1], "Back")
+        self.assertEqual(menu.title, "Music Bot Harmony: Off")
+        for item in menu.items:
+            self.assertGreaterEqual(len(item), 4, f"{item[0]} has no description")
+            self.assertTrue(str(item[3]).strip())
+        # Each line opens the list for the copy it names...
+        menu.items[0][1]()
+        self.assertEqual(FakeMenu.built[-1].title, "Music Bot Harmony 1: Off")
+        self.handler._open_harmony_menu()
+        FakeMenu.built[-1].items[1][1]()
+        self.assertEqual(FakeMenu.built[-1].title, "Music Bot Harmony 2: Off")
+        # ...and its own Back returns to this page, not past it.
+        self.handler._open_autotune_harmony_menu()
+        FakeMenu.built[-1].items[-1][1]()
+        self.assertEqual(FakeMenu.built[-1].title, "Music Bot Harmony: Off")
+
     def test_the_servers_gate_hides_both_lines(self):
         self.addCleanup(music_bot_gate.clear)
         music_bot_gate.apply_locked({"auto_tune": "Auto-Tune"})
         labels = self.settings_labels()
         self.assertNotIn("Auto-Tune: OFF", labels)
         self.assertNotIn(f"Retune Speed: {autotune.speed_label()}", labels)
+        # The copies ride in the tuner's line and under the same lock: a
+        # Developer kill-switching Auto-Tune takes the harmony voices too.
+        self.assertNotIn("Harmony: Off", labels)
         # The rest of the menu is untouched.
         self.assertIn("Speech Key: Original key", labels)
         self.assertIn("Underwater Muffle: ON", labels)
@@ -1381,11 +1454,13 @@ class ScaleMenuTests(unittest.TestCase):
         self.bot.set_autotune_root.assert_called_with(autotune.DEFAULT_ROOT)
         self.bot.set_autotune_speed.assert_called_with(autotune.DEFAULT_SPEED)
         self.bot.set_autotune_amount.assert_called_with(autotune.DEFAULT_AMOUNT)
-        self.bot.set_autotune_harmony.assert_any_call(autotune.DEFAULT_HARMONY)
-        self.bot.set_autotune_harmony.assert_any_call(autotune.DEFAULT_HARMONY,
-                                                     second=True)
+        # Harmony is a mode of its own: clearing the tuner must not silence the
+        # voices a singer set up beside it.
+        self.assertFalse(self.bot.set_autotune_harmony.called)
         self.bot.toggle_autotune.assert_called_with()
         self.assertIn("cleared",
+                      str(self.speak.call_args_list[-1].args[0]).lower())
+        self.assertIn("harmony",
                       str(self.speak.call_args_list[-1].args[0]).lower())
 
 
@@ -1499,7 +1574,8 @@ class HarmonyIntervalTests(unittest.TestCase):
         self.assertEqual(autotune.clamp_harmony("nonsense"), "off")
         self.assertEqual(autotune.clamp_harmony(None), "off")
         self.assertEqual([row[0] for row in autotune.HARMONY_INTERVALS],
-                         ["off", "third", "fifth", "sixth", "seventh", "octave"])
+                         ["off", "third", "fifth", "sixth", "seventh", "octave",
+                          "bass_third", "bass_fifth", "bass_octave"])
         for interval_id, label, semitones, note in autotune.HARMONY_INTERVALS:
             with self.subTest(interval=interval_id):
                 self.assertTrue(note.strip(), f"{interval_id} has no description")
@@ -1511,9 +1587,43 @@ class HarmonyIntervalTests(unittest.TestCase):
         tuner = self.tuner_on(69)          # A4, in tune
         for interval_id, semitones in (("third", 4.0), ("fifth", 7.0),
                                        ("sixth", 9.0), ("seventh", 11.0),
-                                       ("octave", 12.0)):
+                                       ("octave", 12.0), ("bass_third", -3.0),
+                                       ("bass_fifth", -5.0),
+                                       ("bass_octave", -12.0)):
             self.assertAlmostEqual(tuner.harmony_offset(interval_id),
                                    semitones, delta=0.01)
+
+    def test_a_bass_copy_is_looked_for_below_the_same_way(self):
+        # A third below C is A, below D it is B; a fifth below C is G. The sign
+        # on the row is the only thing that says "below".
+        tuner = self.tuner_on(60, mode="major", root=0)       # C4
+        self.assertAlmostEqual(tuner.harmony_offset("bass_third"), -3.0,
+                               delta=0.01)
+        self.assertAlmostEqual(tuner.harmony_offset("bass_fifth"), -5.0,
+                               delta=0.01)
+        tuner = self.tuner_on(62, mode="major", root=0)       # D4
+        self.assertAlmostEqual(tuner.harmony_offset("bass_third"), -3.0,
+                               delta=0.01)
+        self.assertAlmostEqual(tuner.harmony_offset("bass_fifth"), -5.0,
+                               delta=0.01)
+
+    def test_the_bass_copy_is_in_key_like_the_upper_one(self):
+        classes = {note % 12 for note in range(36, 84)
+                   if autotune.AutoTuner.nearest_note(note, "major", 0) == note}
+        for midi in range(55, 72):
+            tuner = self.tuner_on(midi, mode="major", root=0)
+            for interval_id in ("bass_third", "bass_fifth", "bass_octave"):
+                with self.subTest(midi=midi, interval=interval_id):
+                    landed = (tuner.held_note
+                              + (tuner.harmony_offset(interval_id) - tuner.offset))
+                    self.assertIn(int(round(landed)) % 12, classes)
+
+    def test_a_bass_copy_is_an_undertone_not_a_second_singer(self):
+        self.assertTrue(autotune.harmony_is_bass("bass_octave"))
+        self.assertFalse(autotune.harmony_is_bass("octave"))
+        self.assertFalse(autotune.harmony_is_bass("off"))
+        self.assertEqual(autotune.harmony_share("third"), 1.0)
+        self.assertLess(autotune.harmony_share("bass_third"), 1.0)
 
     def test_a_scale_makes_the_third_major_or_minor_by_itself(self):
         self.assertAlmostEqual(
@@ -1522,6 +1632,24 @@ class HarmonyIntervalTests(unittest.TestCase):
         self.assertAlmostEqual(
             self.tuner_on(62, mode="major", root=0).harmony_offset("third"),
             3.0, delta=0.01)    # D -> F
+
+    def test_a_copy_has_a_plain_size_for_the_tuner_off_mode(self):
+        """With the tuner off there is no note set, so the copy is the named size.
+
+        Harmony sings whether Auto-Tune does, and with nothing being tuned there
+        is no scale note to place it on: a third is a major third, a bass fifth
+        is five semitones down. Off is Off.
+        """
+        self.assertIsNone(autotune.harmony_plain_offset("off"))
+        self.assertIsNone(autotune.harmony_plain_offset("nonsense"))
+        for interval_id, _label, semitones, _note in autotune.HARMONY_INTERVALS:
+            if interval_id == "off":
+                continue
+            with self.subTest(interval=interval_id):
+                self.assertEqual(autotune.harmony_plain_offset(interval_id),
+                                 float(semitones))
+        self.assertEqual(autotune.harmony_plain_offset("third"), 4.0)
+        self.assertEqual(autotune.harmony_plain_offset("bass_octave"), -12.0)
 
     def test_every_harmony_note_is_a_note_of_the_scale(self):
         classes = {note % 12 for note in range(60, 72)
@@ -1556,6 +1684,7 @@ class HarmonyIntervalTests(unittest.TestCase):
 
     def test_a_copy_may_ask_for_its_interval_plus_the_correction(self):
         self.assertAlmostEqual(autotune.harmony_pitch_limit(12), 13.51, places=6)
+        self.assertAlmostEqual(autotune.harmony_pitch_limit(-12), 13.51, places=6)
         self.assertAlmostEqual(autotune.harmony_pitch_limit(0), 1.51, places=6)
 
     def test_the_tuner_hands_both_slots_their_own_answer(self):
@@ -1589,6 +1718,76 @@ class HarmonyLineTests(unittest.TestCase):
                 out += shaped
         return line, from_pcm(bytes(out))
 
+    def test_a_bass_copy_lands_on_the_lead_timeline_by_construction(self):
+        """A copy below the voice reads slower, so its opening silence is shorter.
+
+        An octave down would otherwise arrive 107 ms after the lead -- a second
+        voice reading the words a beat late -- and no ring can read audio the
+        vocoder has not produced yet. `LOOKAHEAD * ratio` of opening silence puts
+        its delay at the lead's own, whatever the correction is doing.
+        """
+        line, _audio = self.play_with({AUTOTUNE_HARMONY_OPTION: "bass_octave"},
+                                      tone(1.5, freq=A3, cents=-20.0))
+        self.assertEqual(len(line._harmonies), 1)
+        voice = line._harmonies[0]
+        self.assertEqual(voice._align, 0.0)
+        self.assertEqual(voice.transposer.padded_samples, 0)
+        self.assertEqual(voice.transposer.lookahead,
+                         int(round(ChromaticTransposer.LOOKAHEAD * 0.5)))
+        self.assertAlmostEqual(voice.transposer.delay_samples(),
+                               line.transposer.delay_samples(), delta=3)
+
+    def test_a_bass_copy_hums_under_the_words(self):
+        _line, audio = self.play_with({AUTOTUNE_HARMONY_OPTION: "bass_octave"},
+                                      voice_tone(2.0, freq=A3))
+        block = audio[int(SR * 1.0):int(SR * 1.6)]
+        lead = band_level(block, A3)
+        bass = band_level(block, A3 / 2.0)
+        self.assertGreater(lead, 0.05)
+        self.assertGreater(bass, 0.01)
+        # The voice stays the loud half of the pair: a bass copy at the lead's
+        # own level is the same words doubled, not a voice under them.
+        self.assertLess(bass, lead)
+
+    def test_a_bass_copy_is_low_passed_so_it_is_a_note_not_a_talker(self):
+        voice = HarmonyVoice("bass_octave")
+        voice.transposer.set_pitch_offset(-12.0)
+        # `HarmonyVoice.process` answers float samples, not bytes: it is mixed
+        # into the lead's frame rather than being a stream of its own.
+        shaped = np.concatenate([voice.process(to_pcm(chunk))
+                                 for chunk in frames_of(voice_tone(1.6, freq=A3))])
+        block = shaped[int(SR * 1.0):int(SR * 1.6)]
+        low = band_level(block, A3 / 2.0)
+        high = band_level(block, A3 * 2.0)     # 440 Hz: the 4th harmonic, shifted
+        self.assertGreater(low, 0.01)
+        self.assertLess(high, low * 0.25)
+
+    def test_the_lead_ducks_as_the_copy_arrives_not_before(self):
+        line = AutoTuneLine(speed=0)
+        voice = HarmonyVoice("bass_octave")
+        voice.wanted = True
+        # Aimed an octave down, so the band this test measures (the lead's own
+        # A3) carries the lead and nothing else.
+        voice.transposer.set_pitch_offset(-12.0)
+        line._harmonies = [voice]
+        pcm = to_pcm(tone(0.2, freq=A3))
+        plain = from_pcm(pcm)
+        levels = []
+        for _ in range(6):
+            mixed = from_pcm(line._mix(pcm, pcm))
+            levels.append(band_level(mixed, A3) / band_level(plain, A3))
+        # The duck follows the copy's three-frame fade, so the frame it joins
+        # costs the lead a third of the whole drop rather than all of it -- the
+        # step the old equal-share mix made on the single frame a copy was
+        # first asked for. (The copy is still gliding down to its octave over
+        # those frames, so what is measured at the lead's own note is not
+        # strictly monotone; the fade is.)
+        whole = 1.0 / (1.0 + autotune.BASS_SHARE)
+        self.assertAlmostEqual(levels[0], 1.0 / (1.0 + autotune.BASS_SHARE / 3.0),
+                               delta=0.02)
+        self.assertAlmostEqual(levels[-1], whole, delta=0.03)
+        self.assertLess(1.0 - levels[0], 0.5 * (1.0 - whole))
+
     def test_a_third_sounds_beside_the_lead_at_half_the_mix(self):
         _line, audio = self.play_with({AUTOTUNE_HARMONY_OPTION: "third"},
                                       tone(2.0, freq=A3))
@@ -1617,6 +1816,67 @@ class HarmonyLineTests(unittest.TestCase):
         for level in levels[1:]:
             self.assertAlmostEqual(level, levels[0], delta=0.02)
         self.assertAlmostEqual(sum(levels), 0.2, delta=0.04)
+
+    def play_with_switch(self, switch, values, signal):
+        """The same frame-by-frame contract, with the tuner's switch set."""
+        line = AutoTuneLine(speed=0)
+        out = bytearray()
+        with mock.patch.object(voice_chat.options, "get",
+                               options_returning(**dict(
+                                   {AUTOTUNE_OPTION: switch,
+                                    AUTOTUNE_SPEED_OPTION: 0}, **values))):
+            for chunk in frames_of(signal):
+                shaped = line.shape(to_pcm(chunk))
+                self.assertEqual(len(shaped), FRAME)
+                out += shaped
+        return line, from_pcm(bytes(out))
+
+    def test_a_copy_sings_with_the_tuner_off(self):
+        """Harmony is its own mode: the tuner's switch is not its switch.
+
+        Off, there is no note set to count the interval in, so the copy is the
+        plain third the catalogue names, measured from the voice as it is sung
+        -- and the lead is not moved at all.
+        """
+        line, audio = self.play_with_switch(
+            False, {AUTOTUNE_HARMONY_OPTION: "third"}, tone(2.0, freq=A3))
+        self.assertEqual(len(line._harmonies), 1)
+        self.assertEqual(line.transposer.semitones, 0.0)
+        self.assertAlmostEqual(line._harmonies[0].transposer.semitones, 4.0,
+                               places=6)
+        block = audio[int(SR * 1.0):int(SR * 1.6)]
+        lead = band_level(block, A3)
+        self.assertGreater(lead, 0.05)
+        self.assertAlmostEqual(band_level(block, 277.18), lead, delta=0.02)
+
+    def test_a_bass_copy_hums_with_the_tuner_off(self):
+        line, audio = self.play_with_switch(
+            False, {AUTOTUNE_HARMONY_OPTION: "bass_octave"},
+            voice_tone(2.0, freq=A3))
+        self.assertAlmostEqual(line._harmonies[0].transposer.semitones, -12.0,
+                               places=6)
+        block = audio[int(SR * 1.0):int(SR * 1.6)]
+        self.assertGreater(band_level(block, A3 / 2.0), 0.01)
+        self.assertLess(band_level(block, A3 / 2.0), band_level(block, A3))
+
+    def test_the_switch_moves_the_lead_and_leaves_the_copy_singing(self):
+        """Off is the lead's correction ending -- not the copy disappearing."""
+        values = {AUTOTUNE_OPTION: True, AUTOTUNE_SPEED_OPTION: 0,
+                  AUTOTUNE_HARMONY_OPTION: "third"}
+        line = AutoTuneLine(speed=0)
+        with mock.patch.object(voice_chat.options, "get", options_from(values)):
+            for chunk in frames_of(tone(1.2, freq=A3)):
+                line.shape(to_pcm(chunk))
+            values[AUTOTUNE_OPTION] = False
+            natural = bytearray()
+            for chunk in frames_of(tone(1.2, freq=A3)):
+                natural += line.shape(to_pcm(chunk))
+        # The copy is still there after the switch, still at its third.
+        self.assertEqual(len(line._harmonies), 1)
+        self.assertGreater(
+            band_level(from_pcm(bytes(natural))[-int(SR * 0.6):], 277.18), 0.02)
+        # ...and the lead's shifter was asked for no correction at the end.
+        self.assertEqual(line.transposer.semitones, 0.0)
 
     def test_harmony_off_builds_nothing_and_changes_nothing(self):
         line, plain = self.play_with({}, tone(1.0, freq=A3))

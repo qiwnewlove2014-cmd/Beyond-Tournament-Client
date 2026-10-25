@@ -1494,6 +1494,9 @@ class MapMusicBot:
     def _open_autotune_amount_menu(self):
         return self._menus()._open_autotune_amount_menu()
 
+    def _open_harmony_menu(self):
+        return self._menus()._open_harmony_menu()
+
     def _open_autotune_harmony_menu(self, second=False):
         return self._menus()._open_autotune_harmony_menu(second=second)
 
@@ -1580,14 +1583,39 @@ class MapMusicBot:
         return autotune.harmony_label(getattr(self, attribute,
                                               autotune.DEFAULT_HARMONY))
 
+    def autotune_harmony_summary(self):
+        """What both copies are set to, in one Settings line.
+
+        The two interval lines moved onto their own Harmony page, so the
+        Settings list has to say in one line whether any of it is on: 'Off',
+        '1 voice (Third)', '2 voices (Third + Bass Octave)'. Counted from the
+        copies that are actually singing, so a Bass Octave is a voice here and
+        not a setting.
+        """
+        intervals = [interval for interval
+                     in (getattr(self, "autotune_harmony",
+                                 autotune.DEFAULT_HARMONY),
+                         getattr(self, "autotune_harmony2",
+                                 autotune.DEFAULT_HARMONY))
+                     if autotune.clamp_harmony(interval) != autotune.DEFAULT_HARMONY]
+        if not intervals:
+            return "Off"
+        count = "1 voice" if len(intervals) == 1 else f"{len(intervals)} voices"
+        names = " + ".join(autotune.harmony_label(interval)
+                           for interval in intervals)
+        return f"{count} ({names})"
+
     def set_autotune_harmony(self, interval_id, second=False):
         """Choose the interval one harmony copy sings (or Off for none).
 
         Two copies, each with its own line: a singer who wants a third and a
-        fifth sets both, one who wants a single voice leaves the other Off. The
-        copy is built from the same microphone frame and mixed into the same
-        20 ms frame (`libs/voice_chat.HarmonyVoice`), so a listener, a PA slot
-        and a cinema room still count exactly the frames they always did.
+        fifth sets both, one who wants a single voice leaves the other Off. An
+        interval BELOW the voice (a Bass Third, Fifth or Octave) is a bass
+        copy: the same one-frame mix, quieter than the lead and low-passed, so
+        it hums under the words rather than doubling them. The copy is built
+        from the same microphone frame and mixed into the same 20 ms frame
+        (`libs/voice_chat.HarmonyVoice`), so a listener, a PA slot and a cinema
+        room still count exactly the frames they always did.
         """
         value = autotune.clamp_harmony(interval_id)
         if second:

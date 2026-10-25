@@ -81,6 +81,8 @@ def make_bot():
     bot.autotune_label.return_value = "OFF"
     bot.autotune_speed_label.return_value = autotune.speed_label()
     bot.autotune_scale_label.return_value = autotune.scale_label()
+    bot.autotune_harmony_label.return_value = "Off"
+    bot.autotune_harmony_summary.return_value = "Off"
     bot.subtitle_label.return_value = "Subtitles: OFF"
     bot.cinema_routing_allowed.return_value = True
     bot.cinema_listening_allowed.return_value = True
@@ -172,6 +174,8 @@ class EveryLineIsDescribedTests(unittest.TestCase):
     def test_every_line_of_the_settings_submenus_is_described(self):
         for opener in (self.handler._open_autotune_speed_menu,
                        self.handler._open_autotune_amount_menu,
+                       self.handler._open_harmony_menu,
+                       self.handler._open_autotune_harmony_menu,
                        self.handler._open_eq_menu,
                        self.handler._open_transpose_menu,
                        self.handler._open_speech_transpose_menu):

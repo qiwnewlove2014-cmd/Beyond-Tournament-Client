@@ -194,6 +194,9 @@ class InstrumentInput(threading.Thread):
         self._monitor_pending = bytearray()
         self._relay_pending = bytearray()
         self.tracker = pitch.PitchTracker()
+        #: The guitar's own harmony line (`libs/instrument_harmony.py`). Built
+        #: on the first frame: a session that never uses it pays nothing.
+        self._harmony = None
         self.notes = collections.deque(maxlen=self.NOTE_BUFFER_NOTES)
         # Raw guitar Opus streamed on the normal 3D voice channel (so chords
         # are heard near the player without needing the music bot broadcast).
@@ -293,6 +296,11 @@ class InstrumentInput(threading.Thread):
         self.notes.clear()
         getattr(self, "_monitor_pending", bytearray()).clear()
         getattr(self, "_relay_pending", bytearray()).clear()
+        # The harmony line holds the last frames of dry audio for its lead
+        # delay; a new session must not start by playing the old one back.
+        harmony = getattr(self, "_harmony", None)
+        if harmony is not None:
+            harmony.reset()
         if voice is not None:
             with contextlib.suppress(Exception):
                 close = getattr(voice, "close", None)
@@ -410,7 +418,15 @@ class InstrumentInput(threading.Thread):
         The local monitor is deliberately not fed from here: it was already
         handed the two 10 ms chunks this frame is made of, the moment each of
         them existed (see :meth:`_stage`).
+
+        What LEAVES the machine may be shaped on the way out -- the guitar's
+        Harmony line (``libs/instrument_harmony.py``) adds its second voice to
+        this frame only when the Options switch is on. The pitch tracker below
+        is handed the DRY frame (`raw`) either way: it names the notes the
+        strings played, and a copy in the mix is not a note it should hear.
         """
+        raw = buf16
+        buf16 = self._harmonised(buf16)
         # Check for Megaphone routing
         gp = None
         if hasattr(self.game, 'stack'):
@@ -462,10 +478,25 @@ class InstrumentInput(threading.Thread):
         # players and the PA would hear every strum twice.
         if not route_to_bot:
             self._feed_guitar_voice(buf16, force_mega=voice_using_mega)
-        frame = np.frombuffer(buf16, dtype=np.int16).astype(np.float32) / 32768.0
+        frame = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         result = self.tracker.feed(frame)
         if result is not None:
             self.notes.append(result)
+
+    def _harmonised(self, buf16):
+        """This frame through the guitar's own harmony line, when it is on.
+
+        Lazy: the line is built on the first frame a session sends, so a
+        player who never opens the switch never pays for the copies. The
+        switch and the intervals are read per frame by the line itself, which
+        is what lets a player change the Music Bot's Harmony under a sounding
+        chord (and what makes the line's own fade the only transition).
+        """
+        line = getattr(self, "_harmony", None)
+        if line is None:
+            from .instrument_harmony import GuitarHarmony
+            line = self._harmony = GuitarHarmony()
+        return line.shape(buf16)
 
     def _feed_guitar_voice(self, raw, force_mega=False):
         """Stream guitar PCM through a bounded, session-owned encoder worker."""

@@ -8,6 +8,7 @@ from . import (
     audio_manager,
     consts,
     drum_keyconfig,
+    instrument_harmony,
     keyconfig,
     menu,
     options,
@@ -542,7 +543,21 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
     items = endpoint_items + [
         (f"Select output device - currently set to {options.get('audio_device', '==============system default')[14:]}", lambda: output_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent)),
         (f"Select input device - currently set to {options.get('audio_input_device', '==============system default')[14:]}", lambda: input_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game)),
-        (f"Select instrument input device - currently set to {options.get('audio_instrument_input_device', '==============system default')[14:]}", lambda: input_menu(game, func_call=func_call if in_game else lambda: options_menu(game, func_call, replace_call=replace_call, parent=parent, in_game=in_game), replace_call=replace_call, parent=parent, in_game=in_game, target="instrument")),
+        # The line-in instrument's own page: the device the guitar listens
+        # to and the second voice built from it.  Two lines that made this
+        # list longer without being about anything else in it.
+        (
+            instrument_page_label,
+            lambda: instrument_menu(
+                game,
+                func_call=func_call if in_game else lambda: options_menu(
+                    game, func_call, replace_call=replace_call,
+                    parent=parent, in_game=in_game),
+                replace_call=replace_call,
+                parent=parent,
+                in_game=in_game,
+            ),
+        ),
         (f"Voice Chat Jitter Buffer: {options.get('jitter_buffer', 60)}", lambda: configure_jitter_buffer(game, func_call, replace_call)),
         (game.toggle_item("Voice Chat", "voice_chat", True)),
         voice_chat_mode_item,
@@ -622,6 +637,90 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
     # browsing from the title screens.
     if not in_game:
         m.set_music("music/10.ogg")
+    if replace_call is None: game.replace(m)
+    else: replace_call(m)
+
+
+def instrument_page_label():
+    """What Options says about the line-in instrument's page.
+
+    The page holds the capture device and the guitar's Harmony switch, so the
+    line carries both: which device the guitar listens to, and whether the
+    second voice leaves with it.  While a Developer has the Auto-Tune family
+    locked the switch does not exist, so the line does not claim one does.
+    """
+    device = options.get(
+        "audio_instrument_input_device", "==============system default")[14:]
+    if instrument_harmony.gated():
+        return f"Instrument - input: {device}"
+    return f"Instrument - input: {device}. {instrument_harmony.switch_label()}"
+
+
+def instrument_menu(game, func_call, replace_call=None, parent=None,
+                    in_game=False):
+    """The line-in instrument's own page: its device and its second voice.
+
+    These two lines used to sit in Options, which is the longest list in the
+    game and has nothing else about a guitar in it.  A page of their own keeps
+    the family together -- the device is what the copies are built from -- and
+    gives it somewhere to grow without lengthening Options again.
+    """
+    m = menu.Menu(game, "Instrument", parrent=parent)
+    set_default_sounds(m)
+
+    def reopen():
+        """Back to this page after a device is picked.
+
+        In game the page is a substate of Options, so the device menu is one
+        more: popping it reveals this page again instead of leaving Options
+        altogether.  From the title screens there is no stack, so the page is
+        simply rebuilt in place.
+        """
+        if in_game and parent is not None:
+            parent.pop_last_substate()
+            return
+        instrument_menu(game, func_call, replace_call=replace_call,
+                        parent=parent, in_game=in_game)
+
+    def toggle_guitar_harmony():
+        """The guitar's own second voice, on this page beside its line-in.
+
+        The intervals are the Music Bot's Harmony 1 and 2, so a player who
+        already has a third and a fifth for their voice gets the same pair on
+        the guitar; this switch only decides whether the guitar uses them. It
+        shapes what LEAVES the machine (`libs/instrument_harmony.py`): the
+        performer's own ear is still fed the raw capture, 10 ms at a time, so
+        nothing about playing the guitar feels late.
+        """
+        value = not instrument_harmony.enabled()
+        options.set(instrument_harmony.SWITCH_OPTION, value)
+        if not value:
+            speech.speak("Guitar Harmony off. Your guitar leaves on its own "
+                         "again.")
+            return
+        ids = instrument_harmony.harmony_ids()
+        if not ids:
+            speech.speak(
+                "Guitar Harmony on, but both Music Bot harmony voices are Off. "
+                "Set Harmony 1 or Harmony 2 in the Music Bot menu first.")
+            return
+        from .music_bot import autotune
+        names = " plus ".join(autotune.harmony_label(i) for i in ids)
+        speech.speak(
+            f"Guitar Harmony on: {names}. The copies go out with your guitar -- "
+            "the PA, voice chat, cinema rooms and the broadcast hear them, "
+            "while your own ear stays dry, so the strings do not feel late. "
+            "They land about 27 milliseconds behind the string.")
+
+    m.add_items([
+        (f"Select instrument input device - currently set to "
+         f"{options.get('audio_instrument_input_device', '==============system default')[14:]}",
+         lambda: input_menu(
+             game, func_call=reopen, replace_call=replace_call,
+             parent=parent, in_game=in_game, target="instrument")),
+        *instrument_harmony.menu_item(toggle_guitar_harmony),
+        ("Back", func_call),
+    ])
     if replace_call is None: game.replace(m)
     else: replace_call(m)
 

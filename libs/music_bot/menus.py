@@ -1181,7 +1181,12 @@ class MusicBotMenus:
         gp.add_substate(m)
 
     def _open_settings_menu(self):
-        """Music Bot settings: output device first, then reverb, crossfade, EQ, key, speech key, auto-tune, retune speed, auto-tune scale, muffle.
+        """Music Bot settings: output device first, then reverb, crossfade, EQ, key, speech key, auto-tune, its three dials (speed, scale, amount), harmony, muffle.
+
+                    Harmony is its own line and its own mode: it is not one of the dials
+                    that the Auto-Tune switch adds and removes, and it sings whether the
+                    tuner is on or off (`libs/voice_chat.harmony_enabled`). It sits after
+                    the tuner's dials so the block the switch opens stays one block.
 
                     The output line leads because it is what a player comes here to change;
                     the underwater muffle sits last (just above Back) so the two are never
@@ -1273,11 +1278,14 @@ class MusicBotMenus:
         def toggle_autotune():
             enabled = self._bot.toggle_autotune()
             speak("Auto-Tune on. The voice is snapped to the nearest note as "
-                  "you broadcast it; Retune Speed sets how fast it slides."
-                  if enabled else "Auto-Tune off. Your own voice.")
-            # The two dials below this line exist only while it is on, so the
-            # page is rebuilt around this press and the cursor is put back on
-            # the switch rather than jumping to the top of the list.
+                  "you broadcast it; Retune Speed sets how fast it slides. "
+                  "The harmony voices are not affected."
+                  if enabled else "Auto-Tune off. Your own voice; the "
+                  "harmony voices keep singing.")
+            # The dials below this line exist only while it is on, so the page
+            # is rebuilt around this press and the cursor is put back on the
+            # switch rather than jumping to the top of the list. The Harmony
+            # line is NOT one of them: it is a mode of its own and stays.
             gp.pop_last_substate()
             stand_on(self._open_settings_menu(), "Auto-Tune:")
 
@@ -1302,24 +1310,17 @@ class MusicBotMenus:
             gp.pop_last_substate()
             self._open_autotune_amount_menu()
 
-        def get_autotune_harmony_label():
-            return f"Harmony 1: {self._bot.autotune_harmony_label()}"
+        def get_harmony_label():
+            return f"Harmony: {self._bot.autotune_harmony_summary()}"
 
-        def go_autotune_harmony():
+        def go_harmony():
             gp.pop_last_substate()
-            self._open_autotune_harmony_menu()
-
-        def get_autotune_harmony2_label():
-            return f"Harmony 2: {self._bot.autotune_harmony_label(second=True)}"
-
-        def go_autotune_harmony2():
-            gp.pop_last_substate()
-            self._open_autotune_harmony_menu(second=True)
+            self._open_harmony_menu()
 
         # The dials are only in the list while the switch is on: off, they
-        # change nothing a player can hear, and five Auto-Tune lines that do
-        # nothing are four lines of noise between the player and the rest of
-        # the page. Turning it on puts them there (the switch rebuilds).
+        # change nothing a player can hear, and Auto-Tune lines that do nothing
+        # are noise between the player and the rest of the page. Turning it on
+        # puts them there (the switch rebuilds). Harmony is not one of them.
         dials = [] if not getattr(self._bot, "autotune_enabled", False) else [
             (
                 "auto_tune", get_autotune_speed_label, go_autotune_speed,
@@ -1340,19 +1341,6 @@ class MusicBotMenus:
                 "the notes of the scale, 50% leaves half the error in it and "
                 "half the human wobble, 0% is your own voice with Auto-Tune "
                 "still switched on.",
-            ),
-            (
-                "auto_tune", get_autotune_harmony_label, go_autotune_harmony,
-                "A second copy of your broadcast voice an interval above it, "
-                "taken from your scale so it is always in key: a third, a "
-                "fifth, a sixth, a seventh or an octave. Off is your own "
-                "voice alone, and every copy is part of the one broadcast.",
-            ),
-            (
-                "auto_tune", get_autotune_harmony2_label, go_autotune_harmony2,
-                "A third voice, on another interval of the same scale. A third "
-                "and a fifth together turn one voice into a three-note chord; "
-                "Off leaves Harmony 1 singing alone.",
             ),
         ]
 
@@ -1394,6 +1382,14 @@ class MusicBotMenus:
              "Retune Speed sets how fast it slides, Auto-Tune Scale sets which "
              "notes count, and it costs about a tenth of a second of delay."),
             *dials,
+            ("auto_tune", get_harmony_label, go_harmony,
+             "A mode of its own, NOT a dial of Auto-Tune: up to two extra "
+             "voices, each an interval above yours (a third, a fifth, a sixth, "
+             "a seventh, an octave) or a bass interval below it, which hums "
+             "under your words. It sings with Auto-Tune on or off -- with the "
+             "tuner off each copy is its plain interval from your voice -- and "
+             "switching the tuner never silences it. Every copy rides in the "
+             "one broadcast you send. Off is your own voice alone."),
             ("muffle", get_water_label, toggle_water,
              "Muffles the song the way being underwater does, for a player "
              "who dives while it plays."),
@@ -1743,29 +1739,31 @@ class MusicBotMenus:
                 moved the scale, the key and the speed around wants one press
                 that puts all three back where they started and takes the
                 effect off, rather than three pages to undo by hand. The page
-                it returns to rebuilds itself, so the two dials are gone from
+                it returns to rebuilds itself, so the three dials are gone from
                 the settings list along with the switch being off.
+
+                The HARMONY copies are left exactly as they are: they are a
+                mode of their own, and a singer clearing the tuner must not
+                lose the voices they set up beside it.
                 """
             self._bot.set_autotune_mode(autotune.DEFAULT_MODE)
             self._bot.set_autotune_root(autotune.DEFAULT_ROOT)
             self._bot.set_autotune_speed(autotune.DEFAULT_SPEED)
             self._bot.set_autotune_amount(autotune.DEFAULT_AMOUNT)
-            self._bot.set_autotune_harmony(autotune.DEFAULT_HARMONY)
-            self._bot.set_autotune_harmony(autotune.DEFAULT_HARMONY,
-                                          second=True)
             if getattr(self._bot, "autotune_enabled", False):
                 self._bot.toggle_autotune()
             speak("Auto-Tune cleared. Your own voice again, and the scale, the "
-                  "key, the retune speed, the tune amount and both harmony "
-                  "voices are back at their defaults: Chromatic in C, Normal "
-                  "speed, 100%, no harmony.")
+                  "key, the retune speed and the tune amount are back at their "
+                  "defaults: Chromatic in C, Normal speed, 100%. Your harmony "
+                  "voices are left as they were.")
             gp.pop_last_substate()
             self._open_settings_menu()
 
         items.append(("Clear Auto-Tune Tuning", clear_tuning, None,
                       "Puts everything Auto-Tune was set to back the way it "
                       "came -- Chromatic in C at Normal speed -- and turns it "
-                      "off, so the next press is your own voice."))
+                      "off, so the next press is your own voice. The harmony "
+                      "voices are not touched: they are a mode of their own."))
         items.append(("Back", go_back, None,
                       "Returns to Music Bot Settings."))
         m = menu_mod.Menu(
@@ -1933,15 +1931,78 @@ class MusicBotMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
+    def _open_harmony_menu(self):
+        """The Harmony page: the two copies, and which interval each sings.
+
+        Two lines used to sit in Music Bot Settings (`Harmony 1:` and `Harmony
+        2:`), and every harmony feature added since wanted a third. A page of
+        its own holds them instead: the Settings list keeps one line
+        (`Harmony:`), which says in a few words whether any of it is on, and the
+        page under it is where the choices -- and whatever comes next -- live.
+
+        The line is NOT one of Auto-Tune's dials. Harmony is a mode of its own:
+        the tuner's switch adds and removes the three dials above it and never
+        this line, and the copies sing with the tuner off (at their plain
+        intervals) exactly as with it on.
+        """
+        from .. import menu as menu_mod, menus
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def go_first():
+            gp.pop_last_substate()
+            self._open_autotune_harmony_menu()
+
+        def go_second():
+            gp.pop_last_substate()
+            self._open_autotune_harmony_menu(second=True)
+
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Harmony: {self._bot.autotune_harmony_summary()}",
+            parrent=gp,
+        )
+        m.add_items([
+            (lambda: f"Harmony 1: {self._bot.autotune_harmony_label()}",
+             go_first, None,
+             "What the first copy sings: Off, a third, fifth, sixth, seventh "
+             "or octave ABOVE your voice, or a bass third, fifth or octave "
+             "BELOW it. With Auto-Tune tuning you the interval comes from your "
+             "scale, so the copy is always in key; with Auto-Tune off it is the "
+             "plain interval, measured from your own voice. Either way the "
+             "tuner's switch never silences it."),
+            (lambda: (f"Harmony 2: "
+                      f"{self._bot.autotune_harmony_label(second=True)}"),
+             go_second, None,
+             "The second copy, on another interval of the same scale. A third "
+             "above and a fifth above turn one voice into a three-note chord; "
+             "a bass copy under either of them adds a low voice. Off leaves "
+             "Harmony 1 singing alone."),
+            ("Back", go_back, None,
+             "Returns to Music Bot Settings."),
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
     def _open_autotune_harmony_menu(self, second=False):
         """Which interval one harmony copy sings: a third, a fifth, an octave.
 
-        Two copies, so two of these pages (`Harmony 1:` and `Harmony 2:` in the
-        Settings list). The interval is counted in the scale, so the copy is
+        Two copies, so two of these pages (`Harmony 1:` and `Harmony 2:` on the
+        Harmony page). The interval is counted in the scale, so the copy is
         always on a note the scale has -- a third above C is E, above D it is F
         -- and `Chromatic` falls back to the major scale's spelling of each
         interval, because a grid with a note every semitone has no key to
-        harmonise in.
+        harmonise in. With Auto-Tune OFF there is no scale in play at all: the
+        copy is the plain size of the interval (`autotune.harmony_plain_offset`),
+        sung from the voice as it is, because Harmony is a mode of its own. The
+        rows below `Octave` take the copy DOWN instead: a bass
+        voice, mixed quieter than the lead and low-passed, so it hums under the
+        words rather than doubling them (`autotune.harmony_share`).
 
         The copy is part of the ONE broadcast voice: it is mixed into the same
         20 ms frame (`libs/voice_chat.HarmonyVoice`), so a listener hears it
@@ -1956,7 +2017,7 @@ class MusicBotMenus:
 
         def go_back():
             gp.pop_last_substate()
-            self._open_settings_menu()
+            self._open_harmony_menu()
 
         def pick(interval_id):
             def apply():
@@ -1982,7 +2043,7 @@ class MusicBotMenus:
                  for interval_id, _label, _semitones, note
                  in autotune.HARMONY_INTERVALS]
         items.append(("Back", go_back, None,
-                      "Returns to Music Bot Settings."))
+                      "Returns to the Harmony page."))
         m = menu_mod.Menu(
             self._bot.game,
             f"Music Bot Harmony {'2' if second else '1'}: "

@@ -155,7 +155,8 @@ class ChromaticTransposer:
                          # 53 ms with the key an octave up, 107 ms at the song's
                          # own key, and 213 ms an octave down
 
-    def __init__(self, channels=2, sample_rate=SAMPLE_RATE, lookahead=None):
+    def __init__(self, channels=2, sample_rate=SAMPLE_RATE, lookahead=None,
+                 exact_lookahead=False):
         self.channels = max(1, int(channels))
         self.sample_rate = int(sample_rate)
         # A line that asks for a wider interval than the dial allows -- a
@@ -166,7 +167,7 @@ class ChromaticTransposer:
         # to the dial's own, so an ordinary line is byte-for-byte what it was.
         self.pitch_limit = float(self.MAX_SEMITONES)
         self.lookahead = (self.LOOKAHEAD if lookahead is None
-                          else max(self.LOOKAHEAD, int(lookahead)))
+                          else self._opening_silence(lookahead, exact_lookahead))
         n = np.arange(self.WINDOW)
         self._window = (0.5 - 0.5 * np.cos(2.0 * np.pi * n / self.WINDOW)).astype(np.float32)
         self._omega = (2.0 * np.pi * np.arange(self.WINDOW // 2 + 1) / self.WINDOW)
@@ -339,6 +340,30 @@ class ChromaticTransposer:
     def lag_samples(cls):
         """How many samples this line delays the song by (its whole look-ahead)."""
         return cls.LOOKAHEAD
+
+    @classmethod
+    def _opening_silence(cls, lookahead, exact=False):
+        """How much silence a line opens with, for the look-ahead it was handed.
+
+        ``LOOKAHEAD`` is the dial's own: the opening silence a line that may run
+        at a ratio of 2.0 needs. A caller that asks for more gets more (a copy
+        an octave above the voice reads faster still), and one that asks for
+        less is held at the dial's own -- correct, because the delay it buys is
+        the delay the caller planned for.
+
+        ``exact=True`` is the other half of that story: the delay is in the
+        SONG's time, so reading slower than the source (a copy BELOW the voice)
+        turns the same opening silence into a LONGER delay. Such a caller wants
+        the delay it planned, not the floor -- a bass copy is lined up with the
+        lead by passing exactly `LOOKAHEAD * ratio` -- so the floor drops to the
+        vocoder's own arithmetic: one read step plus the analysis window, which
+        is `(HOP + WINDOW) * ratio` and therefore always a step below what that
+        caller asks for (`HarmonyVoice`).
+        """
+        wanted = int(lookahead)
+        if exact:
+            return max(cls.WINDOW + cls.HOP, wanted)
+        return max(cls.LOOKAHEAD, wanted)
 
     @classmethod
     def lookahead_for(cls, limit):
@@ -670,3 +695,30 @@ class ChromaticTransposer:
     def _to_pcm(self, samples):
         clipped = np.clip(samples, -1.0, 1.0)
         return (clipped * 32767.0).round().astype("<i2").tobytes()
+
+
+class GuitarTransposer(ChromaticTransposer):
+    """The same shifter on a guitar's window: the fast profile Harmony uses.
+
+    `ChromaticTransposer` analyses 43 ms at a time for a reason -- a song's
+    bass line reaches below a guitar's range, and a song that is being played
+    back is allowed to wait. A line-in guitar is not: its harmony copy is heard
+    beside the note that is still ringing, so the analysis window IS the delay
+    the second voice arrives late by. At 43 + 11 ms of window and hop the
+    fastest copy (`lookahead_for`) sits 53 ms behind the string, which a player
+    hears as a slap or a phasey double rather than as a second voice.
+
+    1024 samples is 21 ms -- the shortest window that still spans a period of
+    the lowest string (E2, 82 Hz, 12 ms) and resolves its partials, which are
+    82 Hz apart against a 47 Hz bin. The copy then lands 26.7 ms behind the
+    string with the lead held back to match, and what that costs is the bottom
+    octave of a BASS guitar, where a 21 ms window cannot hold a full period,
+    plus some smearing of a hard pick attack. That is the trade a playable
+    harmony makes; the song's own shifter keeps its longer window.
+
+    Nothing else changes: the same phase vocoder, the same ratio arithmetic,
+    the same delay (``lookahead`` counts stretched samples, read at the ratio).
+    """
+
+    WINDOW = 1024       # 21 ms: the guitar's own window (see the docstring)
+    HOP = 256           # 4x overlap, so an attack still lands mid-window
