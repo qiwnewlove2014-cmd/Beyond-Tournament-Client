@@ -974,6 +974,164 @@ class TabSpeaksTheDescriptionTests(unittest.TestCase):
         self.assertIn("Tab reads what the line", said)
 
 
+class BackAndEscapeLeaveOnePageTests(unittest.TestCase):
+    """A page of values closes onto its board, one press at a time.
+
+    Every page in the Voice Effect tree re-opens the page under it -- that is
+    also how the page is spoken again, since a pop itself says nothing -- and
+    the knob pages were the one place that popped and re-opened nothing. Esc
+    presses a page's last line, which is `Back`, so Esc on a knob page landed
+    on whatever the board had itself replaced: Music Bot Settings, two levels
+    up, with the board and every value just set gone. This is run against a
+    real substate stack, because a fake that ignores `add_substate` cannot see
+    a page that was never there.
+    """
+
+    def setUp(self):
+        FakeMenu.built = []
+        self.addCleanup(mock.patch.stopall)
+        self.addCleanup(music_bot_gate.clear)
+        music_bot_gate.clear()
+        self.saved = {}
+        mock.patch.object(
+            voice_effect_builder.options, "get",
+            side_effect=lambda key, default=None: self.saved.get(key, default)
+        ).start()
+        mock.patch.object(
+            voice_effect_builder.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            self.saved.__setitem__(key, value)
+        ).start()
+        self.bot = make_bot()
+        self.handler = menus_module.MusicBotMenus(self.bot)
+        self.stack = []
+        self.bot._find_gameplay.return_value = SimpleNamespace(
+            substates=self.stack,
+            add_substate=self.add,
+            pop_last_substate=self.pop,
+            can_broadcast_megaphone=True,
+        )
+        mock.patch("libs.menu.Menu", FakeMenu).start()
+        mock.patch("libs.menus.set_default_sounds").start()
+        mock.patch("libs.music_bot.menus.speak").start()
+
+    def add(self, item):
+        self.stack.append(item)
+        return item
+
+    def pop(self):
+        return self.stack.pop() if self.stack else None
+
+    def press(self, menu, label):
+        """Press the line that speaks these words (a prefix is enough)."""
+        for item in menu.items:
+            if label_of(item) == label:
+                item[1]()
+                return
+        for item in menu.items:
+            if label_of(item).startswith(label):
+                item[1]()
+                return
+        self.fail(f"no line starting {label!r} on {menu.title!r}")
+
+    def open_board_and_a_knob(self):
+        self.handler._open_voice_effect_menu()
+        self.press(self.stack[-1], "Custom Voice:")
+        board = self.stack[-1]
+        self.press(board, "Space: Off")
+        return board, self.stack[-1]
+
+    def test_back_on_a_knob_page_is_the_board_under_it(self):
+        board, page = self.open_board_and_a_knob()
+        self.assertIs(page, FakeMenu.built[-1])
+        self.press(page, "Cave")
+        # A choice is one write on the page already open -- it does not move.
+        self.assertIs(self.stack[-1], page)
+        self.assertEqual(voice_effect_builder.values()["space"], "cave")
+        self.press(page, "Back")
+        landed = self.stack[-1]
+        self.assertIsNot(landed, page)
+        self.assertIsNot(landed, board)
+        # ... the board, rebuilt, titled with what it holds now rather than
+        # what it held when it opened.
+        self.assertEqual(landed.title,
+                         f"Music Bot Custom Voice: "
+                         f"{voice_effect_builder.summary()}")
+        self.assertIn("Cave", landed.title)
+        labels = [label_of(item) for item in landed.items]
+        self.assertIn("Space: Cave", labels)
+        self.assertEqual(labels[-1], "Back")
+        self.assertEqual(len(self.stack), 1)
+
+    def test_escape_on_a_knob_page_presses_that_page_s_own_back_line(self):
+        _board, page = self.open_board_and_a_knob()
+        self.press(page, "Cave")
+        menu = Menu(_Game(), page.title)
+        menu.items = list(page.items)
+        menu.update([pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE,
+                                        mod=pygame.KMOD_NONE)])
+        landed = self.stack[-1]
+        self.assertIsNot(landed, page)
+        self.assertIn("Custom Voice", landed.title)
+        self.assertIn("Space: Cave", [label_of(item) for item in landed.items])
+        self.assertEqual(len(self.stack), 1)
+
+    def test_the_board_s_own_escape_leaves_for_the_page_it_came_from(self):
+        self.handler._open_voice_effect_menu()
+        page = self.stack[-1]
+        self.press(page, "Custom Voice:")
+        board = self.stack[-1]
+        menu = Menu(_Game(), board.title)
+        menu.items = list(board.items)
+        menu.update([pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE,
+                                        mod=pygame.KMOD_NONE)])
+        landed = self.stack[-1]
+        self.assertIsNot(landed, board)
+        self.assertIn("Music Bot Voice Effect", landed.title)
+        self.assertEqual(len(self.stack), 1)
+
+    def test_start_from_and_a_recipe_leave_one_page_at_a_time(self):
+        """The path the player walks: board, Start From, a family, a voice.
+
+        A recipe is a press that stays on the page it was pressed on (fifty
+        voices are for trying one after another); Back climbs out one page per
+        press -- the family, the five families, then the board, rebuilt with
+        what the recipe put in it and speaking its title again.
+        """
+        self.handler._open_voice_builder_menu()
+        self.press(self.stack[-1], "Start From:")
+        families = self.stack[-1]
+        self.press(families, "Machine")
+        family_page = self.stack[-1]
+        self.press(family_page, "Bitcrush King")
+        self.assertIs(self.stack[-1], family_page)
+        self.assertEqual(len(self.stack), 3)
+        self.press(family_page, "Back")
+        self.assertIs(self.stack[-1], families)
+        self.assertEqual(len(self.stack), 2)
+        self.press(families, "Back")
+        self.assertEqual(len(self.stack), 1)
+        landed = self.stack[-1]
+        self.assertIn("Music Bot Custom Voice", landed.title)
+        labels = [label_of(item) for item in landed.items]
+        self.assertTrue(any(label.startswith("Start From: ")
+                            for label in labels), labels[:2])
+
+    def test_no_page_of_the_board_leaves_a_second_copy_of_itself(self):
+        """Re-opening the page under a page is one page, not a growing pile."""
+        self.handler._open_voice_effect_menu()
+        self.press(self.stack[-1], "Custom Voice:")
+        depths = [len(self.stack)]
+        for label in ("Space: Off", "Cave", "Back"):
+            self.press(self.stack[-1], label)
+            depths.append(len(self.stack))
+        self.assertEqual(depths, [1, 1, 1, 1])
+        # And the same from the board, which leaves for the Voice Effect page.
+        self.press(self.stack[-1], "Back")
+        self.assertEqual(len(self.stack), 1)
+        self.assertIn("Music Bot Voice Effect", self.stack[-1].title)
+
+
 class TheGateKeepsTheDescriptionTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(music_bot_gate.clear)

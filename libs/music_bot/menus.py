@@ -2313,7 +2313,11 @@ class MusicBotMenus:
         def open_param(param_id):
             def apply():
                 gp.pop_last_substate()
-                self._open_custom_param_menu(param_id, board)
+                # The board is handed on so the knob page's Back can put it
+                # back: a page of values closes onto the board it came from,
+                # never onto the page the board itself was opened from.
+                self._open_custom_param_menu(
+                    param_id, board, board_back_to_top=back_to_top)
             return apply
 
         def make_label(param_id, name):
@@ -2366,7 +2370,8 @@ class MusicBotMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _open_custom_param_menu(self, param_id, board=None):
+    def _open_custom_param_menu(self, param_id, board=None,
+                                board_back_to_top=False):
         """One knob's choices, and the only place a board is written to.
 
         A choice applies the board and leaves this list OPEN. A page of values
@@ -2387,6 +2392,15 @@ class MusicBotMenus:
         the ten slots (and six of the amp's seven knobs) do not open on their
         first row. It leaves the other settings alone and does not ask, which
         is what separates it from the whole board's Clear.
+
+        **Back here is one page, and it is the board.** This page used to pop
+        and re-open nothing, so Esc (which presses the last line) landed on
+        whatever the board itself had replaced -- Music Bot Settings, two
+        levels up, losing the board with every value the player had just set.
+        Every other page in this tree re-opens the page beneath it (that is
+        also how the page gets spoken again, since a pop itself says nothing):
+        this one now does the same, onto the board, titled with what the board
+        holds now rather than what it held when it opened.
         """
         from .. import menu as menu_mod, menus
         from . import gate as music_bot_gate
@@ -2407,6 +2421,8 @@ class MusicBotMenus:
 
         def go_back():
             gp.pop_last_substate()
+            self._open_custom_effect_menu(board,
+                                          back_to_top=board_back_to_top)
 
         def announce(chosen):
             # Shared by a choice and by the clear line: both are one write the
@@ -2454,7 +2470,8 @@ class MusicBotMenus:
                       "other setting alone. Pick any value above to change "
                       "it again."))
         items.append(("Back", go_back, None,
-                      "Returns to the board. Everything on it is kept."))
+                      "Returns to the board, which keeps every setting. Esc "
+                      "does the same, one page at a time."))
         m = menu_mod.Menu(
             self._bot.game,
             f"Music Bot {voice_effects.effect_label(board.EFFECT_ID)} "
