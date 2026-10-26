@@ -5,15 +5,15 @@ a voice through a small speaker. This family is the other half of the idea: what
 makes a voice a *transmission* rather than merely a voice through a filter.
 
 The room and desk channels that used to sit at the top of the same ladder are
-now the `PA & Venue` and `Broadcast Desk` families; the premium handset mics
-are `Pocket Mics`. The split is pinned here beside the radio it came from.
+now the `PA & Venue` and `Broadcast Desk` families. The split is pinned here
+beside the radio it came from.
 
 What is pinned here, and why each one is a measurement rather than a table:
 
 1. **The ladder is real.** The bottom of the family is a four-bit toy and the top
-   is a studio chain, and the difference is mostly the channel's width. So the
-   share of the output above 5 kHz is measured at seven rungs -- and it has to
-   climb, not merely differ.
+   is a cockpit headset, and the difference is mostly the channel's width. So
+   the share of the output above 5 kHz is measured at three rungs -- and it has
+   to climb, not merely differ.
 2. **A radio hisses.** A band-limited voice is a telephone; a radio has a noise
    floor of its own, and that floor is added after the gate precisely so it does
    not follow the words. Measured twice: on silence (the channel is not quiet
@@ -127,7 +127,7 @@ class TheRadioFamilyTests(unittest.TestCase):
         the tiers a player walks through -- toy, air traffic, cockpit -- and
         each has to be wider than the one under it, by a real margin rather
         than by a rounding error. The studios and venue rooms are their own
-        shelves now, and the pocket mics are pinned below.
+        shelves now.
         """
         rungs = ["rad_8bit", "rad_airtraffic", "rad_cockpit"]
         shares = {effect_id: above(self.played(effect_id), 5000.0)
@@ -195,9 +195,6 @@ class TheRadioFamilyTests(unittest.TestCase):
 VENUE = ("rad_terminal", "rad_station", "rad_stadium", "rad_church",
          "rad_cinema", "rad_trailer")
 DESK = ("rad_fm", "rad_studio", "rad_news", "rad_mission")
-POCKET = ("mic_pocket", "mic_titanium", "mic_ceramic", "mic_glass",
-          "mic_night", "mic_flagship", "mic_nano", "mic_magnetic",
-          "mic_broadcast", "mic_silicon")
 
 
 class TheSplitShelvesTests(unittest.TestCase):
@@ -226,50 +223,6 @@ class TheSplitShelvesTests(unittest.TestCase):
     def test_every_split_channel_is_usable_soft_and_loud(self):
         for effect_id in VENUE + DESK:
             with self.subTest(channel=effect_id):
-                for amplitude in (0.25, 0.9):
-                    after = play(voice_effects._EffectProcessor(effect_id),
-                                 to_pcm(saw(amplitude)))[FRAME * 10:]
-                    self.assertGreater(rms(after), 0.08)
-                    self.assertLessEqual(float(np.max(np.abs(after))),
-                                         voice_effects.PEAK_CEILING + 1e-6)
-
-
-class ThePocketMicsTests(unittest.TestCase):
-    """Ten premium handset mics under house names, never a maker's."""
-
-    def test_ten_premium_handset_mics_are_reachable(self):
-        self.assertEqual(voice_effects.catalogue_problems(), [])
-        self.assertEqual(voice_effects.group_members("pocket"), POCKET)
-        self.assertEqual(voice_effects.group_label("pocket"), "Pocket Mics")
-        labels = [voice_effects.effect_label(effect_id)
-                  for effect_id in POCKET]
-        self.assertEqual(len(labels), len(set(labels)))
-        for effect_id in POCKET:
-            with self.subTest(mic=effect_id):
-                self.assertTrue(voice_effects.effect_note(effect_id).strip())
-
-    def test_no_handset_brand_or_model_is_named(self):
-        # The owner's rule: the sounds may be inspired by premium handsets,
-        # but a menu line must never carry the maker's or the model's name.
-        banned = ("iphone", "ipad", "apple", "samsung", "galaxy", "pixel",
-                  "android", "huawei", "xiaomi", "redmi", "oneplus",
-                  "oppo", "vivo", "realme", "sony", "xperia", "nokia",
-                  "motorola", "asus", "nothing phone")
-        for effect_id in POCKET:
-            text = (voice_effects.effect_label(effect_id) + " "
-                    + voice_effects.effect_note(effect_id)).lower()
-            for word in banned:
-                with self.subTest(mic=effect_id, word=word):
-                    self.assertNotIn(word, text)
-
-    def test_each_pocket_mic_is_its_own_sound(self):
-        specs = [repr(sorted(voice_effects._SPECS[effect_id].items()))
-                 for effect_id in POCKET]
-        self.assertEqual(len(specs), len(set(specs)))
-
-    def test_every_pocket_mic_is_usable_soft_and_loud(self):
-        for effect_id in POCKET:
-            with self.subTest(mic=effect_id):
                 for amplitude in (0.25, 0.9):
                     after = play(voice_effects._EffectProcessor(effect_id),
                                  to_pcm(saw(amplitude)))[FRAME * 10:]

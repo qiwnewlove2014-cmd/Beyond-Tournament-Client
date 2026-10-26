@@ -28,7 +28,7 @@ class VoiceEffectMenus:
         """The pedals a player can put their broadcast voice through.
 
         Two levels: the families, then the pedals in one of them. A hundred
-        and thirty-two pedals in one list is a list you scroll rather than read,
+        and twenty-two pedals in one list is a list you scroll rather than read,
         and a name
         like `Plate` says nothing until something explains it -- a family is
         where that explanation fits without every line carrying all of it. Off

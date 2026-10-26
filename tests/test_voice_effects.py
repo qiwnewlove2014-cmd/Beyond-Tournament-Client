@@ -849,14 +849,14 @@ class TheStudioPedalsTests(unittest.TestCase):
 
     def test_the_page_is_two_levels_with_nothing_lost(self):
         self.assertEqual(voice_effects.catalogue_problems(), [])
-        # 132 presets and boards + Off; the ten pocket microphones are the
-        # newest family members (Custom Voice is the standalone row, not in a
-        # family).
-        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 133)
-        self.assertEqual(len(voice_effects.VOICE_EFFECT_GROUPS), 12)
+        # 122 presets and boards + Off; the ten clean channels that left
+        # Radio are still catalogue rows, just in two families of their own.
+        # Custom Voice is the standalone row, not in a family.
+        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 123)
+        self.assertEqual(len(voice_effects.VOICE_EFFECT_GROUPS), 11)
         self.assertEqual(
             sum(len(members) for *_rest, members
-                in voice_effects.VOICE_EFFECT_GROUPS), 131)
+                in voice_effects.VOICE_EFFECT_GROUPS), 121)
 
     def test_tube_warmth_is_gentler_than_the_amp(self):
         # A pure tone has no harmonics of its own: whatever comes out is the
