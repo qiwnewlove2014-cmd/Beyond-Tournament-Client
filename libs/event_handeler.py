@@ -22,6 +22,7 @@ from pyogg import OpusDecoder
 from .audio_diagnostics import probe as audio_probe
 from .audio_health import probe as audio_health, recovery as audio_recovery
 from .music_bot import gate as music_bot_gate
+from .music_bot import voice_effects
 
 
 def _route_music_to_room(game, entity, channel_id):
@@ -209,6 +210,7 @@ class EventHandeler:
         self.game.presence_sounds.configure(data)
 
         # Store staff status for PA Test Mode (with safe fallback)
+        vocoder_permission_read = False
         try:
             self.gameplay.is_staff = bool(data.get("is_staff", False))
             self.gameplay.is_builder = bool(data.get("is_builder", False))
@@ -229,6 +231,17 @@ class EventHandeler:
             self.gameplay.can_use_cinema_speakers = bool(
                 data.get("can_use_cinema_speakers", False)
             )
+            # The Vocoder Lab board is the same rank rule as the cinema
+            # routing. The Server owns it; the audio path's copy is written
+            # here because `effect_id()` runs on the capture thread and cannot
+            # call into gameplay. A fresh login with no key means no board.
+            self.gameplay.can_use_vocoder_lab = bool(
+                data.get("can_use_vocoder_lab", False)
+            )
+            voice_effects.set_vocoder_lab_allowed(
+                self.gameplay.can_use_vocoder_lab
+            )
+            vocoder_permission_read = True
             # Staff panning is the same rank as the cinema routing and one step
             # further: a pan moves somebody *else*, so the Server owns the rule
             # and the menu behind this key does not exist for anyone else.
@@ -260,11 +273,26 @@ class EventHandeler:
             self.gameplay.can_use_cinema_speakers = False
             self.gameplay.can_use_cinema_pan = False
             self.gameplay.can_lock_cinema_mode = False
+            self.gameplay.can_use_vocoder_lab = False
+            voice_effects.set_vocoder_lab_allowed(False)
             # A login snapshot this client could not read decides nothing: an
             # empty gate is the one answer that cannot hide a feature the
             # Server might have offered.
             music_bot_gate.clear()
-            
+
+        # A saved Vocoder Lab board on an account the Server has not allowed
+        # falls back to Off as soon as the snapshot is read. The audible guard
+        # is in `voice_effects.effect_id()`, which is what the capture thread
+        # actually calls; this also puts the saved setting and the Settings
+        # label back in step, so the menu does not name a board it hid.
+        if (vocoder_permission_read
+                and not getattr(self.gameplay, "can_use_vocoder_lab", False)):
+            bot = getattr(self.gameplay, "music_bot", None)
+            if (bot is not None
+                    and getattr(bot, "voice_effect", None)
+                    == voice_effects.VOX_LAB_EFFECT):
+                bot.set_voice_effect(voice_effects.DEFAULT_EFFECT)
+
         # Reset PA Test Mode state
         if hasattr(self.gameplay, 'pa_test_mode'):
             self.gameplay.pa_test_mode = False
@@ -3609,6 +3637,25 @@ class EventHandeler:
                 bot = getattr(gp, "music_bot", None)
                 if bot is not None:
                     self.game.put(bot.stop)
+        if "can_use_vocoder_lab" in data:
+            # A refresh from a Server that predates the board omits the key;
+            # keeping the last known answer then is the same rule the cinema
+            # keys follow, so an unrelated rank change cannot switch it off.
+            had_vocoder_lab = bool(
+                getattr(gp, "can_use_vocoder_lab", False)
+            )
+            gp.can_use_vocoder_lab = bool(
+                data.get("can_use_vocoder_lab", False)
+            )
+            voice_effects.set_vocoder_lab_allowed(gp.can_use_vocoder_lab)
+            if had_vocoder_lab and not gp.can_use_vocoder_lab:
+                bot = getattr(gp, "music_bot", None)
+                if bot is not None:
+                    # The capture thread already refuses the board (the copy
+                    # above moved); this puts the saved setting and the
+                    # Settings label back in step on the main thread.
+                    self.game.put(lambda: bot.set_voice_effect(
+                        voice_effects.DEFAULT_EFFECT))
         if "can_use_cinema_speakers" in data:
             had_cinema_routing = bool(
                 getattr(gp, "can_use_cinema_speakers", False)

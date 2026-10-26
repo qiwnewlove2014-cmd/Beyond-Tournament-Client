@@ -2,9 +2,10 @@
 favorites, downloads, recording and the keybinding hook that glues the media +
 streaming layers into the game.
 
-Every menu this bot opens is built in `menus.py` (a one-line shim per menu here),
-and the cinema room and crossfade machine live in `cinema_handler.py` and
-`crossfade_handler.py`. The state all three read and write stays on this class."""
+Every menu this bot opens is built in `menus.py` and the page groups under
+`menu_pages/` (a one-line shim per menu here), and the cinema room and crossfade
+machine live in `cinema_handler.py` and `crossfade_handler.py`. The state all of
+them read and write stays on this class."""
 
 import contextlib
 import os
@@ -329,9 +330,9 @@ class MapMusicBot:
         # the state above stays here for the callers that read it.
         self._crossfade_handler = CrossfadeHandler(self)
 
-        # Every menu this bot opens is built in music_bot/menus.py; the state
-        # the menus read and write stays here, for the callers and the tests
-        # that read it off the bot.
+        # Every menu this bot opens is built in music_bot/menus.py and its
+        # menu_pages/ groups; the state the menus read and write stays here, for
+        # the callers and the tests that read it off the bot.
         self._menus_handler = MusicBotMenus(self)
 
         # Spoken subtitles (the video's own YouTube captions, read out loud by
@@ -612,6 +613,19 @@ class MapMusicBot:
     def cinema_routing_allowed(self):
         return self._cinema().cinema_routing_allowed()
 
+    def vocoder_lab_allowed(self):
+        """Whether the Server allows this account the Vocoder Lab board.
+
+        The Client does not guess a rank: the login snapshot's
+        `can_use_vocoder_lab` is the only answer, and it is copied into
+        `voice_effects` because the capture thread cannot read gameplay. The
+        copy is refreshed on every login and staff-permission refresh.
+        """
+        gp = self._find_gameplay()
+        allowed = bool(getattr(gp, "can_use_vocoder_lab", False))
+        voice_effects.set_vocoder_lab_allowed(allowed)
+        return allowed
+
     def cinema_active_target(self):
         return self._cinema().cinema_active_target()
 
@@ -745,8 +759,9 @@ class MapMusicBot:
         # Don't stop current music — let it play while user searches
         self.game.put(lambda: self._show_mode_menu())
 
-    # === Menus (music_bot/menus.py) ===
-    # Every menu below is built by music_bot/menus.py; the one-line shims keep
+    # === Menus (music_bot/menus.py, menu_pages/) ===
+    # Every menu below is built by music_bot/menus.py or its menu_pages/ groups;
+    # the one-line shims keep
     # the callers that were written against this class -- gameplay's key
     # bindings, event_handeler, cinema_handler's Back line and the tests --
     # working unchanged. The state the menus read and write stays on the bot.
@@ -1518,6 +1533,9 @@ class MapMusicBot:
     def _open_voice_builder_menu(self):
         return self._menus()._open_voice_builder_menu()
 
+    def _open_vocoder_lab_menu(self):
+        return self._menus()._open_vocoder_lab_menu()
+
     def _open_builder_clear_menu(self, board_menu=None):
         return self._menus()._open_builder_clear_menu(board_menu)
 
@@ -1646,6 +1664,12 @@ class MapMusicBot:
         are different waveforms.
         """
         value = voice_effects.clamp_effect(effect_id)
+        # The Vocoder Lab board is a Server permission, not a client choice. A
+        # saved board on an account that no longer has it falls back to Off
+        # rather than staying chosen under a line nobody can see.
+        if (value == voice_effects.VOX_LAB_EFFECT
+                and not self.vocoder_lab_allowed()):
+            value = voice_effects.DEFAULT_EFFECT
         self.voice_effect = value
         options.set(voice_effects.OPTION, value)
         return value

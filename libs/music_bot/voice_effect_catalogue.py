@@ -4,8 +4,8 @@ Kept apart from `voice_effects.py` on purpose. The DSP is one kind of change
 and the words are another: a name moves a menu line, a description is what a
 player hears when they press Tab, and neither should have to be found inside
 eight hundred lines of filters. `voice_effects` imports this module and
-re-exports it, so every existing caller (`controller.py`, `menus.py`, the
-tests) keeps saying `voice_effects.effect_label`.
+re-exports it, so every existing caller (`controller.py`, the voice-effect menu
+page, the tests) keeps saying `voice_effects.effect_label`.
 
 A row is ``(id, menu name, what Tab reads on that line)``. The name has to stay
 short enough to arrow past; the description is where the pedal explains itself.
@@ -13,17 +13,20 @@ The DSP for a preset lives in `voice_effects._SPECS` under the same id, and the
 two must agree -- `voice_effects._EffectProcessor` raises on an id that has no
 spec, and a spec with no row is a pedal nobody can choose.
 
-Two rows are not fixed presets: ``custom`` is the Custom Amp board
-(`voice_effect_custom.py`) and ``voice_build`` is the Custom Voice board
-(`voice_effect_builder.py`), and their DSP is built from those boards instead
-of being written into ``_SPECS``. Both are catalogued like the others so the
-pedal list, the family check and the clamp all treat them the same way; the
+Three rows are not fixed presets: ``custom`` is the Custom Amp board
+(`voice_effect_custom.py`), ``voice_build`` is the Custom Voice board
+(`voice_effect_builder.py`) and ``vox_lab`` is the Vocoder Lab board
+(`voice_effect_vocoder.py`), and their DSP is built from those boards instead
+of being written into ``_SPECS``. All three are catalogued like the others so
+the pedal list, the family check and the clamp all treat them the same way; the
 builder is in ``STANDALONE_EFFECTS`` because it sits on the Voice Effect page's
-top level rather than inside a family.
+top level rather than inside a family, and the vocoder board is the last line
+of the Vocoder Lab family, where its twenty presets live.
 """
 
 from .voice_effect_builder import EFFECT_ID as BUILDER_EFFECT
 from .voice_effect_custom import EFFECT_ID as CUSTOM_EFFECT
+from .voice_effect_vocoder import EFFECT_ID as VOX_LAB_EFFECT
 
 #: Every preset, in the order the page lists them.
 VOICE_EFFECTS = (
@@ -364,6 +367,14 @@ VOICE_EFFECTS = (
     ("vox_octave", "Octave Machine",
      "A vocoder with a copy an octave up mixed in: one machine becomes two, "
      "the second one brighter and slightly out of step."),
+    # ---- the board: not a preset, the family's own tuner
+    (VOX_LAB_EFFECT, "Vocoder Lab",
+     "Not a preset: your own carrier, on a board of nine rows. Current keeps "
+     "the classic 110 Hz machine; Tune Note locks it to Root + Octave, so "
+     "everything you say comes out on that note; Interval adds a scale degree "
+     "above or below it, for a fixed harmony or a drone in a key. Wave, "
+     "Formant Shift, Breath and Mix shape it, and every row lands on the next "
+     "20 millisecond frame."),
     # ---- the radio family (2026-10-26): thirty channels, worst to best
     ("rad_8bit", "Eight Bit",
      "A four-bit toy radio: six kilohertz of samples, sixteen steps and a hiss "
@@ -530,11 +541,13 @@ VOICE_EFFECT_GROUPS = (
      "Twenty machines that speak your words for you: the carrier's note and "
      "waveform, its bands moved up or down, and one block behind each -- a "
      "chorus, a hall, a ring, a crush, a chest. The same six-band bank the "
-     "Machine family's Vocoder uses, set twenty ways.",
+     "Machine family's Vocoder uses, set twenty ways -- and the board at the "
+     "end, which puts that carrier in your hands.",
      ("vox_classic", "vox_deep", "vox_chip", "vox_giant", "vox_gnome",
       "vox_square", "vox_pulse", "vox_stack", "vox_noise", "vox_breath",
       "vox_choir", "vox_hall", "vox_radio", "vox_bit", "vox_alien",
-      "vox_shimmer", "vox_iron", "vox_air", "vox_formant", "vox_octave")),
+      "vox_shimmer", "vox_iron", "vox_air", "vox_formant", "vox_octave",
+      VOX_LAB_EFFECT)),
     ("broadcast", "Radio",
      "Thirty channels in a ladder, from a four-bit toy with a torn cone to a "
      "studio condenser: what changes is the channel's corners, the codec's bit "
@@ -650,6 +663,9 @@ def effect_note(value):
     if wanted == BUILDER_EFFECT:
         from . import voice_effect_builder
         return voice_effect_builder.note()
+    if wanted == VOX_LAB_EFFECT:
+        from . import voice_effect_vocoder
+        return voice_effect_vocoder.note()
     for effect_id, _label, note in VOICE_EFFECTS:
         if effect_id == wanted:
             return note

@@ -385,6 +385,70 @@ class ReleaseTests(unittest.TestCase):
         rec.voice_chat_finish2()
         self.assertEqual(len(rec.vc_compression.frames), 1)
 
+    def test_the_recorder_is_handed_the_shaped_frame(self):
+        class Line:
+            def shape(self, pcm):
+                return b"\x01\x00" * (len(pcm) // 2)
+
+            def tail_frames(self, frame_bytes):
+                return []
+
+        class Recorder:
+            def __init__(self):
+                self.fed = []
+
+            def recorded_voice_is_studio(self):
+                return False
+
+            def feed_transmitted_microphone(self, pcm, *, locally_rendered=False):
+                self.fed.append(bytes(pcm))
+                return True
+
+        rec = self.recorder(Line())
+        recorder = Recorder()
+        bot = SimpleNamespace(
+            audio_recorder=recorder,
+            playing=False,
+            broadcast_enabled=False,
+            broadcast_to_megaphone=False,
+        )
+        with mock.patch.object(rec, "_find_music_bot", return_value=bot):
+            rec.voice_chat_finish2()
+        self.assertEqual(recorder.fed,
+                         [b"\x01\x00" * (VOICE_FRAME_BYTES // 2)])
+
+    def test_the_studio_take_is_handed_the_raw_frame(self):
+        class Line:
+            def shape(self, pcm):
+                return b"\x02\x00" * (len(pcm) // 2)
+
+            def tail_frames(self, frame_bytes):
+                return []
+
+        class Recorder:
+            def __init__(self):
+                self.fed = []
+
+            def recorded_voice_is_studio(self):
+                return True
+
+            def feed_transmitted_microphone(self, pcm, *, locally_rendered=False):
+                self.fed.append(bytes(pcm))
+                return True
+
+        rec = self.recorder(Line())
+        recorder = Recorder()
+        bot = SimpleNamespace(
+            audio_recorder=recorder,
+            playing=False,
+            broadcast_enabled=False,
+            broadcast_to_megaphone=False,
+        )
+        with mock.patch.object(rec, "_find_music_bot", return_value=bot):
+            rec.voice_chat_finish2()
+        self.assertEqual(recorder.fed,
+                         [np.full(960, 6000, dtype="<i2").tobytes()])
+
     def test_a_dead_microphone_drops_the_line_instead_of_raising(self):
         rec = self.recorder(SpeechKeyLine(semitones=3))
 

@@ -370,7 +370,10 @@ class MusicDownloaderTests(unittest.TestCase):
         self.manager._progress_bar.destroy.assert_called_once_with()
 
     def test_music_bot_exposes_every_requested_download_source(self):
-        source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot" / "menus.py").read_text(encoding="utf-8")
+        # The download pages moved to menu_pages/library.py on 2026-10-26.
+        root = Path(__file__).resolve().parents[1] / "libs" / "music_bot"
+        source = ((root / "menus.py").read_text(encoding="utf-8")
+                  + (root / "menu_pages" / "library.py").read_text(encoding="utf-8"))
         for label in (
             "Music Download Center", "Download Current Song", "Download Song",
             "Download All Favorites", "Download a Saved Playlist", "Download This Track",

@@ -770,6 +770,18 @@ class Gameplay(state.State):
         
         # === MAP MUSIC BOT ===
         self.music_bot = music_bot.MapMusicBot(self.game)
+        # The saved voice effect is read in the bot's __init__, which can run
+        # after the login snapshot but before a map exists. If that snapshot
+        # already said this account may not use the Vocoder Lab board, the
+        # saved board falls back to Off here -- the later login message does
+        # the same, so whichever arrives last leaves the setting honest. No
+        # attribute means no snapshot yet: a Developer's saved board is kept.
+        if getattr(self, "can_use_vocoder_lab", None) is False:
+            from .music_bot import voice_effects as voice_effect_presets
+            if (self.music_bot.voice_effect
+                    == voice_effect_presets.VOX_LAB_EFFECT):
+                self.music_bot.set_voice_effect(
+                    voice_effect_presets.DEFAULT_EFFECT)
         # Wire gameplay reference into PianoAudio for megaphone broadcast routing
         self.game.audio_mngr.piano.gameplay = self
         self.game.audio_mngr.drums.gameplay = self

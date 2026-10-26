@@ -849,11 +849,13 @@ class TheStudioPedalsTests(unittest.TestCase):
 
     def test_the_page_is_two_levels_with_nothing_lost(self):
         self.assertEqual(voice_effects.catalogue_problems(), [])
-        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 122)  # 121 + Off
+        # 122 presets and boards + Off; the Vocoder Lab board is the 121st
+        # family member (Custom Voice is the standalone row, not in a family).
+        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 123)
         self.assertEqual(len(voice_effects.VOICE_EFFECT_GROUPS), 9)
         self.assertEqual(
             sum(len(members) for *_rest, members
-                in voice_effects.VOICE_EFFECT_GROUPS), 120)
+                in voice_effects.VOICE_EFFECT_GROUPS), 121)
 
     def test_tube_warmth_is_gentler_than_the_amp(self):
         # A pure tone has no harmonics of its own: whatever comes out is the
@@ -1721,6 +1723,29 @@ class TheVoicePathTests(unittest.TestCase):
         self.assertIsInstance(wrapped, voice_effects.VoiceEffectLine)
         self.assertIs(wrapped.inner, key_line)
         self.assertIs(record._speech_line, wrapped)
+
+
+class TheRecordingStudioTests(unittest.TestCase):
+    """The one shelf pedal a recording may wear without a broadcast."""
+
+    def test_the_recording_chain_is_the_shelf_studio(self):
+        from libs.music_bot import gate
+        gate.clear()
+        self.addCleanup(gate.clear)
+        processor = voice_effects.recording_studio_processor()
+        self.assertIsInstance(processor, voice_effects._EffectProcessor)
+        self.assertEqual(processor.preset, "rad_studio")
+        frame = to_pcm(tone(seconds=0.02))
+        shaped = processor.process(frame)
+        self.assertEqual(len(shaped), len(frame))
+        self.assertNotEqual(shaped, frame)
+
+    def test_the_staff_lock_closes_the_recording_chain(self):
+        from libs.music_bot import gate
+        gate.apply_locked({"voice_fx": "Voice Effects"})
+        self.addCleanup(gate.clear)
+        self.assertFalse(voice_effects.recording_studio_available())
+        self.assertIsNone(voice_effects.recording_studio_processor())
 
 
 if __name__ == "__main__":

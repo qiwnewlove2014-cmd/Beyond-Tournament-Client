@@ -10,6 +10,7 @@ Windows output endpoint when screen-reader and other computer audio is wanted.
 from __future__ import annotations
 
 import ctypes
+import math
 from array import array
 from collections import deque
 from ctypes import POINTER, Structure, Union, byref, c_longlong, c_ubyte
@@ -68,6 +69,24 @@ SPLIT_MINUTE_CHOICES = (0, 30, 60, 120)
 FADE_CHOICES = (0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0)
 MAX_FADE_SECONDS = 30.0
 
+#: What the recording does with the player's own voice. `Transmitted` is the
+#: voice as it left the Client -- Voice Effect, Auto-Tune, Harmony and the
+#: speech key included -- which is what the person listening to the file would
+#: have heard. `Studio Condenser` is the raw microphone through the same
+#: `rad_studio` chain the Voice Effect list offers, so a microphone that needs
+#: help can sound produced in the file without changing the live voice.
+RECORDED_VOICE_OPTION = "music_bot_recording_voice"
+RECORDED_VOICE_TRANSMITTED = "transmitted"
+RECORDED_VOICE_STUDIO = "studio"
+RECORDED_VOICE_CHOICES = (RECORDED_VOICE_TRANSMITTED, RECORDED_VOICE_STUDIO)
+
+#: The Studio Condenser is levelled for a broadcast chain, so it arrives hotter
+#: than the microphone it replaces. The recorder's mix is additive and the
+#: game already uses most of the range, so 0.55 is the trim that keeps a
+#: polished voice under the game instead of over it. The shelf row's output
+#: and leveller are fixed, so one starting trim serves every take.
+RECORDED_STUDIO_GAIN = 0.55
+
 
 class ProcessLoopbackUnavailable(RuntimeError):
     """Raised when isolated application capture is unavailable or fails."""
@@ -78,6 +97,13 @@ class MicrophoneOverlayBuffer:
 
     The Voice Chat capture thread only performs a short append under a lock.
     Conversion, clipping and WAV I/O remain owned by the recorder thread.
+
+    A block is handed over only when a **whole** block is queued. Padding a
+    short block with zeros put silence inside a 20 ms voice frame when the
+    loopback delivered 10 ms packets (or the reverse), and the Studio chain
+    then processed a word with a hole in it. Holding the partial block for one
+    more loopback packet keeps the samples consecutive; the voice is at most
+    one packet later, which a recording cannot hear.
     """
 
     MAX_FRAMES = SAMPLE_RATE * 2
@@ -111,10 +137,9 @@ class MicrophoneOverlayBuffer:
         if wanted <= 0:
             return None
         with self._lock:
-            available = min(wanted, self._queued_frames)
-            if available <= 0:
+            if self._queued_frames < wanted:
                 return None
-            remaining_bytes = available * 2
+            remaining_bytes = wanted * 2
             output = bytearray()
             while remaining_bytes and self._chunks:
                 chunk = self._chunks.popleft()
@@ -127,27 +152,102 @@ class MicrophoneOverlayBuffer:
                     self._chunks.appendleft(chunk[remaining_bytes:])
                     self._queued_frames -= remaining_bytes // 2
                     remaining_bytes = 0
-        if available < wanted:
-            output.extend(b"\0" * ((wanted - available) * 2))
         return bytes(output)
 
 
-def _mix_mono16_into_stereo16(stereo_pcm, mono_pcm):
-    """Mix mono microphone PCM into both stereo channels with clipping."""
-    if not mono_pcm:
-        return stereo_pcm
-    stereo = array("h")
-    stereo.frombytes(stereo_pcm)
-    mono = array("h")
-    mono.frombytes(mono_pcm)
-    frame_count = min(len(mono), len(stereo) // 2)
-    for frame in range(frame_count):
-        sample = mono[frame]
-        left = stereo[frame * 2] + sample
-        right = stereo[frame * 2 + 1] + sample
-        stereo[frame * 2] = max(-32768, min(32767, left))
-        stereo[frame * 2 + 1] = max(-32768, min(32767, right))
-    return stereo.tobytes()
+def _scale_mono16(pcm, gain):
+    """Scale one mono16 block, clipping at the sample format's own edge."""
+    if gain == 1.0:
+        return pcm
+    samples = array("h")
+    samples.frombytes(pcm)
+    for index in range(len(samples)):
+        samples[index] = max(-32768, min(32767, int(samples[index] * gain)))
+    return samples.tobytes()
+
+
+class _ProcessedMicrophoneOverlay:
+    """One microphone overlay with its recording-only effect applied.
+
+    The effect lives here, not in Voice Chat: the capture thread already runs
+    the live voice's own line and must not run a second one, or a dropped frame
+    would be a dropped word for everybody listening. `take_mono16` is called by
+    the recorder worker between two packets of loopback audio, so the work is
+    paid by the thread that writes the file.
+    """
+
+    def __init__(self, overlay, processor, gain=1.0):
+        self._overlay = overlay
+        self._processor = processor
+        self._gain = float(gain)
+
+    def take_mono16(self, frame_count):
+        pcm = self._overlay.take_mono16(frame_count)
+        if not pcm:
+            return pcm
+        return _scale_mono16(self._processor.process(pcm), self._gain)
+
+
+#: The game's own captured mix already uses most of the range, so the
+#: microphone is summed through a soft knee instead of int16 clipping. Below
+#: 0.90 full scale the sum is untouched; above it a tanh curve bends the
+#: overshoot into the last tenth of the range. The curve is per sample and
+#: stateless, so the game bed does not pump when a word starts or stops.
+MIX_SOFT_KNEE = 0.90
+
+
+class _MicrophoneMixer:
+    """Add the microphone to a finished stereo mix without hard clipping.
+
+    The old mixer added int16 samples and clamped each one at the format's
+    edge. A game bed that is already loud plus a levelled Studio Condenser
+    spends a few percent of every frame above full scale, heard as crackle on
+    the words. This sums in Python precision and bends only the overshoot
+    through a soft knee, so quiet game audio is byte-for-byte and a loud sum
+    cannot wrap. There is no gain state: nothing ducks or steps the bed when a
+    word begins or ends.
+    """
+
+    def mix(self, stereo_pcm, mono_pcm):
+        if not mono_pcm:
+            return stereo_pcm
+        stereo = array("h")
+        stereo.frombytes(stereo_pcm)
+        mono = array("h")
+        mono.frombytes(mono_pcm)
+        frame_count = min(len(mono), len(stereo) // 2)
+        if frame_count <= 0:
+            return stereo_pcm
+
+        # A voice that is digitally silent hands the game back byte for byte,
+        # so a take with no speaking is the game's own recording.
+        voice_peak = max((abs(sample) for sample in mono[:frame_count]),
+                         default=0)
+        if voice_peak == 0:
+            return stereo_pcm
+
+        knee = int(32767 * MIX_SOFT_KNEE)
+        headroom = 32767 - knee
+        mixed = [0] * (frame_count * 2)
+        for frame in range(frame_count):
+            sample = mono[frame]
+            mixed[frame * 2] = self._soft(stereo[frame * 2] + sample,
+                                          knee, headroom)
+            mixed[frame * 2 + 1] = self._soft(
+                stereo[frame * 2 + 1] + sample, knee, headroom)
+
+        output = array("h", mixed)
+        if frame_count * 2 < len(stereo):
+            output.extend(stereo[frame_count * 2:])
+        return output.tobytes()
+
+    @staticmethod
+    def _soft(value, knee, headroom):
+        if -knee <= value <= knee:
+            return value
+        sign = -1 if value < 0 else 1
+        over = abs(value) - knee
+        return sign * int(knee + headroom * math.tanh(over / headroom))
 
 
 class _SegmentedWaveWriter:
@@ -827,6 +927,8 @@ class ProcessLoopbackRecorder:
             # late filesystem race must never overwrite an existing recording.
             writer = _SegmentedWaveWriter(
                 output_path, split_minutes, fade_in_seconds, fade_out_seconds)
+            microphone_mixer = (_MicrophoneMixer()
+                                if microphone_overlay is not None else None)
 
             audio_client.Start()
             started_at = time.monotonic()
@@ -856,9 +958,9 @@ class ProcessLoopbackRecorder:
                             pcm = b"\0" * byte_count
                         else:
                             pcm = ctypes.string_at(data, byte_count)
-                        if microphone_overlay is not None:
+                        if microphone_mixer is not None:
                             mic_pcm = microphone_overlay.take_mono16(frame_count)
-                            pcm = _mix_mono16_into_stereo16(pcm, mic_pcm)
+                            pcm = microphone_mixer.mix(pcm, mic_pcm)
                         writer.write(pcm)
                         frames_written += int(frame_count)
                     finally:
@@ -961,6 +1063,7 @@ class GameAudioRecorderManager:
         self._configuring_folder = False
         self._microphone_overlay = MicrophoneOverlayBuffer()
         self._session_include_microphone = False
+        self._session_recorded_voice = RECORDED_VOICE_TRANSMITTED
         self._session_include_computer_audio = False
         self._session_countdown_seconds = DEFAULT_COUNTDOWN_SECONDS
         self._session_split_minutes = 0
@@ -1004,6 +1107,56 @@ class GameAudioRecorderManager:
 
     def include_computer_audio(self):
         return bool(options.get("music_bot_recording_include_computer_audio", False))
+
+    @staticmethod
+    def _studio_available():
+        """Whether the Staff's Voice Effects lock leaves the studio board open."""
+        try:
+            from .music_bot import gate
+            return not gate.is_locked("voice_fx")
+        except Exception:
+            # A gate that cannot be read is not an unlock: the safe answer is
+            # the transmitted voice, never a recording chain staff may have
+            # meant to switch off.
+            return False
+
+    def recorded_voice(self):
+        """The saved choice, clamped to one this Client can actually use."""
+        value = options.get(RECORDED_VOICE_OPTION, RECORDED_VOICE_TRANSMITTED)
+        if value == RECORDED_VOICE_STUDIO and self._studio_available():
+            return RECORDED_VOICE_STUDIO
+        return RECORDED_VOICE_TRANSMITTED
+
+    def recorded_voice_label(self):
+        if self.recorded_voice() == RECORDED_VOICE_STUDIO:
+            return "Recorded Voice: Studio Condenser"
+        return "Recorded Voice: Transmitted"
+
+    def cycle_recorded_voice(self):
+        """Switch the file's own voice between what was sent and the studio chain."""
+        if not self._can_change_settings():
+            return
+        if not self._studio_available():
+            self._announce(
+                "Voice Effects are locked by staff, so the recording keeps the "
+                "transmitted voice."
+            )
+            return
+        studio = self.recorded_voice() != RECORDED_VOICE_STUDIO
+        options.set(
+            RECORDED_VOICE_OPTION,
+            RECORDED_VOICE_STUDIO if studio else RECORDED_VOICE_TRANSMITTED,
+        )
+        if studio:
+            self._announce(
+                "Recorded voice: Studio Condenser. The file gets a polished "
+                "voice; other players still hear your live one."
+            )
+        else:
+            self._announce(
+                "Recorded voice: Transmitted. The file gets the voice you sent, "
+                "with your Voice Effect, Auto-Tune and Harmony."
+            )
 
     def countdown_seconds(self):
         return self._choice_option(
@@ -1182,6 +1335,7 @@ class GameAudioRecorderManager:
             return False
         options.set("music_bot_recording_include_microphone", False)
         options.set("music_bot_recording_include_computer_audio", False)
+        options.set(RECORDED_VOICE_OPTION, RECORDED_VOICE_TRANSMITTED)
         options.set("music_bot_recording_countdown_seconds", DEFAULT_COUNTDOWN_SECONDS)
         options.set("music_bot_recording_split_minutes", 0)
         options.set("music_bot_recording_announce_details", True)
@@ -1190,8 +1344,18 @@ class GameAudioRecorderManager:
         self._announce("Recording settings restored to defaults.")
         return True
 
+    def recorded_voice_is_studio(self):
+        """Whether this take's file gets the Studio Condenser chain.
+
+        Read by Voice Chat on its capture thread, so it is one lock and one
+        comparison: the choice was snapshotted when the take started and cannot
+        move under a voice that is already being recorded.
+        """
+        with self._lock:
+            return self._session_recorded_voice == RECORDED_VOICE_STUDIO
+
     def feed_transmitted_microphone(self, pcm, *, locally_rendered=False):
-        """Non-blocking Voice Chat hook for the current PTT microphone PCM."""
+        """Non-blocking Voice Chat hook for the microphone PCM this take needs."""
         with self._lock:
             accepted = (
                 self._state == "recording"
@@ -1434,6 +1598,7 @@ class GameAudioRecorderManager:
             self._output_path = os.fspath(output_path)
             self._session_include_microphone = self.include_microphone()
             self._session_include_computer_audio = self.include_computer_audio()
+            self._session_recorded_voice = self.recorded_voice()
             self._session_countdown_seconds = self.countdown_seconds()
             self._session_split_minutes = self.split_minutes()
             self._session_announce_details = self.announce_details()
@@ -1479,6 +1644,7 @@ class GameAudioRecorderManager:
             output_path = self._output_path
             include_microphone = self._session_include_microphone
             include_computer_audio = self._session_include_computer_audio
+            recorded_voice = self._session_recorded_voice
             split_minutes = self._session_split_minutes
             announce_details = self._session_announce_details
             fade_in_seconds = self._session_fade_in_seconds
@@ -1507,11 +1673,23 @@ class GameAudioRecorderManager:
                         include_computer_audio=include_computer_audio,
                     )
 
+            overlay = self._microphone_overlay if include_microphone else None
+            if overlay is not None and recorded_voice == RECORDED_VOICE_STUDIO:
+                try:
+                    from .music_bot import voice_effects
+                    processor = voice_effects.recording_studio_processor()
+                except Exception as error:
+                    print(f"[GameAudioRecorder] Studio Condenser unavailable: {error}")
+                    processor = None
+                if processor is not None:
+                    overlay = _ProcessedMicrophoneOverlay(
+                        overlay, processor, RECORDED_STUDIO_GAIN)
+
             result = backend.record(
                 output_path,
                 self._stop_event,
                 on_started,
-                microphone_overlay=self._microphone_overlay if include_microphone else None,
+                microphone_overlay=overlay,
                 split_minutes=split_minutes,
                 fade_in_seconds=fade_in_seconds,
                 fade_out_seconds=fade_out_seconds,
@@ -1570,6 +1748,7 @@ class GameAudioRecorderManager:
             self._worker = None
             self._recording_started_at = None
             self._session_include_microphone = False
+            self._session_recorded_voice = RECORDED_VOICE_TRANSMITTED
             self._session_include_computer_audio = False
             self._session_fade_in_seconds = 0.0
             self._session_fade_out_seconds = 0.0

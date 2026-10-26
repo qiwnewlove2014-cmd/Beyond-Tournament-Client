@@ -32,9 +32,11 @@ from libs.menu import Menu  # noqa: E402
 from libs.music_bot import autotune  # noqa: E402
 from libs.music_bot import gate as music_bot_gate  # noqa: E402
 from libs.music_bot import menus as menus_module  # noqa: E402
+from libs.music_bot.menu_pages import library as library_pages  # noqa: E402
 from libs.music_bot import voice_effect_builder  # noqa: E402
 from libs.music_bot import voice_effect_custom  # noqa: E402
 from libs.music_bot import voice_effect_recipes  # noqa: E402
+from libs.music_bot import voice_effect_vocoder  # noqa: E402
 from libs.music_bot import voice_effects  # noqa: E402
 
 
@@ -92,6 +94,7 @@ def make_bot():
     bot.subtitle_label.return_value = "Subtitles: OFF"
     bot.cinema_routing_allowed.return_value = True
     bot.cinema_listening_allowed.return_value = True
+    bot.vocoder_lab_allowed.return_value = True
     bot.cinema_target_label = "Cinema Speakers: none"
     bot.cinema_rooms_label = "Cinema Rooms: ON"
     bot.instruments_cinema_label = "Instruments in Rooms: ON"
@@ -111,6 +114,19 @@ def make_bot():
         lambda seconds: "Off" if not seconds else f"{float(seconds):g} seconds")
     recorder.fade_in_setting_label.return_value = "Fade In at Start: Off"
     recorder.fade_out_setting_label.return_value = "Fade Out at Stop: Off"
+    recorder.capture_scope_label.return_value = (
+        "Capture Scope: All Audio Rendered by Beyond Tournament")
+    recorder.computer_audio_setting_label.return_value = (
+        "Include Screen Reader and Computer Audio: Off")
+    recorder.microphone_setting_label.return_value = (
+        "Include My Transmitted Voice: Off")
+    recorder.recorded_voice_label.return_value = (
+        "Recorded Voice: Transmitted")
+    recorder.countdown_setting_label.return_value = (
+        "Recording Countdown: 3 seconds")
+    recorder.split_setting_label.return_value = "Split Long Recordings: Off"
+    recorder.announce_setting_label.return_value = (
+        "Announce Completed Recording Details: On")
     bot.audio_recorder = recorder
     return bot
 
@@ -178,6 +194,10 @@ class EveryLineIsDescribedTests(unittest.TestCase):
                 self.assertTrue(text_of(item).strip())
 
     def test_every_line_of_the_settings_submenus_is_described(self):
+        # The vocoder board reads its saved values from the real options file;
+        # a menu test must not depend on what the developer running it chose.
+        mock.patch.object(voice_effect_vocoder.options, "get",
+                          return_value={}).start()
         for opener in (self.handler._open_autotune_speed_menu,
                        self.handler._open_autotune_amount_menu,
                        self.handler._open_harmony_menu,
@@ -186,6 +206,9 @@ class EveryLineIsDescribedTests(unittest.TestCase):
                        self.handler._open_custom_effect_menu,
                        lambda: self.handler._open_custom_param_menu("drive"),
                        self.handler._open_voice_builder_menu,
+                       self.handler._open_vocoder_lab_menu,
+                       lambda: self.handler._open_custom_param_menu(
+                           "wave", voice_effect_vocoder),
                        self.handler._open_builder_recipes_menu,
                        lambda: self.handler._open_builder_recipes_menu(
                            "machine"),
@@ -262,6 +285,103 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         for item in board.items:
             self.assertGreaterEqual(len(item), 4)
             self.assertTrue(text_of(item).strip())
+
+    def test_the_vocoder_family_ends_with_the_developer_board(self):
+        """The board is the bottom line of Vocoder Lab, and it is not a preset."""
+        mock.patch.object(voice_effect_vocoder.options, "get",
+                          return_value={}).start()
+        self.handler._open_voice_effect_menu("synth")
+        labels = [label_of(item) for item in self.last_menu().items]
+        self.assertEqual(labels[-1], "Back")
+        self.assertTrue(labels[-2].startswith("Vocoder Lab:"), labels[-2])
+        self.assertEqual(
+            sum(1 for label in labels if label.startswith("Vocoder Lab:")), 1)
+        for item in self.last_menu().items:
+            if label_of(item).startswith("Vocoder Lab:"):
+                item[1]()
+                break
+        else:
+            self.fail("the family page has no Vocoder Lab board line")
+        # Opening it chooses it: the board is what the player asked for.
+        self.bot.set_voice_effect.assert_called_once_with(
+            voice_effects.VOX_LAB_EFFECT)
+        board = self.last_menu()
+        names = [label_of(item).split(":")[0] for item in board.items]
+        for row in voice_effect_vocoder.rows():
+            self.assertIn(row[1], names)
+        # Current owns no note: those rows are hidden, not shown doing nothing.
+        self.assertNotIn("Root", names)
+        self.assertNotIn("Scale", names)
+        self.assertEqual(len(board.items),
+                         len(voice_effect_vocoder.rows()) + 1)
+        for item in board.items:
+            self.assertGreaterEqual(len(item), 4)
+            self.assertTrue(text_of(item).strip())
+
+    def test_the_vocoder_family_line_names_the_mode_while_it_is_chosen(self):
+        """The board's catalogue name is the family's own, so the line says the
+        mode and note instead of reading "Vocoder Lab: Vocoder Lab"."""
+        mock.patch.object(voice_effect_vocoder.options, "get",
+                          return_value={}).start()
+        self.bot.voice_effect = "vox_lab"
+        self.handler._open_voice_effect_menu()
+        labels = [label_of(item) for item in self.last_menu().items]
+        self.assertIn("Vocoder Lab: Current 110 Hz (active)", labels)
+
+    def test_the_vocoder_board_is_not_offered_without_the_server_permission(self):
+        self.bot.vocoder_lab_allowed.return_value = False
+        self.handler._open_voice_effect_menu("synth")
+        labels = [label_of(item) for item in self.last_menu().items]
+        self.assertFalse(any(label.startswith("Vocoder Lab:")
+                             for label in labels), labels)
+        # ... and a direct call cannot open it either, so the line is not the
+        # only thing standing between a non-Developer and the page.
+        built = len(FakeMenu.built)
+        self.handler._open_vocoder_lab_menu()
+        self.assertEqual(len(FakeMenu.built), built)
+        # The permission can also be taken away while the family page is open.
+        # The line is a snapshot, so the press refuses in place and says why
+        # instead of popping into a board that would not open.
+        self.bot.vocoder_lab_allowed.return_value = True
+        self.handler._open_voice_effect_menu("synth")
+        self.bot.vocoder_lab_allowed.return_value = False
+        built = len(FakeMenu.built)
+        for item in self.last_menu().items:
+            if label_of(item).startswith("Vocoder Lab:"):
+                item[1]()
+                break
+        else:
+            self.fail("the family page has no Vocoder Lab board line")
+        self.assertEqual(len(FakeMenu.built), built)
+        self.bot.set_voice_effect.assert_not_called()
+        self.assertIn("Developer", menus_module.speak.call_args.args[0])
+
+    def test_noise_is_refused_in_a_locked_note_mode_with_a_reason(self):
+        saved = {voice_effect_vocoder._OPTION: {"mode": "tune"}}
+        mock.patch.object(
+            voice_effect_vocoder.options, "get",
+            side_effect=lambda key, default=None: saved.get(key, default)
+        ).start()
+        mock.patch.object(
+            voice_effect_vocoder.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            saved.__setitem__(key, value)
+        ).start()
+        self.handler._open_vocoder_lab_menu()
+        self.handler._open_custom_param_menu("wave", voice_effect_vocoder)
+        for item in self.last_menu().items:
+            if label_of(item) == "Noise":
+                item[1]()
+                break
+        else:
+            self.fail("the wave page has no Noise line")
+        self.assertEqual(
+            saved[voice_effect_vocoder._OPTION]["wave"], "saw")
+        self.bot.set_voice_effect.assert_called_once_with(
+            voice_effects.VOX_LAB_EFFECT)
+        said = menus_module.speak.call_args.args[0].lower()
+        self.assertIn("no note", said)
+        self.assertIn("saw", said)
 
     def test_a_knob_page_writes_the_board_and_applies_it(self):
         board = {}
@@ -709,7 +829,7 @@ class TheRestOfTheFeatureMenusAreDescribedTests(unittest.TestCase):
         self.bot.playlist_mgr.get_favorites.return_value = [
             {"title": "A Song", "target": "x"}]
         self.bot.playlist_mgr.get_playlist_names.return_value = ["Chill"]
-        with mock.patch.object(menus_module, "is_supported_music_url",
+        with mock.patch.object(library_pages, "is_supported_music_url",
                                return_value=True):
             self.handler._open_download_menu()
         self.assert_described(self.last_menu())
@@ -820,7 +940,7 @@ class TheLibraryMenusAreDescribedTests(unittest.TestCase):
             self.assert_button_described(label)
 
     def test_the_track_actions(self):
-        with mock.patch.object(menus_module, "is_supported_music_url",
+        with mock.patch.object(library_pages, "is_supported_music_url",
                                return_value=True):
             self.handler._show_track_action_menu(
                 "A Song", "https://www.youtube.com/watch?v=abc", "youtube",
@@ -950,6 +1070,16 @@ class TabSpeaksTheDescriptionTests(unittest.TestCase):
             menu.update([tab()])
         said = speak.call_args.args[0]
         self.assertIn("splits", said.lower())
+        self.assertEqual(speak.call_args.kwargs.get("id"), "menu_help")
+
+    def test_tab_speaks_the_recorded_voice_line(self):
+        menu = self.menu_with(self.handler._open_recording_settings_menu)
+        self.at(menu, "Recorded Voice: Transmitted")
+        with mock.patch.object(menu_module.speech, "speak") as speak:
+            menu.update([tab()])
+        said = speak.call_args.args[0].lower()
+        self.assertIn("studio condenser", said)
+        self.assertIn("transmitted", said)
         self.assertEqual(speak.call_args.kwargs.get("id"), "menu_help")
 
     def test_tab_speaks_a_fade_page_line(self):

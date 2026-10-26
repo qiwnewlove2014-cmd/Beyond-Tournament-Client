@@ -2098,7 +2098,15 @@ class VoiceChatRecord(threading.Thread):
                 # recorder here without doing file or mixing work on this capture thread - the
                 # megaphone voice is already rendered through the local PA sidechain.
                 audio_recorder = getattr(music_bot, 'audio_recorder', None) if music_bot else None
-                if audio_recorder is not None:
+                recorded_studio = bool(
+                    audio_recorder is not None
+                    and audio_recorder.recorded_voice_is_studio()
+                )
+                if audio_recorder is not None and recorded_studio:
+                    # The Studio Condenser take needs the raw microphone: the
+                    # recorder worker puts its own chain on it.  The transmitted
+                    # take below is fed after `speech_line.shape`, so it hears
+                    # exactly the frame Opus was handed.
                     audio_recorder.feed_transmitted_microphone(
                         chunk,
                         locally_rendered=bool(voice_using_mega),
@@ -2127,6 +2135,11 @@ class VoiceChatRecord(threading.Thread):
                         chunk_bytes = bytearray(speech_line.shape(chunk_bytes))
                         if monitor:
                             _feed_local_megaphone_direct(gp, chunk_bytes, producer='mic')
+                    if audio_recorder is not None and not recorded_studio:
+                        audio_recorder.feed_transmitted_microphone(
+                            chunk_bytes,
+                            locally_rendered=bool(voice_using_mega),
+                        )
 
                     if route_to_bot:
                         if not hasattr(music_bot, 'mic_pcm_queue'):
@@ -2177,12 +2190,17 @@ class VoiceChatRecord(threading.Thread):
         )
 
         audio_recorder = getattr(music_bot, 'audio_recorder', None) if music_bot else None
-        if audio_recorder is not None:
+        recorded_studio = bool(
+            audio_recorder is not None
+            and audio_recorder.recorded_voice_is_studio()
+        )
+        locally_rendered = (
+            getattr(self.vc_compression, 'channel', None) == consts.CHANNEL_MEGAPHONE
+        )
+        if audio_recorder is not None and recorded_studio:
             audio_recorder.feed_transmitted_microphone(
                 buf,
-                locally_rendered=(
-                    getattr(self.vc_compression, 'channel', None) == consts.CHANNEL_MEGAPHONE
-                ),
+                locally_rendered=locally_rendered,
             )
 
         # Everything this press still owes: its last frame, then whatever the
@@ -2191,6 +2209,14 @@ class VoiceChatRecord(threading.Thread):
         frames = [buf] if buf else []
         if line is not None and frames:
             frames = [line.shape(frames[0])] + line.tail_frames(VOICE_FRAME_BYTES)
+        if audio_recorder is not None and not recorded_studio:
+            # The transmitted take is the frame that leaves, tail included:
+            # feeding the raw buffer here would record a version nobody heard.
+            for frame in frames:
+                audio_recorder.feed_transmitted_microphone(
+                    frame,
+                    locally_rendered=locally_rendered,
+                )
 
         if route_to_bot:
             if not hasattr(music_bot, 'mic_pcm_queue'):

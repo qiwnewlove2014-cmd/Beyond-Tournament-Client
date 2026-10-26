@@ -154,7 +154,12 @@ class TheVocoderFamilyTests(unittest.TestCase):
     """Twenty machines that speak the words instead of the voice."""
 
     def machines(self):
-        return voice_effects.group_members(FAMILY)
+        # The family also ends with the Vocoder Lab board, which is not one of
+        # the twenty fixed machines: its spec is whatever the player set, so it
+        # is pinned by test_voice_effects_vocoder_lab.py instead.
+        return tuple(effect_id for effect_id in
+                     voice_effects.group_members(FAMILY)
+                     if effect_id != voice_effects.VOX_LAB_EFFECT)
 
     def played(self, effect_id, signal=None):
         pcm = signal if signal is not None else to_pcm(saw())

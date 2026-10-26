@@ -1,3 +1,4 @@
+import math
 import os
 from array import array
 from pathlib import Path
@@ -15,8 +16,9 @@ from libs.game_audio_recorder import (
     PROCESS_LOOPBACK_PROBE_GUIDANCE,
     GameAudioRecorderManager,
     MicrophoneOverlayBuffer,
+    _MicrophoneMixer,
+    _ProcessedMicrophoneOverlay,
     _SegmentedWaveWriter,
-    _mix_mono16_into_stereo16,
     process_loopback_supported,
     process_loopback_unavailable_message,
     wait_for_process_loopback_verdict,
@@ -110,7 +112,11 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
             manager.close()
 
     def test_dynamic_menu_uses_separate_recording_action(self):
-        source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot" / "menus.py").read_text(encoding="utf-8")
+        # The recording pages moved to menu_pages/recording.py on 2026-10-26;
+        # the Mode page's line stayed in menus.py, so read the pair as one.
+        root = Path(__file__).resolve().parents[1] / "libs" / "music_bot"
+        source = ((root / "menus.py").read_text(encoding="utf-8")
+                  + (root / "menu_pages" / "recording.py").read_text(encoding="utf-8"))
         # The line names the Server feature it belongs to, so the Music Bot's
         # feature gate can hide it (libs/music_bot/gate.py), and it carries the
         # sentence Tab reads for it (a four-field line).
@@ -123,6 +129,8 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
         self.assertIn("self._bot.audio_recorder.capture_scope_label", source)
         self.assertIn("self._bot.audio_recorder.computer_audio_setting_label", source)
         self.assertIn("self._bot.audio_recorder.microphone_setting_label", source)
+        self.assertIn("self._bot.audio_recorder.recorded_voice_label", source)
+        self.assertIn("self._bot.audio_recorder.cycle_recorded_voice", source)
         self.assertIn("self._bot.audio_recorder.countdown_setting_label", source)
         self.assertIn("self._bot.audio_recorder.split_setting_label", source)
         self.assertIn("self._bot.audio_recorder.announce_setting_label", source)
@@ -137,6 +145,7 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "libs" / "voice_chat.py"
         ).read_text(encoding="utf-8")
         self.assertIn("audio_recorder.feed_transmitted_microphone(", voice_source)
+        self.assertIn("audio_recorder.recorded_voice_is_studio()", voice_source)
         self.assertIn("locally_rendered=bool(voice_using_mega)", voice_source)
         self.assertIn("music_bot = self._find_music_bot(gp)", voice_source)
 
@@ -317,7 +326,9 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
             self.assertTrue(self.manager.start_to_path(output))
             self.assertTrue(_wait_for(lambda: self.manager.state() == "recording"))
             backend = _FakeBackend.instances[0]
-            self.assertIsNotNone(backend.kwargs["microphone_overlay"])
+            self.assertIsInstance(backend.kwargs["microphone_overlay"],
+                                  MicrophoneOverlayBuffer)
+            self.assertFalse(self.manager.recorded_voice_is_studio())
             self.assertEqual(backend.kwargs["split_minutes"], 30)
             self.assertEqual(backend.kwargs["fade_in_seconds"], 0.0)
             self.assertEqual(backend.kwargs["fade_out_seconds"], 0.0)
@@ -333,6 +344,97 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
         self.assertIn("Recording.", self.messages)
         self.assertNotIn("Ready, 3.", self.messages)
         self.assertIn("Recording saved.", self.messages)
+
+    def test_recorded_voice_ships_transmitted_and_cycles_to_studio(self):
+        stored = {}
+        with mock.patch(
+            "libs.game_audio_recorder.options.get",
+            side_effect=lambda key, default=None: stored.get(key, default),
+        ), mock.patch(
+            "libs.game_audio_recorder.options.set",
+            side_effect=lambda key, value: stored.__setitem__(key, value),
+        ), mock.patch.object(
+            self.manager, "_studio_available", return_value=True,
+        ):
+            self.assertEqual(self.manager.recorded_voice_label(),
+                             "Recorded Voice: Transmitted")
+            self.manager.cycle_recorded_voice()
+            self.assertEqual(self.manager.recorded_voice_label(),
+                             "Recorded Voice: Studio Condenser")
+            self.assertIn("polished", self.messages[-1])
+            self.manager.cycle_recorded_voice()
+            self.assertEqual(self.manager.recorded_voice_label(),
+                             "Recorded Voice: Transmitted")
+            self.assertTrue(self.manager.restore_setting_defaults())
+            self.assertEqual(stored[recorder_module.RECORDED_VOICE_OPTION],
+                             recorder_module.RECORDED_VOICE_TRANSMITTED)
+
+    def test_studio_choice_is_ignored_when_voice_effects_are_locked(self):
+        stored = {
+            recorder_module.RECORDED_VOICE_OPTION:
+                recorder_module.RECORDED_VOICE_STUDIO,
+        }
+        with mock.patch(
+            "libs.game_audio_recorder.options.get",
+            side_effect=lambda key, default=None: stored.get(key, default),
+        ), mock.patch(
+            "libs.game_audio_recorder.options.set",
+            side_effect=lambda key, value: stored.__setitem__(key, value),
+        ), mock.patch.object(
+            self.manager, "_studio_available", return_value=False,
+        ):
+            self.assertEqual(self.manager.recorded_voice_label(),
+                             "Recorded Voice: Transmitted")
+            self.manager.cycle_recorded_voice()
+            self.assertIn("locked by staff", self.messages[-1])
+            self.assertEqual(stored[recorder_module.RECORDED_VOICE_OPTION],
+                             recorder_module.RECORDED_VOICE_STUDIO)
+
+    def test_studio_take_polishes_the_microphone_overlay(self):
+        values = {
+            recorder_module.RECORDED_VOICE_OPTION:
+                recorder_module.RECORDED_VOICE_STUDIO,
+            "music_bot_recording_include_microphone": True,
+            "music_bot_recording_countdown_seconds": 0,
+        }
+        with tempfile.TemporaryDirectory() as temp, mock.patch(
+            "libs.game_audio_recorder.options.get",
+            side_effect=lambda key, default=None: values.get(key, default),
+        ), mock.patch.object(
+            self.manager, "_studio_available", return_value=True,
+        ):
+            output = Path(temp) / "studio.wav"
+            self.assertTrue(self.manager.start_to_path(output))
+            self.assertTrue(_wait_for(lambda: self.manager.state() == "recording"))
+            self.assertTrue(self.manager.recorded_voice_is_studio())
+            backend = _FakeBackend.instances[0]
+            overlay = backend.kwargs["microphone_overlay"]
+            self.assertIsInstance(overlay, _ProcessedMicrophoneOverlay)
+            samples = array("h", (
+                int(12000 * math.sin(2.0 * math.pi * 440.0 * index / 48_000))
+                for index in range(960)
+            ))
+            raw = samples.tobytes()
+            self.assertTrue(self.manager.feed_transmitted_microphone(raw))
+            shaped = overlay.take_mono16(960)
+            self.assertEqual(len(shaped), len(raw))
+            self.assertNotEqual(shaped, raw)
+            self.manager.stop()
+            self.assertTrue(_wait_for(lambda: self.manager.state() == "idle"))
+            self.assertFalse(self.manager.recorded_voice_is_studio())
+
+    def test_the_processed_overlay_applies_effect_then_trim(self):
+        class Doubler:
+            def process(self, pcm):
+                samples = array("h")
+                samples.frombytes(pcm)
+                return array("h", (sample * 2 for sample in samples)).tobytes()
+
+        overlay = MicrophoneOverlayBuffer()
+        overlay.put_mono16(array("h", [100, -100]).tobytes())
+        processed = _ProcessedMicrophoneOverlay(overlay, Doubler(), 0.5)
+        self.assertEqual(processed.take_mono16(2),
+                         array("h", [100, -100]).tobytes())
 
     def test_computer_audio_setting_selects_system_loopback_backend(self):
         values = {
@@ -474,20 +576,48 @@ class GameAudioPcmTests(unittest.TestCase):
         values = array("h", samples)
         return values.tobytes()
 
-    def test_microphone_overlay_mixes_both_channels_and_clips(self):
-        stereo = self._pcm([30_000, -30_000, 100, -100])
-        mono = self._pcm([10_000, -200])
+    def test_microphone_overlay_limits_instead_of_clipping(self):
+        stereo = self._pcm([27_000, -27_000, 100, -100])
+        mono = self._pcm([7_000, 7_000])
+        mixer = _MicrophoneMixer()
         mixed = array("h")
-        mixed.frombytes(_mix_mono16_into_stereo16(stereo, mono))
-        self.assertEqual(mixed.tolist(), [32_767, -20_000, -100, -300])
+        mixed.frombytes(mixer.mix(stereo, mono))
+        # 34,000 would have clipped; the soft knee bends the sum under the
+        # ceiling without moving one channel against the other.
+        self.assertLess(max(abs(sample) for sample in mixed), 32_767)
+        self.assertGreater(mixed[0], 0)
+        self.assertLess(mixed[1], 0)
+        # Below the knee the sum is exact: a quiet game bed is untouched.
+        quiet = self._pcm([1_000, -1_000, 100, -100])
+        quiet_voice = self._pcm([100, 100])
+        below = array("h")
+        below.frombytes(mixer.mix(quiet, quiet_voice))
+        self.assertEqual(below.tolist(), [1_100, -900, 200, 0])
+        # A silent microphone is the game's own recording, byte for byte.
+        silent = self._pcm([0, 0])
+        self.assertEqual(mixer.mix(stereo, silent), stereo)
 
-    def test_microphone_buffer_consumes_and_zero_pads(self):
+    def test_microphone_buffer_holds_a_partial_block(self):
         overlay = MicrophoneOverlayBuffer()
         overlay.put_mono16(self._pcm([1, 2, 3]))
+        # A 5-frame request must not pad the missing 2 frames with silence:
+        # that silence is what put a hole in a voice frame the Studio chain
+        # then processed.
+        self.assertIsNone(overlay.take_mono16(5))
         result = array("h")
-        result.frombytes(overlay.take_mono16(5))
-        self.assertEqual(result.tolist(), [1, 2, 3, 0, 0])
+        result.frombytes(overlay.take_mono16(3))
+        self.assertEqual(result.tolist(), [1, 2, 3])
         self.assertIsNone(overlay.take_mono16(1))
+
+    def test_microphone_buffer_splits_one_frame_into_consecutive_blocks(self):
+        overlay = MicrophoneOverlayBuffer()
+        samples = list(range(960))
+        overlay.put_mono16(self._pcm(samples))
+        first = array("h")
+        first.frombytes(overlay.take_mono16(480))
+        second = array("h")
+        second.frombytes(overlay.take_mono16(480))
+        self.assertEqual(first.tolist() + second.tolist(), samples)
 
     def test_segmented_writer_splits_without_overwriting(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -424,7 +424,9 @@ class TestWiring(unittest.TestCase):
     def test_one_wording_for_a_result_line(self):
         # The host's own search menu and an asker's picker show the same
         # results, so both ask song_requests for the line.
-        menus = self._source("libs", "music_bot", "menus.py")
+        # menus.py holds the results page; the picker moved to menu_pages/party.py.
+        menus = (self._source("libs", "music_bot", "menus.py")
+                 + self._source("libs", "music_bot", "menu_pages", "party.py"))
         results = self._function(menus, "_show_results_menu")
         self.assertIn("song_requests.choice_line", results)
         # And neither menu invents a position number of its own: the reader

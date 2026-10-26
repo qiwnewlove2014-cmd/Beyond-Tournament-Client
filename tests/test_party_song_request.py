@@ -574,6 +574,11 @@ class TestWiring(unittest.TestCase):
         with open(path, "r", encoding="utf-8") as handle:
             return handle.read()
 
+    def _menus_source(self):
+        """menus.py and the page group that moved out of it, read as one text."""
+        return (self._source("libs", "music_bot", "menus.py")
+                + self._source("libs", "music_bot", "menu_pages", "party.py"))
+
     def _function(self, source, name):
         marker = f"def {name}("
         start = source.index(marker)
@@ -618,7 +623,7 @@ class TestWiring(unittest.TestCase):
     def test_the_host_sets_it_in_the_party_menus(self):
         # Both doors onto the session -- the Party Sync menu inside the Music
         # Bot menu and the Ctrl+F8 quick menu -- offer the host's switch.
-        menus = self._source("libs", "music_bot", "menus.py")
+        menus = self._menus_source()
         self.assertIn("song_requests_switch_item",
                       self._function(menus, "_open_party_sync_menu"))
         quick = self._function(
@@ -635,7 +640,7 @@ class TestWiring(unittest.TestCase):
 
     def test_a_guest_reads_whether_requests_are_open(self):
         body = self._function(
-            self._source("libs", "music_bot", "menus.py"),
+            self._menus_source(),
             "_open_party_sync_menu")
         self.assertIn("song_requests_label", body)
 

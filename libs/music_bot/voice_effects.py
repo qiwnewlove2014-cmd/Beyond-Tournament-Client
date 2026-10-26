@@ -85,15 +85,24 @@ hard switch is a step the size of the waveform -- and that is heard as a click.
 The first frame of a press has nothing to crossfade from (the microphone was
 silent), so it starts clean.
 
-The two shelves and the board
------------------------------
+The shelves and the boards
+--------------------------
 The Amp & Drive family holds the original six pedals, the twenty amps added on
 2026-10-26 (`Crunch` to `Twelve String` -- each one a different corner, band,
 cabinet and bias on this same chain) and `Custom Amp`, which is not a preset at
 all: `voice_effect_custom.py` holds a table of knobs, and its spec is built from
-the board the player set. A knob change bumps the board's revision, and the line
-rebuilds its processor on the next frame and crossfades into it -- the knobs
-land on the next 20 ms rather than at the next pedal change.
+the board the player set. The Vocoder Lab family ends the same way: its twenty
+machines are fixed carriers, and `voice_effect_vocoder.py` is the board that
+exposes the carrier -- its mode, note, scale degree, waveform, band shift,
+breath and mix. A knob change on either board bumps that board's revision, and
+the line rebuilds its processor on the next frame and crossfades into it -- the
+knobs land on the next 20 ms rather than at the next pedal change.
+
+The vocoder board is Developer/Contributor-only: the Server owns the flag
+(`canUseVocoderLab`), and `set_vocoder_lab_allowed` below is written from that
+snapshot so `effect_id()` can refuse a board saved on an account that no longer
+has it. The capture thread cannot call into gameplay, and the permission must
+be a plain bool it can read.
 
 The Developer's lock
 --------------------
@@ -114,9 +123,10 @@ from . import gate
 from .voice_effect_catalogue import (BUILDER_EFFECT, CUSTOM_EFFECT,
                                      DEFAULT_EFFECT, STANDALONE_EFFECTS,
                                      VOICE_EFFECTS, VOICE_EFFECT_GROUPS,
-                                     catalogue_problems, clamp_effect,
-                                     effect_label, effect_note, group_label,
-                                     group_members, group_note, group_of)
+                                     VOX_LAB_EFFECT, catalogue_problems,
+                                     clamp_effect, effect_label, effect_note,
+                                     group_label, group_members, group_note,
+                                     group_of)
 
 #: One microphone frame: 20 ms of 48 kHz mono16, the unit every voice line is
 #: fed (`libs/voice_chat.VOICE_FRAME_BYTES`).
@@ -513,10 +523,10 @@ _SPECS = {
 def spec_for(effect_id):
     """The filter settings for one pedal: a fixed row, or a player's board.
 
-    Every preset's numbers live in `_SPECS`; the two boards' do not exist until
-    a player sets them, so they are built from their tables instead. All three
-    answers go to the same processor, which is what keeps a board a preset
-    rather than a second feature.
+    Every preset's numbers live in `_SPECS`; the three boards' do not exist
+    until a player sets them, so they are built from their tables instead. All
+    of the answers go to the same processor, which is what keeps a board a
+    preset rather than a second feature.
     """
     if effect_id == CUSTOM_EFFECT:
         from . import voice_effect_custom
@@ -524,6 +534,9 @@ def spec_for(effect_id):
     if effect_id == BUILDER_EFFECT:
         from . import voice_effect_builder
         return voice_effect_builder.spec()
+    if effect_id == VOX_LAB_EFFECT:
+        from . import voice_effect_vocoder
+        return voice_effect_vocoder.spec()
     return _SPECS[effect_id]
 
 #: The loudest a pedal may hand over, in full scale. The PA and a cinema cabinet
@@ -679,6 +692,25 @@ SAG_FALL = 0.55
 SAG_RISE = 0.12
 
 
+#: Whether the Server says this account may use the Vocoder Lab board. The
+#: capture thread reads `effect_id()` and must not call into gameplay, so the
+#: answer is a plain bool, written on the main thread when a login or a staff
+#: refresh arrives (libs/event_handeler.py). False until a snapshot says so: a
+#: board saved on another account must not apply in the meantime.
+_vocoder_lab_allowed = False
+
+
+def set_vocoder_lab_allowed(allowed):
+    """Record the Server's answer for the vocoder board (main thread only)."""
+    global _vocoder_lab_allowed
+    _vocoder_lab_allowed = bool(allowed)
+
+
+def vocoder_lab_allowed():
+    """Whether the vocoder board may apply -- the last Server answer."""
+    return _vocoder_lab_allowed
+
+
 def selected():
     """The saved preset, without asking the Developer's gate."""
     return clamp_effect(options.get(OPTION, DEFAULT_EFFECT))
@@ -692,12 +724,38 @@ def effect_id():
     """
     if gate.is_locked("voice_fx"):
         return DEFAULT_EFFECT
-    return selected()
+    wanted = selected()
+    if wanted == VOX_LAB_EFFECT and not _vocoder_lab_allowed:
+        return DEFAULT_EFFECT
+    return wanted
 
 
 def enabled():
     """Whether a preset is chosen and allowed."""
     return effect_id() != DEFAULT_EFFECT
+
+
+#: The one pedal a recording may wear on its own, without changing the voice
+#: other players hear. It is a fixed shelf row, not a board: the recorder
+#: asks for exactly this chain and gets a fresh processor for each take.
+RECORDING_STUDIO_EFFECT = "rad_studio"
+
+
+def recording_studio_available():
+    """Whether the Staff's Voice Effects lock leaves the recording board open."""
+    return not gate.is_locked("voice_fx")
+
+
+def recording_studio_processor():
+    """A standalone Studio Condenser for the recorder thread, or None when locked.
+
+    The recorder is not the broadcast path: it gets its own processor so a
+    take cannot inherit a sentence's look-ahead or a live preset change, and
+    the capture thread never pays for it.
+    """
+    if not recording_studio_available():
+        return None
+    return _EffectProcessor(RECORDING_STUDIO_EFFECT)
 
 
 # ------------------------------------------------------------------ the filters
@@ -2173,6 +2231,9 @@ def _board_revision(effect_id):
     if effect_id == BUILDER_EFFECT:
         from . import voice_effect_builder
         return voice_effect_builder.revision()
+    if effect_id == VOX_LAB_EFFECT:
+        from . import voice_effect_vocoder
+        return voice_effect_vocoder.revision()
     return 0
 
 

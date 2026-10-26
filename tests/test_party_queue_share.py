@@ -227,6 +227,19 @@ class TestOneWording(unittest.TestCase):
         speak.assert_called_once_with("1. A Song (requested by Bob)")
 
 
+def menu_source():
+    """menus.py plus the page groups that moved out of it, read as one text."""
+    root = os.path.join(os.path.dirname(__file__), "..", "libs", "music_bot")
+    paths = [os.path.join(root, "menus.py")]
+    paths += [os.path.join(root, "menu_pages", page)
+              for page in ("party.py", "library.py")]
+    texts = []
+    for path in paths:
+        with open(path, "r", encoding="utf-8") as handle:
+            texts.append(handle.read())
+    return "".join(texts)
+
+
 class TestNoSecondWording(unittest.TestCase):
     """The wording may only be composed in `song_requests`."""
 
@@ -235,6 +248,8 @@ class TestNoSecondWording(unittest.TestCase):
     #: Every client module that speaks for the music bot's queue.
     READERS = (
         os.path.join("libs", "music_bot", "menus.py"),
+        os.path.join("libs", "music_bot", "menu_pages", "party.py"),
+        os.path.join("libs", "music_bot", "menu_pages", "library.py"),
         os.path.join("libs", "music_bot", "controller.py"),
         os.path.join("libs", "party_sync.py"),
         os.path.join("libs", "gameplay.py"),
@@ -269,7 +284,7 @@ class TestNoSecondWording(unittest.TestCase):
                                  f"{path} composes '{phrase}' itself")
 
     def test_both_menus_ask_the_shared_builders(self):
-        menus = self._source("libs", "music_bot", "menus.py")
+        menus = menu_source()
         controller = self._source("libs", "music_bot", "controller.py")
         host = self._function(menus, "_open_queue_menu")
         listener = self._function(menus, "open_party_queue_view")
@@ -531,7 +546,7 @@ class TestWiring(unittest.TestCase):
         self.assertIn("ps.queue", body)
 
     def test_a_listener_reads_the_queue_without_touching_it(self):
-        menus = self._source("libs", "music_bot", "menus.py")
+        menus = menu_source()
         view = self._function(menus, "open_party_queue_view")
         self.assertIn("song_requests.queue_lines", view)
         self.assertIn('("Close"', view)
@@ -540,7 +555,7 @@ class TestWiring(unittest.TestCase):
         self.assertNotIn("next_up_queue", view)
 
     def test_both_of_a_listeners_party_menus_offer_it(self):
-        menus = self._source("libs", "music_bot", "menus.py")
+        menus = menu_source()
         party = self._function(menus, "_open_party_sync_menu")
         self.assertIn("party_queue_label", party)
         self.assertIn("open_party_queue_view", party)
