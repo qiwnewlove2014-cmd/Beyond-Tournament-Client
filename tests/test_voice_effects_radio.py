@@ -1,8 +1,12 @@
-"""The radio family -- thirty channels, from four bits to a studio condenser.
+"""The radio family -- twenty channels, from four bits to a cockpit headset.
 
 `libs/music_bot/voice_effects.py` has a `Radio` pedal in Amp & Drive, and it is
 a voice through a small speaker. This family is the other half of the idea: what
 makes a voice a *transmission* rather than merely a voice through a filter.
+
+The room and desk channels that used to sit at the top of the same ladder are
+now the `PA & Venue` and `Broadcast Desk` families; the premium handset mics
+are `Pocket Mics`. The split is pinned here beside the radio it came from.
 
 What is pinned here, and why each one is a measurement rather than a table:
 
@@ -17,7 +21,7 @@ What is pinned here, and why each one is a measurement rather than a table:
    same in the gap as in the silence, and well under the words).
 3. **Every channel is usable**: audible, under `PEAK_CEILING` for a soft voice
    and for a shout, and a frame in is a frame out.
-4. **The descriptions are the menu**: thirty rows, thirty names, no two alike.
+4. **The descriptions are the menu**: twenty rows, twenty names, no two alike.
 
 No game, OpenAL, ffmpeg or network is required.
 """
@@ -93,7 +97,7 @@ def above(samples, corner):
 
 
 class TheRadioFamilyTests(unittest.TestCase):
-    """Thirty channels in a ladder, and the hiss that makes them channels."""
+    """Twenty channels in a ladder, and the hiss that makes them channels."""
 
     def channels(self):
         return voice_effects.group_members(FAMILY)
@@ -103,9 +107,9 @@ class TheRadioFamilyTests(unittest.TestCase):
                      else saw())
         return play(voice_effects._EffectProcessor(effect_id), pcm)[FRAME * 10:]
 
-    def test_the_family_is_thirty_and_nothing_is_lost(self):
+    def test_the_family_is_twenty_and_nothing_is_lost(self):
         self.assertEqual(voice_effects.catalogue_problems(), [])
-        self.assertEqual(len(self.channels()), 30)
+        self.assertEqual(len(self.channels()), 20)
         self.assertEqual(voice_effects.group_label(FAMILY), "Radio")
         rows = {row[0]: row[1] for row in voice_effects.VOICE_EFFECTS}
         labels = [row[1] for row in voice_effects.VOICE_EFFECTS]
@@ -116,32 +120,32 @@ class TheRadioFamilyTests(unittest.TestCase):
                 self.assertTrue(voice_effects.effect_note(effect_id).strip())
 
     def test_the_ladder_climbs(self):
-        """From a four-bit toy to a studio: the top of the channel opens up.
+        """From a four-bit toy to a cockpit headset: the top opens up.
 
         Measured on a 300 Hz saw, so the probe itself carries energy all the way
-        up; what is left above 5 kHz is the channel's own corner. The seven rungs
-        are the tiers a player walks through -- toy, CB, police, air traffic,
-        cockpit, terminal, studio -- and each has to be wider than the one under
-        it, by a real margin rather than by a rounding error.
+        up; what is left above 5 kHz is the channel's own corner. The rungs are
+        the tiers a player walks through -- toy, air traffic, cockpit -- and
+        each has to be wider than the one under it, by a real margin rather
+        than by a rounding error. The studios and venue rooms are their own
+        shelves now, and the pocket mics are pinned below.
         """
-        rungs = ["rad_8bit", "rad_airtraffic", "rad_terminal", "rad_fm",
-                 "rad_studio"]
+        rungs = ["rad_8bit", "rad_airtraffic", "rad_cockpit"]
         shares = {effect_id: above(self.played(effect_id), 5000.0)
                   for effect_id in rungs}
         for lower, higher in zip(rungs, rungs[1:]):
             with self.subTest(lower=lower, higher=higher):
                 self.assertGreater(shares[higher], shares[lower], shares)
         self.assertLess(shares["rad_8bit"], 0.001)
-        self.assertGreater(shares["rad_studio"], 0.02)
+        self.assertGreater(shares["rad_cockpit"], 0.002)
         # The neighbouring rungs are not a strict order -- a police set is
         # narrower than a CB on purpose, being built for a siren rather than a
-        # conversation -- but the two ends are two worlds apart.
-        self.assertGreater(shares["rad_studio"], 20.0 * shares["rad_8bit"])
+        # conversation -- but the two ends are worlds apart.
+        self.assertGreater(shares["rad_cockpit"], 5.0 * shares["rad_8bit"])
         # The narrow end really is narrow: above 3.4 kilohertz a four-bit channel
-        # keeps a quarter of a percent, where the studio keeps four.
+        # keeps a quarter of a percent, where the cockpit keeps a few.
         self.assertLess(above(self.played("rad_8bit"), 3400.0), 0.01)
-        self.assertGreater(above(self.played("rad_studio"), 3400.0), 0.03)
-        self.assertGreater(above(self.played("rad_studio"), 3400.0),
+        self.assertGreater(above(self.played("rad_cockpit"), 3400.0), 0.02)
+        self.assertGreater(above(self.played("rad_cockpit"), 3400.0),
                            5.0 * above(self.played("rad_8bit"), 3400.0))
 
     def test_a_radio_hisses_when_nobody_is_talking(self):
@@ -157,13 +161,8 @@ class TheRadioFamilyTests(unittest.TestCase):
                 floor = rms(play(voice_effects._EffectProcessor(effect_id),
                                  to_pcm(silence()))[FRAME * 8:])
                 self.assertGreater(floor, 0.01)
-        # The top of the ladder has no codec and no hiss: silence is silence.
-        for effect_id in ("rad_studio", "rad_fm", "rad_news", "rad_mission",
-                          "rad_cinema", "rad_church", "rad_stadium"):
-            with self.subTest(channel=effect_id):
-                floor = rms(play(voice_effects._EffectProcessor(effect_id),
-                                 to_pcm(silence()))[FRAME * 8:])
-                self.assertLess(floor, 0.0005)
+        # The clean shelves are their own families now; their silence is
+        # pinned by TheSplitShelvesTests below.
 
     def test_the_hiss_does_not_follow_the_words(self):
         """A whisper follows the speaker; a channel floor does not.
@@ -188,6 +187,92 @@ class TheRadioFamilyTests(unittest.TestCase):
             with self.subTest(channel=effect_id):
                 for amplitude in (0.25, 0.9):
                     after = self.played(effect_id, saw(amplitude))
+                    self.assertGreater(rms(after), 0.08)
+                    self.assertLessEqual(float(np.max(np.abs(after))),
+                                         voice_effects.PEAK_CEILING + 1e-6)
+
+
+VENUE = ("rad_terminal", "rad_station", "rad_stadium", "rad_church",
+         "rad_cinema", "rad_trailer")
+DESK = ("rad_fm", "rad_studio", "rad_news", "rad_mission")
+POCKET = ("mic_pocket", "mic_titanium", "mic_ceramic", "mic_glass",
+          "mic_night", "mic_flagship", "mic_nano", "mic_magnetic",
+          "mic_broadcast", "mic_silicon")
+
+
+class TheSplitShelvesTests(unittest.TestCase):
+    """The ten channels that left Radio: six rooms and four desks."""
+
+    def test_the_ten_moved_to_two_named_families(self):
+        self.assertEqual(voice_effects.catalogue_problems(), [])
+        self.assertEqual(voice_effects.group_members("venue"), VENUE)
+        self.assertEqual(voice_effects.group_members("desk"), DESK)
+        self.assertEqual(voice_effects.group_label("venue"), "PA & Venue")
+        self.assertEqual(voice_effects.group_label("desk"), "Broadcast Desk")
+        for effect_id in VENUE + DESK:
+            with self.subTest(channel=effect_id):
+                self.assertNotIn(effect_id, voice_effects.group_members("broadcast"))
+                self.assertIn(voice_effects.group_of(effect_id),
+                              ("venue", "desk"))
+                self.assertTrue(voice_effects.effect_note(effect_id).strip())
+
+    def test_the_clean_shelves_are_quiet_between_words(self):
+        for effect_id in VENUE + DESK:
+            with self.subTest(channel=effect_id):
+                floor = rms(play(voice_effects._EffectProcessor(effect_id),
+                                 to_pcm(silence()))[FRAME * 8:])
+                self.assertLess(floor, 0.01)
+
+    def test_every_split_channel_is_usable_soft_and_loud(self):
+        for effect_id in VENUE + DESK:
+            with self.subTest(channel=effect_id):
+                for amplitude in (0.25, 0.9):
+                    after = play(voice_effects._EffectProcessor(effect_id),
+                                 to_pcm(saw(amplitude)))[FRAME * 10:]
+                    self.assertGreater(rms(after), 0.08)
+                    self.assertLessEqual(float(np.max(np.abs(after))),
+                                         voice_effects.PEAK_CEILING + 1e-6)
+
+
+class ThePocketMicsTests(unittest.TestCase):
+    """Ten premium handset mics under house names, never a maker's."""
+
+    def test_ten_premium_handset_mics_are_reachable(self):
+        self.assertEqual(voice_effects.catalogue_problems(), [])
+        self.assertEqual(voice_effects.group_members("pocket"), POCKET)
+        self.assertEqual(voice_effects.group_label("pocket"), "Pocket Mics")
+        labels = [voice_effects.effect_label(effect_id)
+                  for effect_id in POCKET]
+        self.assertEqual(len(labels), len(set(labels)))
+        for effect_id in POCKET:
+            with self.subTest(mic=effect_id):
+                self.assertTrue(voice_effects.effect_note(effect_id).strip())
+
+    def test_no_handset_brand_or_model_is_named(self):
+        # The owner's rule: the sounds may be inspired by premium handsets,
+        # but a menu line must never carry the maker's or the model's name.
+        banned = ("iphone", "ipad", "apple", "samsung", "galaxy", "pixel",
+                  "android", "huawei", "xiaomi", "redmi", "oneplus",
+                  "oppo", "vivo", "realme", "sony", "xperia", "nokia",
+                  "motorola", "asus", "nothing phone")
+        for effect_id in POCKET:
+            text = (voice_effects.effect_label(effect_id) + " "
+                    + voice_effects.effect_note(effect_id)).lower()
+            for word in banned:
+                with self.subTest(mic=effect_id, word=word):
+                    self.assertNotIn(word, text)
+
+    def test_each_pocket_mic_is_its_own_sound(self):
+        specs = [repr(sorted(voice_effects._SPECS[effect_id].items()))
+                 for effect_id in POCKET]
+        self.assertEqual(len(specs), len(set(specs)))
+
+    def test_every_pocket_mic_is_usable_soft_and_loud(self):
+        for effect_id in POCKET:
+            with self.subTest(mic=effect_id):
+                for amplitude in (0.25, 0.9):
+                    after = play(voice_effects._EffectProcessor(effect_id),
+                                 to_pcm(saw(amplitude)))[FRAME * 10:]
                     self.assertGreater(rms(after), 0.08)
                     self.assertLessEqual(float(np.max(np.abs(after))),
                                          voice_effects.PEAK_CEILING + 1e-6)

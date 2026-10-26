@@ -375,7 +375,7 @@ VOICE_EFFECTS = (
      "above or below it, for a fixed harmony or a drone in a key. Wave, "
      "Formant Shift, Breath and Mix shape it, and every row lands on the next "
      "20 millisecond frame."),
-    # ---- the radio family (2026-10-26): thirty channels, worst to best
+    # ---- the radio family (2026-10-26): twenty channels, worst to best
     ("rad_8bit", "Eight Bit",
      "A four-bit toy radio: six kilohertz of samples, sixteen steps and a hiss "
      "behind the words. The worst thing here on purpose -- it is the sound of a "
@@ -475,6 +475,42 @@ VOICE_EFFECTS = (
      "A flight controller's loop: clean, quiet, level, with a small room behind "
      "it. Calm on purpose -- the sound of a place where nothing is allowed to "
      "sound alarmed."),
+    # ---- pocket microphones: premium handsets under house names, never the
+    # maker's. They are close, clean channels with a small body -- the opposite
+    # end of the shelf from the radio's codec and hiss.
+    ("mic_pocket", "Pocket Studio",
+     "A flagship handset held close: a tight low cut, a clean top and a "
+     "gentle leveller, so a voice memo sounds produced without a microphone "
+     "in the room."),
+    ("mic_titanium", "Titanium Memo",
+     "A crisp metal-bodied handset: the consonants are pushed forward, the "
+     "top is bright and every word is held at the same level -- a voice note "
+     "read like a headline."),
+    ("mic_ceramic", "Ceramic Close",
+     "A warm ceramic-backed handset: a soft top, a little chest and a gate "
+     "that closes between sentences. Intimate rather than bright."),
+    ("mic_glass", "Glass Slab",
+     "A glass-backed handset on a table: a glassy top, a short body and a "
+     "compressor that keeps the room out. Polished and slightly hard."),
+    ("mic_night", "Night Capture",
+     "A night-mode voice memo: darker, quieter and gated, with the room "
+     "pushed down. For a sentence spoken close in a low light."),
+    ("mic_flagship", "Flagship Close",
+     "The most expensive handset's close mic: full, forward and loud, with a "
+     "presence lift and a leveller that never lets a word fall."),
+    ("mic_nano", "Nano Condenser",
+     "A tiny condenser in a thin phone: wide for a handset, quiet and "
+     "detailed, with almost no colour -- the closest a pocket gets to a "
+     "studio."),
+    ("mic_magnetic", "Magnetic Voice",
+     "A warm magnetic mount: a low-mid body, a smooth top and a slow "
+     "leveller, so the voice sounds held rather than clipped."),
+    ("mic_broadcast", "Pocket Broadcast",
+     "A handset in broadcast mode: band-limited, levelled hard and bright, "
+     "so a sentence sounds like a reporter's phone-in."),
+    ("mic_silicon", "Silicon Ribbon",
+     "A ribbon-like smoothness from a silicon mic: an airy top, a soft body "
+     "and no edge. The expensive one for a quiet room."),
     # ---- the board: not a preset, the player's own
     ("custom", "Custom Amp",
      "Your own amp, built on a page of knobs: drive, character, bass, mid, "
@@ -549,18 +585,33 @@ VOICE_EFFECT_GROUPS = (
       "vox_shimmer", "vox_iron", "vox_air", "vox_formant", "vox_octave",
       VOX_LAB_EFFECT)),
     ("broadcast", "Radio",
-     "Thirty channels in a ladder, from a four-bit toy with a torn cone to a "
-     "studio condenser: what changes is the channel's corners, the codec's bit "
-     "depth, how loud the channel hisses and how hard it is levelled -- and, at "
-     "the top, the room the voice is heard in. The start of the list is "
-     "deliberately bad.",
+     "Twenty channels in a ladder, from a four-bit toy with a torn cone to a "
+     "cockpit headset: what changes is the channel's corners, the codec's bit "
+     "depth, how loud the channel hisses and how hard it is levelled. The "
+     "start of the list is deliberately bad.",
      ("rad_8bit", "rad_broken", "rad_toy", "rad_cardboard", "rad_intercom",
       "rad_cb", "rad_walkie", "rad_drivethru", "rad_am", "rad_shortwave",
       "rad_numbers", "rad_fieldphone", "rad_military", "rad_police",
       "rad_dispatch", "rad_marine", "rad_ham", "rad_airtraffic",
-      "rad_tower", "rad_cockpit", "rad_terminal", "rad_station",
-      "rad_stadium", "rad_church", "rad_cinema", "rad_trailer", "rad_fm",
-      "rad_studio", "rad_news", "rad_mission")),
+      "rad_tower", "rad_cockpit")),
+    ("venue", "PA & Venue",
+     "The six places a voice is announced rather than transmitted: an "
+     "airport terminal, a station hall, a stadium, a church, a cinema and a "
+     "trailer. The room is the effect; the channel itself is clean.",
+     ("rad_terminal", "rad_station", "rad_stadium", "rad_church",
+      "rad_cinema", "rad_trailer")),
+    ("desk", "Broadcast Desk",
+     "The four clean desks at the top of the old ladder: FM, a studio "
+     "condenser, a news anchor and mission control. Close, quiet and levelled, "
+     "with no codec and no hiss.",
+     ("rad_fm", "rad_studio", "rad_news", "rad_mission")),
+    ("pocket", "Pocket Mics",
+     "Ten premium handset microphones under house names: close, quiet and "
+     "levelled, from a warm ceramic body to a nano condenser. No handset "
+     "brand is named -- the sound is the point.",
+     ("mic_pocket", "mic_titanium", "mic_ceramic", "mic_glass",
+      "mic_night", "mic_flagship", "mic_nano", "mic_magnetic",
+      "mic_broadcast", "mic_silicon")),
 )
 
 

@@ -27,8 +27,9 @@ class VoiceEffectMenus:
     def _open_voice_effect_menu(self, group=None):
         """The pedals a player can put their broadcast voice through.
 
-        Two levels: the families, then the pedals in one of them. Sixty-eight
-        pedals in one list is a list you scroll rather than read, and a name
+        Two levels: the families, then the pedals in one of them. A hundred
+        and thirty-two pedals in one list is a list you scroll rather than read,
+        and a name
         like `Plate` says nothing until something explains it -- a family is
         where that explanation fits without every line carrying all of it. Off
         stays on the top page, so turning the effect off never means drilling

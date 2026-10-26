@@ -410,7 +410,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         self.assertEqual(voice_effect_custom.values()["drive"], "sat")
 
     def test_the_voice_effect_page_ends_with_the_voice_builder(self):
-        """Custom Voice is the page's last choice, after the seven families."""
+        """Custom Voice is the page's last choice, after the families."""
         self.handler._open_voice_effect_menu()
         menu = self.last_menu()
         labels = [label_of(item) for item in menu.items]

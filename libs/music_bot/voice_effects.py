@@ -399,13 +399,13 @@ _SPECS = {
                        gate=0.005, out=2.60,
                        vocoder=(2.6, 0.85, 110.0, "saw", 1.0, 0.0),
                        octave=0.40),
-    # The radio family (2026-10-26): thirty channels, from a four-bit toy to a
-    # studio condenser, in one ladder. What makes a voice a *transmission* is
-    # four things and they are each a dial here: the channel's corners (hp/lp),
-    # the codec (`crush`, absent at the top), the noise floor (`static`, added
-    # after the gate so it never follows the words) and how hard the channel is
-    # levelled (`ott`). The top of the ladder adds the room it is heard in --
-    # the terminal, the hall, the church, the cinema.
+    # The radio family (2026-10-26): twenty channels, from a four-bit toy to a
+    # cockpit headset. What makes a voice a *transmission* is four things and
+    # they are each a dial here: the channel's corners (hp/lp), the codec
+    # (`crush`, absent at the top), the noise floor (`static`, added after the
+    # gate so it never follows the words) and how hard the channel is levelled
+    # (`ott`). The ten clean room and desk channels that used to top this ladder
+    # are their own families now (`PA & Venue`, `Broadcast Desk`).
     "rad_8bit": dict(hp=380.0, lp=3200.0, drive=1.0, shape=None, bias=0.0,
                      gate=0.006, out=2.20, crush=(4, 6000.0),
                      static=(0.016, 380.0, 3200.0)),
@@ -516,6 +516,52 @@ _SPECS = {
                         air=(7500.0, 2.0, 0.20),
                         cluster=((13.0, 19.0, 29.0, 41.0),
                                  (0.40, 0.34, 0.28, 0.22), 0.16, 0.20)),
+    # The pocket microphone family (2026-10-27): ten premium handsets under
+    # house names. They are deliberately not radios -- no codec and almost no
+    # floor. What changes is the capsule (hp/lp/air), the body
+    # (cluster/formant) and how hard the handset's own leveller holds a word
+    # (ott). The chain is the same one the radio top uses, which is the point:
+    # a phone mic is a close, clean channel with a small body.
+    "mic_pocket": dict(hp=110.0, lp=10500.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.004, out=4.20, ott=(1.05, 0.52),
+                       air=(8500.0, 1.8, 0.16)),
+    "mic_titanium": dict(hp=125.0, lp=10000.0, drive=1.3, shape="tanh",
+                         bias=0.02, gate=0.004, out=5.00,
+                         formant=(3200.0, 1.05, 0.30, 1.35),
+                         ott=(1.25, 0.62), air=(9000.0, 2.0, 0.20)),
+    "mic_ceramic": dict(hp=95.0, lp=8500.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.005, out=3.65, ott=(0.80, 0.40),
+                        cluster=((3.0, 5.0, 7.0, 11.0),
+                                 (0.30, 0.22, 0.16, 0.10), 0.10, 0.12),
+                        air=(6500.0, 1.4, 0.12)),
+    "mic_glass": dict(hp=135.0, lp=11000.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.004, out=4.55,
+                      formant=(2600.0, 0.90, 0.25, 1.20),
+                      ott=(1.30, 0.65), air=(9800.0, 2.2, 0.22)),
+    "mic_night": dict(hp=145.0, lp=7200.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.008, out=3.25, ott=(1.60, 0.75),
+                      static=(0.002, 300.0, 7200.0)),
+    "mic_flagship": dict(hp=90.0, lp=9800.0, drive=1.2, shape="tanh",
+                         bias=0.02, gate=0.004, out=5.45,
+                         formant=(2800.0, 1.10, 0.30, 1.45),
+                         ott=(1.35, 0.68), air=(8000.0, 1.8, 0.16)),
+    "mic_nano": dict(hp=75.0, lp=12500.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.004, out=4.70, ott=(0.80, 0.40),
+                     air=(10500.0, 2.4, 0.22)),
+    "mic_magnetic": dict(hp=100.0, lp=9000.0, drive=1.0, shape=None, bias=0.0,
+                         gate=0.005, out=4.05,
+                         formant=(600.0, 1.15, 0.35, 1.55),
+                         ott=(0.95, 0.48), air=(7000.0, 1.5, 0.12)),
+    "mic_broadcast": dict(hp=160.0, lp=8000.0, drive=1.8, shape="tanh",
+                          bias=0.04, gate=0.005, out=6.00,
+                          formant=(3000.0, 1.20, 0.30, 1.35),
+                          ott=(1.50, 0.75),
+                          static=(0.002, 300.0, 8000.0)),
+    "mic_silicon": dict(hp=85.0, lp=11500.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.004, out=4.45, ott=(0.90, 0.45),
+                        air=(10000.0, 2.6, 0.20),
+                        cluster=((2.0, 4.0, 6.0, 9.0),
+                                 (0.22, 0.16, 0.11, 0.07), 0.08, 0.10)),
 
 }
 
