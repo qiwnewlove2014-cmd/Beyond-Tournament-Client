@@ -583,8 +583,11 @@ class _EffectProcessor:
     #: step with one another as well as with the frames.
     TAPS = 257
 
-    def __init__(self, preset):
-        spec = spec_for(preset)
+    def __init__(self, preset, spec=None):
+        """`spec` overrides the table for a chain that is a preset *plus*
+        something -- the in-game radio's gentle auto-wah is the one caller
+        (`libs/radio_voice.py`); everything else is the preset's own row."""
+        spec = spec if spec is not None else spec_for(preset)
         self.preset = preset
         self.spec = spec
         self.pre = _Biquad.highpass(spec["hp"])

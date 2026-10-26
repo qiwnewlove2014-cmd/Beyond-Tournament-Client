@@ -109,38 +109,16 @@ class Entity(Object):
                 self.radio_source.position = (0,0,0)
                 self.radio_source.relative = True
                 self.radio_source.gain=0.7
-            try:
-                # Tagged with this entity as the holder: an entity dropped
-                # without its destroy() (overwritten in the entity table during
-                # a reload) used to keep these two slots for the rest of the
-                # session, and the map-load sweep can now see that it is gone.
-                self.eq_slot = self.soundgroup.parent.gen_effect(
-                    "EQUALIZER",
-                    ("low_gain", 0.126),
-                    ("low_cutoff", 800.0),
-                    ("high_gain", 0.126),
-                    ("high_cutoff", 4000.0),
-                    ("mid1_gain", 1.0),
-                    ("mid2_gain", 1.0),
-                    hold=("voice_effects", f"{self.name}:eq", self),
-                )
-                self.distortion_slot = self.soundgroup.parent.gen_effect(
-                    "DISTORTION",
-                    ("edge", 0.2),
-                    ("gain", 0.5),
-                    ("lowpass_cutoff", 8000.0),
-                    ("eqcenter", 3000.0),
-                    ("eqbandwidth", 1000.0),
-                    hold=("voice_effects", f"{self.name}:radio", self),
-                )
-            except Exception:
-                self.eq_slot = None
-                self.distortion_slot = None
-            try:
-                if self.distortion_slot is not None: self.distortion_slot.target = self.eq_slot
-            except Exception as e:
-                print(f"[Entity] Warning: Failed to chain distortion to equalizer target: {e}")
-            self.soundgroup.parent.efx.send(self.radio_source, 1, self.distortion_slot)
+            # The radio copy is coloured on the RECEIVE path now, by the Voice
+            # Effect list's own `radio` pedal (`libs/radio_voice.py`), so this
+            # entity holds no EFX slots for it any more. It used to hold an
+            # EQUALIZER chained from a DISTORTION -- two of the driver's 64
+            # slots per remote player, forty of them in a twenty-player lobby,
+            # which is what `AudioManager._init_slot_pool` warns about. The
+            # attributes stay (as None) because `destroy` returns whatever is
+            # in them.
+            self.eq_slot = None
+            self.distortion_slot = None
             self.vc_compression = voice_chat.voice_chat_compression(self.game)
             self.music_compression = voice_chat.MusicCompression(self.game)
             

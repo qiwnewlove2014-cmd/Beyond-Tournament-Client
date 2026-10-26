@@ -6,6 +6,7 @@ import cyal.exceptions
 from pyogg import OpusEncoder, OpusDecoder
 import cyal
 from . import consts
+from . import radio_voice
 from .speech import speak
 from . import options
 from . import logger
@@ -1139,11 +1140,52 @@ def _drop_source_queue(src):
         pass
 
 
-def _play_voice_frame(mngr, sources, data, margin_frames, radio_source, channelID, gameplay):
+def _radio_audible(gameplay, channelID):
+    """Whether this listener hears the radio copy of this channel at all.
+
+    One place for the condition, because two threads now ask it: the decode
+    worker decides whether to colour a frame (`recieve2`) and the main thread
+    decides whether to queue it (`_play_voice_frame`). A worker that coloured a
+    frame nobody would hear would be work for nothing, and two copies of the
+    test could drift into colouring one and playing the other.
+    """
+    if channelID == consts.CHANNEL_MEGAPHONE:
+        return False
+    voice_channel = (gameplay.voice_channels.get(channelID)
+                     if hasattr(gameplay, 'voice_channels') else None)
+    return bool(voice_channel and voice_channel.has_radio
+                and gameplay.player.has_radio)
+
+
+def _radio_key(channelID, sender_id, radio_source, vc_source):
+    """Which speaker this radio frame belongs to.
+
+    A party or team leg carries the sender's id; the ordinary proximity leg does
+    not (`EventHandeler.process_voice_data` already knows the sender and hands
+    over their own receiver object instead). So the key falls back to that
+    receiver's source, which is one object per speaker for as long as they are
+    here -- the thing that identifies them on this leg, and the only thing. A
+    reused id after a player leaves inherits at most 2.7 ms of a filter tail,
+    never another voice's band.
+    """
+    if sender_id is not None:
+        return (channelID, sender_id)
+    source = radio_source if radio_source is not None else vc_source
+    return (channelID, id(source))
+
+
+def _play_voice_frame(mngr, sources, data, margin_frames, radio_source, channelID, gameplay,
+                      radio_data=None):
     """Queue one decoded 20 ms voice frame (and its radio copy) for playback.
 
                     MAIN THREAD ONLY - called via AudioManager.defer_audio() from
                     voice_chat_compression.recieve2, so no OpenAL call runs on a worker thread.
+
+                    ``radio_data`` is that copy already coloured by
+                    `libs/radio_voice.py` on the decode worker -- the radio's tone
+                    is the Voice Effect list's own `radio` pedal, and it is paid
+                    on the thread that decodes rather than this one, which owns
+                    OpenAL and the frame being drawn.
                     """
     sources_to_play = []
     for idx, src in enumerate(sources):
@@ -1189,11 +1231,7 @@ def _play_voice_frame(mngr, sources, data, margin_frames, radio_source, channelI
             pass
 
     # Skip radio processing for CHANNEL_MEGAPHONE (no radio, global broadcast only)
-    if channelID == consts.CHANNEL_MEGAPHONE:
-        return
-
-    voice_channel = gameplay.voice_channels.get(channelID) if hasattr(gameplay, 'voice_channels') else None
-    if not voice_channel or not voice_channel.has_radio or not gameplay.player.has_radio:
+    if not _radio_audible(gameplay, channelID):
         return
     try:
         if radio_source.buffers_processed > 0:
@@ -1204,7 +1242,11 @@ def _play_voice_frame(mngr, sources, data, margin_frames, radio_source, channelI
     buffer = _get_buffer_from_pool(mngr)
     if buffer is not None:
         try:
-            buffer.set_data(data, sample_rate=48000, format=cyal.BufferFormat.MONO16)
+            # The coloured copy when the worker made one; the raw frame only
+            # if a caller queued the radio without going through `recieve2`
+            # (a tool, a test) -- never a second, uncoloured voice in the game.
+            buffer.set_data(radio_data if radio_data is not None else data,
+                            sample_rate=48000, format=cyal.BufferFormat.MONO16)
             radio_source.queue_buffers(buffer)
         except Exception:
             pass
@@ -1734,8 +1776,17 @@ class voice_chat_compression(threading.Thread):
         # on the MAIN thread via the audio inbox.
         mngr = self.game.audio_mngr
         frame_data = bytes(data)
+        # The radio's tone is paid here, on the decode worker, not on the main
+        # thread: one coloured frame per speaker, in a biquad's own band.
+        radio_data = None
+        if _radio_audible(gameplay, channelID):
+            radio_data = radio_voice.frame(
+                _radio_key(channelID, sender_id, radio_source, vc_source),
+                frame_data,
+            )
         mngr.defer_audio(lambda: _play_voice_frame(
-            mngr, sources, frame_data, margin_frames, radio_source, channelID, gameplay
+            mngr, sources, frame_data, margin_frames, radio_source, channelID, gameplay,
+            radio_data=radio_data,
         ))
 
 
