@@ -128,6 +128,15 @@ VOICE_EFFECTS = (
     ("whisper", "Whisper",
      "A hush: the voice loses its low end and filtered breath rides its own "
      "envelope. Quiet and close, as if someone is speaking into your ear."),
+    ("hiss", "Hiss",
+     "The breath with no voice under it: a bright band of noise riding the "
+     "shape of the syllable, so every word arrives as its own hiss. Not a "
+     "whisper -- there are no formants in it, which is what makes it sound like "
+     "a brush across a snare drum."),
+    ("hiss_room", "Hiss Room",
+     "The same hiss left in a stone room: four taps feed one another, so a "
+     "syllable hisses and then hisses from the walls. Wide, dry, and a little "
+     "wrong on purpose."),
     ("growl", "Growl",
      "Two formants moved down, so the same words come from a much bigger "
      "chest. Dark and heavy, where Sub Octave is buzzy and Alien is metallic."),
@@ -335,9 +344,10 @@ VOICE_EFFECT_GROUPS = (
      "bigger than the one you are in.",
      ("echo", "cave", "cloud", "swell", "reverse")),
     ("character", "Character",
-     "Vinyl, wood, breath, air, a double and a talkbox: the pedals that change "
-     "what the voice is made of.",
-     ("vinyl", "body", "whisper", "air", "doubler", "talkbox")),
+     "Vinyl, wood, breath, air, a hiss, a double and a talkbox: the pedals that "
+     "change what the voice is made of.",
+     ("vinyl", "body", "whisper", "hiss", "hiss_room", "air", "doubler",
+      "talkbox")),
     ("rhythm", "Rhythm & Glitch",
      "Stutter, gate, step, pump, tape stop, hyperpop and freeze: the pedals "
      "that play the voice in time.",

@@ -797,16 +797,63 @@ class TheModernPedalsTests(unittest.TestCase):
         self.assertEqual(ghosts[77], 0.0)
 
 
+class TheHissTests(unittest.TestCase):
+    """The two deliberate snare-brush voices: breath with no words in it."""
+
+    def test_the_pair_is_reachable_and_distinct(self):
+        self.assertEqual(voice_effects.catalogue_problems(), [])
+        members = voice_effects.group_members("character")
+        self.assertIn("hiss", members)
+        self.assertIn("hiss_room", members)
+        self.assertEqual(voice_effects.group_of("hiss"), "character")
+        self.assertEqual(voice_effects.group_of("hiss_room"), "character")
+        self.assertNotEqual(repr(sorted(voice_effects._SPECS["hiss"].items())),
+                            repr(sorted(
+                                voice_effects._SPECS["hiss_room"].items())))
+
+    def test_a_hiss_is_bright_and_has_no_body(self):
+        """Pinned on purpose: this sound has no formants, and that is the point.
+
+        It is the Whisper pedal with its voice gain at zero, so what is left is
+        a band of noise shaped by the syllable. Measured: practically nothing
+        under 500 Hz (a whisper keeps most of its energy there; a snare does
+        not) and a fifth of it above 6 kHz.
+        """
+        signal = to_pcm(saw(0.3, 1.0, 130.0))
+        for effect_id in ("hiss", "hiss_room"):
+            after = play(voice_effects._EffectProcessor(effect_id), signal)
+            self.assertGreater(rms(after), 0.02, f"{effect_id} is silent")
+            self.assertLess(band_share(after, 80.0, 500.0), 0.05, effect_id)
+            self.assertGreater(band_share(after, 6000.0, 24000.0), 0.10,
+                               effect_id)
+            self.assertLessEqual(float(np.max(np.abs(after))),
+                                 voice_effects.PEAK_CEILING + 1e-6, effect_id)
+
+    def test_the_hiss_follows_the_syllables(self):
+        """Two words and a breath: the noise stops when the mouth does."""
+        first = tone(300.0, 0.3, 0.25)
+        gap = np.zeros(int(0.30 * SR), dtype=np.float32)
+        second = tone(450.0, 0.3, 0.25)
+        tail = np.zeros(int(0.40 * SR), dtype=np.float32)
+        after = play(voice_effects._EffectProcessor("hiss"),
+                     to_pcm(np.concatenate((first, gap, second, tail))))
+        self.assertGreater(rms(after[:int(0.20 * SR)]), 0.02)
+        # The gap is much quieter than either word -- the hiss is the envelope.
+        self.assertLess(rms(after[int(0.28 * SR):int(0.50 * SR)]),
+                        0.25 * rms(after[:int(0.20 * SR)]))
+        self.assertGreater(rms(after[int(0.58 * SR):int(0.72 * SR)]), 0.02)
+
+
 class TheStudioPedalsTests(unittest.TestCase):
     """The record chain: each piece is what its name says."""
 
     def test_the_page_is_two_levels_with_nothing_lost(self):
         self.assertEqual(voice_effects.catalogue_problems(), [])
-        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 70)   # 69 + Off
+        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 72)   # 71 + Off
         self.assertEqual(len(voice_effects.VOICE_EFFECT_GROUPS), 7)
         self.assertEqual(
             sum(len(members) for *_rest, members
-                in voice_effects.VOICE_EFFECT_GROUPS), 68)
+                in voice_effects.VOICE_EFFECT_GROUPS), 70)
 
     def test_tube_warmth_is_gentler_than_the_amp(self):
         # A pure tone has no harmonics of its own: whatever comes out is the

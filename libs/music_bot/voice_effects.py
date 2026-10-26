@@ -187,6 +187,17 @@ _SPECS = {
                     gate=0.004, out=0.95, shimmer=(14.0, 0.62)),
     "whisper": dict(hp=900.0, lp=7000.0, drive=1.0, shape=None, bias=0.0,
                     gate=0.003, out=1.30, whisper=(0.45, 0.50)),
+    # The hiss pair (2026-10-26): the whisper pedal with its voice taken out, so
+    # what is left is the breath alone -- a band of noise riding the syllable's
+    # own envelope, bright and dry. It is deliberately NOT a whisper: it has no
+    # formants and no words, which is why it reads as a brush on a snare rather
+    # than as somebody speaking. That is the sound it is here for.
+    "hiss": dict(hp=1100.0, lp=7000.0, drive=1.0, shape=None, bias=0.0,
+                 gate=0.002, out=1.15, whisper=(0.95, 0.0)),
+    "hiss_room": dict(hp=1100.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.002, out=1.20,
+                      cave=((29.0, 43.0, 67.0, 97.0), 0.40, 0.40),
+                      whisper=(0.95, 0.0)),
     "growl": dict(hp=80.0, lp=6000.0, drive=2.2, shape="tanh", bias=0.04,
                   gate=0.005, out=0.95, growl=(450.0, 0.80)),
     "doubler": dict(hp=100.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
