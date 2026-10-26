@@ -274,6 +274,32 @@ def set_value(param_id, value):
     return chosen
 
 
+def default_label(param_id):
+    """What this knob's own default is called in the menu's words."""
+    return boards.default_label(PARAMS, param_id)
+
+
+def clear_value(param_id):
+    """One knob back to the value the board opens with, and one revision.
+
+    The `Clear: back to ...` line on that knob's page. It removes the key
+    rather than writing the default into it: `values()` fills the hole from
+    `PARAMS`, so a cleared knob follows a default that moves tomorrow, the
+    same reason the whole board's Clear saves an empty dict.
+
+    Unlike that one, this does not ask: the page already says what it holds
+    and any choice above puts a value straight back.
+    """
+    global _revision
+    if param(param_id) is None:
+        return None
+    board = values()
+    board.pop(param_id, None)
+    options.set(_OPTION, board)
+    _revision += 1
+    return values()[param_id]
+
+
 def revision():
     """How many changes the board has had; the line rebuilds when it moves."""
     return _revision

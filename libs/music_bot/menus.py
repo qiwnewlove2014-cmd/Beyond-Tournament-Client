@@ -2380,6 +2380,13 @@ class MusicBotMenus:
 
         Picking a choice here is also what makes the board the chosen pedal: a
         player who turns a knob has chosen it.
+
+        **The line above Back puts this one setting back.** `Clear: back to
+        Crunch`, naming the value the board opens with -- a page of choices
+        used to answer "what was it before I got here" nowhere, and four of
+        the ten slots (and six of the amp's seven knobs) do not open on their
+        first row. It leaves the other settings alone and does not ask, which
+        is what separates it from the whole board's Clear.
         """
         from .. import menu as menu_mod, menus
         from . import gate as music_bot_gate
@@ -2401,20 +2408,30 @@ class MusicBotMenus:
         def go_back():
             gp.pop_last_substate()
 
+        def announce(chosen):
+            # Shared by a choice and by the clear line: both are one write the
+            # player hears on the next frame, and both say what the board now
+            # holds. Nothing is popped: this page is where the next choice is.
+            # The mark follows by itself (see `make_label`); the title is the
+            # one snapshot on the page, so it is rewritten here.
+            speak(f"{name}: {board.choice_label(param_id, chosen)}. "
+                  f"{board.choice_note(param_id, chosen)}")
+            m.title = (
+                f"Music Bot "
+                f"{voice_effects.effect_label(board.EFFECT_ID)} "
+                f"{name}: {board.choice_label(param_id, chosen)}")
+
         def pick(value):
             def apply():
                 chosen = board.set_value(param_id, value)
                 self._bot.set_voice_effect(board.EFFECT_ID)
-                speak(f"{name}: {board.choice_label(param_id, chosen)}. "
-                      f"{board.choice_note(param_id, chosen)}")
-                # Nothing is popped: this page is where the next choice is.
-                # The mark follows by itself (see `make_label`); the title is
-                # the one snapshot on the page, so it is rewritten here.
-                m.title = (
-                    f"Music Bot "
-                    f"{voice_effects.effect_label(board.EFFECT_ID)} "
-                    f"{name}: {board.choice_label(param_id, chosen)}")
+                announce(chosen)
             return apply
+
+        def clear_one():
+            chosen = board.clear_value(param_id)
+            self._bot.set_voice_effect(board.EFFECT_ID)
+            announce(chosen)
 
         def make_label(value):
             def label_fn():
@@ -2425,6 +2442,17 @@ class MusicBotMenus:
 
         items = [(make_label(stored), pick(stored), None, note)
                  for _label, stored, note in choices]
+        # The line above Back is this one setting's way out, in the place the
+        # board page's own Clear sits: one slot back to what the board opens
+        # with, named, because the page has never said which value that is.
+        # It does not ask -- ten slots at once is a question, one is a press
+        # the page already answers with `(active)` and any choice undoes.
+        items.append((f"Clear: back to {board.default_label(param_id)}",
+                      clear_one, None,
+                      "Puts this one back to what the board opens with "
+                      f"({board.default_label(param_id)}) and leaves every "
+                      "other setting alone. Pick any value above to change "
+                      "it again."))
         items.append(("Back", go_back, None,
                       "Returns to the board. Everything on it is kept."))
         m = menu_mod.Menu(

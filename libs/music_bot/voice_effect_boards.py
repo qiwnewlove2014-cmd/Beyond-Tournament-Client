@@ -57,6 +57,29 @@ def read(params, saved):
     return board
 
 
+def default(params, param_id):
+    """The value a knob sits at when nothing has been chosen for it."""
+    row = param(params, param_id)
+    return row[4] if row else None
+
+
+def default_label(params, param_id):
+    """What that default is called in the menu's words: 'Crunch', 'Unity'.
+
+    The choice pages have never said what the board opens with -- a player
+    reads six values and no answer to "which one was it" -- so the line that
+    puts one back names it (`Clear: back to Crunch`). Read from the table, so
+    the wording follows a default that moves and a renamed choice.
+    """
+    value = default(params, param_id)
+    if value is None:
+        return ""
+    for choice_label, stored, _note in choices(params, param_id):
+        if stored == value:
+            return choice_label
+    return ""
+
+
 def label(params, board, param_id):
     """A knob's chosen choice in the menu's words: 'Crunch', 'Cave'."""
     row = param(params, param_id)

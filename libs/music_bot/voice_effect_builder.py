@@ -477,6 +477,37 @@ def set_value(param_id, value):
     return chosen
 
 
+def default_label(param_id):
+    """What this slot's own default is called in the menu's words."""
+    return boards.default_label(PARAMS, param_id)
+
+
+def clear_value(param_id):
+    """One slot back to the value the board opens with, and one revision.
+
+    The `Clear: back to ...` line on that slot's page. It removes the key
+    rather than writing the default into it: `values()` fills the hole from
+    `PARAMS`, so a cleared slot follows a default that moves tomorrow, the
+    same reason `clear()` saves an empty board for all ten.
+
+    The starting point's mark is left alone, and needs no help: if the slot
+    now differs from the recipe the board was filled from, `current_label()`
+    already reads `My Own`, and if it does not differ the board still IS that
+    recipe -- there is nothing to forget.
+
+    Unlike the whole board's Clear, this does not ask: the page already says
+    what it holds and any choice above puts a value straight back.
+    """
+    global _revision
+    if param(param_id) is None:
+        return None
+    board = values()
+    board.pop(param_id, None)
+    options.set(_OPTION, board)
+    _revision += 1
+    return values()[param_id]
+
+
 def filled(board):
     """A partial board with every slot filled in, as `set_values` stores it.
 

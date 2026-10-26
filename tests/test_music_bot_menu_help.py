@@ -343,6 +343,63 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         self.bot.set_voice_effect.assert_called_with("voice_build")
         self.assertEqual(voice_effect_builder.values()["space"], "cave")
 
+    def test_every_choice_page_ends_with_a_clear_for_that_one_setting(self):
+        """`Clear: back to <default>` sits above Back on every page, named.
+
+        The page of values has never said what the board opens with, and a
+        default is not always the first row -- Colour opens on Crunch, the amp
+        on Crunch too with its character on Valve and its gate on Soft. So the
+        line the player presses says which value they are being put back on,
+        read from the board's own table rather than typed out here.
+        """
+        for board in (voice_effect_custom, voice_effect_builder):
+            for param_id, name, _note, _choices, _default in board.PARAMS:
+                with self.subTest(board=board.EFFECT_ID, setting=name):
+                    self.handler._open_custom_param_menu(param_id, board)
+                    items = self.last_menu().items
+                    labels = [label_of(item) for item in items]
+                    self.assertEqual(labels[-1], "Back")
+                    wanted = board.default_label(param_id)
+                    self.assertTrue(wanted, "a setting with no default name")
+                    self.assertEqual(labels[-2], f"Clear: back to {wanted}")
+                    self.assertIn(wanted, text_of(items[-2]))
+
+    def test_the_clear_line_puts_one_setting_back_and_leaves_the_others(self):
+        saved = {}
+        mock.patch.object(
+            voice_effect_builder.options, "get",
+            side_effect=lambda key, default=None: saved.get(key, default)
+        ).start()
+        mock.patch.object(
+            voice_effect_builder.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            saved.__setitem__(key, value)
+        ).start()
+        voice_effect_builder.set_values({"colour": "fuzz", "space": "cave",
+                                          "texture": "vocoder"})
+        self.handler._open_voice_builder_menu()
+        self.handler._open_custom_param_menu("colour", voice_effect_builder)
+        page = self.last_menu()
+        before = voice_effect_builder.revision()
+        for item in page.items:
+            if label_of(item) == "Clear: back to Crunch":
+                item[1]()
+                break
+        else:
+            self.fail("the Colour page has no clear line")
+        board = voice_effect_builder.values()
+        self.assertEqual(board["colour"], "crunch")
+        # The other nine slots are where the player left them: this is one
+        # setting's way out, not the whole board's Clear.
+        self.assertEqual(board["space"], "cave")
+        self.assertEqual(board["texture"], "vocoder")
+        self.assertEqual(voice_effect_builder.revision(), before + 1)
+        self.bot.set_voice_effect.assert_called_with("voice_build")
+        # No question, and no page to come back from: the page the press
+        # happened on is the page that stays open, saying what it now holds.
+        self.assertIs(self.last_menu(), page)
+        self.assertIn("Colour: Crunch", page.title)
+
     def test_the_voice_board_begins_with_fifty_finished_voices(self):
         """`Start From:` is the board's first line, and a press is a sound."""
         saved = {}
