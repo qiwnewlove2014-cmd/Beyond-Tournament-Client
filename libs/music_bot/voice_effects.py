@@ -313,6 +313,199 @@ _SPECS = {
                     gate=0.010, out=0.52, sub_octave=0.50),
     "twelve": dict(hp=90.0, lp=8200.0, drive=1.0, shape=None, bias=0.0,
                    gate=0.004, out=1.05, octave=0.26),
+    # The vocoder family (2026-10-26): twenty ways to hear the words spoken by a
+    # machine. Every one of them is the same six-band bank; what changes is the
+    # carrier -- its note (`hz`), its waveform, where its bands sit (`shift`,
+    # below 1 for a bigger machine, above for a smaller one) and how much noise
+    # rides on it -- plus at most one block from the rest of the file, so no two
+    # of the twenty share a fingerprint. The classic `vocoder` row in Machine
+    # stays as it was: `(q, mix)` reads exactly as it always did.
+    "vox_classic": dict(hp=90.0, lp=7500.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.004, out=1.25,
+                        vocoder=(2.6, 0.90, 110.0, "saw", 1.0, 0.0)),
+    "vox_deep": dict(hp=60.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.004, out=1.30,
+                     vocoder=(2.4, 0.92, 55.0, "saw", 0.80, 0.0)),
+    "vox_chip": dict(hp=220.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.004, out=1.50,
+                     vocoder=(2.8, 0.86, 220.0, "saw", 1.25, 0.0)),
+    "vox_giant": dict(hp=50.0, lp=5000.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.004, out=1.35,
+                      vocoder=(2.2, 0.90, 41.0, "saw", 0.70, 0.0)),
+    "vox_gnome": dict(hp=300.0, lp=7000.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.004, out=1.90,
+                      vocoder=(3.0, 0.84, 330.0, "saw", 1.45, 0.0)),
+    "vox_square": dict(hp=100.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.004, out=1.25,
+                       vocoder=(2.6, 0.88, 130.0, "square", 1.0, 0.0)),
+    "vox_pulse": dict(hp=90.0, lp=5500.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.004, out=1.25,
+                      vocoder=(2.6, 0.90, 98.0, "pulse", 1.0, 0.0)),
+    "vox_stack": dict(hp=90.0, lp=8000.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.004, out=1.25,
+                      vocoder=(2.6, 0.88, 110.0, "stack", 1.0, 0.0)),
+    "vox_noise": dict(hp=200.0, lp=7000.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.003, out=1.10,
+                      vocoder=(2.2, 0.95, 110.0, "noise", 1.0, 0.0)),
+    "vox_breath": dict(hp=100.0, lp=7000.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.004, out=1.20,
+                       vocoder=(2.6, 0.90, 110.0, "saw", 1.0, 0.45)),
+    "vox_choir": dict(hp=110.0, lp=7500.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.004, out=1.70,
+                      vocoder=(2.6, 0.82, 110.0, "saw", 1.0, 0.0),
+                      chorus3=((9.0, 13.0, 17.0), 0.22, 1.2, 0.40)),
+    "vox_hall": dict(hp=120.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.004, out=1.55,
+                     vocoder=(2.6, 0.78, 120.0, "saw", 1.0, 0.0),
+                     cave=((31.0, 47.0, 61.0, 83.0), 0.35, 0.35)),
+    "vox_radio": dict(hp=420.0, lp=2900.0, drive=3.0, shape="tanh", bias=0.05,
+                      gate=0.006, out=1.05,
+                      vocoder=(2.8, 0.85, 150.0, "square", 1.0, 0.0)),
+    "vox_bit": dict(hp=80.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.005, out=1.15,
+                    vocoder=(2.6, 0.85, 110.0, "saw", 1.0, 0.0),
+                    crush=(5, 9000.0)),
+    "vox_alien": dict(hp=120.0, lp=6500.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.004, out=1.70,
+                      vocoder=(2.6, 0.80, 110.0, "saw", 1.0, 0.0),
+                      alien=(300.0, 0.70, 0.55)),
+    "vox_shimmer": dict(hp=110.0, lp=7500.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.004, out=1.50,
+                        vocoder=(2.6, 0.80, 165.0, "saw", 1.0, 0.0),
+                        shimmer=(12.0, 0.50)),
+    "vox_iron": dict(hp=70.0, lp=5200.0, drive=3.0, shape="tanh", bias=0.06,
+                     gate=0.006, out=0.85,
+                     vocoder=(2.4, 0.85, 70.0, "saw", 0.90, 0.0),
+                     formant=(420.0, 1.1, 0.40, 1.6)),
+    "vox_air": dict(hp=150.0, lp=9000.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.004, out=1.15,
+                    vocoder=(2.8, 0.85, 165.0, "saw", 1.0, 0.0),
+                    air=(6000.0, 2.4, 0.35)),
+    "vox_formant": dict(hp=120.0, lp=7200.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.004, out=1.90,
+                        vocoder=(2.6, 0.82, 120.0, "saw", 1.0, 0.0),
+                        formant=(2400.0, 1.2, 0.50, 1.8)),
+    "vox_octave": dict(hp=110.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.005, out=2.60,
+                       vocoder=(2.6, 0.85, 110.0, "saw", 1.0, 0.0),
+                       octave=0.40),
+    # The radio family (2026-10-26): thirty channels, from a four-bit toy to a
+    # studio condenser, in one ladder. What makes a voice a *transmission* is
+    # four things and they are each a dial here: the channel's corners (hp/lp),
+    # the codec (`crush`, absent at the top), the noise floor (`static`, added
+    # after the gate so it never follows the words) and how hard the channel is
+    # levelled (`ott`). The top of the ladder adds the room it is heard in --
+    # the terminal, the hall, the church, the cinema.
+    "rad_8bit": dict(hp=380.0, lp=3200.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.006, out=2.20, crush=(4, 6000.0),
+                     static=(0.016, 380.0, 3200.0)),
+    "rad_broken": dict(hp=420.0, lp=2600.0, drive=5.0, shape="tanh", bias=0.12,
+                       gate=0.008, out=0.76, crush=(4, 8000.0),
+                       static=(0.022, 420.0, 2600.0)),
+    "rad_toy": dict(hp=520.0, lp=3000.0, drive=1.0, shape=None, bias=0.0,
+                    gate=0.006, out=2.24, crush=(5, 7000.0),
+                    static=(0.014, 520.0, 3000.0)),
+    "rad_cardboard": dict(hp=450.0, lp=2400.0, drive=3.0, shape="hard",
+                          bias=0.10, gate=0.008, out=1.01,
+                          crush=(6, 9000.0),
+                          static=(0.010, 450.0, 2400.0)),
+    "rad_intercom": dict(hp=350.0, lp=2800.0, drive=6.0, shape="tanh",
+                         bias=0.05, gate=0.007, out=0.68,
+                         crush=(6, 10000.0),
+                         static=(0.008, 350.0, 2800.0)),
+    "rad_cb": dict(hp=400.0, lp=3000.0, drive=2.0, shape="tanh", bias=0.04,
+                   gate=0.006, out=2.10, ott=(0.35, 0.18),
+                   static=(0.020, 400.0, 3000.0)),
+    "rad_walkie": dict(hp=500.0, lp=3200.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.006, out=2.67, crush=(7, 11000.0),
+                       static=(0.018, 500.0, 3200.0)),
+    "rad_drivethru": dict(hp=380.0, lp=3400.0, drive=1.8, shape="tanh",
+                          bias=0.03, gate=0.005, out=1.90,
+                          formant=(1800.0, 1.2, 0.35, 1.5),
+                          static=(0.012, 380.0, 3400.0)),
+    "rad_am": dict(hp=300.0, lp=4000.0, drive=1.0, shape=None, bias=0.0,
+                   gate=0.005, out=3.34, robot=(55.0, 0.18),
+                   ott=(0.30, 0.15), static=(0.022, 300.0, 4000.0)),
+    "rad_shortwave": dict(hp=300.0, lp=3800.0, drive=1.0, shape=None,
+                          bias=0.0, gate=0.005, out=2.69,
+                          alien=(90.0, 0.35, 0.25),
+                          static=(0.030, 300.0, 3800.0)),
+    "rad_numbers": dict(hp=280.0, lp=3200.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.005, out=2.51, robot=(60.0, 0.20),
+                        static=(0.025, 280.0, 3200.0)),
+    "rad_fieldphone": dict(hp=350.0, lp=2600.0, drive=2.4, shape="tanh",
+                           bias=0.05, gate=0.006, out=1.17,
+                           crush=(7, 9000.0),
+                           static=(0.010, 350.0, 2600.0)),
+    "rad_military": dict(hp=320.0, lp=3000.0, drive=3.0, shape="tanh",
+                         bias=0.06, gate=0.006, out=1.60,
+                         ott=(0.45, 0.22),
+                         static=(0.015, 320.0, 3000.0)),
+    "rad_police": dict(hp=350.0, lp=3200.0, drive=2.6, shape="tanh",
+                       bias=0.05, gate=0.006, out=1.97,
+                       ott=(0.50, 0.25),
+                       static=(0.010, 350.0, 3200.0)),
+    "rad_dispatch": dict(hp=320.0, lp=3400.0, drive=1.0, shape=None, bias=0.0,
+                         gate=0.005, out=3.89, ott=(0.60, 0.30),
+                         static=(0.008, 320.0, 3400.0)),
+    "rad_marine": dict(hp=300.0, lp=3600.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.005, out=3.78, ott=(0.60, 0.30),
+                       static=(0.012, 300.0, 3600.0)),
+    "rad_ham": dict(hp=280.0, lp=3800.0, drive=1.6, shape="tanh", bias=0.03,
+                    gate=0.005, out=2.41, ott=(0.50, 0.25),
+                    static=(0.020, 280.0, 3800.0)),
+    "rad_airtraffic": dict(hp=250.0, lp=4500.0, drive=1.0, shape=None,
+                           bias=0.0, gate=0.005, out=3.90,
+                           ott=(0.70, 0.35),
+                           static=(0.006, 250.0, 4500.0)),
+    "rad_tower": dict(hp=220.0, lp=4800.0, drive=1.0, shape=None, bias=0.0,
+                      gate=0.004, out=4.10, ott=(0.80, 0.40),
+                      static=(0.004, 220.0, 4800.0)),
+    "rad_cockpit": dict(hp=200.0, lp=5200.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.004, out=4.55,
+                        formant=(3000.0, 1.15, 0.30, 1.4),
+                        ott=(0.70, 0.35),
+                        static=(0.003, 200.0, 5200.0)),
+    "rad_terminal": dict(hp=160.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                         gate=0.004, out=3.88, ott=(0.60, 0.30),
+                         static=(0.002, 160.0, 6000.0),
+                         cluster=((17.0, 25.0, 37.0, 53.0),
+                                  (0.5, 0.42, 0.34, 0.27), 0.18, 0.22)),
+    "rad_station": dict(hp=140.0, lp=6000.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.004, out=3.12, ott=(0.50, 0.25),
+                        static=(0.002, 140.0, 6000.0),
+                        cluster=((23.0, 34.0, 49.0, 71.0),
+                                 (0.5, 0.42, 0.34, 0.27), 0.22, 0.30)),
+    "rad_stadium": dict(hp=180.0, lp=5600.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.004, out=6.80, ott=(1.00, 0.50),
+                        air=(5500.0, 2.2, 0.25),
+                        cluster=((41.0, 59.0, 83.0, 113.0),
+                                 (0.45, 0.38, 0.30, 0.24), 0.26, 0.30)),
+    "rad_church": dict(hp=150.0, lp=5000.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.004, out=3.20, ott=(0.50, 0.25),
+                       cave=((41.0, 59.0, 79.0, 113.0), 0.32, 0.30)),
+    "rad_cinema": dict(hp=90.0, lp=7500.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.004, out=3.92, ott=(1.10, 0.55),
+                       air=(7000.0, 2.0, 0.25)),
+    "rad_trailer": dict(hp=80.0, lp=8000.0, drive=2.0, shape="tanh",
+                        bias=0.10, gate=0.005, out=4.29,
+                        formant=(700.0, 1.1, 0.40, 1.6),
+                        ott=(1.30, 0.65)),
+    "rad_fm": dict(hp=90.0, lp=9500.0, drive=1.0, shape=None, bias=0.0,
+                   gate=0.004, out=5.45, ott=(1.40, 0.70),
+                   air=(8000.0, 2.2, 0.20)),
+    "rad_studio": dict(hp=70.0, lp=12000.0, drive=1.0, shape=None, bias=0.0,
+                       gate=0.004, out=4.20, ott=(1.20, 0.60),
+                       air=(9000.0, 2.0, 0.18)),
+    "rad_news": dict(hp=120.0, lp=9000.0, drive=1.0, shape=None, bias=0.0,
+                     gate=0.004, out=7.15,
+                     formant=(2800.0, 0.9, 0.30, 1.5),
+                     ott=(1.30, 0.65)),
+    "rad_mission": dict(hp=110.0, lp=8000.0, drive=1.0, shape=None, bias=0.0,
+                        gate=0.004, out=5.77, ott=(1.20, 0.60),
+                        air=(7500.0, 2.0, 0.20),
+                        cluster=((13.0, 19.0, 29.0, 41.0),
+                                 (0.40, 0.34, 0.28, 0.22), 0.16, 0.20)),
 
 }
 
@@ -380,32 +573,95 @@ VOCODER_BANDS = (180.0, 360.0, 700.0, 1300.0, 2400.0, 4200.0)
 #: band levels are constants. Dividing the voice's envelope by them is what
 #: keeps a band with a quiet harmonic as loud as one with a strong harmonic.
 VOCODER_CARRIER_HZ = 110.0
+
+#: The carriers a vocoder may be spoken through -- one family of twenty, added
+#: 2026-10-26, is built out of these. A saw is the classic: every harmonic, so
+#: every band has something to shape. Square is hollow and buzzy (odd harmonics
+#: only, and loud ones), pulse is thinner, stack is a saw with its octave under
+#: it (richer and brighter than one saw), and noise is the odd one -- no pitch
+#: at all, so the words come out as a loud whisper that keeps its formants.
+#:
+#: A sine or a triangle is deliberately NOT in this list, and the reason is the
+#: one rule a vocoder has to keep: the carrier must reach the top band (4.2 kHz)
+#: or the top of the words is simply missing. A sine has one partial at all, and
+#: a triangle's harmonics fall as 1/n^2 -- measured on a 140 Hz saw, the sine
+#: carrier put 100% of the output's energy on its own fundamental and the
+#: triangle 93% below 120 Hz: a tone with the words taken out, which is the same
+#: failure as the Whispered family's snare hit. Both were dropped rather than
+#: shipped as presets.
+VOCODER_WAVES = ("saw", "square", "pulse", "stack", "noise")
+
 _vocoder_carrier_levels = None
+
+
+def _carrier_frame(kind, phase, count, rng, breath=0.0):
+    """One frame of a vocoder's carrier, built from its phase in 0..1.
+
+    The phase is handed in rather than kept here so a frame joins the last one
+    at the sample it left off, whatever the carrier's frequency is doing; the
+    noise carrier is the exception, because noise has no phase to join.
+    """
+    if kind == "square":
+        base = np.where(phase < 0.5, 1.0, -1.0)
+    elif kind == "pulse":
+        base = np.where(phase < 0.22, 1.0, -1.0)
+    elif kind == "stack":
+        # A saw and the same saw an octave up, half as loud: richer than one
+        # saw and brighter, while every band still has a harmonic in it.
+        lower = 2.0 * phase - 1.0
+        upper = 2.0 * ((phase * 2.0) % 1.0) - 1.0
+        base = lower + 0.5 * upper
+    elif kind == "noise":
+        base = rng.standard_normal(count) * 0.6
+    else:
+        base = 2.0 * phase - 1.0
+    base = base.astype(np.float32)
+    if breath > 0.0 and kind != "noise":
+        # A breath of noise on the carrier, so the machine sounds like it has
+        # air in it. Scaled like the noise carrier, which is 0.6 RMS.
+        base = (base * (1.0 - float(breath))
+                + rng.standard_normal(count).astype(np.float32) * 0.6
+                * float(breath))
+    return base
 
 #: The step filter's pattern: which of the three bands is heard on each
 #: sixteenth. Eight steps is a bar's worth of movement, not a melody.
 STEP_PATTERN = (0, 0, 1, 2, 1, 0, 2, 1)
 
 
-def _carrier_band_levels(q):
-    """The carrier's RMS in each vocoder band, measured once and cached."""
+def _carrier_levels(q, hz, shift, kind, breath):
+    """A carrier's RMS in each vocoder band, measured once per carrier.
+
+    Every band's gain is the voice's envelope divided by the carrier's own level
+    in that band, which is what keeps a band the carrier barely reaches as loud
+    as one it fills -- so this has to be measured with the *same* carrier the
+    block will use: its note, its waveform, where its formants sit and whether
+    it has noise on it. Hence the key, and hence one cache entry per carrier
+    rather than one per Q.
+
+    The noise carrier is measured on a fixed seed while the block draws from
+    its own: filtered white noise has the same mean square frame after frame, so
+    the level is a property of the carrier and not of the draw.
+    """
     global _vocoder_carrier_levels
-    if _vocoder_carrier_levels is not None and _vocoder_carrier_levels[0] == q:
+    key = (float(q), float(hz), float(shift), kind, float(breath))
+    if _vocoder_carrier_levels is not None and _vocoder_carrier_levels[0] == key:
         return _vocoder_carrier_levels[1]
     frames = 3
     samples = frames * 960
-    cycle = np.arange(samples) / SAMPLE_RATE * VOCODER_CARRIER_HZ
-    carrier = (2.0 * (cycle % 1.0) - 1.0).astype(np.float32)
+    rng = np.random.default_rng(0x5EED)
+    phase = (np.arange(samples) * (float(hz) / SAMPLE_RATE)) % 1.0
+    carrier = _carrier_frame(kind, phase, samples, rng, breath)
     levels = []
-    for hz in VOCODER_BANDS:
-        band = _Biquad.bandpass(hz, q)
+    for band_hz in VOCODER_BANDS:
+        band = _Biquad.bandpass(band_hz * float(shift), q)
         shaped = np.concatenate([
             band.process(carrier[start:start + 960])
             for start in range(0, samples, 960)])
         # The last frame only: the filters have settled by then.
         levels.append(max(1e-3, float(np.sqrt(np.mean(
             np.square(shaped[-960:]))))))
-    _vocoder_carrier_levels = (q, tuple(levels))
+    _vocoder_carrier_levels = (key, tuple(levels))
     return _vocoder_carrier_levels[1]
 
 #: The gate's two speeds, per frame. Opening is quick (a word must not lose its
@@ -728,6 +984,15 @@ class _EffectProcessor:
                                if self._shimmer else None)
         self._shimmer_pos = 0
         self._shimmer_fir = (_Fir(_hilbert(127)) if self._shimmer else None)
+        # Radio: a noise floor that never stops. It is the one thing a
+        # band-limited voice needs to read as a transmission rather than as a
+        # telephone -- and it is added *after* the gate (see `_static_block`),
+        # because a hiss that closes with the words is a whisper, not a radio.
+        self._static = spec.get("static")
+        self._static_high = (_Biquad.highpass(self._static[1], 0.9)
+                             if self._static else None)
+        self._static_low = (_Biquad.lowpass(self._static[2], 0.9)
+                            if self._static else None)
         # Whisper: filtered noise shaped by the voice's own envelope.
         self._whisper = spec.get("whisper")
         self._whisper_noise = (_Biquad.bandpass(2500.0, 0.8)
@@ -740,10 +1005,28 @@ class _EffectProcessor:
         # The modern pedals: a vocoder bank, a raised formant, an exciter, an
         # up-and-down compressor, a varispeed delay, a cloud, a beat duck, a
         # held slice, a stepped band-bank and a backwards ghost.
+        # A vocoder spec is `(q, mix)` for the classic and `(q, mix, hz, wave,
+        # shift, breath)` for the family of twenty: the note it speaks on, its
+        # waveform, where its band bank sits (below 1 is a bigger machine, above
+        # 1 a smaller one) and how much noise rides on it. The short form is
+        # kept so every preset written before the family reads the same.
         self._vocoder = spec.get("vocoder")
-        self._vocoder_filters = ([_Biquad.bandpass(hz, self._vocoder[0])
-                                  for hz in VOCODER_BANDS]
-                                 if self._vocoder else None)
+        if self._vocoder:
+            _q, _mix = float(self._vocoder[0]), float(self._vocoder[1])
+            _extra = tuple(self._vocoder[2:])
+            _hz = float(_extra[0]) if len(_extra) > 0 else VOCODER_CARRIER_HZ
+            _wave = _extra[1] if len(_extra) > 1 else "saw"
+            _shift = float(_extra[2]) if len(_extra) > 2 else 1.0
+            _breath = float(_extra[3]) if len(_extra) > 3 else 0.0
+            self._vocoder_voice = (_q, _mix, _hz, _wave, _shift, _breath)
+            self._vocoder_filters = [_Biquad.bandpass(hz * _shift, _q)
+                                     for hz in VOCODER_BANDS]
+            self._vocoder_levels = _carrier_levels(_q, _hz, _shift, _wave,
+                                                   _breath)
+        else:
+            self._vocoder_voice = None
+            self._vocoder_filters = None
+            self._vocoder_levels = None
         self._vocoder_envelopes = [0.0] * len(VOCODER_BANDS)
         self._vocoder_gains = [0.0] * len(VOCODER_BANDS)
         self._vocoder_cycle = 0.0
@@ -1419,26 +1702,27 @@ class _EffectProcessor:
 
         A channel vocoder does not shift pitch: it keeps *what* the mouth did
         and throws away *what* made the sound, then rebuilds it from a fixed
-        saw through the same six bands. That is why the words survive and the
-        voice does not. The envelopes are read as one spectrum per frame (six
+        carrier through the same six bands. That is why the words survive and
+        the voice does not -- and why the family of twenty can sound so
+        different while doing the same thing: the carrier is the whole
+        instrument (its note, its waveform, where its band bank sits, whether
+        it has noise on it). The envelopes are read as one spectrum per frame (six
         more filters on the voice would be six more per-sample loops), and each
         band's gain ramps across the frame, so a syllable's edge is not a step
         at a frame boundary.
         """
-        if not self._vocoder:
+        if not self._vocoder_voice:
             return block
-        q, mix = self._vocoder
+        _q, mix, hz, kind, _shift, breath = self._vocoder_voice
         count = block.size
         positions = np.arange(count)
-        cycle = ((self._vocoder_cycle
-                  + VOCODER_CARRIER_HZ * positions / SAMPLE_RATE) % 1.0)
-        carrier = (2.0 * cycle - 1.0).astype(np.float32)
+        phase = ((self._vocoder_cycle + hz * positions / SAMPLE_RATE) % 1.0)
+        carrier = _carrier_frame(kind, phase, count, self._rng, breath)
         self._vocoder_cycle = ((self._vocoder_cycle
-                                + VOCODER_CARRIER_HZ * count / SAMPLE_RATE)
-                               % 1.0)
+                                + hz * count / SAMPLE_RATE) % 1.0)
         spectrum = np.abs(np.fft.rfft(block)) ** 2
         bin_hz = SAMPLE_RATE / float(count)
-        levels = _carrier_band_levels(q)
+        levels = self._vocoder_levels
         half = 2.0 ** 0.35
         wet = np.zeros(count, dtype=np.float32)
         for index, hz in enumerate(VOCODER_BANDS):
@@ -1458,6 +1742,32 @@ class _EffectProcessor:
                                       endpoint=False)
             self._vocoder_gains[index] = gain
         return block * (1.0 - float(mix)) + wet * float(mix)
+
+    def _static_block(self, block):
+        """The channel's own noise floor: a band of noise under the voice.
+
+        A radio is not a telephone because of its bandwidth -- a telephone is
+        band-limited too. It is a radio because something is always hissing
+        under the words, and because that hiss sits at a level of its own
+        rather than following the speaker. So this is added to the frame the
+        gate has already closed, and it draws from the processor's RNG rather
+        than from the voice: silence in a channel is not silence in the room.
+
+        The noise is band-limited to the same corners the preset gives the
+        voice, so a narrow channel hisses narrowly -- which is what makes an
+        eight-bit walkie sound thin rather than merely noisy. It joins the
+        frame at the output stage -- before the preset's trim and the ceiling
+        -- so a louder channel hisses louder and the hiss can never push the
+        frame past `PEAK_CEILING`.
+        """
+        if not self._static:
+            return block
+        level = float(self._static[0])
+        noise = (self._rng.standard_normal(block.size)
+                 .astype(np.float32) * level)
+        noise = self._static_high.process(noise)
+        noise = self._static_low.process(noise)
+        return block + noise
 
     def _ott_block(self, block):
         """A pop vocal's loudness: quiet lifted, loud held, no dials.
@@ -1837,6 +2147,9 @@ class _EffectProcessor:
         block = self._freeze_block(block)
         block = self._riser_block(block)
         block = self._tapestop_block(block)
+        # The radio family's noise floor comes last of the blocks: a channel's
+        # hiss is not something the compressor or the gate acts on.
+        block = self._static_block(block)
         # Unity below the knee and a hard asymptotic ceiling at PEAK_CEILING:
         # the encoder is handed a frame with room left for the effect sends the
         # PA and a cinema room put on top of it (see PEAK_CEILING).

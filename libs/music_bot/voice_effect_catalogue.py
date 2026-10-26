@@ -295,6 +295,175 @@ VOICE_EFFECTS = (
     ("twelve", "Twelve String",
      "A twelve-string's shimmer: a clean amp with the rectified octave mixed "
      "lightly, so every word gains a second, brighter string above it."),
+    # ---- the vocoder family (2026-10-26): the words spoken by a machine
+    ("vox_classic", "Classic Robot",
+     "The vocoder everyone hears in their head: six bands of your voice drive a "
+     "110 Hz saw, so the mouth is yours and the throat is a synth's. Words "
+     "survive whole; the voice does not."),
+    ("vox_deep", "Deep Machine",
+     "The same machine an octave lower: a 55 Hz saw with its band bank pulled "
+     "down, so the voice arrives huge and slow. The one to use for a villain's "
+     "announcement."),
+    ("vox_chip", "Chip Voice",
+     "A toy's speak-and-spell: a 220 Hz saw with the bands pushed up into the "
+     "top of the voice. Small, bright and a little comic."),
+    ("vox_giant", "Giant",
+     "A 41 Hz carrier with the bands pulled right down: deeper than Deep "
+     "Machine, and the bottom of the cabinet is opened for it. A voice from "
+     "under a hill."),
+    ("vox_gnome", "Gnome",
+     "The other end of the same trick: a 330 Hz saw and the bands lifted, so "
+     "everything sits high and quick. Fussy rather than cute."),
+    ("vox_square", "Square Bot",
+     "A square-wave carrier instead of a saw: only the odd harmonics, so the "
+     "fizz under the words is thicker and the voice is plainly a buzzer."),
+    ("vox_pulse", "Pulse Talker",
+     "A narrow pulse carrier: thinner than the square, with a click on every "
+     "cycle that reads as a mechanical tick under each syllable."),
+    ("vox_stack", "Twin Oscillator",
+     "Two oscillators an octave apart instead of one: the classic machine with "
+     "a brighter copy on top of it, so the words sit in a fatter synth than "
+     "Classic Robot's."),
+    ("vox_noise", "Noise Whisper",
+     "A noise carrier instead of a note: no pitch at all, so the words arrive "
+     "as a loud whisper that keeps the mouth's shape. The quietest-sounding "
+     "loud preset here."),
+    ("vox_breath", "Breath Machine",
+     "The classic saw with a breath of noise on the carrier, so air hisses "
+     "through the machine on every word -- a vocoder with a throat rather than "
+     "a speaker."),
+    ("vox_choir", "Synth Choir",
+     "The classic vocoder sung by three copies drifting apart: the machine "
+     "becomes a small choir of itself."),
+    ("vox_hall", "Vocoder Hall",
+     "The classic vocoder in a stone room: four short taps feed each other, so "
+     "the machine rings on after the word."),
+    ("vox_radio", "Broadcast Bot",
+     "A vocoder heard down a telephone line: a square carrier band-passed to "
+     "the midrange and driven, so it sounds like a machine reading the news "
+     "from a speaker in another room."),
+    ("vox_bit", "Bit Machine",
+     "A vocoder through a broken sampler: the output is sampled coarsely, so "
+     "the machine's voice is grit held together by the words."),
+    ("vox_alien", "Alien Synth",
+     "A vocoder through a sliding ring modulator: the metallic sidebands move "
+     "up and down under the words, so the machine sings rather than speaks."),
+    ("vox_shimmer", "Sky Machine",
+     "A vocoder through a single-sideband shifter: a copy an octave up slides "
+     "under the voice and lifts it. Bright, wide and not quite there."),
+    ("vox_iron", "Iron Throat",
+     "A low carrier with a chest formant and some drive: the machine has a "
+     "body, and it is not a small one."),
+    ("vox_air", "Air Machine",
+     "A vocoder with an exciter after it: the top is grown rather than "
+     "equalised, so the machine's consonants sparkle without getting louder."),
+    ("vox_formant", "Formant Synth",
+     "A vocoder with one band lifted high: the machine has a tube in its "
+     "throat, so the words come out shaped like a talkbox rather than a "
+     "speaker."),
+    ("vox_octave", "Octave Machine",
+     "A vocoder with a copy an octave up mixed in: one machine becomes two, "
+     "the second one brighter and slightly out of step."),
+    # ---- the radio family (2026-10-26): thirty channels, worst to best
+    ("rad_8bit", "Eight Bit",
+     "A four-bit toy radio: six kilohertz of samples, sixteen steps and a hiss "
+     "behind the words. The worst thing here on purpose -- it is the sound of a "
+     "sentence squeezed through a chip."),
+    ("rad_broken", "Broken Speaker",
+     "An eight-bit radio with a torn cone: the top above 2.6 kilohertz is gone, "
+     "what is left is driven hard, and the hiss is loud. Every word lands like "
+     "a knock on cardboard."),
+    ("rad_toy", "Toy Walkie",
+     "A five-bit walkie-talkie: a narrow channel, coarse samples and a bright "
+     "hiss, like two children talking through a garden fence."),
+    ("rad_cardboard", "Cardboard Radio",
+     "A six-bit radio in a box: a hard clip, a middly channel and almost no top. "
+     "Cheap, loud and entirely unlovely -- the sound of a radio in a garage."),
+    ("rad_intercom", "Intercom Buzzer",
+     "A six-bit intercom with the gain up: the voice is driven into the "
+     "clipper's corner, so it buzzes rather than speaks. The one for a door "
+     "speaker nobody wants to answer."),
+    ("rad_cb", "CB Radio",
+     "A citizen's-band radio: narrow, levelled hard and faintly hissing. Clear "
+     "enough to understand, plain enough to sound like a lorry's dashboard."),
+    ("rad_walkie", "Walkie Talkie",
+     "A seven-bit handheld: a five-hundred-hertz channel with a steady hiss, "
+     "the middle of the cheap handheld range."),
+    ("rad_drivethru", "Drive-Thru",
+     "A speaker in a box at a window: band-limited, with one band near two "
+     "kilohertz pushed forward so an order of fries arrives perfectly clear."),
+    ("rad_am", "AM Radio",
+     "An amplitude-modulated station: a narrow channel, a hiss, and a faint "
+     "fifty-five-hertz ring where the carrier sits. Warm, old and a little "
+     "whistly."),
+    ("rad_shortwave", "Shortwave",
+     "A shortwave station fading in and out: the loudest hiss here, a slow ring "
+     "that drifts with the carrier, and a channel that keeps changing its mind."),
+    ("rad_numbers", "Numbers Station",
+     "A number station: a narrow channel, a steady hiss and a sixty-hertz ring "
+     "under every digit. Flat, mechanical and oddly unsettling."),
+    ("rad_fieldphone", "Field Phone",
+     "A field telephone: a very narrow channel, seven-bit samples and almost no "
+     "low end at all. Built to be understood in a wind, not enjoyed."),
+    ("rad_military", "Military Radio",
+     "A military set: driven, band-limited and levelled flat, so a shouted "
+     "order and a quiet one arrive equally loud."),
+    ("rad_police", "Police Radio",
+     "A patrol radio: a narrow channel with the top clipped off and a hard "
+     "leveller, so it cuts through an engine and a siren."),
+    ("rad_dispatch", "Dispatch",
+     "A dispatcher's desk: clearer than the patrol set, a light leveller and a "
+     "thin hiss. Businesslike."),
+    ("rad_marine", "Marine VHF",
+     "A marine band radio: a slightly wider channel than the police set and a "
+     "steady level, because a call from a boat has to survive wind."),
+    ("rad_ham", "Ham Radio",
+     "An amateur set: a wide-ish channel, a little drive and a hiss you can "
+     "hear between the words. Friendly rather than official."),
+    ("rad_airtraffic", "Air Traffic",
+     "An air-traffic channel: a clean four-and-a-half-kilohertz channel with a "
+     "strong leveller and very little hiss. Every word clipped to the same "
+     "loudness, which is exactly why pilots are easy to understand."),
+    ("rad_tower", "Control Tower",
+     "A tower frequency: wider again and quieter, levelled so hard that a "
+     "whisper and a shout come out the same size. Calm and procedural."),
+    ("rad_cockpit", "Cockpit Headset",
+     "A pilot's own headset: a clean channel, a lift near three kilohertz for "
+     "consonants, and a level that never moves. The sound of someone reading a "
+     "checklist twenty thousand feet up."),
+    ("rad_terminal", "Terminal PA",
+     "An airport's announcement: a wide channel, a light leveller and a small "
+     "hall behind it, so a gate number arrives with the room around it."),
+    ("rad_station", "Station Hall",
+     "A train station: the same clarity as the terminal, in a taller room with "
+     "a longer tail. The last syllable of a platform number hangs."),
+    ("rad_stadium", "Stadium Announcer",
+     "A stadium: levelled to the top, opened at the top, with a big room under "
+     "it. A name read out over a crowd."),
+    ("rad_church", "Church PA",
+     "A church's speech system: a warm channel in a stone room, with a tail "
+     "long enough to be a building and short enough to stay a sentence."),
+    ("rad_cinema", "Cinema Voice",
+     "The voice at the front of a cinema: wide, quiet between the words, and "
+     "levelled so the soft line and the loud one both reach the back row."),
+    ("rad_trailer", "Movie Trailer",
+     "The trailer voice: chest pushed forward, driven a little, and levelled as "
+     "hard as the format allows. Every sentence sounds like the last one before "
+     "a title card."),
+    ("rad_fm", "Broadcast FM",
+     "A broadcast FM chain: wide, bright, compressed to the loudest the ceiling "
+     "allows. The station that never has a quiet moment."),
+    ("rad_studio", "Studio Condenser",
+     "A studio condenser on a treated room: the widest channel here, a gentle "
+     "lift at the top and a leveller that only glues. Nothing added, nothing "
+     "taken away."),
+    ("rad_news", "News Anchor",
+     "A news desk: crisp, forward around three kilohertz, and levelled so the "
+     "reading never dips. The voice that tells you what happened."),
+    ("rad_mission", "Mission Control",
+     "A flight controller's loop: clean, quiet, level, with a small room behind "
+     "it. Calm on purpose -- the sound of a place where nothing is allowed to "
+     "sound alarmed."),
     # ---- the board: not a preset, the player's own
     ("custom", "Custom Amp",
      "Your own amp, built on a page of knobs: drive, character, bass, mid, "
@@ -357,6 +526,28 @@ VOICE_EFFECT_GROUPS = (
      "gated tail, throws, dub, a wash, a choir, a riser and a scream.",
      ("tube", "presence", "plate", "gated", "throw", "dub", "wash", "choir",
       "riser", "scream")),
+    ("synth", "Vocoder Lab",
+     "Twenty machines that speak your words for you: the carrier's note and "
+     "waveform, its bands moved up or down, and one block behind each -- a "
+     "chorus, a hall, a ring, a crush, a chest. The same six-band bank the "
+     "Machine family's Vocoder uses, set twenty ways.",
+     ("vox_classic", "vox_deep", "vox_chip", "vox_giant", "vox_gnome",
+      "vox_square", "vox_pulse", "vox_stack", "vox_noise", "vox_breath",
+      "vox_choir", "vox_hall", "vox_radio", "vox_bit", "vox_alien",
+      "vox_shimmer", "vox_iron", "vox_air", "vox_formant", "vox_octave")),
+    ("broadcast", "Radio",
+     "Thirty channels in a ladder, from a four-bit toy with a torn cone to a "
+     "studio condenser: what changes is the channel's corners, the codec's bit "
+     "depth, how loud the channel hisses and how hard it is levelled -- and, at "
+     "the top, the room the voice is heard in. The start of the list is "
+     "deliberately bad.",
+     ("rad_8bit", "rad_broken", "rad_toy", "rad_cardboard", "rad_intercom",
+      "rad_cb", "rad_walkie", "rad_drivethru", "rad_am", "rad_shortwave",
+      "rad_numbers", "rad_fieldphone", "rad_military", "rad_police",
+      "rad_dispatch", "rad_marine", "rad_ham", "rad_airtraffic",
+      "rad_tower", "rad_cockpit", "rad_terminal", "rad_station",
+      "rad_stadium", "rad_church", "rad_cinema", "rad_trailer", "rad_fm",
+      "rad_studio", "rad_news", "rad_mission")),
 )
 
 

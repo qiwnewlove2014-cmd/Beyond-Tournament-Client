@@ -849,11 +849,11 @@ class TheStudioPedalsTests(unittest.TestCase):
 
     def test_the_page_is_two_levels_with_nothing_lost(self):
         self.assertEqual(voice_effects.catalogue_problems(), [])
-        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 72)   # 71 + Off
-        self.assertEqual(len(voice_effects.VOICE_EFFECT_GROUPS), 7)
+        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 122)  # 121 + Off
+        self.assertEqual(len(voice_effects.VOICE_EFFECT_GROUPS), 9)
         self.assertEqual(
             sum(len(members) for *_rest, members
-                in voice_effects.VOICE_EFFECT_GROUPS), 70)
+                in voice_effects.VOICE_EFFECT_GROUPS), 120)
 
     def test_tube_warmth_is_gentler_than_the_amp(self):
         # A pure tone has no harmonics of its own: whatever comes out is the
