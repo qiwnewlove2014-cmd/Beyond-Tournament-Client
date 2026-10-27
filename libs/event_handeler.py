@@ -207,6 +207,12 @@ class EventHandeler:
         self.game.pa_timeline_supported = bool(
             data.get("pa_timeline_v1", False)
         )
+        # ...and for the Pan Delay's movement, which is three bytes on a channel
+        # a Server that predates it would not relay. Without this answer a
+        # Client still hears its own delay; the movement is simply not sent.
+        self.game.voice_motion_supported = bool(
+            data.get("voice_motion_v1", False)
+        )
         self.game.presence_sounds.configure(data)
 
         # Store staff status for PA Test Mode (with safe fallback)
@@ -2454,6 +2460,9 @@ class EventHandeler:
         own_channel = getattr(self.gameplay, "own_voice_channel", None)
         if own_channel is not None and channelID == own_channel:
             return
+        if channelID == consts.CHANNEL_VOICE_MOTION:
+            self._apply_voice_motion(data)
+            return
         if channelID == consts.CHANNEL_MEGAPHONE:
             # Per-player megaphone: first byte = sender's voice_channel ID.
             # This is the LEGACY payload -- it carries no position for the
@@ -2468,6 +2477,12 @@ class EventHandeler:
             receiver = self._party_audio_receiver(channelID)
             if receiver is None:
                 return
+            # A movement that stopped arriving is a voice stuck beside a head:
+            # the voice frames are the clock that notices (50 a second), and the
+            # check is cheap unless the timeout has actually passed.
+            expire = getattr(receiver, "expire_voice_motion", None)
+            if expire is not None:
+                expire()
             compression = getattr(receiver, "vc_compression", None)
             if compression is None:
                 return
@@ -2478,6 +2493,34 @@ class EventHandeler:
                 channelID,
                 self.gameplay,
             )
+
+    def _apply_voice_motion(self, data):
+        """Move one talker's voice in the listener's own space.
+
+        Three bytes: their voice channel, then the place on the listener's right
+        and forward axes, both -127..127 scaled to one metre. The movement is
+        the sender's Pan Delay talking -- it is NOT applied to the dry speaker
+        position, so `set_voice_motion` keeps the body's position and adds the
+        offset when the source is placed. A channel with no entity here (a
+        speaker on another map, a stale sender) is ignored, which is also what
+        every older client does with this packet.
+
+        Runs on the receive thread: `set_voice_motion` stores the numbers and
+        hands the OpenAL call to the audio manager's own inbox.
+        """
+        if data is None or len(data) < 3:
+            return
+        channel = data[0]
+        right = (data[1] - 128) / 127.0
+        forward = (data[2] - 128) / 127.0
+        entity = (getattr(self.gameplay, "voice_channels", None)
+                  or {}).get(channel)
+        if entity is None:
+            return
+        setter = getattr(entity, "set_voice_motion", None)
+        if setter is None:
+            return
+        setter(right, forward)
 
     # How often the party leg may be re-reported for one channel (seconds).
     # The leg is reported on a CHANGE of output (or of the flags that shape

@@ -35,6 +35,7 @@ from libs.music_bot import menus as menus_module  # noqa: E402
 from libs.music_bot.menu_pages import library as library_pages  # noqa: E402
 from libs.music_bot import voice_effect_builder  # noqa: E402
 from libs.music_bot import voice_effect_custom  # noqa: E402
+from libs.music_bot import voice_effect_pan  # noqa: E402
 from libs.music_bot import voice_effect_recipes  # noqa: E402
 from libs.music_bot import voice_effect_vocoder  # noqa: E402
 from libs.music_bot import voice_effects  # noqa: E402
@@ -436,6 +437,77 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         for item in board.items:
             self.assertGreaterEqual(len(item), 4)
             self.assertTrue(text_of(item).strip())
+
+    def test_the_voice_effect_page_offers_the_pan_delay_at_the_top_level(self):
+        """The one preset with a setting of its own is not hidden in a family.
+
+        A typed delay cannot be a row of fixed steps, so Pan Delay opens a page
+        rather than being a pedal -- which is the same reason Custom Voice sits
+        on this page. It is a line of its own beside the families, and pressing
+        it chooses the preset and opens the page.
+        """
+        # The page's own settings are read from the real options file; a menu
+        # test must not depend on what the developer running it chose.
+        mock.patch.object(voice_effect_pan.options, "get",
+                          side_effect=lambda key, default=None: default).start()
+        self.handler._open_voice_effect_menu()
+        menu = self.last_menu()
+        labels = [label_of(item) for item in menu.items]
+        self.assertTrue(any(label.startswith("Pan Delay:") for label in labels),
+                        labels)
+        self.assertIn(voice_effects.PAN_EFFECT,
+                      voice_effects.STANDALONE_EFFECTS)
+        self.assertIsNone(voice_effects.group_of(voice_effects.PAN_EFFECT))
+        # ...and no family page lists it as a pedal.
+        self.handler._open_voice_effect_menu("motion")
+        pedals = [label_of(item) for item in self.last_menu().items]
+        self.assertFalse(any("Pan Delay" in label for label in pedals), pedals)
+        self.handler._open_voice_effect_menu()
+        for item in self.last_menu().items:
+            if label_of(item).startswith("Pan Delay:"):
+                item[1]()
+                break
+        else:
+            self.fail("the Voice Effect page has no Pan Delay line")
+        # Pressing the line chooses the preset (the page is opened by pressing
+        # it, and the page itself selects it again on open), so every call it
+        # makes is for the one preset.
+        self.assertTrue(self.bot.set_voice_effect.called)
+        for chosen in self.bot.set_voice_effect.call_args_list:
+            self.assertEqual(chosen, mock.call("pan_delay"))
+        page = [label_of(item) for item in self.last_menu().items]
+        self.assertTrue(any(label.startswith("Delay:") for label in page), page)
+        self.assertTrue(any(label.startswith("Motion:") for label in page), page)
+        self.assertTrue(any(label.startswith("Preset:") for label in page), page)
+        self.assertEqual(page[-1], "Back")
+        # Preset opens the same names the Custom Voice board's Pan slot offers.
+        for item in self.last_menu().items:
+            if label_of(item).startswith("Preset:"):
+                item[1]()
+                break
+        else:
+            self.fail("the Pan Delay page has no Preset line")
+        names = [label_of(item) for item in self.last_menu().items]
+        for _stored, label, _ms, _mode, _note in voice_effect_pan.PRESETS:
+            self.assertTrue(any(name.startswith(label) for name in names),
+                            names)
+
+    def test_the_custom_voice_board_carries_the_pan_delay_slot(self):
+        """The board can play the delay the Pan Delay page sets."""
+        self.handler._open_voice_builder_menu()
+        labels = [label_of(item) for item in self.last_menu().items]
+        self.assertTrue(any(label.startswith("Pan Delay") for label in labels),
+                        labels)
+        for item in self.last_menu().items:
+            if label_of(item).startswith("Pan Delay"):
+                item[1]()
+                break
+        else:
+            self.fail("the Custom Voice board has no Pan Delay slot")
+        choices = [label_of(item) for item in self.last_menu().items]
+        self.assertTrue(any(name.startswith("Off") for name in choices), choices)
+        for _stored, name, _ms, _mode, _note in voice_effect_pan.PRESETS:
+            self.assertIn(name, choices)
 
     def test_a_voice_builder_slot_page_writes_the_board_and_applies_it(self):
         board = {}

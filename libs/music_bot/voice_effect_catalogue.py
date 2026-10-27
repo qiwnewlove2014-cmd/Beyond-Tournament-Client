@@ -20,12 +20,15 @@ Three rows are not fixed presets: ``custom`` is the Custom Amp board
 of being written into ``_SPECS``. All three are catalogued like the others so
 the pedal list, the family check and the clamp all treat them the same way; the
 builder is in ``STANDALONE_EFFECTS`` because it sits on the Voice Effect page's
-top level rather than inside a family, and the vocoder board is the last line
-of the Vocoder Lab family, where its twenty presets live.
+top level rather than inside a family, the Pan Delay is there for the same
+reason (its delay is typed, so it opens a page rather than being a row of
+steps) and the vocoder board is the last line of the Vocoder Lab family, where
+its twenty presets live.
 """
 
 from .voice_effect_builder import EFFECT_ID as BUILDER_EFFECT
 from .voice_effect_custom import EFFECT_ID as CUSTOM_EFFECT
+from .voice_effect_pan import EFFECT_ID as PAN_EFFECT
 from .voice_effect_vocoder import EFFECT_ID as VOX_LAB_EFFECT
 
 #: Every preset, in the order the page lists them.
@@ -117,6 +120,12 @@ VOICE_EFFECTS = (
      "A chorus pedal: three copies of the voice, each a little later and "
      "slowly drifting, mixed with the dry one. Lush and wide, where Clean "
      "Guitar's is a single shimmer."),
+    (PAN_EFFECT, "Pan Delay",
+     "A delay that moves: the repeats cross the listener's ears (or pass in "
+     "front and behind) while the words repeat beside them. The delay is typed "
+     "in milliseconds -- it is both the gap between the repeats and the time "
+     "one crossing takes -- and the movement is applied by each listener's own "
+     "machine, because one mono frame cannot carry a direction."),
     ("vinyl", "Vinyl",
      "A record: a delay whose length breathes a third of a millisecond, about "
      "three cents of wow, with a handful of clicks and the top rolled off. Old "
@@ -568,7 +577,7 @@ VOICE_EFFECTS = (
     (BUILDER_EFFECT, "Custom Voice",
      "Your own effect, assembled from the blocks the fixed pedals are made of: "
      "colour, tone, body, movement, pitch, space, texture, rhythm, a gate and "
-     "the output. Ten slots and seventy-one choices between them, so a fuzz in "
+     "the output. Eleven slots and seventy-eight choices between them, so a fuzz in "
      "a cave with a slow chorus is a sound you can build rather than one the "
      "list happens not to have."),
 )
@@ -577,8 +586,11 @@ VOICE_EFFECTS = (
 #: from a family. `catalogue_problems` treats them as reachable -- the check
 #: exists to catch a preset nobody can choose, not to force every row into a
 #: category -- and `menus._open_voice_effect_menu` puts each one on that page by
-#: hand, which is the thing a new standalone row has to remember.
-STANDALONE_EFFECTS = (BUILDER_EFFECT,)
+#: hand, which is the thing a new standalone row has to remember. Both of these
+#: open a page rather than being a pedal to pick: the Pan Delay's setting is
+#: typed, and Custom Voice is a board. A row in a family AND here is an error
+#: (`listed twice`), so a line that moves up here moves out of its family.
+STANDALONE_EFFECTS = (PAN_EFFECT, BUILDER_EFFECT)
 
 #: The page is too long to read as one list, so it is a page of families and a
 #: page of pedals under each: ``(id, menu name, what Tab reads, (members,))``.

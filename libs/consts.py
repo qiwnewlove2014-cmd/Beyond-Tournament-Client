@@ -41,6 +41,10 @@ CHANNEL_MEGAPHONE = 30
 # conceal it (Opus PLC) instead of holding a reserve big enough to sit through
 # every hole. Only used once the Server advertises `pa_timeline_v1`.
 CHANNEL_MEGAPHONE_TIMELINE = 31
+#: The Pan Delay's movement, three bytes per frame, beside the voice leg. It is
+#: reserved out of the player voice-channel range (`get_available_voice_channel`
+#: assigns 21-255) so a movement packet can never be mistaken for a speaker.
+CHANNEL_VOICE_MOTION = 254
 # The wire format on that channel (both ends read it from here): version, then
 # the sender's voice_channel, then the stream epoch, then the frame sequence -
 # 9 bytes uploaded by the sender, 10 once the Server has inserted the channel.

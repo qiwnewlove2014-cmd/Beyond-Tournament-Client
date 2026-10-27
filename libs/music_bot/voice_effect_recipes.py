@@ -2,12 +2,13 @@
 
 Why this exists
 ---------------
-`voice_effect_builder.py` is a board of ten slots holding seventy-one choices,
-which is more combinations than anyone will ever try and, on the first visit,
-ten lines all reading their default. A player who wants "my voice, but through
-a broken radio" has to know which of ten slots that is before they can hear it.
-So the board's **first line** is `Start From:` and it opens this module: fifty
-finished voices, each one the same ten slots with values in them. Picking one is
+`voice_effect_builder.py` is a board of eleven slots holding seventy-eight
+choices, which is more combinations than anyone will ever try and, on the first
+visit, eleven lines all reading their default. A player who wants "my voice, but
+through a broken radio" has to know which of eleven slots that is before they
+can hear it. So the board's **first line** is `Start From:` and it opens this
+module: fifty finished voices, each one the same eleven slots with values in
+them. Picking one is
 picking a sound, and every slot underneath stays the player's to change.
 
 A recipe is not a pedal. It has no row in `voice_effect_catalogue`, it never
@@ -381,7 +382,7 @@ def family_label(family_id):
 
 
 def board(recipe_id):
-    """The ten slots a recipe sets, every default filled in, or None."""
+    """The slots a recipe sets, every default filled in, or None."""
     row = recipe(recipe_id)
     return _builder().filled(row[4]) if row else None
 
@@ -422,7 +423,7 @@ def current_label():
 
 def start_note():
     """What Tab reads on the board's first line."""
-    return ("Fifty ready-made voices: pick one and the ten slots above fill "
+    return ("Fifty ready-made voices: pick one and the slots above fill "
             "themselves from it, then change whatever you like. As it is now: "
             f"{current_label()}. A recipe is not a pedal -- it writes the "
             "board, so what you hear is always the board.")

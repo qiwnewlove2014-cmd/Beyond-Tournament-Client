@@ -179,7 +179,7 @@ class TheCatalogueTests(unittest.TestCase):
                           "cocked", "wool", "starved", "boxy", "studio_pre",
                           "tape", "organ", "air_amp", "horn", "grind",
                           "substack", "sizzle", "lowgrowl", "wall", "spring",
-                          "trem", "custom", "voice_build"):
+                          "trem", "pan_delay", "custom", "voice_build"):
             self.assertIn(effect_id, ids)
         for effect_id, label, note in voice_effects.VOICE_EFFECTS:
             with self.subTest(preset=effect_id):
@@ -253,7 +253,7 @@ class TheProcessorTests(unittest.TestCase):
                        "cocked", "wool", "starved", "boxy", "studio_pre",
                        "tape", "organ", "air_amp", "horn", "grind",
                        "substack", "sizzle", "lowgrowl", "wall", "spring",
-                       "trem", "custom", "voice_build"):
+                       "trem", "pan_delay", "custom", "voice_build"):
             with self.subTest(preset=preset):
                 processor = self.processor(preset)
                 for start in range(0, len(pcm) - FRAME + 1, FRAME):
@@ -279,7 +279,7 @@ class TheProcessorTests(unittest.TestCase):
                        "cocked", "wool", "starved", "boxy", "studio_pre",
                        "tape", "organ", "air_amp", "horn", "grind",
                        "substack", "sizzle", "lowgrowl", "wall", "spring",
-                       "trem", "custom", "voice_build"):
+                       "trem", "pan_delay", "custom", "voice_build"):
             with self.subTest(preset=preset):
                 self.assertEqual(
                     self.processor(preset).process(silence), silence)
@@ -360,7 +360,7 @@ class TheProcessorTests(unittest.TestCase):
                        "cocked", "wool", "starved", "boxy", "studio_pre",
                        "tape", "organ", "air_amp", "horn", "grind",
                        "substack", "sizzle", "lowgrowl", "wall", "spring",
-                       "trem", "custom", "voice_build"):
+                       "trem", "pan_delay", "custom", "voice_build"):
             with self.subTest(preset=preset):
                 after = play(self.processor(preset), loud)
                 # The ceiling, not full scale: a pedal hands the PA and a cinema
@@ -866,11 +866,14 @@ class TheStudioPedalsTests(unittest.TestCase):
 
     def test_the_page_is_two_levels_with_nothing_lost(self):
         self.assertEqual(voice_effects.catalogue_problems(), [])
-        # 142 presets and boards + Off; the ten clean channels that left
+        # 143 presets and boards + Off; the ten clean channels that left
         # Radio are still catalogue rows, just in two families of their own.
-        # Custom Voice is the standalone row, not in a family.
-        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 143)
+        # Two rows are in no family at all -- Custom Voice and the Pan Delay
+        # -- because each one opens a page rather than being a pedal, and the
+        # Pan Delay's delay is typed rather than a row of steps.
+        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 144)
         self.assertEqual(len(voice_effects.VOICE_EFFECT_GROUPS), 11)
+        self.assertEqual(len(voice_effects.STANDALONE_EFFECTS), 2)
         self.assertEqual(
             sum(len(members) for *_rest, members
                 in voice_effects.VOICE_EFFECT_GROUPS), 141)
@@ -1371,13 +1374,14 @@ class TheVoiceBuilderTests(unittest.TestCase):
     def test_the_board_offers_at_least_fifty_forms(self):
         forms = sum(len(row[3]) for row in voice_effect_builder.PARAMS)
         self.assertGreaterEqual(forms, 50)
-        self.assertEqual(len(voice_effect_builder.PARAMS), 10)
+        self.assertEqual(len(voice_effect_builder.PARAMS), 11)
 
     def test_every_slot_is_a_different_choice_set(self):
         ids = [row[0] for row in voice_effect_builder.PARAMS]
         self.assertEqual(len(ids), len(set(ids)))
         for param_id in ("colour", "tone", "body", "movement", "pitch",
-                         "space", "texture", "rhythm", "gate", "output"):
+                         "space", "pan", "texture", "rhythm", "gate",
+                         "output"):
             self.assertIn(param_id, ids)
 
     def test_a_fresh_board_is_an_amp_with_nothing_else_on(self):

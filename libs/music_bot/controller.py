@@ -1536,6 +1536,9 @@ class MapMusicBot:
     def _open_vocoder_lab_menu(self):
         return self._menus()._open_vocoder_lab_menu()
 
+    def _open_pan_delay_menu(self):
+        return self._menus()._open_pan_delay_menu()
+
     def _open_builder_clear_menu(self, board_menu=None):
         return self._menus()._open_builder_clear_menu(board_menu)
 

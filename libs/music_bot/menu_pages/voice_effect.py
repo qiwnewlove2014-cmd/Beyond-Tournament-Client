@@ -28,7 +28,7 @@ class VoiceEffectMenus:
         """The pedals a player can put their broadcast voice through.
 
         Two levels: the families, then the pedals in one of them. A hundred
-        and forty-two pedals in one list is a list you scroll rather than read,
+        and forty-four rows in one list is a list you scroll rather than read,
         and a name
         like `Plate` says nothing until something explains it -- a family is
         where that explanation fits without every line carrying all of it. Off
@@ -47,13 +47,20 @@ class VoiceEffectMenus:
         bottom of that family and nowhere else, because a board with no amp
         around it is a page of filters with nothing to filter.
 
-        This page ends with a board too: `Custom Voice`
-        (`_open_voice_builder_menu`) assembles a whole effect out of the blocks
-        the families are made of -- ten slots, seventy-one choices, and fifty
-        ready-made voices on the board's first line (`voice_effect_recipes`) --
-        and it is a line *on* this page rather than a family under it, because
-        it is one choice rather than a category (`voice_effect_catalogue.
-        STANDALONE_EFFECTS`).
+        This page also ends with the two rows that are not families, because
+        each is one choice rather than a category (`voice_effect_catalogue.
+        STANDALONE_EFFECTS`), and each opens a page rather than a list of
+        pedals:
+
+        - `Pan Delay` (`_open_pan_delay_menu`) is a delay whose repeats cross
+          the listener's head, and its delay is TYPED, so it cannot be a row of
+          fixed steps the way a family's presets are. It sits beside the
+          families rather than inside Motion so the one preset with a setting
+          of its own is where a player looking for it opens the page.
+        - `Custom Voice` (`_open_voice_builder_menu`) assembles a whole effect
+          out of the blocks the families are made of -- eleven slots,
+          seventy-eight choices, and fifty ready-made voices on the board's
+          first line (`voice_effect_recipes`).
 
         The Vocoder Lab family ends with its own board
         (`_open_vocoder_lab_menu`): the same six-band bank as its twenty
@@ -66,6 +73,7 @@ class VoiceEffectMenus:
         from .. import gate as music_bot_gate
         from .. import voice_effect_builder
         from .. import voice_effect_custom
+        from .. import voice_effect_pan
         from .. import voice_effect_vocoder
         from .. import voice_effects
         gp = self._bot._find_gameplay()
@@ -137,6 +145,23 @@ class VoiceEffectMenus:
                 return label
             return label_fn
 
+        def make_pan_label():
+            # The page's two settings on the family's own line, like the boards'.
+            def label_fn():
+                label = voice_effects.effect_label(voice_effects.PAN_EFFECT)
+                label = f"{label}: {voice_effect_pan.summary()}"
+                if current() == voice_effects.PAN_EFFECT:
+                    return f"{label} (active)"
+                return label
+            return label_fn
+
+        def go_pan():
+            # Opening the page is choosing the preset, as it is for the boards:
+            # a player who came here to set a delay has already decided.
+            gp.pop_last_substate()
+            self._bot.set_voice_effect(voice_effects.PAN_EFFECT)
+            self._open_pan_delay_menu()
+
         def go_custom():
             # Opening the board is choosing it: a player who wants their own
             # amp has already decided, and a board that changed nothing until
@@ -202,11 +227,17 @@ class VoiceEffectMenus:
                     voice_effects.VOICE_EFFECT_GROUPS):
                 items.append((make_group_label(group_id, name, members),
                               open_group(group_id), None, note))
-            # The builder is the page's last choice, not a family: it opens a
-            # board rather than a list of pedals.
+            # The rows that are not families: each opens a page rather than a
+            # list of pedals (the Pan Delay types its delay, Custom Voice is a
+            # board). They come after the families, so the page reads as the
+            # categories first and the two things you set yourself last.
             for effect_id in voice_effects.STANDALONE_EFFECTS:
-                items.append((make_builder_label(), go_builder, None,
-                              voice_effects.effect_note(effect_id)))
+                if effect_id == voice_effects.PAN_EFFECT:
+                    items.append((make_pan_label(), go_pan, None,
+                                  voice_effects.effect_note(effect_id)))
+                elif effect_id == voice_effects.BUILDER_EFFECT:
+                    items.append((make_builder_label(), go_builder, None,
+                                  voice_effects.effect_note(effect_id)))
             items.append(("Back", go_back, None,
                           "Returns to Music Bot Settings."))
         else:
@@ -234,13 +265,183 @@ class VoiceEffectMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
+    def _open_pan_delay_menu(self):
+        """Pan Delay: the typed delay and the movement, on one page.
+
+        Two settings, not a board. `Delay` is typed, 20-2000 whole
+        milliseconds, because a delay a player hears is a number they choose
+        rather than a row of steps; `Motion` is three choices (Stereo,
+        Front-Back, Off). The page's title names both, and every change is
+        spoken once and lands on the next 20 ms frame.
+
+        `Preset` is the third line: the named settings of
+        `voice_effect_pan.PRESETS` -- Ping-Pong, Wide Sweep, Front Walk, Deep
+        Behind and Slow Drift, plus `Custom (this page)` for the player's own
+        two numbers. Choosing a name writes both settings, so a preset is a
+        name for the pair rather than a copy of it, and typing a delay puts the
+        mark back to `Custom`. **The same table is the Custom Voice board's Pan
+        Delay slot**, so a delay set here can be played by a voice built there.
+
+        Opening the page chooses the preset -- the same rule as the boards: a
+        player who came here to set a delay has already decided. The line on the
+        Voice Effect page carries the same summary, so that page answers "what
+        is it set to" without being opened.
+        """
+        from ... import menu as menu_mod, menus
+        from .. import gate as music_bot_gate
+        from .. import voice_effect_pan
+        from .. import voice_effects
+
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+        if music_bot_gate.blocked("voice_fx"):
+            return
+
+        def go_back():
+            # The line lives on the Voice Effect page itself, not in a family.
+            gp.pop_last_substate()
+            self._open_voice_effect_menu()
+
+        def choose():
+            self._bot.set_voice_effect(voice_effects.PAN_EFFECT)
+
+        def go_delay():
+            def submitted(text):
+                # Pop first, always: a field that stays open over a swapped
+                # substate is the frozen-looking game the fade field had.
+                gp.pop_last_substate()
+                text = "" if text is None else str(text).strip()
+                before = voice_effect_pan.delay_ms()
+                if not text:
+                    self._say(f"Delay unchanged, {before} milliseconds.")
+                    return
+                stored = voice_effect_pan.set_delay_ms(text)
+                if stored is None:
+                    self._say(f"'{text}' is not a number of milliseconds, so "
+                              f"the delay is still {before}.")
+                    return
+                choose()
+                self._say(f"Pan Delay: {stored} milliseconds, "
+                          f"{voice_effect_pan.motion_label().lower()}.")
+
+            gp.add_substate(self._bot.game.input.run(
+                f"Enter the delay in milliseconds, "
+                f"{voice_effect_pan.MIN_DELAY_MS} to "
+                f"{voice_effect_pan.MAX_DELAY_MS} "
+                f"(currently {voice_effect_pan.delay_ms()}):",
+                handeler=submitted,
+                min_val=voice_effect_pan.MIN_DELAY_MS,
+                max_val=voice_effect_pan.MAX_DELAY_MS,
+                msg_length=4, multiline=False,
+            ))
+
+        def go_motion():
+            page = menu_mod.Menu(
+                self._bot.game,
+                f"Music Bot Pan Delay: {voice_effect_pan.motion_label()}",
+                parrent=gp,
+            )
+            items = []
+            for label, stored, note in voice_effect_pan.MOTIONS:
+                def apply(value=stored, name=label):
+                    def pressed():
+                        voice_effect_pan.set_motion(value)
+                        choose()
+                        gp.pop_last_substate()
+                        self._say(f"Pan Delay: {name.lower()}.")
+                    return pressed
+
+                shown = (f"{label} (active)"
+                         if stored == voice_effect_pan.motion() else label)
+                items.append((shown, apply(), None, note))
+            items.append(("Back", lambda: gp.pop_last_substate(), None,
+                          "Returns to the Pan Delay page."))
+            page.add_items(items)
+            menus.set_default_sounds(page)
+            gp.add_substate(page)
+
+        def go_preset():
+            page = menu_mod.Menu(
+                self._bot.game,
+                f"Music Bot Pan Delay Preset: "
+                f"{voice_effect_pan.preset_label()}",
+                parrent=gp,
+            )
+            items = []
+            for stored, label, milliseconds, mode, note in (
+                    voice_effect_pan.PRESETS):
+                def apply(value=stored, name=label):
+                    def pressed():
+                        voice_effect_pan.set_preset(value)
+                        choose()
+                        gp.pop_last_substate()
+                        self._say(f"Pan Delay preset: {name.lower()}, "
+                                  f"{voice_effect_pan.delay_ms()} "
+                                  f"milliseconds, "
+                                  f"{voice_effect_pan.motion_label().lower()}.")
+                    return pressed
+
+                # A named row says what it would set; the mark says which one
+                # the page is on (`Custom (this page)` is the player's own two
+                # numbers, so it reads as its own name alone).
+                shown = label
+                if stored != voice_effect_pan.CUSTOM_PRESET:
+                    shown = (f"{label} -- {milliseconds} ms, "
+                             f"{voice_effect_pan.motion_label(mode).lower()}")
+                if stored == voice_effect_pan.preset():
+                    shown = f"{shown} (active)"
+                items.append((shown, apply(), None, note))
+            items.append(("Back", lambda: gp.pop_last_substate(), None,
+                          "Returns to the Pan Delay page."))
+            page.add_items(items)
+            menus.set_default_sounds(page)
+            gp.add_substate(page)
+
+        def reset():
+            voice_effect_pan.clear()
+            choose()
+            page.title = f"Music Bot Pan Delay: {voice_effect_pan.summary()}"
+            self._say("Pan Delay reset: 300 milliseconds, Stereo.")
+
+        choose()
+        page = menu_mod.Menu(
+            self._bot.game,
+            f"Music Bot Pan Delay: {voice_effect_pan.summary()}",
+            parrent=gp,
+        )
+        page.add_items([
+            (lambda: f"Delay: {voice_effect_pan.delay_ms()} ms", go_delay,
+             None,
+             "Type the delay yourself, in whole milliseconds from 20 to 2000. "
+             "It is both the gap between the repeats and the time one crossing "
+             "takes, so a longer delay is a slower movement."),
+            (lambda: f"Motion: {voice_effect_pan.motion_label()}", go_motion,
+             None,
+             "Where the repeats travel: Stereo crosses your ears, Front-Back "
+             "passes in front of and behind you, Off keeps the delay still."),
+            (lambda: f"Preset: {voice_effect_pan.preset_label()}", go_preset,
+             None,
+             "Named settings: a delay and a movement under one name. The same "
+             "names are the Pan Delay slot of the Custom Voice board, so a "
+             "preset chosen here can be played by a voice built there, and "
+             "Custom (this page) follows the two lines above."),
+            ("Reset to 300 ms, Stereo", reset, None,
+             "Puts both settings back to what the page opens with, and the "
+             "preset mark back to Custom. Pan Delay stays chosen."),
+            ("Back", go_back, None,
+             "Returns to the Voice Effect page."),
+        ])
+        menus.set_default_sounds(page)
+        gp.add_substate(page)
+
     def _open_voice_builder_menu(self):
         """The Custom Voice board: the last line of the Voice Effect page.
 
-        The same generated page as the amp board, over the ten slots in
+        The same generated page as the amp board, over the eleven slots in
         `voice_effect_builder.PARAMS` -- colour, tone, body, movement, pitch,
-        space, texture, rhythm, gate and output. Back returns to the Voice
-        Effect page it came from, not into Amp & Drive.
+        space, pan delay, texture, rhythm, gate and output. Back returns to the
+        Voice Effect page it came from, not into Amp & Drive.
         """
         from .. import voice_effect_builder
         return self._open_custom_effect_menu(voice_effect_builder,
@@ -266,7 +467,7 @@ class VoiceEffectMenus:
         """The Custom Voice board's Clear line, behind a question.
 
         Every other line on that page is a choice that can be changed again by
-        pressing the same line; `Clear` is ten slots at once, and it sits
+        pressing the same line; `Clear` is every slot at once, and it sits
         directly above `Back` -- exactly where an overshoot lands. So the press
         opens a two-line question instead, and `No, keep it` is a Back.
 
@@ -305,7 +506,7 @@ class VoiceEffectMenus:
                           parrent=gp)
         m.add_items([
             ("Yes, clear the board", do_clear, None,
-             "Puts all ten slots back to their defaults and forgets the "
+             "Puts every slot back to its default and forgets the "
              "starting point. Custom Voice stays chosen."),
             ("No, keep it", keep, None,
              "Returns to the board with everything on it kept."),
@@ -316,10 +517,12 @@ class VoiceEffectMenus:
     def _open_builder_recipes_menu(self, family_id=None, from_board=False):
         """The Custom Voice board's starting points: five pages of ten.
 
-        The board is ten slots of seventy-one choices, and a player opening it
+        The board is eleven slots of seventy-eight choices, and a player
+        opening it
         for the first time is looking at ten lines reading their defaults. This
         page is the way in: fifty finished voices (`voice_effect_recipes`),
-        each one the same ten slots with values in them, so a press is a sound
+        each one the same eleven slots with values in them, so a press is a
+        sound
         and every slot underneath stays the player's afterwards.
 
         One method for both levels -- the five families, and then one family's
@@ -498,13 +701,13 @@ class VoiceEffectMenus:
                  for param_id, name, note, _choices, _default in params]
         if board.EFFECT_ID == voice_effects.BUILDER_EFFECT:
             # The whole-voice board's first line is where to start, above the
-            # ten slots it fills: ten lines reading their defaults is not a
-            # choice, and "what is a Colour?" is not the first question a
+            # eleven slots it fills: eleven lines reading their defaults is not
+            # a choice, and "what is a Colour?" is not the first question a
             # player wants to answer.
             items.insert(0, (make_recipes_label(), open_recipes, None,
                              voice_effect_recipes.start_note()))
             # ... and the board's last line above Back is the way out of one
-            # that has been played with: ten slots at once is the only change
+            # that has been played with: every slot at once is the only change
             # here a single extra press cannot undo, so it asks first.
             items.append(("Clear: back to the defaults", open_clear, None,
                           "Every slot back to its default and the starting "
@@ -545,7 +748,7 @@ class VoiceEffectMenus:
         **The line above Back puts this one setting back.** `Clear: back to
         Crunch`, naming the value the board opens with -- a page of choices
         used to answer "what was it before I got here" nowhere, and four of
-        the ten slots (and six of the amp's ten knobs) do not open on their
+        the board's slots (and six of the amp's ten knobs) do not open on their
         first row. It leaves the other settings alone and does not ask, which
         is what separates it from the whole board's Clear.
 
@@ -631,7 +834,7 @@ class VoiceEffectMenus:
         # The line above Back is this one setting's way out, in the place the
         # board page's own Clear sits: one slot back to what the board opens
         # with, named, because the page has never said which value that is.
-        # It does not ask -- ten slots at once is a question, one is a press
+        # It does not ask -- every slot at once is a question, one is a press
         # the page already answers with `(active)` and any choice undoes.
         items.append((f"Clear: back to {board.default_label(param_id)}",
                       clear_one, None,

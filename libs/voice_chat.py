@@ -1644,6 +1644,9 @@ class voice_chat_compression(threading.Thread):
                             "n/a",
                             payload
                         )
+                    self._send_motion()
+                else:
+                    self._send_motion()
                 self._drain_megaphone_playout()
             except Exception as e:
                 logger.log_exception(e, f"voice_chat_compression.run (Channel {self.channel})")
@@ -1652,6 +1655,47 @@ class voice_chat_compression(threading.Thread):
         self._megaphone_decoders.clear()
 
 
+
+    #: How the three movement bytes are written: signed -127..127 around 128, so
+    #: `decode(byte) = (byte - 128) / 127` is one metre at the ends.
+    @staticmethod
+    def _motion_byte(value):
+        clamped = max(-1.0, min(1.0, float(value)))
+        return int(round(128 + clamped * 127.0)) & 0xFF
+
+    def _send_motion(self):
+        """Send this frame's place in the listener's space, if there is one.
+
+        The Pan Delay is the only preset that answers -- every other pedal's
+        `motion()` is the centre -- so this costs a normal talker nothing: a
+        frame with no movement is not sent unless the PREVIOUS one had some, in
+        which case one centre packet goes out and the listener puts the voice
+        back beside the body. The whole leg is skipped on a Server that never
+        advertised `voice_motion_v1`, which is the same negotiation the PA's
+        sequenced channel uses.
+        """
+        motion = getattr(self, "pending_motion", None)
+        if motion is None:
+            return
+        self.pending_motion = None
+        right, forward = motion
+        moving = bool(right or forward)
+        if not moving and not getattr(self, "_motion_moving", False):
+            return
+        self._motion_moving = moving
+        if not getattr(self.game, "voice_motion_supported", False):
+            return
+        own = getattr(getattr(self.game, "gameplay", None),
+                      "own_voice_channel", None)
+        if own is None:
+            return
+        payload = bytes((int(own) & 0xFF,
+                         self._motion_byte(right),
+                         self._motion_byte(forward)))
+        try:
+            self.game.network.send(consts.CHANNEL_VOICE_MOTION, "n/a", payload)
+        except Exception as exc:
+            logger.log_exception(exc, "voice motion send")
 
     def recieve(self, data, vc_source, radio_source, channelID, gameplay, sender_id=None,
                 epoch=None, frame_seq=None):
@@ -2133,6 +2177,14 @@ class VoiceChatRecord(threading.Thread):
 
                     if speech_line is not None:
                         chunk_bytes = bytearray(speech_line.shape(chunk_bytes))
+                        # The frame just shaped, as a place around the listener:
+                        # read here because the processor's clock moved with it.
+                        # Only a line with a pedal on it has a place to give --
+                        # the key, Auto-Tune and harmony lines are not wrapped
+                        # when the effect is off, and they answer nothing.
+                        read_motion = getattr(speech_line, "motion", None)
+                        if read_motion is not None:
+                            self.vc_compression.pending_motion = read_motion()
                         if monitor:
                             _feed_local_megaphone_direct(gp, chunk_bytes, producer='mic')
                     if audio_recorder is not None and not recorded_studio:

@@ -22,6 +22,16 @@ class Entity(Object):
     armor_sounds_path = None
     armor_cloth_volume = 60
 
+    #: How far a Pan Delay may move this voice from the talker's body, in
+    #: metres. One metre is enough for HRTF to place a voice beside the head,
+    #: and small enough that the distance gain (computed from the source's
+    #: position) does not audibly pump between syllables.
+    VOICE_MOTION_METRES = 1.0
+    #: How long the last movement is kept without a fresh packet. The voice
+    #: frames themselves run the check, so a talker who stopped mid-move leaves
+    #: their voice centred within half a second.
+    VOICE_MOTION_TIMEOUT = 0.5
+
     def __init__(self, game, map, x, y, z, hp, name="None", player=False):
         super().__init__(game, map, x, y, z)
         self._player = player
@@ -98,8 +108,8 @@ class Entity(Object):
             ey = float(self.y) if self.y is not None else 0.0
             ez = float(self.z) if self.z is not None else 0.0
             if self.vc_source:
-                self.vc_source.position = (ex, ey, ez)
                 self.vc_source.reference_distance = 1.7  # Boost volume to ~20% at 8 meters
+                self.place_voice_source()
             if self.music_source:
                 self.music_source.position = (ex, ey, ez)
                 self.music_source.rolloff_factor = 0.5
@@ -130,6 +140,78 @@ class Entity(Object):
                     self.soundgroup.parent.efx.send(self.music_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
                 except Exception:
                     pass
+
+    def set_voice_motion(self, right, forward):
+        """Where a Pan Delay wants this voice heard, relative to the listener.
+
+        `right` and `forward` are -1..1 on the LISTENER's own axes, decoded from
+        the three bytes the talker's machine sent. The body's position is never
+        touched: only where the voice plays from, so walking still moves the
+        talker and the movement rides on top of that. The OpenAL call is handed
+        to the audio inbox -- this arrives on the receive thread.
+        """
+        self._voice_motion = (float(right), float(forward))
+        self._voice_motion_at = time.monotonic()
+        audio = getattr(self.game, "audio_mngr", None)
+        if audio is not None:
+            audio.defer_audio(self.place_voice_source)
+
+    def expire_voice_motion(self):
+        """Centre the voice once the movement packets have stopped."""
+        motion = getattr(self, "_voice_motion", None)
+        if not motion or (not motion[0] and not motion[1]):
+            return
+        age = time.monotonic() - getattr(self, "_voice_motion_at", 0.0)
+        if age < self.VOICE_MOTION_TIMEOUT:
+            return
+        self._voice_motion = (0.0, 0.0)
+        self._voice_motion_at = 0.0
+        audio = getattr(self.game, "audio_mngr", None)
+        if audio is not None:
+            audio.defer_audio(self.place_voice_source)
+
+    def place_voice_source(self):
+        """Put the voice where it is heard: the body plus any pan offset.
+
+        The offset is one metre along the LISTENER's right (for Stereo) or
+        forward (for Front-Back) axis, taken from the audio listener's own
+        orientation -- so "left to right" means the listener's left and right, and
+        a voice behind them is behind them. The axes come from the same
+        orientation OpenAL already uses to place every other sound, so there is
+        one source of truth for where "right" is.
+        """
+        source = getattr(self, "vc_source", None)
+        if source is None:
+            return False
+        x = float(self.x) if self.x is not None else 0.0
+        y = float(self.y) if self.y is not None else 0.0
+        z = float(self.z) if self.z is not None else 0.0
+        motion = getattr(self, "_voice_motion", None)
+        if motion and (motion[0] or motion[1]):
+            try:
+                audio = self.game.audio_mngr
+                ox, oy, oz, ux, uy, uz = audio.orientation
+                # right = forward x up (right-handed listener: +X is right)
+                rx, ry, rz = (oy * uz - oz * uy,
+                              oz * ux - ox * uz,
+                              ox * uy - oy * ux)
+                length = (rx * rx + ry * ry + rz * rz) ** 0.5 or 1.0
+                scale = self.VOICE_MOTION_METRES
+                across = motion[0] * scale
+                ahead = motion[1] * scale
+                x += (rx / length) * across + ox * ahead
+                y += (ry / length) * across + oy * ahead
+                z += (rz / length) * across + oz * ahead
+            except Exception as exc:
+                audio_health.note_swallowed("entity.place_voice_source",
+                                            type(exc).__name__)
+        try:
+            source.position = (x, y, z)
+            return True
+        except Exception as exc:
+            audio_health.note_swallowed("entity.place_voice_source",
+                                        type(exc).__name__)
+            return False
 
     def sync_reverb(self):
         """Re-syncs environment Reverb EFX for this entity at current position."""
@@ -187,7 +269,7 @@ class Entity(Object):
         self.sync_reverb()
         if self.player:
             try:
-                self.vc_source.position = (self.x, self.y, self.z)
+                self.place_voice_source()
                 # Party Sync guest: the host's music arrives as a direct
                 # non-positional "headphones" feed, never placed in the world.
                 if not getattr(self, "_party_sync_direct", False):

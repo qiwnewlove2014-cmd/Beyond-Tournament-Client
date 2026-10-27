@@ -122,12 +122,12 @@ import numpy as np
 from .. import options
 from . import gate
 from .voice_effect_catalogue import (BUILDER_EFFECT, CUSTOM_EFFECT,
-                                     DEFAULT_EFFECT, STANDALONE_EFFECTS,
-                                     VOICE_EFFECTS, VOICE_EFFECT_GROUPS,
-                                     VOX_LAB_EFFECT, catalogue_problems,
-                                     clamp_effect, effect_label, effect_note,
-                                     group_label, group_members, group_note,
-                                     group_of)
+                                     DEFAULT_EFFECT, PAN_EFFECT,
+                                     STANDALONE_EFFECTS, VOICE_EFFECTS,
+                                     VOICE_EFFECT_GROUPS, VOX_LAB_EFFECT,
+                                     catalogue_problems, clamp_effect,
+                                     effect_label, effect_note, group_label,
+                                     group_members, group_note, group_of)
 
 #: One microphone frame: 20 ms of 48 kHz mono16, the unit every voice line is
 #: fed (`libs/voice_chat.VOICE_FRAME_BYTES`).
@@ -597,6 +597,9 @@ def spec_for(effect_id):
     if effect_id == VOX_LAB_EFFECT:
         from . import voice_effect_vocoder
         return voice_effect_vocoder.spec()
+    if effect_id == PAN_EFFECT:
+        from . import voice_effect_pan
+        return voice_effect_pan.spec()
     return _SPECS[effect_id]
 
 #: The loudest a pedal may hand over, in full scale. The PA and a cinema cabinet
@@ -621,7 +624,7 @@ PEAK_CEILING = 0.70
 #:
 #: It is the two BOARDS that get this, not the fixed pedals: every one of the
 #: sixty-odd presets was tuned by ear against a PA (its drive, its cabinet and
-#: its `out`), while a board is combinatorics -- ten slots can stack a shaper, a
+#: its `out`), while a board is combinatorics -- eleven slots can stack a shaper, a
 #: crusher, a sub octave and `Output: Loud`, a voice no preset ever hands over.
 #: 0.22 is a voice's own 0.08 plus about 9 dB: still a loud board, and no longer
 #: a square wave pretending to be one.
@@ -1148,6 +1151,25 @@ class _EffectProcessor:
         self._vocoder_envelopes = [0.0] * len(VOCODER_BANDS)
         self._vocoder_gains = [0.0] * len(VOCODER_BANDS)
         self._vocoder_cycle = 0.0
+        # Pan Delay: a delay (the talker's) and a position (the listener's).
+        # The ring holds `taps` repeats of `seconds` each; `_pan_clock` is the
+        # movement's own clock, advanced once per frame and read by `motion()`
+        # so the three bytes that travel describe the frame just shaped.
+        self._pan_delay = spec.get("pan_delay")
+        self._pan_motion = spec.get("pan_motion", "stereo")
+        if self._pan_delay:
+            seconds = float(self._pan_delay[0])
+            taps = max(1, int(self._pan_delay[1]))
+            self._pan_ring = np.zeros(int(round(seconds * taps * SAMPLE_RATE))
+                                      + 4800, dtype=np.float32)
+            self._pan_pos = 0
+            self._pan_weight = 0.55 / taps
+        else:
+            self._pan_ring = None
+            self._pan_pos = 0
+            self._pan_weight = 0.0
+        self._pan_clock = 0.0
+        self._pan_last = 0.0
         self._formant = spec.get("formant")
         self._formant_filter = (_Biquad.bandpass(self._formant[0],
                                                  self._formant[1])
@@ -1390,6 +1412,48 @@ class _EffectProcessor:
         ring[write] = block + float(feedback) * delayed
         self._echo_pos = int((self._echo_pos + block.size) % size)
         return block * (1.0 - mix) + delayed * mix
+
+    def _pan_delay_block(self, block):
+        """The Pan Delay's repeats: `taps` copies, `seconds` apart, no feedback.
+
+        No feedback on purpose. A repeat that feeds itself would smear the
+        movement: three copies at known distances are what a listener hears
+        crossing, and a tail past the third is a wash rather than a ping-pong.
+        The gains fall with each repeat, so the third is a hint of the first.
+        """
+        if not self._pan_delay:
+            return block
+        seconds, taps, _metres = self._pan_delay
+        taps = max(1, int(taps))
+        delay = int(round(float(seconds) * SAMPLE_RATE))
+        ring, size = self._pan_ring, self._pan_ring.size
+        positions = np.arange(block.size)
+        write = (self._pan_pos + positions) % size
+        wet = np.zeros(block.size, dtype=np.float32)
+        for tap in range(1, taps + 1):
+            read = (self._pan_pos + positions - delay * tap) % size
+            wet += ring[read] * (self._pan_weight * (taps - tap + 1) / taps)
+        ring[write] = block
+        self._pan_pos = int((self._pan_pos + block.size) % size)
+        period = 2.0 * float(seconds)
+        self._pan_clock = (self._pan_clock + block.size / SAMPLE_RATE) % period
+        return block + wet
+
+    def motion(self):
+        """The frame's place in the listener's space: (right, forward), -1..1.
+
+        Read after `process()`: the clock moved with the frame that was just
+        shaped, so the three bytes a listener receives describe the sound they
+        are about to hear. A preset with no pan stays at the centre -- the
+        answer is (0, 0) for every other pedal in the catalogue.
+        """
+        if not self._pan_delay or self._pan_motion == "off":
+            return 0.0, 0.0
+        seconds = float(self._pan_delay[0])
+        pan = float(np.cos(np.pi * self._pan_clock / seconds))
+        if self._pan_motion == "front_back":
+            return 0.0, pan
+        return pan, 0.0
 
     def _robot_block(self, block):
         if not self._robot:
@@ -2238,6 +2302,7 @@ class _EffectProcessor:
         block = self._wah_block(block)
         block = self._phaser_block(block)
         block = self._echo_block(block)
+        block = self._pan_delay_block(block)
         block = self._dark_echo_block(block)
         block = self._gated_block(block)
         block = self._cluster_block(block)
@@ -2289,11 +2354,22 @@ def _board_revision(effect_id):
         from . import voice_effect_custom
         return voice_effect_custom.revision()
     if effect_id == BUILDER_EFFECT:
-        from . import voice_effect_builder
-        return voice_effect_builder.revision()
+        from . import voice_effect_builder, voice_effect_pan
+        count = voice_effect_builder.revision()
+        # The board's Pan Delay slot has a `Custom` choice that plays whatever
+        # the Pan Delay page holds, so while the slot is ON it, that page's
+        # changes have to rebuild the board -- a typed delay must land on the
+        # next frame there too. With the slot on Off or a named setting the two
+        # counts are independent again.
+        if voice_effect_builder.uses_pan_page():
+            count += voice_effect_pan.revision()
+        return count
     if effect_id == VOX_LAB_EFFECT:
         from . import voice_effect_vocoder
         return voice_effect_vocoder.revision()
+    if effect_id == PAN_EFFECT:
+        from . import voice_effect_pan
+        return voice_effect_pan.revision()
     return 0
 
 
@@ -2335,6 +2411,20 @@ class VoiceEffectLine:
     @property
     def semitones(self):
         return self.inner.semitones if self.inner is not None else 0
+
+    def motion(self):
+        """The frame just shaped, as a place in the listener's space.
+
+        `(right, forward)` in the range -1..1, or `(0, 0)` for every preset that
+        has no movement. The voice path reads this beside the shaped frame and
+        sends it on `CHANNEL_VOICE_MOTION`; nothing else in this module needs
+        it, and a line with no processor answers the centre.
+        """
+        with self._lock:
+            processor = self._processor
+            if processor is None:
+                return 0.0, 0.0
+            return processor.motion()
 
     def set_semitones(self, semitones):
         if self.inner is not None:
