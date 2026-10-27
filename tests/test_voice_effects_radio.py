@@ -4,8 +4,8 @@
 a voice through a small speaker. This family is the other half of the idea: what
 makes a voice a *transmission* rather than merely a voice through a filter.
 
-The room and desk channels that used to sit at the top of the same ladder are
-now the `PA & Venue` and `Broadcast Desk` families. The split is pinned here
+The room and console channels that used to sit at the top of the same ladder are
+now the `PA & Venue` and `Studio Console` families. The split is pinned here
 beside the radio it came from.
 
 What is pinned here, and why each one is a measurement rather than a table:
@@ -198,19 +198,19 @@ DESK = ("rad_fm", "rad_studio", "rad_news", "rad_mission")
 
 
 class TheSplitShelvesTests(unittest.TestCase):
-    """The ten channels that left Radio: six rooms and four desks."""
+    """The ten channels that left Radio: six rooms and four console chains."""
 
     def test_the_ten_moved_to_two_named_families(self):
         self.assertEqual(voice_effects.catalogue_problems(), [])
         self.assertEqual(voice_effects.group_members("venue"), VENUE)
-        self.assertEqual(voice_effects.group_members("desk"), DESK)
+        self.assertEqual(voice_effects.group_members("console"), DESK)
         self.assertEqual(voice_effects.group_label("venue"), "PA & Venue")
-        self.assertEqual(voice_effects.group_label("desk"), "Broadcast Desk")
+        self.assertEqual(voice_effects.group_label("console"), "Studio Console")
         for effect_id in VENUE + DESK:
             with self.subTest(channel=effect_id):
                 self.assertNotIn(effect_id, voice_effects.group_members("broadcast"))
                 self.assertIn(voice_effects.group_of(effect_id),
-                              ("venue", "desk"))
+                              ("venue", "console"))
                 self.assertTrue(voice_effects.effect_note(effect_id).strip())
 
     def test_the_clean_shelves_are_quiet_between_words(self):

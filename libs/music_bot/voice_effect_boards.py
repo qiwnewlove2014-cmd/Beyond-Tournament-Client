@@ -3,8 +3,8 @@
 There are three boards on the Voice Effect page and they are the same shape:
 
 - `voice_effect_custom.py` -- **Custom Amp**, the last line of Amp & Drive:
-  seven knobs that configure the amp chain (drive, character, bass, mid,
-  treble, gate, output);
+  ten knobs that configure the amp chain (drive, character, bass, mid,
+  treble, gate, air, sag, wobble, output), forty-four choices between them;
 - `voice_effect_builder.py` -- **Custom Voice**, the last choice on the Voice
   Effect page itself: ten slots that assemble a whole voice effect out of the
   blocks the sixty-seven presets are made of;

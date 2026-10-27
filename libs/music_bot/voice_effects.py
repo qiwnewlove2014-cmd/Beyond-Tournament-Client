@@ -89,8 +89,9 @@ The shelves and the boards
 --------------------------
 The Amp & Drive family holds the original six pedals, the twenty amps added on
 2026-10-26 (`Crunch` to `Twelve String` -- each one a different corner, band,
-cabinet and bias on this same chain) and `Custom Amp`, which is not a preset at
-all: `voice_effect_custom.py` holds a table of knobs, and its spec is built from
+cabinet and bias on this same chain), the twenty more of 2026-10-27 (from
+`Bright Stack` to `Amp Tremolo`, each with a high-pass/cabinet pair no other
+row in the family has) and `Custom Amp`, which is not a preset at all: `voice_effect_custom.py` holds a table of knobs, and its spec is built from
 the board the player set. The Vocoder Lab family ends the same way: its twenty
 machines are fixed carriers, and `voice_effect_vocoder.py` is the board that
 exposes the carrier -- its mode, note, scale degree, waveform, band shift,
@@ -323,6 +324,65 @@ _SPECS = {
                     gate=0.010, out=0.52, sub_octave=0.50),
     "twelve": dict(hp=90.0, lp=8200.0, drive=1.0, shape=None, bias=0.0,
                    gate=0.004, out=1.05, octave=0.26),
+    # The third shelf (2026-10-27): twenty more voicings on the same chain.
+    # The rule between them is a corner of their own: no two of the twenty,
+    # and none of the rows above, share a high-pass and a cabinet corner --
+    # the low reach and the top of the cabinet are the two numbers a voice
+    # cannot help sounding, so they are what keeps these apart. The band and
+    # the exciter are the second pair: a lift at a new centre or an air band
+    # at a new corner, never both of an existing row's.
+    "plexi": dict(hp=150.0, lp=5800.0, drive=8.0, shape="tanh", bias=0.09,
+                  gate=0.007, out=0.78,
+                  formant=(950.0, 1.15, 0.35, 1.6)),
+    "scoop": dict(hp=85.0, lp=5200.0, drive=18.0, shape="hard", bias=0.10,
+                  gate=0.010, out=0.55, air=(7000.0, 2.0, 0.22)),
+    "treble_boost": dict(hp=330.0, lp=7200.0, drive=3.4, shape="tanh",
+                         bias=0.03, gate=0.005, out=1.05,
+                         air=(9000.0, 2.2, 0.34)),
+    "bass_rig": dict(hp=40.0, lp=3500.0, drive=2.6, shape="tanh", bias=0.05,
+                     gate=0.005, out=1.35,
+                     formant=(600.0, 1.1, 0.25, 1.4)),
+    "cocked": dict(hp=180.0, lp=4600.0, drive=5.5, shape="tanh", bias=0.07,
+                   gate=0.006, out=0.85,
+                   formant=(1250.0, 3.2, 0.75, 2.0)),
+    "wool": dict(hp=95.0, lp=2900.0, drive=9.5, shape="hard", bias=0.26,
+                 gate=0.008, out=0.70),
+    "starved": dict(hp=215.0, lp=3000.0, drive=14.0, shape="hard", bias=0.30,
+                    gate=0.026, out=0.95),
+    "boxy": dict(hp=240.0, lp=2700.0, drive=6.5, shape="tanh", bias=0.12,
+                 gate=0.007, out=0.95,
+                 formant=(720.0, 1.6, 0.55, 1.8)),
+    "studio_pre": dict(hp=75.0, lp=4600.0, drive=2.2, shape="tanh", bias=0.04,
+                       gate=0.004, out=1.15,
+                       formant=(1600.0, 1.0, 0.20, 1.3)),
+    "tape": dict(hp=65.0, lp=4500.0, drive=2.0, shape="tanh", bias=0.02,
+                 gate=0.004, out=1.10),
+    "organ": dict(hp=300.0, lp=6000.0, drive=4.0, shape="tanh", bias=0.06,
+                  gate=0.005, out=1.20,
+                  formant=(2400.0, 1.2, 0.45, 1.5)),
+    "air_amp": dict(hp=110.0, lp=9000.0, drive=1.4, shape="tanh", bias=0.03,
+                    gate=0.004, out=1.05, air=(11000.0, 1.6, 0.28)),
+    "horn": dict(hp=190.0, lp=3200.0, drive=9.0, shape="tanh", bias=0.15,
+                 gate=0.008, out=0.80,
+                 formant=(1500.0, 1.8, 0.60, 1.9)),
+    "grind": dict(hp=120.0, lp=4000.0, drive=21.0, shape="hard", bias=0.12,
+                  gate=0.011, out=0.55),
+    "substack": dict(hp=55.0, lp=2200.0, drive=12.0, shape="tanh", bias=0.18,
+                     gate=0.010, out=0.60, sub_octave=0.35),
+    "sizzle": dict(hp=160.0, lp=8000.0, drive=6.0, shape="tanh", bias=0.07,
+                   gate=0.006, out=0.85,
+                   formant=(3200.0, 1.3, 0.40, 1.7)),
+    "lowgrowl": dict(hp=105.0, lp=6800.0, drive=12.0, shape="tanh",
+                     bias=0.20, gate=0.008, out=0.62,
+                     formant=(420.0, 1.2, 0.50, 1.7)),
+    "wall": dict(hp=50.0, lp=4300.0, drive=26.0, shape="hard", bias=0.18,
+                 gate=0.012, out=0.50),
+    "spring": dict(hp=130.0, lp=6400.0, drive=3.0, shape="tanh", bias=0.05,
+                   gate=0.005, out=0.95,
+                   cluster=((11.0, 17.0, 23.0, 31.0),
+                            (0.50, 0.42, 0.34, 0.27), 0.20, 0.40)),
+    "trem": dict(hp=145.0, lp=5000.0, drive=4.4, shape="tanh", bias=0.08,
+                 gate=0.006, out=0.88, tremolo=(4.6, 0.65)),
     # The vocoder family (2026-10-26): twenty ways to hear the words spoken by a
     # machine. Every one of them is the same six-band bank; what changes is the
     # carrier -- its note (`hz`), its waveform, where its bands sit (`shift`,
@@ -404,8 +464,8 @@ _SPECS = {
     # they are each a dial here: the channel's corners (hp/lp), the codec
     # (`crush`, absent at the top), the noise floor (`static`, added after the
     # gate so it never follows the words) and how hard the channel is levelled
-    # (`ott`). The ten clean room and desk channels that used to top this ladder
-    # are their own families now (`PA & Venue`, `Broadcast Desk`).
+    # (`ott`). The ten clean room and console chains that used to top this
+    # ladder are their own families now (`PA & Venue`, `Studio Console`).
     "rad_8bit": dict(hp=380.0, lp=3200.0, drive=1.0, shape=None, bias=0.0,
                      gate=0.006, out=2.20, crush=(4, 6000.0),
                      static=(0.016, 380.0, 3200.0)),

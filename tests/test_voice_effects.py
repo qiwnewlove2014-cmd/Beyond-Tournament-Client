@@ -174,7 +174,12 @@ class TheCatalogueTests(unittest.TestCase):
                           "tweed", "brown", "hotrod", "chime", "sag",
                           "direct", "acoustic", "jazz", "room_cab", "doom",
                           "stoner", "velcro", "octavia", "fuzzsub",
-                          "twelve", "custom", "voice_build"):
+                          "twelve",
+                          "plexi", "scoop", "treble_boost", "bass_rig",
+                          "cocked", "wool", "starved", "boxy", "studio_pre",
+                          "tape", "organ", "air_amp", "horn", "grind",
+                          "substack", "sizzle", "lowgrowl", "wall", "spring",
+                          "trem", "custom", "voice_build"):
             self.assertIn(effect_id, ids)
         for effect_id, label, note in voice_effects.VOICE_EFFECTS:
             with self.subTest(preset=effect_id):
@@ -244,7 +249,11 @@ class TheProcessorTests(unittest.TestCase):
                        "modern", "tweed", "brown", "hotrod", "chime", "sag",
                        "direct", "acoustic", "jazz", "room_cab", "doom",
                        "stoner", "velcro", "octavia", "fuzzsub", "twelve",
-                       "custom", "voice_build"):
+                       "plexi", "scoop", "treble_boost", "bass_rig",
+                       "cocked", "wool", "starved", "boxy", "studio_pre",
+                       "tape", "organ", "air_amp", "horn", "grind",
+                       "substack", "sizzle", "lowgrowl", "wall", "spring",
+                       "trem", "custom", "voice_build"):
             with self.subTest(preset=preset):
                 processor = self.processor(preset)
                 for start in range(0, len(pcm) - FRAME + 1, FRAME):
@@ -266,7 +275,11 @@ class TheProcessorTests(unittest.TestCase):
                        "modern", "tweed", "brown", "hotrod", "chime", "sag",
                        "direct", "acoustic", "jazz", "room_cab", "doom",
                        "stoner", "velcro", "octavia", "fuzzsub", "twelve",
-                       "custom", "voice_build"):
+                       "plexi", "scoop", "treble_boost", "bass_rig",
+                       "cocked", "wool", "starved", "boxy", "studio_pre",
+                       "tape", "organ", "air_amp", "horn", "grind",
+                       "substack", "sizzle", "lowgrowl", "wall", "spring",
+                       "trem", "custom", "voice_build"):
             with self.subTest(preset=preset):
                 self.assertEqual(
                     self.processor(preset).process(silence), silence)
@@ -343,7 +356,11 @@ class TheProcessorTests(unittest.TestCase):
                        "modern", "tweed", "brown", "hotrod", "chime", "sag",
                        "direct", "acoustic", "jazz", "room_cab", "doom",
                        "stoner", "velcro", "octavia", "fuzzsub", "twelve",
-                       "custom", "voice_build"):
+                       "plexi", "scoop", "treble_boost", "bass_rig",
+                       "cocked", "wool", "starved", "boxy", "studio_pre",
+                       "tape", "organ", "air_amp", "horn", "grind",
+                       "substack", "sizzle", "lowgrowl", "wall", "spring",
+                       "trem", "custom", "voice_build"):
             with self.subTest(preset=preset):
                 after = play(self.processor(preset), loud)
                 # The ceiling, not full scale: a pedal hands the PA and a cinema
@@ -849,14 +866,14 @@ class TheStudioPedalsTests(unittest.TestCase):
 
     def test_the_page_is_two_levels_with_nothing_lost(self):
         self.assertEqual(voice_effects.catalogue_problems(), [])
-        # 122 presets and boards + Off; the ten clean channels that left
+        # 142 presets and boards + Off; the ten clean channels that left
         # Radio are still catalogue rows, just in two families of their own.
         # Custom Voice is the standalone row, not in a family.
-        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 123)
+        self.assertEqual(len(voice_effects.VOICE_EFFECTS), 143)
         self.assertEqual(len(voice_effects.VOICE_EFFECT_GROUPS), 11)
         self.assertEqual(
             sum(len(members) for *_rest, members
-                in voice_effects.VOICE_EFFECT_GROUPS), 121)
+                in voice_effects.VOICE_EFFECT_GROUPS), 141)
 
     def test_tube_warmth_is_gentler_than_the_amp(self):
         # A pure tone has no harmonics of its own: whatever comes out is the
@@ -971,8 +988,9 @@ class TheAmpShelfTests(unittest.TestCase):
             with self.subTest(preset=preset):
                 self.assertIn(preset, members)
                 self.assertTrue(voice_effects.effect_label(preset))
-        # The original six, the twenty, and the board.
-        self.assertEqual(len(members), 27)
+        # The original six, the twenty, the third shelf's twenty and the
+        # board.
+        self.assertEqual(len(members), 47)
 
     def test_the_drive_ladder_gets_dirtier_step_by_step(self):
         signal = to_pcm(tone(220.0, 0.30, 0.6))
@@ -1053,6 +1071,149 @@ class TheAmpShelfTests(unittest.TestCase):
         self.assertLess(peak, 16.0)
 
 
+# ---------------------------------------------------------- the third shelf
+
+
+class TheThirdShelfTests(unittest.TestCase):
+    """The twenty voicings of 2026-10-27: each in a corner of its own.
+
+    The owner's rule for this shelf is a measurement rather than a table:
+    **no two voicings may share a frequency range.** So the corners are tested
+    twice -- as the numbers the specs set (a high-pass/cabinet pair that is
+    unique in the whole family) and as the spectrum that actually comes out.
+    """
+
+    THIRD = ("plexi", "scoop", "treble_boost", "bass_rig", "cocked",
+             "wool", "starved", "boxy", "studio_pre", "tape", "organ",
+             "air_amp", "horn", "grind", "substack", "sizzle", "lowgrowl",
+             "wall", "spring", "trem")
+
+    BANDS = ((0.0, 200.0), (200.0, 600.0), (600.0, 1200.0),
+             (1200.0, 2500.0), (2500.0, 4000.0), (4000.0, 6000.0),
+             (6000.0, 9000.0), (9000.0, 20000.0))
+
+    def shaped(self, preset, signal):
+        return play(voice_effects._EffectProcessor(preset), signal)
+
+    def shares(self, samples):
+        window = np.hanning(len(samples))
+        spectrum = np.abs(np.fft.rfft(samples * window)) ** 2
+        freqs = np.fft.rfftfreq(len(samples), 1.0 / SR)
+        total = max(1e-12, spectrum.sum())
+        return tuple(float(spectrum[(freqs >= low) & (freqs < high)].sum()
+                           / total) for low, high in self.BANDS)
+
+    def fingerprint(self, preset):
+        """The cabinet's eight bands, plus how hard the shaper is working."""
+        noise_out = self.shaped(preset, to_pcm(noise(0.20, 0.8)))[FRAME * 12:]
+        tone_out = self.shaped(preset, to_pcm(saw(0.30, 0.6)))[FRAME * 10:]
+        return self.shares(noise_out) + (min(3.0, harmonics(tone_out, 180.0))
+                                        / 3.0,)
+
+    def test_the_shelf_is_in_the_amp_family_and_in_the_catalogue(self):
+        members = voice_effects.group_members("drive")
+        for preset in self.THIRD:
+            with self.subTest(preset=preset):
+                self.assertIn(preset, members)
+                self.assertIn(preset, voice_effects._SPECS)
+                self.assertTrue(voice_effects.effect_label(preset).strip())
+                self.assertGreater(len(voice_effects.effect_note(preset)), 60)
+
+    def test_no_two_voicings_share_a_frequency_range(self):
+        """Every amp in the family has a high-pass/cabinet pair of its own.
+
+        The low reach and the top of the cabinet are the two numbers a voice
+        cannot help sounding, so a shared pair is a shared sound. This is the
+        table half of the owner's rule; the spectrum test below is the other.
+        """
+        corners = {}
+        for preset in voice_effects.group_members("drive"):
+            if preset not in voice_effects._SPECS:
+                continue    # Custom Amp is built from its board, not the table
+            spec = voice_effects._SPECS[preset]
+            corners[preset] = (spec["hp"], spec["lp"])
+        self.assertEqual(len(corners), len(set(corners.values())))
+        for preset in self.THIRD:
+            with self.subTest(preset=preset):
+                self.assertIn(preset, corners)
+
+    def test_every_voicing_is_a_different_spectrum(self):
+        """Played, not read from the table: twenty fingerprints, all apart."""
+        prints = {preset: self.fingerprint(preset)
+                  for preset in self.THIRD}
+        for index, first in enumerate(self.THIRD):
+            for second in self.THIRD[index + 1:]:
+                distance = sum(abs(a - b) for a, b
+                               in zip(prints[first], prints[second]))
+                with self.subTest(first=first, second=second):
+                    self.assertGreater(distance, 0.06,
+                                       f"{first} and {second} share a voice")
+        # ...and none of them is one of the older amps wearing a new name.
+        old = {preset: self.fingerprint(preset)
+               for preset in voice_effects.group_members("drive")
+               if preset not in self.THIRD
+               and preset in voice_effects._SPECS}
+        for preset in self.THIRD:
+            for other, other_print in old.items():
+                distance = sum(abs(a - b) for a, b
+                               in zip(prints[preset], other_print))
+                with self.subTest(new=preset, old=other):
+                    self.assertGreater(distance, 0.035,
+                                       f"{preset} is {other} again")
+
+    def test_treble_boost_has_no_bottom(self):
+        signal = to_pcm(noise(0.20, 0.8))
+        boost = self.shares(self.shaped("treble_boost", signal)[FRAME * 12:])
+        amp = self.shares(self.shaped("amp", signal)[FRAME * 12:])
+        self.assertLess(boost[0], 0.005)
+        self.assertGreater(amp[0], 10.0 * boost[0])
+
+    def test_cocked_wah_holds_one_band(self):
+        signal = to_pcm(noise(0.20, 0.8))
+        cocked = self.shares(self.shaped("cocked", signal)[FRAME * 12:])
+        amp = self.shares(self.shaped("amp", signal)[FRAME * 12:])
+        self.assertGreater(cocked[3], 0.50)
+        self.assertGreater(cocked[3], 1.4 * amp[3])
+
+    def test_sub_stack_adds_the_octave_below(self):
+        signal = to_pcm(tone(220.0, 0.30, 0.8))
+        after = self.shaped("substack", signal)[FRAME * 6:]
+        self.assertGreater(harmonic_ratio(after, 220.0, 110.0), 0.10)
+        dry = from_pcm(signal)[FRAME * 6:]
+        self.assertLess(harmonic_ratio(dry, 220.0, 110.0), 0.001)
+
+    def test_spring_amp_twangs_after_the_word(self):
+        burst = np.concatenate((tone(300.0, 0.30, 0.01),
+                                np.zeros(int(0.20 * SR), dtype=np.float32)))
+        pcm = to_pcm(burst)
+        spring = self.shaped("spring", pcm)
+        plain = self.shaped("studio_pre", pcm)
+        window = slice(int(0.035 * SR), int(0.060 * SR))
+        self.assertGreater(rms(spring[window]), 0.006)
+        self.assertGreater(rms(spring[window]), 5.0 * rms(plain[window]))
+
+    def test_amp_tremolo_pulses_at_its_rate(self):
+        signal = to_pcm(tone(220.0, 0.30, 2.0))
+        after = self.shaped("trem", signal)[FRAME * 5:]
+        blocks = after[:after.size // 480 * 480].reshape(-1, 480)
+        envelope = np.abs(blocks).max(axis=1)
+        self.assertGreater(float(envelope.std()), 0.15 * float(envelope.mean()))
+        centred = envelope - envelope.mean()
+        spectrum = np.abs(np.fft.rfft(centred * np.hanning(centred.size)))
+        rates = np.fft.rfftfreq(centred.size, 480.0 / SR)
+        self.assertAlmostEqual(float(rates[int(np.argmax(spectrum))]),
+                               4.6, delta=1.2)
+
+    def test_wall_is_the_dirtiest_of_the_shelf(self):
+        signal = to_pcm(tone(220.0, 0.25, 0.6))
+        wall = harmonics(self.shaped("wall", signal)[FRAME * 6:], 220.0)
+        for other in ("grind", "modern", "amp"):
+            with self.subTest(other=other):
+                self.assertGreater(
+                    wall, harmonics(self.shaped(other, signal)[FRAME * 6:],
+                                    220.0))
+
+
 # ---------------------------------------------------------------- the board
 
 
@@ -1095,6 +1256,33 @@ class TheCustomBoardTests(unittest.TestCase):
         self.assertEqual(voice_effect_custom.spec()["gate"], 0.020)
         voice_effect_custom.set_value("output", "loud")
         self.assertEqual(voice_effect_custom.spec()["out"], 1.15)
+
+    def test_the_board_can_build_the_third_shelf(self):
+        """Air, sag and wobble: the three blocks that shelf is made of.
+
+        The board grew from seven knobs to ten so the twenty new voicings are
+        all reachable from it -- an exciter for the bright ones, a supply for
+        the ones that dip, and movement for the two that pulse. Forty-four
+        choices between the ten, and every new knob absent from the spec while
+        it is Off, so a fresh board is still the amp it was.
+        """
+        self.assertEqual(len(voice_effect_custom.PARAMS), 10)
+        self.assertEqual(
+            sum(len(row[3]) for row in voice_effect_custom.PARAMS), 44)
+        spec = voice_effect_custom.spec()
+        for block in ("air", "sag", "tremolo", "vibrato"):
+            self.assertNotIn(block, spec)
+        voice_effect_custom.set_value("air", "brilliant")
+        self.assertEqual(voice_effect_custom.spec()["air"], (9000.0, 2.4, 0.30))
+        voice_effect_custom.set_value("sag", "deep")
+        self.assertEqual(voice_effect_custom.spec()["sag"], (0.55, 0.14))
+        voice_effect_custom.set_value("wobble", "deep")
+        self.assertEqual(voice_effect_custom.spec()["tremolo"], (5.8, 0.80))
+        self.assertNotIn("vibrato", voice_effect_custom.spec())
+        voice_effect_custom.set_value("wobble", "warble")
+        self.assertEqual(voice_effect_custom.spec()["vibrato"],
+                         (6.0, 2.5, 5.0))
+        self.assertNotIn("tremolo", voice_effect_custom.spec())
 
     def test_drive_off_takes_the_shaper_with_it(self):
         voice_effect_custom.set_value("drive", "off")

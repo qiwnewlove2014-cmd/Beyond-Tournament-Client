@@ -172,6 +172,56 @@ PARAMS = (
        "Shuts the moment you stop: silent between chords, at the price of a "
        "clipped tail on a held syllable.")),
      "soft"),
+    ("air", "Air",
+     "An exciter after the cabinet: the top is filtered out, driven and put "
+     "back, so harmonics are grown above a dull cabinet instead of merely "
+     "being lifted. This is the knob the third shelf's bright amps are built "
+     "on -- a dark cabinet with Air on is a different amp from the same "
+     "cabinet without it.",
+     (("Off", "off",
+       "Nothing above the cabinet: what the treble knob allows is all the top "
+       "there is. The default, and the right answer for a warm amp."),
+      ("Open", "open",
+       "Six kilohertz driven lightly and mixed a fifth in: the cabinet sounds "
+       "open-backed, with air around the note rather than a hiss on it."),
+      ("Brilliant", "brilliant",
+       "Nine kilohertz driven hard: new top harmonics, bright enough to cut "
+       "through a mix. Pair it with a dark cabinet, not a bright one.")),
+     "off"),
+    ("sag", "Sag",
+     "The amp's supply, not its output. A valve rectifier cannot feed a loud "
+     "passage, so the whole amp dips and only recovers once the passage ends "
+     "-- it is felt on a held word rather than heard as an effect. Off is a "
+     "solid-state supply that never dips.",
+     (("Off", "off",
+       "A stiff supply: the amp stays where it is put, which is what most "
+       "modern amps do. The default."),
+      ("Soft", "soft",
+       "A gentle dip on a loud syllable and a slow recovery: the breath a "
+       "small valve combo has under a held word."),
+      ("Deep", "deep",
+       "A rectifier at its limit: the loud part of a phrase sits down and "
+       "comes back over half a second. Felt rather than heard.")),
+     "off"),
+    ("wobble", "Wobble",
+     "The amp's own movement, the way an onboard tremolo is wired into the "
+     "bias. Slow and Deep pulse the level from full to half; Warble is the "
+     "other kind -- a delay that only moves, so the pitch sways instead. One "
+     "knob, four amps' worth of movement.",
+     (("Off", "off",
+       "Still: no movement at all, which is what every fixed preset without a "
+       "tremolo does. The default."),
+      ("Slow", "slow",
+       "About three and a half pulses a second, from full to half: the slow "
+       "tremolo a ballad is played with."),
+      ("Deep", "deep",
+       "Faster and deeper: nearly six pulses a second, almost to silence. "
+       "Surf, and a voice that comes and goes."),
+      ("Warble", "warble",
+       "Not a tremolo at all: a six-millisecond delay swinging three "
+       "milliseconds either way, so the pitch sways about five times a "
+       "second. A tape's wobble rather than an amp's pulse.")),
+     "off"),
     ("output", "Output",
      "The level the board hands on, after the cabinet. The line's ceiling is "
      "still above this, so Loud cannot clip a frame -- it is trim, not a "
@@ -233,6 +283,25 @@ _GATE = {"off": 0.0, "soft": 0.004, "firm": 0.010, "hard": 0.020}
 
 #: The output trim.
 _OUTPUT = {"quiet": 0.60, "half": 0.78, "unity": 0.95, "loud": 1.15}
+
+#: The exciter: None, or (corner, drive, mix) for `voice_effects._air_block`.
+_AIR = {
+    "off": None,
+    "open": (6000.0, 1.8, 0.22),
+    "brilliant": (9000.0, 2.4, 0.30),
+}
+
+#: The supply: None, or (depth, reference) for `_sag_block`.
+_SAG = {"off": None, "soft": (0.30, 0.18), "deep": (0.55, 0.14)}
+
+#: The movement: None, or the block and its tuple. Tremolo is the amp's own
+#: pulse (rate, depth); warble is a fully wet delay (base ms, sweep ms, rate).
+_WOBBLE = {
+    "off": None,
+    "slow": ("tremolo", (3.4, 0.55)),
+    "deep": ("tremolo", (5.8, 0.80)),
+    "warble": ("vibrato", (6.0, 2.5, 5.0)),
+}
 
 #: Bumped by every change, so a running line knows its processor is stale.
 _revision = 0
@@ -329,11 +398,14 @@ def summary():
 def note():
     """What Tab reads on the Custom Amp line in the pedal list."""
     return ("Your own amp: the board under this line sets the drive, the "
-            f"character, the bass, mid and treble and the gate. As it is now: "
-            f"{summary()}, "
+            f"character, the bass, mid and treble, the gate, the air, the "
+            f"supply's sag and the wobble. As it is now: {summary()}, "
             f"{choice_label('bass').lower()} bass, "
             f"{choice_label('mid').lower()} mid, "
             f"{choice_label('gate').lower()} gate, "
+            f"{choice_label('air').lower()} air, "
+            f"{choice_label('sag').lower()} sag, "
+            f"{choice_label('wobble').lower()} wobble, "
             f"{choice_label('output').lower()} output. It is the same chain the "
             "fixed pedals use -- a guitar plugged into the line-in is shaped by "
             "it too -- and every knob lands on the next 20 millisecond frame.")
@@ -357,5 +429,18 @@ def spec():
     mid = _MID[board["mid"]]
     if mid is not None:
         built["formant"] = mid
+    # The three knobs the third shelf needed: a chain that cannot grow top
+    # harmonics, dip under a loud phrase or move cannot build those twenty
+    # sounds, and each one is absent from the spec when it is Off so the
+    # default board stays byte-for-byte the amp it was.
+    air = _AIR[board["air"]]
+    if air is not None:
+        built["air"] = air
+    sag = _SAG[board["sag"]]
+    if sag is not None:
+        built["sag"] = sag
+    wobble = _WOBBLE[board["wobble"]]
+    if wobble is not None:
+        built[wobble[0]] = wobble[1]
     return built
 

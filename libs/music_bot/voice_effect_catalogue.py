@@ -298,6 +298,88 @@ VOICE_EFFECTS = (
     ("twelve", "Twelve String",
      "A twelve-string's shimmer: a clean amp with the rectified octave mixed "
      "lightly, so every word gains a second, brighter string above it."),
+    # ---- the third shelf (2026-10-27): twenty more voicings, one per corner
+    ("plexi", "Bright Stack",
+     "A hundred-watt stack with the bright channel up: the top stays open "
+     "over the dirt and the upper mid pushes at a syllable. The sound of a "
+     "big room with a loud band in it."),
+    ("scoop", "Scoop",
+     "A high-gain amp with the mids taken out: a hard clip, a low bottom and "
+     "an exciter far above the voice, so the consonants stay sharp while the "
+     "middle falls away. Modern, wide and empty in the centre."),
+    ("treble_boost", "Treble Boost",
+     "A treble booster in front of an amp: everything under three hundred "
+     "hertz is cut away before the shaper and the top is opened after it, so "
+     "a dull voice arrives bright and biting, with no bottom at all."),
+    ("bass_rig", "Bass Rig",
+     "A big bass rig: the low end reaches forty hertz and the cabinet stops "
+     "early, with only a whisper of drive. The one amp here that puts a chest "
+     "under the words instead of a bite over them."),
+    ("cocked", "Cocked Wah",
+     "A wah pedal parked half open: one very narrow band at twelve hundred "
+     "hertz, and the drive behind it. It does not sweep -- the sound is the "
+     "fixed vowel the pedal is stuck on, which is what makes the words honk."),
+    ("wool", "Wool Fuzz",
+     "A germanium fuzz at low gain: a soft, badly matched clip with the "
+     "cabinet dark and the top almost gone. Rounder and woollier than Fuzz, "
+     "and it cleans up on a quiet syllable."),
+    ("starved", "Starved Fuzz",
+     "A fuzz run on a dying battery: the supply cannot keep up, so the clip "
+     "sputters and the gate splutters on the tail of every word. Broken on "
+     "purpose, where Velcro tears on a clock and this one chokes on its own "
+     "current."),
+    ("boxy", "Small Box",
+     "A five-watt combo in a small box: the cabinet starts at two and a half "
+     "kilohertz, one boxy resonance at seven hundred and a clip with some "
+     "weight. Small, nasal and entirely convincing."),
+    ("studio_pre", "Studio Pre",
+     "A rack preamp rather than an amp: a wide, quiet channel with one small "
+     "lift at sixteen hundred and barely any clipping. The clean front end a "
+     "record is cut through before anything else is added."),
+    ("tape", "Tape Saturation",
+     "A voice printed to tape: a soft, almost symmetric clip, the top rolled "
+     "at four and a half kilohertz and no cabinet resonance at all. It rounds "
+     "the sound rather than dirtying it -- the tamest drive here."),
+    ("organ", "Organ Drive",
+     "A combo organ through its own amp: the bass cut high, a hard band at "
+     "twenty-four hundred and a gentle clip, so the voice takes on the reedy "
+     "edge of a drawbar instead of a guitar's bark."),
+    ("air_amp", "Air Amp",
+     "An amp with almost no cabinet at all: the top runs to nine kilohertz "
+     "and an exciter puts back what the microphone lost. Bright, open and "
+     "thin, where Direct is flat and this one is lit."),
+    ("horn", "Horn",
+     "A voice through a horn: one broad band at fifteen hundred hertz with "
+     "the drive behind it, so every syllable is pushed out of a bell. Loud, "
+     "nasal and unmistakably a speaker aimed at a street."),
+    ("grind", "Grind",
+     "A modern metal channel: the hardest clip of the shelf, the cabinet cut "
+     "at four kilohertz and no lifted band to hide behind. Tight, dry and "
+     "relentless."),
+    ("substack", "Sub Stack",
+     "An amp tuned for the bottom: the cabinet at twenty-two hundred hertz "
+     "and a half-speed copy under it, so a word arrives an octave deep and "
+     "heavy. Doom's floor without Doom's mud."),
+    ("sizzle", "Sizzle",
+     "A driven amp with a bright cap and a lift at three and a fifth: the "
+     "consonants sizzle over a tight clip while the body of the voice stays "
+     "dry. The most forward top of the shelf."),
+    ("lowgrowl", "Low Growl",
+     "A big amp with its weight in the low mids: a band at four hundred and "
+     "twenty hertz, a drive that thickens and a cabinet that still reaches "
+     "the top. Chest, not rumble."),
+    ("wall", "Wall",
+     "Everything the shaper can do at once: the drive at the top of the "
+     "range into a hard clip, the cabinet at four kilohertz. There is no "
+     "clean syllable left -- a wall of voice with the words inside it."),
+    ("spring", "Spring Amp",
+     "A small amp with a spring tank in it: four short bright taps between "
+     "eleven and thirty-one milliseconds, so a word twangs back at you from "
+     "the springs. The amp's reverb, not a room's."),
+    ("trem", "Amp Tremolo",
+     "An amp with its own tremolo switched on: the valve bias swings about "
+     "five times a second, so the voice pulses from full to a third. Not the "
+     "pedal's square chop -- this one breathes."),
     # ---- the vocoder family (2026-10-26): the words spoken by a machine
     ("vox_classic", "Classic Robot",
      "The vocoder everyone hears in their head: six bands of your voice drive a "
@@ -477,10 +559,12 @@ VOICE_EFFECTS = (
      "sound alarmed."),
     # ---- the board: not a preset, the player's own
     ("custom", "Custom Amp",
-     "Your own amp, built on a page of knobs: drive, character, bass, mid, "
-     "treble, gate and output. It is the same chain every fixed pedal uses, so "
-     "it can be anything from a clean DI to a saturated fuzz, and a guitar "
-     "plugged into the line-in is shaped by it too."),
+     "Your own amp, built on a page of ten knobs: drive, character, bass, "
+     "mid, treble, gate, air, sag, wobble and output -- forty-four choices. It "
+     "is the same chain every fixed pedal uses, so it can be anything from a "
+     "clean DI to a saturated fuzz, an exciter-bright stack or an amp that "
+     "dips and moves, and a guitar plugged into the line-in is shaped by it "
+     "too."),
     (BUILDER_EFFECT, "Custom Voice",
      "Your own effect, assembled from the blocks the fixed pedals are made of: "
      "colour, tone, body, movement, pitch, space, texture, rhythm, a gate and "
@@ -503,12 +587,15 @@ STANDALONE_EFFECTS = (BUILDER_EFFECT,)
 VOICE_EFFECT_GROUPS = (
     ("drive", "Amp & Drive",
      "The amp, the fuzz, the radio and the pedals that add dirt or a "
-     "cabinet's colour -- twenty-six of them, and the Custom Amp board at the "
+     "cabinet's colour -- forty-six of them, and the Custom Amp board at the "
      "end of the list.",
      ("amp", "clean", "fuzz", "radio", "crush", "growl",
       "crunch", "overdrive", "boost", "lead", "modern", "tweed", "brown",
       "hotrod", "chime", "sag", "direct", "acoustic", "jazz", "room_cab",
       "doom", "stoner", "velcro", "octavia", "fuzzsub", "twelve",
+      "plexi", "scoop", "treble_boost", "bass_rig", "cocked", "wool",
+      "starved", "boxy", "studio_pre", "tape", "organ", "air_amp", "horn",
+      "grind", "substack", "sizzle", "lowgrowl", "wall", "spring", "trem",
       "custom")),
     ("motion", "Motion",
      "Tremolo, wah, phaser, flanger, vibrato and chorus: the pedals that move "
@@ -564,10 +651,10 @@ VOICE_EFFECT_GROUPS = (
      "trailer. The room is the effect; the channel itself is clean.",
      ("rad_terminal", "rad_station", "rad_stadium", "rad_church",
       "rad_cinema", "rad_trailer")),
-    ("desk", "Broadcast Desk",
-     "The four clean desks at the top of the old ladder: FM, a studio "
-     "condenser, a news anchor and mission control. Close, quiet and levelled, "
-     "with no codec and no hiss.",
+    ("console", "Studio Console",
+     "The four clean chains at the top of the old ladder: an FM station, a "
+     "studio condenser, a news anchor and mission control. What leaves the "
+     "console -- close, quiet and levelled, with no codec and no hiss.",
      ("rad_fm", "rad_studio", "rad_news", "rad_mission")),
 )
 

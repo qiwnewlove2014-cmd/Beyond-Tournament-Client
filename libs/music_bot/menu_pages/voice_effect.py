@@ -28,7 +28,7 @@ class VoiceEffectMenus:
         """The pedals a player can put their broadcast voice through.
 
         Two levels: the families, then the pedals in one of them. A hundred
-        and twenty-two pedals in one list is a list you scroll rather than read,
+        and forty-two pedals in one list is a list you scroll rather than read,
         and a name
         like `Plate` says nothing until something explains it -- a family is
         where that explanation fits without every line carrying all of it. Off
@@ -42,7 +42,8 @@ class VoiceEffectMenus:
 
         Amp & Drive ends with one line that is not a pedal: `Custom Amp` opens
         the board (`_open_custom_effect_menu`), where the drive, the character,
-        the three tone knobs and the gate are the player's own. It sits at the
+        the three tone knobs, the gate, the air, the supply's sag and the
+        wobble are the player's own. It sits at the
         bottom of that family and nowhere else, because a board with no amp
         around it is a page of filters with nothing to filter.
 
@@ -544,7 +545,7 @@ class VoiceEffectMenus:
         **The line above Back puts this one setting back.** `Clear: back to
         Crunch`, naming the value the board opens with -- a page of choices
         used to answer "what was it before I got here" nowhere, and four of
-        the ten slots (and six of the amp's seven knobs) do not open on their
+        the ten slots (and six of the amp's ten knobs) do not open on their
         first row. It leaves the other settings alone and does not ask, which
         is what separates it from the whole board's Clear.
 
