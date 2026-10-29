@@ -1,6 +1,6 @@
 """The radio family -- twenty channels, from four bits to a cockpit headset.
 
-`libs/music_bot/voice_effects.py` has a `Radio` pedal in Amp & Drive, and it is
+`libs/music_bot/voice_effects/dsp.py` has a `Radio` pedal in Amp & Drive, and it is
 a voice through a small speaker. This family is the other half of the idea: what
 makes a voice a *transmission* rather than merely a voice through a filter.
 

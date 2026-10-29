@@ -12,8 +12,8 @@ one of its presets. This board is that ask: **Current** keeps the classic
 on that note; **Interval** adds one degree of a scale above or below it, which
 is a fixed harmony or a drone in a key.
 
-The board is a third table beside `voice_effect_custom.py` (the amp) and
-`voice_effect_builder.py` (the whole voice). It is the same contract:
+The board is a third table beside `custom.py` (the amp) and
+`builder.py` (the whole voice). It is the same contract:
 
 - `PARAMS` is the whole page: a row is a knob -- name, what Tab says, choices,
   default -- and `_carrier_hz` is the only place a mode and a note become a
@@ -42,7 +42,7 @@ Developer-only
 --------------
 The Server owns the permission (`player.canUseVocoderLab` ->
 `can_use_vocoder_lab`), the Client's Voice Effect page shows the board's line
-only to an account that has it, and `voice_effects.effect_id()` silences a
+only to an account that has it, and `dsp.effect_id()` silences a
 saved board when the permission is not present. The line is one row at the
 bottom of the Vocoder Lab family, beside the twenty presets, for the same
 reason Custom Amp sits at the bottom of Amp & Drive.
@@ -50,9 +50,9 @@ reason Custom Amp sits at the bottom of Amp & Drive.
 Pinned by `client/tests/test_voice_effects_vocoder_lab.py`.
 """
 
-from .. import options
-from . import autotune
-from . import voice_effect_boards as boards
+from ... import options
+from .. import autotune
+from . import boards as boards
 
 #: The id the rest of the feature knows this board by. It is a catalogue row and
 #: a member of the Vocoder Lab family, so `catalogue_problems` can find it and
@@ -60,7 +60,7 @@ from . import voice_effect_boards as boards
 EFFECT_ID = "vox_lab"
 
 #: The saved board, beside the preset that selects it.
-_OPTION = "music_bot_voice_effect_vocoder"
+_OPTION = "music_bot_vocoder"
 
 #: The carrier Current mode speaks through, and the family's classic note.
 CARRIER_HZ = 110.0

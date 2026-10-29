@@ -424,9 +424,9 @@ class CinemaOutputTests(unittest.TestCase):
         bot = self.routed_bot()
         streamer = mock.MagicMock()
         streamer.ready_event = threading.Event()
-        with mock.patch("libs.music_bot.controller.AudioStreamer",
+        with mock.patch("libs.music_bot.track_source.AudioStreamer",
                         return_value=streamer) as factory, \
-                mock.patch("libs.music_bot.controller.speak") as speech:
+                mock.patch("libs.music_bot.track_source.speak") as speech:
             bot._start_youtube_stream("http://example.com/a.mp3", "Song")
         bank = bot.cinema_bank
         self.assertFalse(any("Audio error" in str(call) for call in speech.call_args_list))

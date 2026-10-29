@@ -2,13 +2,13 @@
 
 There are three boards on the Voice Effect page and they are the same shape:
 
-- `voice_effect_custom.py` -- **Custom Amp**, the last line of Amp & Drive:
+- `custom.py` -- **Custom Amp**, the last line of Amp & Drive:
   ten knobs that configure the amp chain (drive, character, bass, mid,
   treble, gate, air, sag, wobble, output), forty-four choices between them;
-- `voice_effect_builder.py` -- **Custom Voice**, the last choice on the Voice
+- `builder.py` -- **Custom Voice**, the last choice on the Voice
   Effect page itself: eleven slots that assemble a whole voice effect out of the
   blocks the sixty-seven presets are made of;
-- `voice_effect_vocoder.py` -- **Vocoder Lab**, the last line of that family:
+- `vocoder.py` -- **Vocoder Lab**, the last line of that family:
   nine rows that expose the six-band vocoder's carrier, with the rows a mode
   cannot use hidden by the board's own `rows()`.
 
@@ -19,7 +19,7 @@ menu walks the board's `PARAMS` (or its `rows()` filter), so a page is generated
 and never written out by hand.
 
 What deliberately stays in each board module: the `options.get`/`options.set`
-calls. A test patches `voice_effect_custom.options` (or the builder's, or the
+calls. A test patches `custom.options` (or the builder's, or the
 vocoder's) to keep a board in memory, and a shared reader would slip past that
 seam and write the player's real settings file from a test.
 """

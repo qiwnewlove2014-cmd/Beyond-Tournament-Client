@@ -1969,6 +1969,10 @@ class VoiceChatRecord(threading.Thread):
         # The speech key's line (SpeechKeyLine), built the first time a tuned
         # frame goes to the PA and reset when the key is released.
         self._speech_line = None
+        # The audio-mode Opus worker a SHAPED press (Speech Key,
+        # Auto-Tune, Harmony, a pedal) sends through. Built on first use by
+        # `_speech_sender`; plain speech keeps `vc_compression` above.
+        self._shaped_compression = None
         self.recording = False
         self.running = True
         self.start()
@@ -1990,6 +1994,55 @@ class VoiceChatRecord(threading.Thread):
                     return candidate
         return None
     
+
+    def _speech_sender(self, shaped):
+        """The Opus worker this press sends its frames through.
+
+        `shaped` is whether the press carries a line at all (Speech Key,
+        Auto-Tune, Harmony or a pedal). Plain speech keeps the microphone's
+        own `voip` worker: that is the mode Opus is built for, it costs the
+        least bits, and a talker with nothing on their voice should not pay
+        for a music encoder.
+
+        A shaped voice is no longer ONE voice. Two harmony copies sit at
+        musical intervals, and the tuner moves the pitch under the words --
+        `voip` mode predicts a single talker's pitch and high-passes the
+        input, so a polyphonic or re-pitched frame arrives thin and warped.
+        On the PA, where the frame is played through one speaker at
+        distance, that is heard as words that come out in pieces while the
+        performer's own monitor (the same bytes, before the encoder) sounds
+        whole. `audio` is the mode the music bot's relay and the line-in
+        guitar already send in (`InstrumentInput._feed_guitar_voice`), and
+        for the same reason: the signal has to arrive sounding like itself.
+
+        Built lazily, reused for the client's life, and never used for the
+        same press as `vc_compression` -- so the two PA sequence counters
+        cannot interleave, and a press that switches worker hands the
+        listener a fresh timeline epoch, which is what a new transmission
+        is. A client that cannot build it still has to be heard: the shaped
+        frame falls back to the voip worker (thin, but never silent).
+        """
+        if not shaped:
+            return self.vc_compression
+        worker = getattr(self, "_shaped_compression", None)
+        if worker is not None:
+            return worker
+        try:
+            # The channel the press's own worker is on, because `gameplay`
+            # swaps `vc_compression` to the channel a press routes to before
+            # the microphone starts (and a cinema cabinet map hands over a
+            # room-only PA channel when the map has no speakers). It is only
+            # a first value: run() re-points this worker per frame like the
+            # one it stands beside.
+            channel = getattr(self.vc_compression, "channel", None)
+            worker = voice_chat_compression(
+                self.game, channel or consts.CHANNEL_MEGAPHONE,
+                application="audio")
+        except Exception as exc:
+            logger.log_exception(exc, "voice_chat shaped compression")
+            return self.vc_compression
+        self._shaped_compression = worker
+        return worker
 
     def _speech_line_for(self, mega):
         """This press's line, or None when the voice is not going to the PA.
@@ -2200,12 +2253,16 @@ class VoiceChatRecord(threading.Thread):
                     else:
                         from . import consts
                         target_channel = consts.CHANNEL_MEGAPHONE if voice_using_mega else consts.CHANNEL_VOICECHAT
-                        if getattr(self.vc_compression, 'channel', None) != target_channel:
-                            if hasattr(self.vc_compression, 'set_channel'):
-                                self.vc_compression.set_channel(target_channel)
+                        # A press with a line on it goes through the audio-mode
+                        # encoder; plain speech keeps the voip one (see
+                        # _speech_sender for why the difference is audible).
+                        sender = self._speech_sender(speech_line is not None)
+                        if getattr(sender, 'channel', None) != target_channel:
+                            if hasattr(sender, 'set_channel'):
+                                sender.set_channel(target_channel)
                             else:
-                                self.vc_compression.channel = target_channel
-                        self.vc_compression.put(bytearray(chunk_bytes))
+                                sender.channel = target_channel
+                        sender.put(bytearray(chunk_bytes))
 
     def voice_chat_finish(self):
         self.voice_chat_finish2()
@@ -2231,6 +2288,9 @@ class VoiceChatRecord(threading.Thread):
         
         # Check if Music Bot is streaming to Megaphone
         music_bot = self._find_music_bot()
+        # The release owes its tail to the same worker the press sent
+        # through: the channel it holds is this session's truth.
+        sender = self._speech_sender(line is not None)
 
         # Voice joins the music bot broadcast only when this recording session used the
         # megaphone channel - the compression's channel is the reliable per-session truth
@@ -2238,7 +2298,7 @@ class VoiceChatRecord(threading.Thread):
         route_to_bot = bool(
             music_bot and music_bot.playing
             and music_bot.broadcast_enabled and music_bot.broadcast_to_megaphone
-            and getattr(self.vc_compression, 'channel', None) == consts.CHANNEL_MEGAPHONE
+            and getattr(sender, 'channel', None) == consts.CHANNEL_MEGAPHONE
         )
 
         audio_recorder = getattr(music_bot, 'audio_recorder', None) if music_bot else None
@@ -2247,7 +2307,7 @@ class VoiceChatRecord(threading.Thread):
             and audio_recorder.recorded_voice_is_studio()
         )
         locally_rendered = (
-            getattr(self.vc_compression, 'channel', None) == consts.CHANNEL_MEGAPHONE
+            getattr(sender, 'channel', None) == consts.CHANNEL_MEGAPHONE
         )
         if audio_recorder is not None and recorded_studio:
             audio_recorder.feed_transmitted_microphone(
@@ -2280,18 +2340,21 @@ class VoiceChatRecord(threading.Thread):
             # Re-deriving it from the music bot here is wrong: by the time finish2 runs
             # (40 ms after stop) the megaphone flag is reset, so the last 20 ms would leak
             # onto CHANNEL_VOICECHAT and re-point the megaphone compression at it for good.
-            target_channel = getattr(self.vc_compression, 'channel', None) or consts.CHANNEL_VOICECHAT
-            if getattr(self.vc_compression, 'channel', None) != target_channel:
-                if hasattr(self.vc_compression, 'set_channel'):
-                    self.vc_compression.set_channel(target_channel)
+            target_channel = getattr(sender, 'channel', None) or consts.CHANNEL_VOICECHAT
+            if getattr(sender, 'channel', None) != target_channel:
+                if hasattr(sender, 'set_channel'):
+                    sender.set_channel(target_channel)
                 else:
-                    self.vc_compression.channel = target_channel
+                    sender.channel = target_channel
             for frame in frames:
-                self.vc_compression.put(bytearray(frame))
+                sender.put(bytearray(frame))
     
     def close(self):
         self._speech_line = None
         self.vc_compression.put(None)
+        shaped = getattr(self, "_shaped_compression", None)
+        if shaped is not None:
+            shaped.put(None)
         self.running = False
 
 

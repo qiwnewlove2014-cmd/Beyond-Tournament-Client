@@ -1,6 +1,6 @@
 """The vocoder family -- twenty machines, and the words still in them.
 
-`libs/music_bot/voice_effects.py` has had one vocoder since the modern pedals:
+`libs/music_bot/voice_effects/dsp.py` has had one vocoder since the modern pedals:
 six bands of the voice drive a 110 Hz saw, the mouth survives and the voice does
 not. This file holds the family of twenty that followed it to the same rule, and
 to the one thing a vocoder must never lose.

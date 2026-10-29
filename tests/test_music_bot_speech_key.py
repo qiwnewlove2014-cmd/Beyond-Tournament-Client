@@ -303,9 +303,17 @@ class CaptureTests(unittest.TestCase):
         rec.game = SimpleNamespace()
         rec.audio_input = FakeInput(VOICE_FRAME_BYTES // 2)
         rec.vc_compression = FakeCompression()
+        # The audio-mode worker a tuned press goes through (VoiceChatRecord.
+        # _speech_sender); a fake collection point here.
+        rec._shaped_compression = FakeCompression()
         rec._speech_line = None
         self.key = key
         return rec
+
+    def press_worker(self, rec):
+        """The worker the press in flight sends through."""
+        return (rec._shaped_compression if rec._speech_line is not None
+                else rec.vc_compression)
 
     def run_once(self, rec):
         worker = threading.Thread(target=rec.run, daemon=True)
@@ -314,12 +322,14 @@ class CaptureTests(unittest.TestCase):
                 options_returning(**{SPEECH_KEY_OPTION: self.key})):
             worker.start()
             deadline = time.monotonic() + 2.0
-            while not rec.vc_compression.frames and time.monotonic() < deadline:
+            while (not rec.vc_compression.frames
+                   and not rec._shaped_compression.frames
+                   and time.monotonic() < deadline):
                 time.sleep(0.002)
             rec.running = False
             worker.join(2)
         self.assertFalse(worker.is_alive())
-        return rec.vc_compression.frames
+        return self.press_worker(rec).frames
 
     def test_the_original_key_sends_the_microphone_unchanged(self):
         rec = self.recorder(0)
@@ -339,8 +349,15 @@ class CaptureTests(unittest.TestCase):
     def test_the_pa_channel_is_unchanged_by_the_key(self):
         rec = self.recorder(5)
         self.run_once(rec)
-        self.assertEqual(rec.vc_compression.channel,
+        self.assertEqual(self.press_worker(rec).channel,
                          consts.CHANNEL_MEGAPHONE)
+
+    def test_a_tuned_press_is_not_sent_by_the_voip_worker(self):
+        """A shifted voice is encoded in audio mode (see _speech_sender)."""
+        rec = self.recorder(5)
+        self.run_once(rec)
+        self.assertEqual(rec.vc_compression.frames, [])
+        self.assertEqual(len(rec._shaped_compression.frames), 1)
 
     def test_the_monitor_is_fed_the_tuned_frame_not_the_raw_chunk(self):
         """The performer auditions the PA, so they must hear what the PA plays."""
@@ -365,6 +382,7 @@ class ReleaseTests(unittest.TestCase):
         rec.game = SimpleNamespace()
         rec.audio_input = FakeInput(VOICE_FRAME_BYTES // 2)
         rec.vc_compression = FakeCompression(consts.CHANNEL_MEGAPHONE)
+        rec._shaped_compression = FakeCompression(consts.CHANNEL_MEGAPHONE)
         rec._speech_line = line
         return rec
 
@@ -374,7 +392,7 @@ class ReleaseTests(unittest.TestCase):
         expected = (line.transposer.delay_samples() * 2) // FRAME
         rec = self.recorder(line)
         rec.voice_chat_finish2()
-        frames = rec.vc_compression.frames
+        frames = rec._shaped_compression.frames
         self.assertEqual(len(frames), 1 + expected)
         for frame in frames:
             self.assertEqual(len(frame), VOICE_FRAME_BYTES)

@@ -689,6 +689,60 @@ class RecorderGateTests(unittest.TestCase):
             self.assertIsNone(rec._speech_line_for(True))
 
 
+# ------------------------------------------------------- which encoder sends
+
+
+class SenderChoiceTests(unittest.TestCase):
+    """Plain speech keeps `voip`; a shaped voice gets `audio`.
+
+    `voip` is Opus's single-talker model -- it high-passes the input and
+    predicts one pitch -- so a frame carrying harmony copies, or a pitch the
+    tuner is moving, arrives thin and warped however clean the capture was.
+    The performer's monitor is the same bytes BEFORE the encoder, which is why
+    "it sounds fine here" and "it is unreadable out there" were both true.
+    """
+
+    def recorder(self):
+        rec = VoiceChatRecord.__new__(VoiceChatRecord)
+        rec.game = SimpleNamespace()
+        # `gameplay` swaps in the channel a press routes to before the
+        # microphone starts, so a press with a line is already on the PA's.
+        rec.vc_compression = FakeCompression(consts.CHANNEL_MEGAPHONE)
+        rec._speech_line = None
+        return rec
+
+    def test_a_plain_press_keeps_the_microphones_voip_worker(self):
+        rec = self.recorder()
+        with mock.patch.object(voice_chat, "voice_chat_compression") as built:
+            self.assertIs(rec._speech_sender(False), rec.vc_compression)
+        built.assert_not_called()
+
+    def test_a_shaped_press_is_encoded_in_audio_mode(self):
+        rec = self.recorder()
+        built = []
+
+        class Stub(FakeCompression):
+            def __init__(self, game, channel=None, application=None):
+                super().__init__(channel)
+                built.append((game, channel, application))
+
+        with mock.patch.object(voice_chat, "voice_chat_compression", Stub):
+            worker = rec._speech_sender(True)
+            self.assertEqual(len(built), 1)
+            self.assertEqual(built[0][2], "audio")
+            self.assertEqual(built[0][1], consts.CHANNEL_MEGAPHONE)
+            self.assertIs(worker, rec._shaped_compression)
+            # Once for the client's life, never a worker per frame.
+            self.assertIs(rec._speech_sender(True), worker)
+        self.assertEqual(len(built), 1)
+
+    def test_a_client_that_cannot_build_it_still_sends(self):
+        rec = self.recorder()
+        with mock.patch.object(voice_chat, "voice_chat_compression",
+                               side_effect=RuntimeError("no encoder")),                 mock.patch.object(voice_chat, "logger"):
+            self.assertIs(rec._speech_sender(True), rec.vc_compression)
+
+
 # ------------------------------------------------------------- the capture
 
 
@@ -703,9 +757,17 @@ class CaptureTests(unittest.TestCase):
         rec.game = SimpleNamespace()
         rec.audio_input = FakeInput(VOICE_FRAME_BYTES // 2, signal=tone(1.0, cents=-12.0))
         rec.vc_compression = FakeCompression()
+        # The audio-mode worker a shaped press goes through (see
+        # VoiceChatRecord._speech_sender). Here it is a fake collection point.
+        rec._shaped_compression = FakeCompression()
         rec._speech_line = None
         rec.speed = speed
         return rec
+
+    def press_worker(self, rec):
+        """The worker the press in flight sends through."""
+        return (rec._shaped_compression if rec._speech_line is not None
+                else rec.vc_compression)
 
     def run_once(self, rec):
         worker = threading.Thread(target=rec.run, daemon=True)
@@ -715,12 +777,14 @@ class CaptureTests(unittest.TestCase):
                                      AUTOTUNE_SPEED_OPTION: rec.speed})):
             worker.start()
             deadline = time.monotonic() + 2.0
-            while not rec.vc_compression.frames and time.monotonic() < deadline:
+            while (not rec.vc_compression.frames
+                   and not rec._shaped_compression.frames
+                   and time.monotonic() < deadline):
                 time.sleep(0.002)
             rec.running = False
             worker.join(2)
         self.assertFalse(worker.is_alive())
-        return rec.vc_compression.frames
+        return self.press_worker(rec).frames
 
     def test_the_broadcast_frame_is_a_tuned_frame_of_the_same_size(self):
         rec = self.recorder()
@@ -732,7 +796,16 @@ class CaptureTests(unittest.TestCase):
     def test_the_pa_channel_is_unchanged_by_the_tuning(self):
         rec = self.recorder()
         self.run_once(rec)
-        self.assertEqual(rec.vc_compression.channel, consts.CHANNEL_MEGAPHONE)
+        self.assertEqual(self.press_worker(rec).channel,
+                         consts.CHANNEL_MEGAPHONE)
+
+    def test_a_tuned_press_leaves_the_voip_worker_untouched(self):
+        """The tuner's frames are the audio encoder's business, not voip's."""
+        rec = self.recorder()
+        frames = self.run_once(rec)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(rec.vc_compression.frames, [])
+        self.assertEqual(len(rec._shaped_compression.frames), 1)
 
     def test_the_monitor_is_fed_the_tuned_frame(self):
         rec = self.recorder()
@@ -749,13 +822,15 @@ class ReleaseTests(unittest.TestCase):
         rec._speech_line = AutoTuneLine(speed=0)
         rec.audio_input = FakeInput(VOICE_FRAME_BYTES, signal=tone(0.2, cents=-10.0))
         rec.vc_compression = FakeCompression(consts.CHANNEL_MEGAPHONE)
+        rec._shaped_compression = FakeCompression(consts.CHANNEL_MEGAPHONE)
         rec.game = SimpleNamespace()
         rec.player = SimpleNamespace(gameplay=None)
         expected = (rec._speech_line.transposer.delay_samples() * 2) // FRAME
         with mock.patch.object(voice_chat.options, "get", options_returning()):
             rec.voice_chat_finish2()
-        frames = rec.vc_compression.frames
+        frames = rec._shaped_compression.frames
         self.assertEqual(len(frames), 1 + expected)
+        self.assertEqual(rec.vc_compression.frames, [])
         for chunk in frames:
             self.assertEqual(len(chunk), VOICE_FRAME_BYTES)
         self.assertIsNone(rec._speech_line)

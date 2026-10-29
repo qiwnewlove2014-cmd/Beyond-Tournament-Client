@@ -7,7 +7,7 @@ amp -- more drive than `Crunch`, less top than `Bright`, a gate between chords
 -- has no shelf to pick from, and adding a preset for every combination is how
 a menu becomes a catalogue nobody reads. So the Amp & Drive page ends with one
 line that opens a board: the same chain the presets use, with the values the
-player chose (`voice_effects.spec_for` hands the board's spec to the processor
+player chose (`dsp.spec_for` hands the board's spec to the processor
 that every other preset is built by -- there is no second DSP).
 
 **One table drives the whole feature.** `PARAMS` is the board: a row is a knob
@@ -26,8 +26,8 @@ crossfades into a fresh processor when it moves -- the same fade, and the same
 reason, as a preset change.
 """
 
-from .. import options
-from . import voice_effect_boards as boards
+from ... import options
+from . import boards as boards
 
 #: The id the whole chain calls this board by. It sits in the catalogue's Amp &
 #: Drive family like a preset, because to every other part of the feature it IS
@@ -36,9 +36,9 @@ from . import voice_effect_boards as boards
 EFFECT_ID = "custom"
 
 #: The saved board. One dict of knob id to chosen value, beside the preset that
-#: selects it (`voice_effects.OPTION`) and for the same reason: a player's amp
+#: selects it (`dsp.OPTION`) and for the same reason: a player's amp
 #: has to survive a restart.
-_OPTION = "music_bot_voice_effect_custom"
+_OPTION = "music_bot_custom"
 
 #: The board itself. A row is ``(id, menu name, what Tab reads on the knob's
 #: own line, choices, default)`` and a choice is ``(menu name, stored value,
@@ -284,7 +284,7 @@ _GATE = {"off": 0.0, "soft": 0.004, "firm": 0.010, "hard": 0.020}
 #: The output trim.
 _OUTPUT = {"quiet": 0.60, "half": 0.78, "unity": 0.95, "loud": 1.15}
 
-#: The exciter: None, or (corner, drive, mix) for `voice_effects._air_block`.
+#: The exciter: None, or (corner, drive, mix) for `dsp._air_block`.
 _AIR = {
     "off": None,
     "open": (6000.0, 1.8, 0.22),

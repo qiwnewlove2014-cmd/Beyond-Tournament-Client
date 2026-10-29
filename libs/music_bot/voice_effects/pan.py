@@ -10,7 +10,7 @@ source at the talker's body (`entity.vc_source`), through EFX/HRTF. So this
 effect is two halves:
 
 - **the delay** is the talker's, on the same chain as every other preset
-  (`voice_effects._SPECS`'s `pan_delay` key is built from `spec()` below);
+  (`dsp._SPECS`'s `pan_delay` key is built from `spec()` below);
 - **the position** is three bytes per frame on `CHANNEL_VOICE_MOTION`, which the
   Server relays beside the voice, and which every listener turns into an offset
   of that 3D source around the talker's body -- along the LISTENER's right or
@@ -34,7 +34,7 @@ word is on the right when it is spoken, on the left one repeat later. Saved unde
 Where the line lives
 --------------------
 On the Voice Effect page itself, beside the eleven families and `Custom Voice`
-(`voice_effect_catalogue.STANDALONE_EFFECTS`), because a typed delay is not one
+(`catalogue.STANDALONE_EFFECTS`), because a typed delay is not one
 of a family's rows of fixed steps: the line opens a page rather than choosing a
 pedal in place. It is deliberately not a member of `Motion` -- a preset is in
 one family or a standalone row, never both (`catalogue_problems` reports
@@ -52,15 +52,15 @@ mark back to `Custom` rather than naming a preset those numbers no longer
 match.
 
 **The same table is the Custom Voice board's Pan Delay slot**
-(`voice_effect_builder`, through `preset_choices()` and `spec_keys()`), which is
+(`builder`, through `preset_choices()` and `spec_keys()`), which is
 what makes a delay set on this page usable by another function: a built voice
 can carry any of these names, and `Custom (this page)` carries whatever is set
-here -- kept live on purpose, with `voice_effects._board_revision` reading this
+here -- kept live on purpose, with `dsp._board_revision` reading this
 module's `revision()` while the board's slot is on `custom`, so a number typed
 here is heard through the board on the next 20 ms frame.
 """
 
-from .. import options
+from ... import options
 
 #: The catalogue id. It is a standalone row on the Voice Effect page, not a
 #: board and not a member of a family: its two settings are options, not a table
@@ -111,7 +111,7 @@ PRESET_OPTION = "music_bot_voice_pan_preset"
 
 #: The named settings, and **the one table two features share**: the page lists
 #: them under `Preset:`, and the Custom Voice board's own Pan slot offers the
-#: same names (`voice_effect_builder`), so a delay set here is a delay another
+#: same names (`builder`), so a delay set here is a delay another
 #: function can play. A named row WRITES the delay and the movement above when
 #: it is chosen -- the two options stay the only truth, and the mark only says
 #: where the pair came from, so the page can never contradict what it plays.

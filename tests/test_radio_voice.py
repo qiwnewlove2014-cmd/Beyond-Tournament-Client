@@ -255,7 +255,7 @@ class TheVoiceEffectFeatureIsNotTouchedTests(unittest.TestCase):
         self.addCleanup(radio_voice.reset)
 
     def test_a_radio_frame_writes_no_option_and_moves_no_board(self):
-        from libs.music_bot import voice_effect_builder as builder
+        from libs.music_bot.voice_effects import builder
         before = (builder.values(), builder.revision(), voice_effects.enabled())
         with mock.patch.object(builder.options, "set") as setter:
             play(tone(900, frames=3))

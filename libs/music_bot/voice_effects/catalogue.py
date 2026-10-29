@@ -1,23 +1,22 @@
 """The pedals on the Voice Effect page: their names, and what Tab reads.
 
-Kept apart from `voice_effects.py` on purpose. The DSP is one kind of change
-and the words are another: a name moves a menu line, a description is what a
-player hears when they press Tab, and neither should have to be found inside
-eight hundred lines of filters. `voice_effects` imports this module and
-re-exports it, so every existing caller (`controller.py`, the voice-effect menu
-page, the tests) keeps saying `voice_effects.effect_label`.
+Kept apart from `dsp.py` on purpose. The DSP is one kind of change and the
+words are another: a name moves a menu line, a description is what a player
+hears when they press Tab, and neither should have to be found inside eight
+hundred lines of filters. The package's `__init__` re-exports both, so every
+existing caller (`controller.py`, the voice-effect menu page, the tests) keeps
+saying `voice_effects.effect_label`.
 
 A row is ``(id, menu name, what Tab reads on that line)``. The name has to stay
 short enough to arrow past; the description is where the pedal explains itself.
-The DSP for a preset lives in `voice_effects._SPECS` under the same id, and the
-two must agree -- `voice_effects._EffectProcessor` raises on an id that has no
-spec, and a spec with no row is a pedal nobody can choose.
+The DSP for a preset lives in `dsp._SPECS` under the same id, and the two
+must agree -- `dsp._EffectProcessor` raises on an id that has no spec, and a
+spec with no row is a pedal nobody can choose.
 
 Three rows are not fixed presets: ``custom`` is the Custom Amp board
-(`voice_effect_custom.py`), ``voice_build`` is the Custom Voice board
-(`voice_effect_builder.py`) and ``vox_lab`` is the Vocoder Lab board
-(`voice_effect_vocoder.py`), and their DSP is built from those boards instead
-of being written into ``_SPECS``. All three are catalogued like the others so
+(`custom.py`), ``voice_build`` is the Custom Voice board (`builder.py`) and
+``vox_lab`` is the Vocoder Lab board (`vocoder.py`), and their DSP is built
+from those boards instead of being written into ``_SPECS``. All three are catalogued like the others so
 the pedal list, the family check and the clamp all treat them the same way; the
 builder is in ``STANDALONE_EFFECTS`` because it sits on the Voice Effect page's
 top level rather than inside a family, the Pan Delay is there for the same
@@ -26,10 +25,10 @@ steps) and the vocoder board is the last line of the Vocoder Lab family, where
 its twenty presets live.
 """
 
-from .voice_effect_builder import EFFECT_ID as BUILDER_EFFECT
-from .voice_effect_custom import EFFECT_ID as CUSTOM_EFFECT
-from .voice_effect_pan import EFFECT_ID as PAN_EFFECT
-from .voice_effect_vocoder import EFFECT_ID as VOX_LAB_EFFECT
+from .builder import EFFECT_ID as BUILDER_EFFECT
+from .custom import EFFECT_ID as CUSTOM_EFFECT
+from .pan import EFFECT_ID as PAN_EFFECT
+from .vocoder import EFFECT_ID as VOX_LAB_EFFECT
 
 #: Every preset, in the order the page lists them.
 VOICE_EFFECTS = (
@@ -765,14 +764,14 @@ def effect_note(value):
     """
     wanted = clamp_effect(value)
     if wanted == CUSTOM_EFFECT:
-        from . import voice_effect_custom
-        return voice_effect_custom.note()
+        from . import custom
+        return custom.note()
     if wanted == BUILDER_EFFECT:
-        from . import voice_effect_builder
-        return voice_effect_builder.note()
+        from . import builder
+        return builder.note()
     if wanted == VOX_LAB_EFFECT:
-        from . import voice_effect_vocoder
-        return voice_effect_vocoder.note()
+        from . import vocoder
+        return vocoder.note()
     for effect_id, _label, note in VOICE_EFFECTS:
         if effect_id == wanted:
             return note

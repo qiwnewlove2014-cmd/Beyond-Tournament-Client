@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-`voice_effect_builder.py` is a board of eleven slots holding seventy-eight
+`builder.py` is a board of eleven slots holding seventy-eight
 choices, which is more combinations than anyone will ever try and, on the first
 visit, eleven lines all reading their default. A player who wants "my voice, but
 through a broken radio" has to know which of eleven slots that is before they
@@ -11,9 +11,9 @@ module: fifty finished voices, each one the same eleven slots with values in
 them. Picking one is
 picking a sound, and every slot underneath stays the player's to change.
 
-A recipe is not a pedal. It has no row in `voice_effect_catalogue`, it never
+A recipe is not a pedal. It has no row in `catalogue`, it never
 appears in the Voice Effect list, and it has no spec of its own: `apply()` writes
-the board and `voice_effect_builder.spec()` builds the sound, exactly as it does
+the board and `builder.spec()` builds the sound, exactly as it does
 for a board the player set by hand. That is why fifty of them cost the DSP
 nothing -- there is no second processor, no second table of filters, and no way
 for a recipe and the board to disagree about what is being heard.
@@ -27,7 +27,7 @@ five names and the order they are listed in. `family_members` filters this table
 so the page and the data are the same object.
 
 The board names only the slots it moves. The defaults live in
-`voice_effect_builder.PARAMS` and `boards.read` fills them in, so a recipe says
+`builder.PARAMS` and `boards.read` fills them in, so a recipe says
 "Dark tone, Cave" rather than ten values of which eight are what you would get
 anyway -- and the day a default changes, the recipe follows it.
 
@@ -64,7 +64,7 @@ FAMILIES = (
 )
 
 #: The fifty. A board dict names only the slots it moves; every other slot is
-#: the board's own default (`voice_effect_builder.PARAMS`).
+#: the board's own default (`builder.PARAMS`).
 RECIPES = (
     # ------------------------------------------------------------ Amp & Rock
     ("stack", "Full Stack", "amp",
@@ -334,12 +334,12 @@ MY_OWN = "My Own"
 def _builder():
     """The board this module writes to, imported where it is used.
 
-    Inside the call because `voice_effect_builder` imports the recipes' own
+    Inside the call because `builder` imports the recipes' own
     module only from the menu; a cycle at import time would make the sounds
     depend on which module was read first.
     """
-    from . import voice_effect_builder
-    return voice_effect_builder
+    from . import builder
+    return builder
 
 
 def recipe(recipe_id):

@@ -61,15 +61,22 @@ The chain, in order
 10. The valve sag, on `Sag` and on the Custom Amp's own chain: the supply's
    gain rather than the output's. It dips under a loud passage and recovers
    over about six frames, interpolated across the frame so the recovery cannot
-   step -- the same rule as the follower above, for the same reason.11. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
+   step -- the same rule as the follower above, for the same reason.11. **The player's own four tone bands** (`_ToneStack`, `tone.py`), after the
+    preset has made its sound: a low shelf, two bells and a high shelf, saved
+    per preset and flat until somebody moves one. Flat builds no filter at all,
+    so the hundred and forty-four presets tuned by ear here are byte-for-byte
+    what they were. Only `VoiceEffectLine` asks for it: the in-game radio is
+    this same class on the receive path and must not hear a tone saved for the
+    `Radio` pedal.
+12. Output trim and a soft ceiling. Opus's `voip` mode is speech-tuned and will
     thin the top of any distortion it is handed; the cabinet is deliberately
     below the range where that hurts, and the ceiling keeps the encoder from
-    being handed a clipped frame. A **board** also gets a loudness trim here
-    (`VOICE_LOUDNESS`): a fixed preset was tuned by ear against a PA, while ten
-    slots can stack a shaper, a crusher, a sub octave and `Output: Loud` into a
-    square wave whose average is sixteen decibels above a voice's -- the level
-    a room's bass shelf, speech compressor and receive-side limiter were never
-    built for.
+    being handed a clipped frame. A **board** -- and a fixed preset whose tone
+    has been moved -- also gets a loudness trim here (`VOICE_LOUDNESS`): a fixed
+    preset was tuned by ear against a PA, while ten slots can stack a shaper, a
+    crusher, a sub octave and `Output: Loud` into a square wave whose average is
+    sixteen decibels above a voice's -- the level a room's bass shelf, speech
+    compressor and receive-side limiter were never built for.
 
 The cabinet is FIR (windowed sinc, 257 taps), so its delay is a known constant:
 128 samples after the shaper, 2.7 ms, well inside the 20 ms frame. `_Fir` carries
@@ -91,9 +98,9 @@ The Amp & Drive family holds the original six pedals, the twenty amps added on
 2026-10-26 (`Crunch` to `Twelve String` -- each one a different corner, band,
 cabinet and bias on this same chain), the twenty more of 2026-10-27 (from
 `Bright Stack` to `Amp Tremolo`, each with a high-pass/cabinet pair no other
-row in the family has) and `Custom Amp`, which is not a preset at all: `voice_effect_custom.py` holds a table of knobs, and its spec is built from
+row in the family has) and `Custom Amp`, which is not a preset at all: `custom.py` holds a table of knobs, and its spec is built from
 the board the player set. The Vocoder Lab family ends the same way: its twenty
-machines are fixed carriers, and `voice_effect_vocoder.py` is the board that
+machines are fixed carriers, and `vocoder.py` is the board that
 exposes the carrier -- its mode, note, scale degree, waveform, band shift,
 breath and mix. A knob change on either board bumps that board's revision, and
 the line rebuilds its processor on the next frame and crossfades into it -- the
@@ -119,9 +126,10 @@ import threading
 
 import numpy as np
 
-from .. import options
-from . import gate
-from .voice_effect_catalogue import (BUILDER_EFFECT, CUSTOM_EFFECT,
+from ... import options
+from .. import gate
+from . import tone
+from .catalogue import (BUILDER_EFFECT, CUSTOM_EFFECT,
                                      DEFAULT_EFFECT, PAN_EFFECT,
                                      STANDALONE_EFFECTS, VOICE_EFFECTS,
                                      VOICE_EFFECT_GROUPS, VOX_LAB_EFFECT,
@@ -589,17 +597,17 @@ def spec_for(effect_id):
     preset rather than a second feature.
     """
     if effect_id == CUSTOM_EFFECT:
-        from . import voice_effect_custom
-        return voice_effect_custom.spec()
+        from . import custom
+        return custom.spec()
     if effect_id == BUILDER_EFFECT:
-        from . import voice_effect_builder
-        return voice_effect_builder.spec()
+        from . import builder
+        return builder.spec()
     if effect_id == VOX_LAB_EFFECT:
-        from . import voice_effect_vocoder
-        return voice_effect_vocoder.spec()
+        from . import vocoder
+        return vocoder.spec()
     if effect_id == PAN_EFFECT:
-        from . import voice_effect_pan
-        return voice_effect_pan.spec()
+        from . import pan
+        return pan.spec()
     return _SPECS[effect_id]
 
 #: The loudest a pedal may hand over, in full scale. The PA and a cinema cabinet
@@ -898,6 +906,37 @@ class _Biquad:
         """Move a running band-pass, keeping its state (a sweep, not a reset)."""
         self.b, self.a = self._bandpass_coefficients(hz, q)
 
+    def retune(self, b, a):
+        """A new response on the same filter, keeping the samples it holds.
+
+        The tone stage moves a band a few frames at a time (`_ToneStack`), and
+        a filter that reset its state on every one of those frames would drop
+        the tail it is still ringing with -- a tick at each 20 ms boundary.
+        """
+        self.b = np.asarray(b, dtype=np.float64)
+        self.a = np.asarray(a, dtype=np.float64)
+
+    def reset(self):
+        """Forget the samples this filter is holding (a band let go of)."""
+        self._z1 = 0.0
+        self._z2 = 0.0
+
+    def state(self):
+        """The samples this filter is holding, so they can be rewound.
+
+        A response that changes between frames has to be auditioned twice on
+        the same input (`_ToneStack`): once with the response that was playing
+        and once with the new one, crossfaded across the frame. The second run
+        starts from the first one's state, which is what makes the seam
+        continuous -- the alternative is a step the size of whatever the old
+        response was holding.
+        """
+        return self._z1, self._z2
+
+    def restore(self, state):
+        """Put back a state `state()` saved, before a second run."""
+        self._z1, self._z2 = state
+
     @classmethod
     def lowpass(cls, hz, q=0.7071067811865476):
         """RBJ's cookbook low-pass, at a Butterworth's Q (the delay's darkening)."""
@@ -946,6 +985,70 @@ class _Biquad:
         return np.asarray(out, dtype=np.float32)
 
 
+#: A filter that changes nothing, for a tone band that is back at flat.
+_IDENTITY = (1.0, 0.0, 0.0)
+
+
+def _shelf_coefficients(hz, decibels, high=False):
+    """RBJ's shelf, at S = 1: it reaches its whole gain by the corner's octave.
+
+    A low shelf is what "less bottom" means and a high shelf is what "less
+    top" means: neither leaves a hole in the middle of the voice the way a
+    bell at 120 Hz would.
+    """
+    amplitude = 10.0 ** (float(decibels) / 40.0)
+    w0 = 2.0 * np.pi * float(hz) / SAMPLE_RATE
+    cos_w0 = float(np.cos(w0))
+    alpha = float(np.sin(w0)) / 2.0 * np.sqrt(2.0)
+    root_alpha = 2.0 * np.sqrt(amplitude) * alpha
+    if high:
+        b0 = amplitude * ((amplitude + 1.0) + (amplitude - 1.0) * cos_w0
+                          + root_alpha)
+        b1 = -2.0 * amplitude * ((amplitude - 1.0)
+                                 + (amplitude + 1.0) * cos_w0)
+        b2 = amplitude * ((amplitude + 1.0) + (amplitude - 1.0) * cos_w0
+                          - root_alpha)
+        a0 = ((amplitude + 1.0) - (amplitude - 1.0) * cos_w0 + root_alpha)
+        a1 = 2.0 * ((amplitude - 1.0) - (amplitude + 1.0) * cos_w0)
+        a2 = ((amplitude + 1.0) - (amplitude - 1.0) * cos_w0 - root_alpha)
+    else:
+        b0 = amplitude * ((amplitude + 1.0) - (amplitude - 1.0) * cos_w0
+                          + root_alpha)
+        b1 = 2.0 * amplitude * ((amplitude - 1.0)
+                                - (amplitude + 1.0) * cos_w0)
+        b2 = amplitude * ((amplitude + 1.0) - (amplitude - 1.0) * cos_w0
+                          - root_alpha)
+        a0 = ((amplitude + 1.0) + (amplitude - 1.0) * cos_w0 + root_alpha)
+        a1 = -2.0 * ((amplitude - 1.0) + (amplitude + 1.0) * cos_w0)
+        a2 = ((amplitude + 1.0) + (amplitude - 1.0) * cos_w0 - root_alpha)
+    return ((b0 / a0, b1 / a0, b2 / a0), (1.0, a1 / a0, a2 / a0))
+
+
+def _bell_coefficients(hz, q, decibels):
+    """RBJ's peaking band: only the band around its centre moves.
+
+    This is the one that takes the mud out from under the words without
+    thinning the chest -- a shelf cannot do it from either end.
+    """
+    amplitude = 10.0 ** (float(decibels) / 40.0)
+    w0 = 2.0 * np.pi * float(hz) / SAMPLE_RATE
+    cos_w0 = float(np.cos(w0))
+    alpha = float(np.sin(w0)) / (2.0 * float(q))
+    a0 = 1.0 + alpha / amplitude
+    return ((1.0 + alpha * amplitude) / a0,
+            -2.0 * cos_w0 / a0,
+            (1.0 - alpha * amplitude) / a0), (
+        1.0, -2.0 * cos_w0 / a0, (1.0 - alpha / amplitude) / a0)
+
+
+def _tone_coefficients(index, decibels):
+    """The coefficients for one tone band, from the table in `tone.BANDS`."""
+    _band_id, _label, hz, kind, q, _note = tone.BANDS[index]
+    if kind == "bell":
+        return _bell_coefficients(hz, q, decibels)
+    return _shelf_coefficients(hz, decibels, high=(kind == "highshelf"))
+
+
 class _Fir:
     """One FIR filter that carries the samples it needs across frames."""
 
@@ -962,6 +1065,94 @@ class _Fir:
         return out.astype(np.float32, copy=False)
 
 
+class _ToneStack:
+    """The four tone bands a player set for one preset, over its voice.
+
+    `tone.py` owns the table, the saved setting and the words; this is only the
+    filters. **Flat is not a filter**: a preset whose four bands are all zero
+    is handed straight back, so the hundred and forty-four presets that nobody
+    has equalised cost exactly what they cost before this class existed.
+
+    A band is GLIDED to its saved value rather than jumped to, because a filter
+    whose coefficients change between one sample and the next is a step the
+    size of whatever the old response was holding -- heard as a click. 3 dB a
+    frame puts a slider press on the next ~80 ms, and the band's state (the
+    samples the biquad is still ringing with) is kept across every one of
+    those frames, which is what makes the glide continuous.
+    """
+
+    #: How far a band may move in one frame, in decibels.
+    GLIDE_DB = 3.0
+
+    def __init__(self, preset):
+        self.preset = preset
+        self._filters = [_Biquad(_IDENTITY, _IDENTITY)
+                         for _band in tone.BANDS]
+        self._applied = [0.0] * len(tone.BANDS)
+        self._engaged = False
+
+    def active(self):
+        """Whether any band is doing anything -- the loudness trim asks this.
+
+        A fixed preset is normally left alone by `_loudness_trim` because it
+        was tuned against a PA by ear. A preset whose tone has been moved is
+        no longer that measurement, so from the first decibel it is levelled
+        like a board; flat returns it to exactly as it was made.
+
+        **The latch does not clear at 0 dB on the way past.** A band gliding
+        from +12 to -12 crosses 0, and a trim that read the applied gain alone
+        would release for that one frame -- which measured as a 2x burst in the
+        middle of a 20 ms glide, heard as a thump under the words. It clears
+        only when the saved value is flat too.
+        """
+        return self._engaged
+
+    def process(self, block):
+        targets = tone.gains(self.preset)
+        if not any(targets) and not self._engaged:
+            return block
+        for index, target in enumerate(targets):
+            applied = self._applied[index]
+            if applied != target:
+                step = max(-self.GLIDE_DB,
+                           min(self.GLIDE_DB, float(target) - applied))
+                applied += step
+                self._applied[index] = applied
+                block = self._change(index, applied, block)
+                self._engaged = True
+            elif applied:
+                block = self._filters[index].process(block)
+        if not any(targets) and not any(self._applied):
+            self._engaged = False
+        return block
+
+    def _change(self, index, applied, block):
+        """Run the same frame through the old response and the new one, blended.
+
+        Changing a biquad's coefficients under a running stream is only half a
+        fix: the filter's state was computed for the response that was playing, so
+        the first samples after a change are a step the old response was about
+        to make. Measured on the 0 dB crossing of a +12 to -12 glide, that step
+        was 0.067 of full scale -- a click under the words, from the one frame
+        the stage spent at "no change".
+
+        So the frame is shaped twice: once with the filter as it was (its state
+        carried on), then again from the same starting state with the new
+        response, and the two are crossfaded across the 20 ms. The second run's
+        end state is the one kept, so the next frame starts where this one
+        ended. It costs one extra filter run only on frames where a band moves.
+        """
+        band_filter = self._filters[index]
+        state = band_filter.state()
+        before = band_filter.process(block)
+        band_filter.restore(state)
+        band_filter.retune(*_tone_coefficients(index, applied))
+        after = band_filter.process(block)
+        blend = np.linspace(0.0, 1.0, block.size, endpoint=False,
+                            dtype=np.float32)
+        return before * (1.0 - blend) + after * blend
+
+
 class _EffectProcessor:
     """One preset's chain, with the state a stream needs between frames."""
 
@@ -971,10 +1162,17 @@ class _EffectProcessor:
     #: step with one another as well as with the frames.
     TAPS = 257
 
-    def __init__(self, preset, spec=None):
+    def __init__(self, preset, spec=None, with_tone=False):
         """`spec` overrides the table for a chain that is a preset *plus*
         something -- the in-game radio's gentle auto-wah is the one caller
-        (`libs/radio_voice.py`); everything else is the preset's own row."""
+        (`libs/radio_voice.py`); everything else is the preset's own row.
+
+        `with_tone` is the player's own four tone bands, and it is off by
+        default on purpose: the in-game radio is built by this same class on
+        the RECEIVE path, and a tone saved for the `Radio` pedal must not
+        colour every radio a player hears. `VoiceEffectLine` is the only
+        caller that asks for it.
+        """
         spec = spec if spec is not None else spec_for(preset)
         self.preset = preset
         self.spec = spec
@@ -993,6 +1191,9 @@ class _EffectProcessor:
         # next frame starts there rather than stepping.
         self._levelled = preset in (CUSTOM_EFFECT, BUILDER_EFFECT)
         self._loudness_gain = 1.0
+        # The player's four tone bands, for the broadcast line only (see
+        # `with_tone`). Flat hands every frame straight back untouched.
+        self._tone = _ToneStack(preset) if with_tone else None
         # A chorus is a modulated delay; the ring is long enough for the base
         # delay plus its whole sweep.
         self._chorus = float(spec.get("chorus", 0.0))
@@ -2257,14 +2458,27 @@ class _EffectProcessor:
         So the trim is on the RMS, not the peak: attenuating only (a quiet voice
         and a quiet board pass byte for byte), aimed at `VOICE_LOUDNESS`, fast
         on the way down and slow on the way up, and interpolated across the
-        frame so the gain cannot step. A fixed pedal is not trimmed: it was
-        tuned for a room when it was made, and `self._levelled` says so.
+        frame so the gain cannot step. A fixed pedal is not trimmed -- it was
+        tuned for a room when it was made, and `self._levelled` says so --
+        unless the player has moved its tone, which is no longer that
+        measurement; a tone put back to flat releases the trim (slowly, over
+        the same ramp) rather than dropping the gain on the frame it lands.
         """
-        if not self._levelled:
+        levelled = self._levelled or (self._tone is not None
+                                      and self._tone.active())
+        if not levelled and self._loudness_gain > 0.9995:
+            # A fixed preset that has never been moved: byte for byte, its own
+            # measured sound, and no multiply by 1.0 on the way out.
+            self._loudness_gain = 1.0
             return block
         level = (float(np.sqrt(np.mean(np.square(block))))
                  if block.size else 0.0)
-        target = (VOICE_LOUDNESS / level) if level > VOICE_LOUDNESS else 1.0
+        # A preset whose tone has been put back to flat releases the trim
+        # instead of dropping it: the gain it was holding is still on the last
+        # frame, and returning the block untrimmed would be a step the size of
+        # that gain (the same click the latch fixes on the way past 0 dB).
+        target = ((VOICE_LOUDNESS / level)
+                  if levelled and level > VOICE_LOUDNESS else 1.0)
         rate = (LOUDNESS_ATTACK if target < self._loudness_gain
                 else LOUDNESS_RELEASE)
         goal = self._loudness_gain + (target - self._loudness_gain) * rate
@@ -2333,6 +2547,12 @@ class _EffectProcessor:
         # The radio family's noise floor comes last of the blocks: a channel's
         # hiss is not something the compressor or the gate acts on.
         block = self._static_block(block)
+        # The player's own four tone bands, after the preset has made its sound
+        # and before the trim and the ceiling -- so a band pushed up is caught
+        # by the ceiling like any other loud pedal, and a preset nobody has
+        # equalised takes no new code path at all.
+        if self._tone is not None:
+            block = self._tone.process(block)
         # Unity below the knee and a hard asymptotic ceiling at PEAK_CEILING:
         # the encoder is handed a frame with room left for the effect sends the
         # PA and a cinema room put on top of it (see PEAK_CEILING).
@@ -2351,25 +2571,25 @@ def _board_revision(effect_id):
     voice path that never chooses it should not carry it at import time.
     """
     if effect_id == CUSTOM_EFFECT:
-        from . import voice_effect_custom
-        return voice_effect_custom.revision()
+        from . import custom
+        return custom.revision()
     if effect_id == BUILDER_EFFECT:
-        from . import voice_effect_builder, voice_effect_pan
-        count = voice_effect_builder.revision()
+        from . import builder, pan
+        count = builder.revision()
         # The board's Pan Delay slot has a `Custom` choice that plays whatever
         # the Pan Delay page holds, so while the slot is ON it, that page's
         # changes have to rebuild the board -- a typed delay must land on the
         # next frame there too. With the slot on Off or a named setting the two
         # counts are independent again.
-        if voice_effect_builder.uses_pan_page():
-            count += voice_effect_pan.revision()
+        if builder.uses_pan_page():
+            count += pan.revision()
         return count
     if effect_id == VOX_LAB_EFFECT:
-        from . import voice_effect_vocoder
-        return voice_effect_vocoder.revision()
+        from . import vocoder
+        return vocoder.revision()
     if effect_id == PAN_EFFECT:
-        from . import voice_effect_pan
-        return voice_effect_pan.revision()
+        from . import pan
+        return pan.revision()
     return 0
 
 
@@ -2457,7 +2677,7 @@ class VoiceEffectLine:
             if (self._processor is None or wanted != self._preset
                     or revision != self._revision):
                 switching = self._processor is not None
-                self._processor = _EffectProcessor(wanted)
+                self._processor = _EffectProcessor(wanted, with_tone=True)
                 out = self._processor.process(data)
                 if switching:
                     out = _crossfade(self._last, out)
@@ -2483,5 +2703,5 @@ class VoiceEffectLine:
             revision = _board_revision(wanted)
             if (processor is None or wanted != self._preset
                     or revision != self._revision):
-                processor = _EffectProcessor(wanted)
+                processor = _EffectProcessor(wanted, with_tone=True)
             return [processor.process(frame) for frame in frames]

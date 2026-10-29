@@ -2,7 +2,7 @@
 
 Why a second board
 ------------------
-`Custom Amp` (in `voice_effect_custom.py`) is a board for one family: seven
+`Custom Amp` (in `custom.py`) is a board for one family: seven
 knobs that configure the amp chain. A player who wants their *voice* to be
 something the list does not have -- a fuzz, a cave and a slow chorus at once, a
 vocoder with a sub octave, a whisper behind a tremolo -- needs more than an amp,
@@ -29,7 +29,7 @@ with each other:
 - **Rhythm** (9) -- Off, Stutter, Chop, Step, Pump, Tape Stop, Freeze, Swell,
   Riser.
 - **Pan Delay** (7) -- Off, then the named settings of the Pan Delay page
-  (`voice_effect_pan.PRESETS`: Custom, Ping-Pong, Wide Sweep, Front Walk, Deep
+  (`pan.PRESETS`: Custom, Ping-Pong, Wide Sweep, Front Walk, Deep
   Behind, Slow Drift). It is the one slot whose choices are another page's own
   table, because the same delay has to mean the same thing in both places.
 - **Gate** (4) and **Output** (4) -- the two that every effect needs.
@@ -43,17 +43,17 @@ choice per slot is the rule that keeps "what you picked" and "what you hear"
 the same thing, and it is why every choice is a slot and not a dial.
 
 **The spec is the presets' own.** `spec()` returns a dict in exactly the shape
-`voice_effects._SPECS` uses, so the same `_EffectProcessor` builds it; three
+`dsp._SPECS` uses, so the same `_EffectProcessor` builds it; three
 collisions are resolved on purpose and said so in the choices' own Tab text: a
 Talkbox takes the Body slot's band, Whisper adds breath *over* whatever body the
 board has, and Space can only be one room at a time.
 
 Switching a slot lands on the next frame: `revision()` is read beside the
 preset id by `VoiceEffectLine`, which rebuilds the processor and crossfades
-into it (`voice_effect_boards.py` holds the reading half of that rule).
+into it (`boards.py` holds the reading half of that rule).
 
 **The board's first line is `Start From:`**, and it is not a slot: fifty
-finished voices (`voice_effect_recipes.py`) in five families, because ten lines
+finished voices (`recipes.py`) in five families, because ten lines
 reading their defaults is not a way in. A recipe is a saved board and nothing
 else -- `set_values` is what it calls, so every slot moves in one save and one
 revision (one crossfade), and `spec()` still builds the sound.
@@ -64,20 +64,20 @@ menu asks first, because it is the one line on this page a single extra press
 cannot undo.
 """
 
-from .. import options
-from . import voice_effect_boards as boards
-from . import voice_effect_pan
+from ... import options
+from . import boards as boards
+from . import pan
 
 #: The id the rest of the feature knows this board by. It is a catalogue row and
 #: a line on the Voice Effect page's top level -- not a family member, because it
 #: is one choice on that page rather than a category under it
-#: (`voice_effect_catalogue.STANDALONE_EFFECTS`).
+#: (`catalogue.STANDALONE_EFFECTS`).
 EFFECT_ID = "voice_build"
 
 #: The saved board, beside the preset that selects it.
-_OPTION = "music_bot_voice_effect_builder"
+_OPTION = "music_bot_builder"
 
-#: The starting point the board was last filled from (`voice_effect_recipes`),
+#: The starting point the board was last filled from (`recipes`),
 #: or empty for a board the player built from the defaults. Saved here rather
 #: than in the recipes module because it is part of this board's state -- and
 #: because one options seam is one thing a test has to stand in for.
@@ -85,14 +85,14 @@ _RECIPE_OPTION = "music_bot_voice_effect_recipe"
 
 #: Pan -> the one block whose effect is not in the frame: the delay's repeats
 #: are the talker's, but where the voice sits is placed by each LISTENER's own
-#: machine (`voice_effect_pan`). Its choices come from that module's `PRESETS`
+#: machine (`pan`). Its choices come from that module's `PRESETS`
 #: rather than being written out here, so the names on this board and the names
 #: on the Pan Delay page are the same list -- and `Custom` means that page's own
 #: two numbers, kept live.
 _PAN_CHOICES = (("Off", "off",
                  "No pan at all: the voice is where the body is, as every "
                  "other effect here leaves it. The default."),
-                ) + voice_effect_pan.preset_choices()
+                ) + pan.preset_choices()
 
 #: A slot: ``(id, menu name, what Tab reads on the slot's line, choices,
 #: default)``. A choice is ``(menu name, stored value, what Tab reads)``. The
@@ -538,7 +538,7 @@ def clear_value(param_id):
 def filled(board):
     """A partial board with every slot filled in, as `set_values` stores it.
 
-    A starting point (`voice_effect_recipes`) names only the slots it moves,
+    A starting point (`recipes`) names only the slots it moves,
     because that is what makes a recipe readable; the board itself is always
     ten values. This is the one place that difference is resolved, so a saved
     board and a recipe are comparable -- which is how the board's first line
@@ -656,15 +656,15 @@ def spec():
         # The Pan Delay is not in a table of its own here: its keys come from
         # the module that owns the setting, so a name means the same delay and
         # the same movement on this board and on that page (`spec_keys`).
-        built.update(voice_effect_pan.spec_keys(board["pan"]))
+        built.update(pan.spec_keys(board["pan"]))
     return built
 
 
 def uses_pan_page():
     """True while the Pan slot follows the Pan Delay page's own numbers.
 
-    `voice_effects._board_revision` reads this: a board that plays whatever
+    `dsp._board_revision` reads this: a board that plays whatever
     that page holds has to be rebuilt when the page moves, or a delay typed
     there would be heard on the page and not through the voice.
     """
-    return values()["pan"] == voice_effect_pan.CUSTOM_PRESET
+    return values()["pan"] == pan.CUSTOM_PRESET

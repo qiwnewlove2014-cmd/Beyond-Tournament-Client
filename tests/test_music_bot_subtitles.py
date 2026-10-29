@@ -21,6 +21,7 @@ against a fake module, speaking is a recorded call, and every caption track
 here is a fixture written out in the test.
 """
 
+import inspect
 import json
 import os
 import sys
@@ -33,6 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.music_bot import controller as bot_module
 from libs.music_bot import subtitles
 from libs.music_bot import MapMusicBot
+from libs.music_bot.track_source import TrackSourceHandler
 
 
 # ── caption-track fixtures (the shapes YouTube really sends) ────────────────
@@ -524,7 +526,6 @@ class InlineThread:
 
 def source_of(name):
     """The source body of one MapMusicBot method (how a rule is placed)."""
-    import inspect
     return inspect.getsource(getattr(MapMusicBot, name))
 
 
@@ -670,8 +671,8 @@ class TheFetchTests(unittest.TestCase):
         stop_body = source_of("stop")
         self.assertIn("self._stop_subtitles()", stop_body)
         self.assertIn("self._pump_subtitles()", source_of("loop"))
-        self.assertIn("self._begin_subtitles(canonical_url)",
-                      source_of("_start_youtube_stream"))
+        stream = inspect.getsource(TrackSourceHandler._start_youtube_stream)
+        self.assertIn("self._bot._begin_subtitles(canonical_url)", stream)
 
 
 class ThePumpTests(unittest.TestCase):

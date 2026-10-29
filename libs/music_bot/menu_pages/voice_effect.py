@@ -6,7 +6,11 @@ family's pedals. `_open_voice_builder_menu`, `_open_builder_recipes_menu`,
 `_open_custom_param_menu` are the Custom Voice board, its fifty starting
 points, its Clear question and the knob pages every board shares;
 `_open_vocoder_lab_menu` is the Vocoder Lab board, the Developer/Contributor
-carrier page at the end of that family.
+carrier page at the end of that family. `_open_voice_tone_menu` and
+`_VoiceToneSlider` are the four tone bands one preset carries of its own
+(`voice_effects/tone.py`): a `state.State`, not a page, for the same reason
+the Music Bot's own equalizer is one -- a slider is Tab, arrows and speech,
+not a list of steps.
 
 Moved out of `libs/music_bot/menus.py` on 2026-10-26 and mixed into
 `MusicBotMenus`, so every caller still says `bot._menus().<method>()` and the
@@ -19,6 +23,18 @@ Pins: client/tests/test_music_bot_menu_help.py, test_voice_effects.py,
 test_music_bot_autotune.py (the harmony and voice pages) and
 test_music_bot_gate*.py. Rules: .agents/skills/music_bot_integration/.
 """
+
+import pygame
+
+from ... import state
+from .settings import _speak
+
+#: What Tab says about the `Tone:` line, on every page that offers it.
+_TONE_NOTE = (
+    "Four tone bands for this one effect: Low for the chest and the room, "
+    "Body for the mud under the words, Presence for the clarity of the "
+    "words, Air for the breath on top. Each moves twelve decibels either "
+    "way, and Flat is the pedal exactly as it was made.")
 
 
 class VoiceEffectMenus:
@@ -48,9 +64,9 @@ class VoiceEffectMenus:
         around it is a page of filters with nothing to filter.
 
         This page also ends with the two rows that are not families, because
-        each is one choice rather than a category (`voice_effect_catalogue.
-        STANDALONE_EFFECTS`), and each opens a page rather than a list of
-        pedals:
+        each is one choice rather than a category
+        (`voice_effects.catalogue.STANDALONE_EFFECTS`), and each opens a page
+        rather than a list of pedals:
 
         - `Pan Delay` (`_open_pan_delay_menu`) is a delay whose repeats cross
           the listener's head, and its delay is TYPED, so it cannot be a row of
@@ -60,7 +76,7 @@ class VoiceEffectMenus:
         - `Custom Voice` (`_open_voice_builder_menu`) assembles a whole effect
           out of the blocks the families are made of -- eleven slots,
           seventy-eight choices, and fifty ready-made voices on the board's
-          first line (`voice_effect_recipes`).
+          first line (`voice_effects.recipes`).
 
         The Vocoder Lab family ends with its own board
         (`_open_vocoder_lab_menu`): the same six-band bank as its twenty
@@ -71,10 +87,11 @@ class VoiceEffectMenus:
         """
         from ... import menu as menu_mod, menus
         from .. import gate as music_bot_gate
-        from .. import voice_effect_builder
-        from .. import voice_effect_custom
-        from .. import voice_effect_pan
-        from .. import voice_effect_vocoder
+        from ..voice_effects import builder
+        from ..voice_effects import custom
+        from ..voice_effects import pan
+        from ..voice_effects import tone
+        from ..voice_effects import vocoder
         from .. import voice_effects
         gp = self._bot._find_gameplay()
         if not gp:
@@ -86,6 +103,37 @@ class VoiceEffectMenus:
             return voice_effects.clamp_effect(
                 getattr(self._bot, "voice_effect",
                         voice_effects.DEFAULT_EFFECT))
+
+        def marks(effect_id):
+            """The suffixes one preset's line carries: `tuned`, then `active`.
+
+            `tuned` is this preset's OWN four bands, so a player can see which of
+            the hundred and forty-four they have reshaped without opening each
+            one -- and it stops being said the moment `R` puts the bands back,
+            because flat is no saved key at all rather than four zeros. Both
+            words are read live, like the labels around them, so tuning a band
+            and closing the slider updates the list that is already open.
+            """
+            bits = []
+            if tone.has_tone(effect_id):
+                bits.append("tuned")
+            if effect_id == current():
+                bits.append("active")
+            return f" ({', '.join(bits)})" if bits else ""
+
+        def note_for(effect_id):
+            """The preset's own description, and what its tone is doing now.
+
+            Callable because the bands move while the page is open: Tab on a
+            preset whose tone was just changed answers with the bands it has
+            now, not the ones it had when the list was built.
+            """
+            def note_fn():
+                note = voice_effects.effect_note(effect_id)
+                if tone.has_tone(effect_id):
+                    note = f"{note} Tone: {tone.summary(effect_id)}."
+                return note
+            return note_fn
 
         def go_back():
             gp.pop_last_substate()
@@ -113,8 +161,8 @@ class VoiceEffectMenus:
             # Read live, like the Harmony list: the mark follows the choice on
             # the list that is already open.
             def label_fn():
-                label = voice_effects.effect_label(effect_id)
-                return f"{label} (active)" if effect_id == current() else label
+                return (f"{voice_effects.effect_label(effect_id)}"
+                        f"{marks(effect_id)}")
             return label_fn
 
         def make_group_label(group_id, name, members):
@@ -128,9 +176,9 @@ class VoiceEffectMenus:
                 if now in members:
                     if now == voice_effects.VOX_LAB_EFFECT:
                         return (f"{name}: "
-                                f"{voice_effect_vocoder.summary()} (active)")
-                    return (f"{name}: {voice_effects.effect_label(now)} "
-                            f"(active)")
+                                f"{vocoder.summary()}{marks(now)}")
+                    return (f"{name}: {voice_effects.effect_label(now)}"
+                            f"{marks(now)}")
                 return name
             return label_fn
 
@@ -139,20 +187,16 @@ class VoiceEffectMenus:
             # page answers "what am I playing through" without being opened.
             def label_fn():
                 label = voice_effects.effect_label(voice_effects.CUSTOM_EFFECT)
-                label = f"{label}: {voice_effect_custom.summary()}"
-                if current() == voice_effects.CUSTOM_EFFECT:
-                    return f"{label} (active)"
-                return label
+                label = f"{label}: {custom.summary()}"
+                return f"{label}{marks(voice_effects.CUSTOM_EFFECT)}"
             return label_fn
 
         def make_pan_label():
             # The page's two settings on the family's own line, like the boards'.
             def label_fn():
                 label = voice_effects.effect_label(voice_effects.PAN_EFFECT)
-                label = f"{label}: {voice_effect_pan.summary()}"
-                if current() == voice_effects.PAN_EFFECT:
-                    return f"{label} (active)"
-                return label
+                label = f"{label}: {pan.summary()}"
+                return f"{label}{marks(voice_effects.PAN_EFFECT)}"
             return label_fn
 
         def go_pan():
@@ -176,10 +220,8 @@ class VoiceEffectMenus:
             # player built, so the top page answers without being opened.
             def label_fn():
                 label = voice_effects.effect_label(voice_effects.BUILDER_EFFECT)
-                label = f"{label}: {voice_effect_builder.summary()}"
-                if current() == voice_effects.BUILDER_EFFECT:
-                    return f"{label} (active)"
-                return label
+                label = f"{label}: {builder.summary()}"
+                return f"{label}{marks(voice_effects.BUILDER_EFFECT)}"
             return label_fn
 
         def go_builder():
@@ -192,10 +234,8 @@ class VoiceEffectMenus:
             # holds now, so the family page answers without being opened.
             def label_fn():
                 label = voice_effects.effect_label(voice_effects.VOX_LAB_EFFECT)
-                label = f"{label}: {voice_effect_vocoder.summary()}"
-                if current() == voice_effects.VOX_LAB_EFFECT:
-                    return f"{label} (active)"
-                return label
+                label = f"{label}: {vocoder.summary()}"
+                return f"{label}{marks(voice_effects.VOX_LAB_EFFECT)}"
             return label_fn
 
         def go_vocoder():
@@ -212,6 +252,21 @@ class VoiceEffectMenus:
             self._bot.set_voice_effect(voice_effects.VOX_LAB_EFFECT)
             self._open_vocoder_lab_menu()
 
+        def make_tone_label():
+            # The line names the effect it will edit, because the tone belongs
+            # to one preset: it is read live, so picking a pedal here moves the
+            # name on the page already open.
+            def label_fn():
+                now = current()
+                if now == voice_effects.DEFAULT_EFFECT:
+                    return "Tone: pick an effect first"
+                return (f"Tone ({voice_effects.effect_label(now)}): "
+                        f"{tone.summary(now)}")
+            return label_fn
+
+        def open_tone():
+            self._open_voice_tone_menu(current())
+
         m = menu_mod.Menu(
             self._bot.game,
             f"Music Bot Voice Effect: {self._bot.voice_effect_label()}"
@@ -222,11 +277,15 @@ class VoiceEffectMenus:
         if group is None:
             items = [(make_label(voice_effects.DEFAULT_EFFECT),
                       pick(voice_effects.DEFAULT_EFFECT), None,
-                      voice_effects.effect_note(voice_effects.DEFAULT_EFFECT))]
+                      note_for(voice_effects.DEFAULT_EFFECT))]
             for group_id, name, note, members in (
                     voice_effects.VOICE_EFFECT_GROUPS):
                 items.append((make_group_label(group_id, name, members),
                               open_group(group_id), None, note))
+            # The tone sits above the rows that are not families, so the page
+            # still ends with the two things you set yourself (Custom Voice is
+            # its last choice above Back, and a pin says so).
+            items.append((make_tone_label(), open_tone, None, _TONE_NOTE))
             # The rows that are not families: each opens a page rather than a
             # list of pedals (the Pan Delay types its delay, Custom Voice is a
             # board). They come after the families, so the page reads as the
@@ -234,10 +293,10 @@ class VoiceEffectMenus:
             for effect_id in voice_effects.STANDALONE_EFFECTS:
                 if effect_id == voice_effects.PAN_EFFECT:
                     items.append((make_pan_label(), go_pan, None,
-                                  voice_effects.effect_note(effect_id)))
+                                  note_for(effect_id)))
                 elif effect_id == voice_effects.BUILDER_EFFECT:
                     items.append((make_builder_label(), go_builder, None,
-                                  voice_effects.effect_note(effect_id)))
+                                  note_for(effect_id)))
             items.append(("Back", go_back, None,
                           "Returns to Music Bot Settings."))
         else:
@@ -245,25 +304,62 @@ class VoiceEffectMenus:
             # is chosen) but it is not a pedal to pick: it opens a page, so the
             # plain list leaves it out and its own line goes at the bottom.
             items = [(make_label(effect_id), pick(effect_id), None,
-                      voice_effects.effect_note(effect_id))
+                      note_for(effect_id))
                      for effect_id in voice_effects.group_members(group)
                      if effect_id not in (voice_effects.CUSTOM_EFFECT,
                                           voice_effects.VOX_LAB_EFFECT)]
+            # Above the board's own line, so the family still ends with the
+            # board at the bottom of its list (as its own pins say).
+            items.append((make_tone_label(), open_tone, None, _TONE_NOTE))
             if group == "drive":
                 items.append((make_custom_label(), go_custom, None,
-                              voice_effects.effect_note(
-                                  voice_effects.CUSTOM_EFFECT)))
+                              note_for(voice_effects.CUSTOM_EFFECT)))
             elif group == "synth" and self._bot.vocoder_lab_allowed():
                 # Hidden for anyone the Server has not allowed: this is the
                 # one line in the family that is not a preset but a tool.
                 items.append((make_vocoder_label(), go_vocoder, None,
-                              voice_effects.effect_note(
-                                  voice_effects.VOX_LAB_EFFECT)))
+                              note_for(voice_effects.VOX_LAB_EFFECT)))
             items.append(("Back", go_to_groups, None,
                           "Returns to the list of voice effect families."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
+
+    def _open_voice_tone_menu(self, preset=None):
+        """The four tone bands of one preset, as a slider page.
+
+        `preset` is the effect the caller's line names (the live choice on the
+        Voice Effect page, the board's own id on a board page); with none it is
+        whatever is chosen now. It is pushed ON TOP of the page that opened it,
+        never in place of it, because every label on that page reads live --
+        closing the slider reveals a `Tone:` line already saying what the bands
+        now hold, with nothing rebuilt and nothing spoken over.
+
+        A page for Off would be a slider with no chain behind it (the line holds
+        no processor when no pedal is chosen), so it says so instead.
+
+        The values are written live as the bands move, with `autosave=False`:
+        the capture thread reads the same option dict, so a decibel lands on
+        the next 20 ms frame, and the settings file is written ONCE when the
+        page closes (`_VoiceToneSlider._close_and_commit`) rather than once per
+        key press.
+        """
+        from .. import gate as music_bot_gate
+        from .. import voice_effects
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+        if music_bot_gate.blocked("voice_fx"):
+            return
+        chosen = (voice_effects.clamp_effect(preset) if preset is not None
+                  else voice_effects.clamp_effect(
+                      getattr(self._bot, "voice_effect",
+                              voice_effects.DEFAULT_EFFECT)))
+        if chosen == voice_effects.DEFAULT_EFFECT:
+            self._say("Pick a voice effect first: the tone belongs to the "
+                      "pedal you are using.")
+            return
+        gp.add_substate(_VoiceToneSlider(self._bot.game, self._bot, chosen))
 
     def _open_pan_delay_menu(self):
         """Pan Delay: the typed delay and the movement, on one page.
@@ -275,7 +371,7 @@ class VoiceEffectMenus:
         spoken once and lands on the next 20 ms frame.
 
         `Preset` is the third line: the named settings of
-        `voice_effect_pan.PRESETS` -- Ping-Pong, Wide Sweep, Front Walk, Deep
+        `voice_effects.pan.PRESETS` -- Ping-Pong, Wide Sweep, Front Walk, Deep
         Behind and Slow Drift, plus `Custom (this page)` for the player's own
         two numbers. Choosing a name writes both settings, so a preset is a
         name for the pair rather than a copy of it, and typing a delay puts the
@@ -289,7 +385,8 @@ class VoiceEffectMenus:
         """
         from ... import menu as menu_mod, menus
         from .. import gate as music_bot_gate
-        from .. import voice_effect_pan
+        from ..voice_effects import pan
+        from ..voice_effects import tone
         from .. import voice_effects
 
         gp = self._bot._find_gameplay()
@@ -312,48 +409,48 @@ class VoiceEffectMenus:
                 # substate is the frozen-looking game the fade field had.
                 gp.pop_last_substate()
                 text = "" if text is None else str(text).strip()
-                before = voice_effect_pan.delay_ms()
+                before = pan.delay_ms()
                 if not text:
                     self._say(f"Delay unchanged, {before} milliseconds.")
                     return
-                stored = voice_effect_pan.set_delay_ms(text)
+                stored = pan.set_delay_ms(text)
                 if stored is None:
                     self._say(f"'{text}' is not a number of milliseconds, so "
                               f"the delay is still {before}.")
                     return
                 choose()
                 self._say(f"Pan Delay: {stored} milliseconds, "
-                          f"{voice_effect_pan.motion_label().lower()}.")
+                          f"{pan.motion_label().lower()}.")
 
             gp.add_substate(self._bot.game.input.run(
                 f"Enter the delay in milliseconds, "
-                f"{voice_effect_pan.MIN_DELAY_MS} to "
-                f"{voice_effect_pan.MAX_DELAY_MS} "
-                f"(currently {voice_effect_pan.delay_ms()}):",
+                f"{pan.MIN_DELAY_MS} to "
+                f"{pan.MAX_DELAY_MS} "
+                f"(currently {pan.delay_ms()}):",
                 handeler=submitted,
-                min_val=voice_effect_pan.MIN_DELAY_MS,
-                max_val=voice_effect_pan.MAX_DELAY_MS,
+                min_val=pan.MIN_DELAY_MS,
+                max_val=pan.MAX_DELAY_MS,
                 msg_length=4, multiline=False,
             ))
 
         def go_motion():
             page = menu_mod.Menu(
                 self._bot.game,
-                f"Music Bot Pan Delay: {voice_effect_pan.motion_label()}",
+                f"Music Bot Pan Delay: {pan.motion_label()}",
                 parrent=gp,
             )
             items = []
-            for label, stored, note in voice_effect_pan.MOTIONS:
+            for label, stored, note in pan.MOTIONS:
                 def apply(value=stored, name=label):
                     def pressed():
-                        voice_effect_pan.set_motion(value)
+                        pan.set_motion(value)
                         choose()
                         gp.pop_last_substate()
                         self._say(f"Pan Delay: {name.lower()}.")
                     return pressed
 
                 shown = (f"{label} (active)"
-                         if stored == voice_effect_pan.motion() else label)
+                         if stored == pan.motion() else label)
                 items.append((shown, apply(), None, note))
             items.append(("Back", lambda: gp.pop_last_substate(), None,
                           "Returns to the Pan Delay page."))
@@ -365,31 +462,31 @@ class VoiceEffectMenus:
             page = menu_mod.Menu(
                 self._bot.game,
                 f"Music Bot Pan Delay Preset: "
-                f"{voice_effect_pan.preset_label()}",
+                f"{pan.preset_label()}",
                 parrent=gp,
             )
             items = []
             for stored, label, milliseconds, mode, note in (
-                    voice_effect_pan.PRESETS):
+                    pan.PRESETS):
                 def apply(value=stored, name=label):
                     def pressed():
-                        voice_effect_pan.set_preset(value)
+                        pan.set_preset(value)
                         choose()
                         gp.pop_last_substate()
                         self._say(f"Pan Delay preset: {name.lower()}, "
-                                  f"{voice_effect_pan.delay_ms()} "
+                                  f"{pan.delay_ms()} "
                                   f"milliseconds, "
-                                  f"{voice_effect_pan.motion_label().lower()}.")
+                                  f"{pan.motion_label().lower()}.")
                     return pressed
 
                 # A named row says what it would set; the mark says which one
                 # the page is on (`Custom (this page)` is the player's own two
                 # numbers, so it reads as its own name alone).
                 shown = label
-                if stored != voice_effect_pan.CUSTOM_PRESET:
+                if stored != pan.CUSTOM_PRESET:
                     shown = (f"{label} -- {milliseconds} ms, "
-                             f"{voice_effect_pan.motion_label(mode).lower()}")
-                if stored == voice_effect_pan.preset():
+                             f"{pan.motion_label(mode).lower()}")
+                if stored == pan.preset():
                     shown = f"{shown} (active)"
                 items.append((shown, apply(), None, note))
             items.append(("Back", lambda: gp.pop_last_substate(), None,
@@ -399,33 +496,45 @@ class VoiceEffectMenus:
             gp.add_substate(page)
 
         def reset():
-            voice_effect_pan.clear()
+            pan.clear()
             choose()
-            page.title = f"Music Bot Pan Delay: {voice_effect_pan.summary()}"
+            page.title = f"Music Bot Pan Delay: {pan.summary()}"
             self._say("Pan Delay reset: 300 milliseconds, Stereo.")
+
+        def make_tone_label():
+            # The tone belongs to the preset, and this page is one preset.
+            def label_fn():
+                label = voice_effects.effect_label(voice_effects.PAN_EFFECT)
+                return (f"Tone ({label}): "
+                        f"{tone.summary(voice_effects.PAN_EFFECT)}")
+            return label_fn
+
+        def open_tone():
+            self._open_voice_tone_menu(voice_effects.PAN_EFFECT)
 
         choose()
         page = menu_mod.Menu(
             self._bot.game,
-            f"Music Bot Pan Delay: {voice_effect_pan.summary()}",
+            f"Music Bot Pan Delay: {pan.summary()}",
             parrent=gp,
         )
         page.add_items([
-            (lambda: f"Delay: {voice_effect_pan.delay_ms()} ms", go_delay,
+            (lambda: f"Delay: {pan.delay_ms()} ms", go_delay,
              None,
              "Type the delay yourself, in whole milliseconds from 20 to 2000. "
              "It is both the gap between the repeats and the time one crossing "
              "takes, so a longer delay is a slower movement."),
-            (lambda: f"Motion: {voice_effect_pan.motion_label()}", go_motion,
+            (lambda: f"Motion: {pan.motion_label()}", go_motion,
              None,
              "Where the repeats travel: Stereo crosses your ears, Front-Back "
              "passes in front of and behind you, Off keeps the delay still."),
-            (lambda: f"Preset: {voice_effect_pan.preset_label()}", go_preset,
+            (lambda: f"Preset: {pan.preset_label()}", go_preset,
              None,
              "Named settings: a delay and a movement under one name. The same "
              "names are the Pan Delay slot of the Custom Voice board, so a "
              "preset chosen here can be played by a voice built there, and "
              "Custom (this page) follows the two lines above."),
+            (make_tone_label(), open_tone, None, _TONE_NOTE),
             ("Reset to 300 ms, Stereo", reset, None,
              "Puts both settings back to what the page opens with, and the "
              "preset mark back to Custom. Pan Delay stays chosen."),
@@ -439,28 +548,28 @@ class VoiceEffectMenus:
         """The Custom Voice board: the last line of the Voice Effect page.
 
         The same generated page as the amp board, over the eleven slots in
-        `voice_effect_builder.PARAMS` -- colour, tone, body, movement, pitch,
+        `voice_effects.builder.PARAMS` -- colour, tone, body, movement, pitch,
         space, pan delay, texture, rhythm, gate and output. Back returns to the
         Voice Effect page it came from, not into Amp & Drive.
         """
-        from .. import voice_effect_builder
-        return self._open_custom_effect_menu(voice_effect_builder,
+        from ..voice_effects import builder
+        return self._open_custom_effect_menu(builder,
                                              back_to_top=True)
 
     def _open_vocoder_lab_menu(self):
         """The Vocoder Lab board: the last line of the family.
 
         The same generated page as the amp board, over the nine rows in
-        `voice_effect_vocoder.PARAMS` -- mode, root, octave, scale, interval,
+        `voice_effects.vocoder.PARAMS` -- mode, root, octave, scale, interval,
         wave, shift, breath and mix. Back returns to the Vocoder Lab family,
         not into Amp & Drive. Developer/Contributor only: the Server's
         snapshot is asked here as well as where the line is added, so a direct
         call cannot open the page for an account without it.
         """
-        from .. import voice_effect_vocoder
+        from ..voice_effects import vocoder
         if not self._bot.vocoder_lab_allowed():
             return
-        return self._open_custom_effect_menu(voice_effect_vocoder,
+        return self._open_custom_effect_menu(vocoder,
                                              back_group="synth")
 
     def _open_builder_clear_menu(self, board_menu=None):
@@ -479,7 +588,7 @@ class VoiceEffectMenus:
         """
         from ... import menu as menu_mod, menus
         from .. import gate as music_bot_gate
-        from .. import voice_effect_builder
+        from ..voice_effects import builder
         from .. import voice_effects
         gp = self._bot._find_gameplay()
         if not gp:
@@ -491,12 +600,12 @@ class VoiceEffectMenus:
             gp.pop_last_substate()
 
         def do_clear():
-            voice_effect_builder.clear()
+            builder.clear()
             if board_menu is not None:
                 board_menu.title = (
                     f"Music Bot "
                     f"{voice_effects.effect_label(voice_effects.BUILDER_EFFECT)}: "
-                    f"{voice_effect_builder.summary()}")
+                    f"{builder.summary()}")
             gp.pop_last_substate()
             self._say("Custom Voice cleared. Every slot is back at its default, "
                   "and the board says My Own.")
@@ -520,7 +629,7 @@ class VoiceEffectMenus:
         The board is eleven slots of seventy-eight choices, and a player
         opening it
         for the first time is looking at ten lines reading their defaults. This
-        page is the way in: fifty finished voices (`voice_effect_recipes`),
+        page is the way in: fifty finished voices (`voice_effects.recipes`),
         each one the same eleven slots with values in them, so a press is a
         sound
         and every slot underneath stays the player's afterwards.
@@ -544,7 +653,7 @@ class VoiceEffectMenus:
         """
         from ... import menu as menu_mod, menus
         from .. import gate as music_bot_gate
-        from .. import voice_effect_recipes
+        from ..voice_effects import recipes
         from .. import voice_effects
         gp = self._bot._find_gameplay()
         if not gp:
@@ -572,8 +681,8 @@ class VoiceEffectMenus:
             # answers "which voice am I on" without being opened -- the same
             # rule the pedal families follow.
             def label_fn():
-                now = voice_effect_recipes.current_id()
-                row = voice_effect_recipes.recipe(now)
+                now = recipes.current_id()
+                row = recipes.recipe(now)
                 if row is not None and row[2] == group_id:
                     return f"{name}: {row[1]}"
                 return name
@@ -581,11 +690,11 @@ class VoiceEffectMenus:
 
         def pick(recipe_id):
             def apply():
-                voice_effect_recipes.apply(recipe_id)
+                recipes.apply(recipe_id)
                 self._bot.set_voice_effect(voice_effects.BUILDER_EFFECT)
                 self._say(f"Custom Voice: "
-                      f"{voice_effect_recipes.recipe_label(recipe_id)}. "
-                      f"{voice_effect_recipes.recipe_note(recipe_id)}")
+                      f"{recipes.recipe_label(recipe_id)}. "
+                      f"{recipes.recipe_note(recipe_id)}")
                 # The page stays open -- the mark and the board's first line
                 # are live labels, and the board underneath is rebuilt when
                 # this page is left (go_back), so nothing said here is stale.
@@ -593,30 +702,30 @@ class VoiceEffectMenus:
 
         def make_label(recipe_id):
             def label_fn():
-                label = voice_effect_recipes.recipe_label(recipe_id)
+                label = recipes.recipe_label(recipe_id)
                 return (f"{label} (active)"
-                        if voice_effect_recipes.current_id() == recipe_id
+                        if recipes.current_id() == recipe_id
                         else label)
             return label_fn
 
         if family_id is None:
             items = [(make_family_label(group_id, name), open_family(group_id),
                       None, note)
-                     for group_id, name, note in voice_effect_recipes.FAMILIES]
+                     for group_id, name, note in recipes.FAMILIES]
             items.append(("Back", go_back, None,
                           "Returns to the Custom Voice board. The board keeps "
                           "everything set here."))
             title = "Music Bot Custom Voice: Start From"
         else:
             items = [(make_label(recipe_id), pick(recipe_id), None,
-                      voice_effect_recipes.recipe_note(recipe_id))
+                      recipes.recipe_note(recipe_id))
                      for recipe_id in
-                     voice_effect_recipes.family_members(family_id)]
+                     recipes.family_members(family_id)]
             items.append(("Back", go_back, None,
                           "Returns to the five families of starting "
                           "points."))
             title = ("Music Bot Custom Voice: "
-                     f"{voice_effect_recipes.family_label(family_id)}")
+                     f"{recipes.family_label(family_id)}")
         m = menu_mod.Menu(self._bot.game, title, parrent=gp)
         m.add_items(items)
         menus.set_default_sounds(m)
@@ -642,10 +751,11 @@ class VoiceEffectMenus:
         """
         from ... import menu as menu_mod, menus
         from .. import gate as music_bot_gate
-        from .. import voice_effect_custom
-        from .. import voice_effect_recipes
+        from ..voice_effects import custom
+        from ..voice_effects import recipes
+        from ..voice_effects import tone
         from .. import voice_effects
-        board = board if board is not None else voice_effect_custom
+        board = board if board is not None else custom
         gp = self._bot._find_gameplay()
         if not gp:
             return
@@ -684,11 +794,22 @@ class VoiceEffectMenus:
         def make_recipes_label():
             def label_fn():
                 return ("Start From: "
-                        f"{voice_effect_recipes.current_label()}")
+                        f"{recipes.current_label()}")
             return label_fn
 
         def open_clear():
             self._open_builder_clear_menu(m)
+
+        def make_tone_label():
+            # A board is a preset too, and the tone sits after its whole chain:
+            # Air over a vocoder is a different sound from either alone.
+            def label_fn():
+                return (f"Tone ({voice_effects.effect_label(board.EFFECT_ID)}): "
+                        f"{tone.summary(board.EFFECT_ID)}")
+            return label_fn
+
+        def open_tone():
+            self._open_voice_tone_menu(board.EFFECT_ID)
 
         # A board may hide rows by mode (the vocoder hides Root and Octave in
         # Current, and Scale and Interval outside Interval). Its `rows()` asks
@@ -699,13 +820,16 @@ class VoiceEffectMenus:
         params = visible() if callable(visible) else board.PARAMS
         items = [(make_label(param_id, name), open_param(param_id), None, note)
                  for param_id, name, note, _choices, _default in params]
+        # The tone goes above the board's own Clear line, which is the last
+        # thing above Back on the board that has one.
+        items.append((make_tone_label(), open_tone, None, _TONE_NOTE))
         if board.EFFECT_ID == voice_effects.BUILDER_EFFECT:
             # The whole-voice board's first line is where to start, above the
             # eleven slots it fills: eleven lines reading their defaults is not
             # a choice, and "what is a Colour?" is not the first question a
             # player wants to answer.
             items.insert(0, (make_recipes_label(), open_recipes, None,
-                             voice_effect_recipes.start_note()))
+                             recipes.start_note()))
             # ... and the board's last line above Back is the way out of one
             # that has been played with: every slot at once is the only change
             # here a single extra press cannot undo, so it asks first.
@@ -763,9 +887,9 @@ class VoiceEffectMenus:
         """
         from ... import menu as menu_mod, menus
         from .. import gate as music_bot_gate
-        from .. import voice_effect_custom
+        from ..voice_effects import custom
         from .. import voice_effects
-        board = board if board is not None else voice_effect_custom
+        board = board if board is not None else custom
         gp = self._bot._find_gameplay()
         if not gp:
             return
@@ -804,7 +928,7 @@ class VoiceEffectMenus:
                 chosen = board.set_value(param_id, value)
                 self._bot.set_voice_effect(board.EFFECT_ID)
                 # A board may answer a choice with another value and say why
-                # (`voice_effect_vocoder.refusal`). It is one spoken line, not
+                # (`voice_effects.vocoder.refusal`). It is one spoken line, not
                 # a second line after the announcement: the refusal and the
                 # value it fell back to are the same press.
                 refusal = getattr(board, "refusal", None)
@@ -854,3 +978,120 @@ class VoiceEffectMenus:
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
+
+
+class _VoiceToneSlider(state.State):
+    """Four tone bands of one voice effect, as Tab, arrows and speech.
+
+    The same keyboard shape as the Music Bot's own Bass/Mid/Treble slider
+    (`_MusicBotEqSlider` in `menu_pages/settings.py`), because a player who has
+    set the song's EQ already knows this one: Tab walks the bands, Up and Down
+    move a decibel, Page Up and Down move six, Home puts the band under the
+    cursor back flat, `R` puts all four back, and Enter keeps them. Every press
+    is spoken, so the page is usable without seeing it -- which is the reason
+    the Music Bot's equalizer is a `state.State` and not a list of steps.
+
+    **The working copy is the slider's own.** `values` is what the speech
+    reads; `voice_effects.tone` is written on every move with
+    `autosave=False`, so the capture thread hears the band on the next frame
+    while the settings file is written once, when the page closes. A page
+    closed without a key press writes nothing at all.
+
+    Closing pops only: the page underneath reads its labels live, so the
+    `Tone:` line it is revealed with already names the new value.
+    """
+
+    def __init__(self, game, bot, preset):
+        super().__init__(game, parrent=bot)
+        from .. import voice_effects
+        from ..voice_effects import tone
+        self.bot = bot
+        self.preset = preset
+        self.name = voice_effects.effect_label(preset)
+        self.bands = tone.BANDS
+        self.values = tone.values(preset)
+        self.current_index = 0
+        self._closed = False
+        self._touched = False
+
+    def enter(self):
+        super().enter()
+        _speak(
+            f"Tone for {self.name}. Tab switches the four bands: Low, the "
+            "chest and the room under the voice; Body, where a voice turns "
+            "muddy; Presence, the clarity of the words; Air, the breath on "
+            "top. Up and Down move one decibel, Page Up and Page Down six. "
+            "Home puts this band back flat, R puts all four back, Enter keeps "
+            "them.")
+        self._announce_current()
+
+    def update(self, events):
+        super().update(events)
+        for event in events:
+            if event.type != pygame.KEYDOWN:
+                continue
+            key = event.key
+            if key == pygame.K_TAB:
+                direction = -1 if event.mod & pygame.KMOD_SHIFT else 1
+                self.current_index = ((self.current_index + direction)
+                                      % len(self.bands))
+                self._announce_current()
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE):
+                self._close_and_commit()
+                break
+            elif key == pygame.K_UP:
+                self._adjust(1)
+            elif key == pygame.K_DOWN:
+                self._adjust(-1)
+            elif key == pygame.K_PAGEUP:
+                self._adjust(6)
+            elif key == pygame.K_PAGEDOWN:
+                self._adjust(-6)
+            elif key == pygame.K_HOME:
+                self._set_current(0)
+            elif key == pygame.K_r:
+                self._reset_all()
+        return True
+
+    def _announce_current(self):
+        from ..voice_effects import tone
+        band_id, label, hz, _kind, _q, _note = self.bands[self.current_index]
+        _speak(f"{label}, {int(hz)} hertz. "
+               f"{tone.spoken(self.values[band_id])}.")
+
+    def _adjust(self, amount):
+        band_id = self.bands[self.current_index][0]
+        self._set_current(self.values[band_id] + amount)
+
+    def _set_current(self, value):
+        from ..voice_effects import tone
+        band_id = self.bands[self.current_index][0]
+        stored = tone.set_band(self.preset, band_id, value, save=False)
+        if stored is None:
+            return
+        self.values[band_id] = stored
+        self._touched = True
+        _speak(tone.spoken(stored))
+
+    def _reset_all(self):
+        from ..voice_effects import tone
+        tone.reset(self.preset, save=False)
+        self.values = {row[0]: 0 for row in self.bands}
+        self._touched = True
+        _speak("Every band flat: the effect is exactly as it was made again.")
+
+    def _close_and_commit(self):
+        if self._closed:
+            return
+        self._closed = True
+        from ... import options
+        from ..voice_effects import tone
+        if self._touched:
+            # One write for the whole visit: a key press moves the band in
+            # memory (the capture thread reads it per frame), and the settings
+            # file is encrypted and rewritten here instead of on every arrow.
+            options.save()
+        gp = self.bot._find_gameplay()
+        _speak(f"Tone for {self.name}: {tone.description(self.preset)}")
+        if gp is not None:
+            gp.pop_last_substate()

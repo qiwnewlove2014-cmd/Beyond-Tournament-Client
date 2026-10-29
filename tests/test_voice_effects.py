@@ -1,6 +1,6 @@
 """The broadcast voice through a guitar amp -- pinned.
 
-`libs/music_bot/voice_effects.py` is the pedal: a player with no guitar can still
+`libs/music_bot/voice_effects/dsp.py` is the pedal: a player with no guitar can still
 put their *voice* through an amp, a fuzz, a small radio or a bitcrusher. Nothing
 here is a note -- the words stay words.
 
@@ -41,10 +41,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import voice_chat  # noqa: E402
 from libs.music_bot import MapMusicBot  # noqa: E402
-from libs.music_bot import voice_effect_builder  # noqa: E402
-from libs.music_bot import voice_effect_catalogue  # noqa: E402
-from libs.music_bot import voice_effect_custom  # noqa: E402
-from libs.music_bot import voice_effect_recipes  # noqa: E402
+from libs.music_bot.voice_effects import builder  # noqa: E402
+from libs.music_bot.voice_effects import dsp  # noqa: E402
+from libs.music_bot.voice_effects import catalogue  # noqa: E402
+from libs.music_bot.voice_effects import custom  # noqa: E402
+from libs.music_bot.voice_effects import recipes  # noqa: E402
 from libs.music_bot import voice_effects  # noqa: E402
 
 SR = voice_effects.SAMPLE_RATE
@@ -194,7 +195,7 @@ class TheCatalogueTests(unittest.TestCase):
                       voice_effects.STANDALONE_EFFECTS)
         self.assertIsNone(voice_effects.group_of(voice_effects.BUILDER_EFFECT))
         self.assertEqual(voice_effects.catalogue_problems(), [])
-        with mock.patch.object(voice_effect_catalogue, "STANDALONE_EFFECTS",
+        with mock.patch.object(catalogue, "STANDALONE_EFFECTS",
                                ()):
             # ...and if the catalogue ever loses the line, the check says so.
             problems = voice_effects.catalogue_problems()
@@ -1227,38 +1228,38 @@ class TheCustomBoardTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         self.board = {}
         mock.patch.object(
-            voice_effect_custom.options, "get",
+            custom.options, "get",
             side_effect=lambda key, default=None: self.board.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_custom.options, "set",
+            custom.options, "set",
             side_effect=lambda key, value, autosave=True:
             self.board.__setitem__(key, value)
         ).start()
 
     def test_a_fresh_board_is_the_table_defaults(self):
-        values = voice_effect_custom.values()
+        values = custom.values()
         for param_id, _name, _note, _choices, default in (
-                voice_effect_custom.PARAMS):
+                custom.PARAMS):
             self.assertEqual(values[param_id], default)
-        self.assertEqual(voice_effect_custom.summary(),
+        self.assertEqual(custom.summary(),
                          "Crunch, Valve, Classic")
-        self.assertEqual(voice_effect_custom.spec()["lp"], 4200.0)
+        self.assertEqual(custom.spec()["lp"], 4200.0)
 
     def test_every_knob_moves_the_setting_it_names(self):
-        voice_effect_custom.set_value("drive", "sat")
-        self.assertEqual(voice_effect_custom.spec()["drive"], 20.0)
-        voice_effect_custom.set_value("bass", "telephone")
-        self.assertEqual(voice_effect_custom.spec()["hp"], 400.0)
-        voice_effect_custom.set_value("treble", "dark")
-        self.assertEqual(voice_effect_custom.spec()["lp"], 2400.0)
-        self.assertNotIn("formant", voice_effect_custom.spec())
-        voice_effect_custom.set_value("mid", "bark")
-        self.assertEqual(voice_effect_custom.spec()["formant"][0], 900.0)
-        voice_effect_custom.set_value("gate", "hard")
-        self.assertEqual(voice_effect_custom.spec()["gate"], 0.020)
-        voice_effect_custom.set_value("output", "loud")
-        self.assertEqual(voice_effect_custom.spec()["out"], 1.15)
+        custom.set_value("drive", "sat")
+        self.assertEqual(custom.spec()["drive"], 20.0)
+        custom.set_value("bass", "telephone")
+        self.assertEqual(custom.spec()["hp"], 400.0)
+        custom.set_value("treble", "dark")
+        self.assertEqual(custom.spec()["lp"], 2400.0)
+        self.assertNotIn("formant", custom.spec())
+        custom.set_value("mid", "bark")
+        self.assertEqual(custom.spec()["formant"][0], 900.0)
+        custom.set_value("gate", "hard")
+        self.assertEqual(custom.spec()["gate"], 0.020)
+        custom.set_value("output", "loud")
+        self.assertEqual(custom.spec()["out"], 1.15)
 
     def test_the_board_can_build_the_third_shelf(self):
         """Air, sag and wobble: the three blocks that shelf is made of.
@@ -1269,36 +1270,36 @@ class TheCustomBoardTests(unittest.TestCase):
         choices between the ten, and every new knob absent from the spec while
         it is Off, so a fresh board is still the amp it was.
         """
-        self.assertEqual(len(voice_effect_custom.PARAMS), 10)
+        self.assertEqual(len(custom.PARAMS), 10)
         self.assertEqual(
-            sum(len(row[3]) for row in voice_effect_custom.PARAMS), 44)
-        spec = voice_effect_custom.spec()
+            sum(len(row[3]) for row in custom.PARAMS), 44)
+        spec = custom.spec()
         for block in ("air", "sag", "tremolo", "vibrato"):
             self.assertNotIn(block, spec)
-        voice_effect_custom.set_value("air", "brilliant")
-        self.assertEqual(voice_effect_custom.spec()["air"], (9000.0, 2.4, 0.30))
-        voice_effect_custom.set_value("sag", "deep")
-        self.assertEqual(voice_effect_custom.spec()["sag"], (0.55, 0.14))
-        voice_effect_custom.set_value("wobble", "deep")
-        self.assertEqual(voice_effect_custom.spec()["tremolo"], (5.8, 0.80))
-        self.assertNotIn("vibrato", voice_effect_custom.spec())
-        voice_effect_custom.set_value("wobble", "warble")
-        self.assertEqual(voice_effect_custom.spec()["vibrato"],
+        custom.set_value("air", "brilliant")
+        self.assertEqual(custom.spec()["air"], (9000.0, 2.4, 0.30))
+        custom.set_value("sag", "deep")
+        self.assertEqual(custom.spec()["sag"], (0.55, 0.14))
+        custom.set_value("wobble", "deep")
+        self.assertEqual(custom.spec()["tremolo"], (5.8, 0.80))
+        self.assertNotIn("vibrato", custom.spec())
+        custom.set_value("wobble", "warble")
+        self.assertEqual(custom.spec()["vibrato"],
                          (6.0, 2.5, 5.0))
-        self.assertNotIn("tremolo", voice_effect_custom.spec())
+        self.assertNotIn("tremolo", custom.spec())
 
     def test_drive_off_takes_the_shaper_with_it(self):
-        voice_effect_custom.set_value("drive", "off")
-        spec = voice_effect_custom.spec()
+        custom.set_value("drive", "off")
+        spec = custom.spec()
         self.assertIsNone(spec["shape"])
         self.assertEqual(spec["drive"], 1.0)
 
     def test_the_five_characters_are_five_shapers(self):
         shapes = {}
-        voice_effect_custom.set_value("drive", "high")
+        custom.set_value("drive", "high")
         for value in ("clean", "warm", "valve", "hard", "fuzz"):
-            voice_effect_custom.set_value("character", value)
-            spec = voice_effect_custom.spec()
+            custom.set_value("character", value)
+            spec = custom.spec()
             shapes[value] = (spec["shape"], spec["bias"])
         self.assertEqual(len(set(shapes.values())), 5)
         self.assertEqual(shapes["clean"], (None, 0.0))
@@ -1307,15 +1308,15 @@ class TheCustomBoardTests(unittest.TestCase):
         self.assertGreater(shapes["fuzz"][1], shapes["hard"][1])
 
     def test_a_value_the_knob_does_not_offer_keeps_the_default(self):
-        self.assertEqual(voice_effect_custom.set_value("drive", "nonsense"),
+        self.assertEqual(custom.set_value("drive", "nonsense"),
                          "crunch")
-        self.assertIsNone(voice_effect_custom.set_value("no_such_knob", "x"))
+        self.assertIsNone(custom.set_value("no_such_knob", "x"))
 
     def test_a_saved_board_that_lost_a_knob_reads_from_the_table(self):
         # A setting written by an older build (or hand-edited) must never be a
         # pedal that cannot be built: every missing knob is its default.
         self.board["music_bot_voice_effect_custom"] = {"drive": "gone"}
-        values = voice_effect_custom.values()
+        values = custom.values()
         self.assertEqual(values["drive"], "crunch")
         self.assertEqual(values["gate"], "soft")
 
@@ -1327,20 +1328,20 @@ class TheCustomBoardTests(unittest.TestCase):
                              FRAME)
 
     def test_a_knob_change_is_a_new_revision(self):
-        before = voice_effect_custom.revision()
-        voice_effect_custom.set_value("drive", "sat")
-        self.assertGreater(voice_effect_custom.revision(), before)
+        before = custom.revision()
+        custom.set_value("drive", "sat")
+        self.assertGreater(custom.revision(), before)
 
     def test_the_line_rebuilds_when_a_knob_moves_under_a_sounding_voice(self):
         line = voice_effects.VoiceEffectLine()
         pcm = to_pcm(tone(seconds=0.2))
-        with mock.patch.object(voice_effects, "effect_id",
+        with mock.patch.object(dsp, "effect_id",
                                return_value=voice_effects.CUSTOM_EFFECT):
             first = line.shape(pcm[:FRAME])
             self.assertEqual(len(first), FRAME)
             processor = line._processor
             self.assertIsNotNone(processor)
-            voice_effect_custom.set_value("drive", "sat")
+            custom.set_value("drive", "sat")
             line.shape(pcm[:FRAME])
             self.assertIsNot(line._processor, processor)
 
@@ -1350,7 +1351,7 @@ class TheCustomBoardTests(unittest.TestCase):
         note = voice_effects.effect_note(voice_effects.CUSTOM_EFFECT)
         self.assertIn("Crunch", note)
         self.assertIn("guitar", note.lower())
-        voice_effect_custom.set_value("drive", "sat")
+        custom.set_value("drive", "sat")
         self.assertIn("Saturated",
                       voice_effects.effect_note(voice_effects.CUSTOM_EFFECT))
 
@@ -1362,22 +1363,22 @@ class TheVoiceBuilderTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         self.board = {}
         mock.patch.object(
-            voice_effect_builder.options, "get",
+            builder.options, "get",
             side_effect=lambda key, default=None: self.board.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_builder.options, "set",
+            builder.options, "set",
             side_effect=lambda key, value, autosave=True:
             self.board.__setitem__(key, value)
         ).start()
 
     def test_the_board_offers_at_least_fifty_forms(self):
-        forms = sum(len(row[3]) for row in voice_effect_builder.PARAMS)
+        forms = sum(len(row[3]) for row in builder.PARAMS)
         self.assertGreaterEqual(forms, 50)
-        self.assertEqual(len(voice_effect_builder.PARAMS), 11)
+        self.assertEqual(len(builder.PARAMS), 11)
 
     def test_every_slot_is_a_different_choice_set(self):
-        ids = [row[0] for row in voice_effect_builder.PARAMS]
+        ids = [row[0] for row in builder.PARAMS]
         self.assertEqual(len(ids), len(set(ids)))
         for param_id in ("colour", "tone", "body", "movement", "pitch",
                          "space", "pan", "texture", "rhythm", "gate",
@@ -1385,12 +1386,12 @@ class TheVoiceBuilderTests(unittest.TestCase):
             self.assertIn(param_id, ids)
 
     def test_a_fresh_board_is_an_amp_with_nothing_else_on(self):
-        values = voice_effect_builder.values()
+        values = builder.values()
         for param_id, _name, _note, _choices, default in (
-                voice_effect_builder.PARAMS):
+                builder.PARAMS):
             self.assertEqual(values[param_id], default)
-        self.assertEqual(voice_effect_builder.summary(), "Crunch")
-        spec = voice_effect_builder.spec()
+        self.assertEqual(builder.summary(), "Crunch")
+        spec = builder.spec()
         self.assertEqual(spec["shape"], "tanh")
         self.assertEqual(spec["lp"], 4200.0)
         for block in ("tremolo", "echo", "vocoder", "stutter", "octave"):
@@ -1419,41 +1420,41 @@ class TheVoiceBuilderTests(unittest.TestCase):
         )
         for slot, value, key, expected in cases:
             with self.subTest(slot=slot, choice=value):
-                voice_effect_builder.set_value(slot, value)
-                spec = voice_effect_builder.spec()
+                builder.set_value(slot, value)
+                spec = builder.spec()
                 self.assertIn(key, spec)
                 if expected is not None:
                     self.assertEqual(spec[key], expected)
 
     def test_off_is_the_absence_of_the_block(self):
-        voice_effect_builder.set_value("movement", "tremolo")
-        self.assertIn("tremolo", voice_effect_builder.spec())
-        voice_effect_builder.set_value("movement", "off")
-        self.assertNotIn("tremolo", voice_effect_builder.spec())
-        voice_effect_builder.set_value("body", "flat")
-        self.assertNotIn("formant", voice_effect_builder.spec())
+        builder.set_value("movement", "tremolo")
+        self.assertIn("tremolo", builder.spec())
+        builder.set_value("movement", "off")
+        self.assertNotIn("tremolo", builder.spec())
+        builder.set_value("body", "flat")
+        self.assertNotIn("formant", builder.spec())
 
     def test_a_talkbox_takes_the_body_band_for_its_own(self):
-        voice_effect_builder.set_value("body", "bark")
-        self.assertEqual(voice_effect_builder.spec()["formant"][0], 900.0)
-        voice_effect_builder.set_value("texture", "talkbox")
-        self.assertEqual(voice_effect_builder.spec()["formant"][0], 2300.0)
+        builder.set_value("body", "bark")
+        self.assertEqual(builder.spec()["formant"][0], 900.0)
+        builder.set_value("texture", "talkbox")
+        self.assertEqual(builder.spec()["formant"][0], 2300.0)
 
     def test_the_summary_names_only_what_is_on(self):
-        voice_effect_builder.set_value("movement", "wah")
-        voice_effect_builder.set_value("space", "cave")
-        self.assertEqual(voice_effect_builder.summary(), "Crunch, Wah, Cave")
+        builder.set_value("movement", "wah")
+        builder.set_value("space", "cave")
+        self.assertEqual(builder.summary(), "Crunch, Wah, Cave")
         for slot, _name, _note, _choices, default in (
-                voice_effect_builder.PARAMS):
+                builder.PARAMS):
             if slot in ("colour", "gate", "output", "tone", "body"):
                 continue
-            voice_effect_builder.set_value(slot, "off")
-        voice_effect_builder.set_value("colour", "off")
-        self.assertEqual(voice_effect_builder.summary(), "Dry")
+            builder.set_value(slot, "off")
+        builder.set_value("colour", "off")
+        self.assertEqual(builder.summary(), "Dry")
 
     def test_a_saved_board_that_lost_a_slot_reads_from_the_table(self):
         self.board["music_bot_voice_effect_builder"] = {"space": "gone"}
-        values = voice_effect_builder.values()
+        values = builder.values()
         self.assertEqual(values["space"], "off")
         self.assertEqual(values["colour"], "crunch")
 
@@ -1469,8 +1470,8 @@ class TheVoiceBuilderTests(unittest.TestCase):
         # Chop in Rhythm next to a Tremolo in Movement). One shared LFO would
         # move both by the *sum* of the rates, so each oscillator's own travel
         # is what this pins.
-        voice_effect_builder.set_value("movement", "tremolo")
-        voice_effect_builder.set_value("rhythm", "chop")
+        builder.set_value("movement", "tremolo")
+        builder.set_value("rhythm", "chop")
         processor = voice_effects._EffectProcessor(voice_effects.BUILDER_EFFECT)
         frame = to_pcm(tone(0.30, 1.0))[:FRAME]
         processor.process(frame)
@@ -1484,30 +1485,30 @@ class TheVoiceBuilderTests(unittest.TestCase):
             (2.0 * np.pi * 5.2 * seconds) % (2.0 * np.pi), places=5)
 
     def test_a_slot_change_is_a_new_revision(self):
-        before = voice_effect_builder.revision()
-        voice_effect_builder.set_value("space", "cave")
-        self.assertGreater(voice_effect_builder.revision(), before)
+        before = builder.revision()
+        builder.set_value("space", "cave")
+        self.assertGreater(builder.revision(), before)
 
     def test_clear_puts_every_slot_back_and_forgets_the_starting_point(self):
         """The board's Clear line: ten slots, one save, nothing remembered."""
-        voice_effect_recipes.apply("oracle")
-        self.assertEqual(voice_effect_recipes.current_label(), "Dub Oracle")
-        before = voice_effect_builder.revision()
-        cleared = voice_effect_builder.clear()
-        self.assertEqual(cleared, voice_effect_builder.filled({}))
-        self.assertEqual(voice_effect_builder.values(), cleared)
+        recipes.apply("oracle")
+        self.assertEqual(recipes.current_label(), "Dub Oracle")
+        before = builder.revision()
+        cleared = builder.clear()
+        self.assertEqual(cleared, builder.filled({}))
+        self.assertEqual(builder.values(), cleared)
         for param_id, _name, _note, _choices, default in (
-                voice_effect_builder.PARAMS):
-            self.assertEqual(voice_effect_builder.values()[param_id], default)
-        self.assertEqual(voice_effect_recipes.current_label(),
-                         voice_effect_recipes.MY_OWN)
-        self.assertEqual(voice_effect_builder.recipe(), "")
+                builder.PARAMS):
+            self.assertEqual(builder.values()[param_id], default)
+        self.assertEqual(recipes.current_label(),
+                         recipes.MY_OWN)
+        self.assertEqual(builder.recipe(), "")
         # One save and one rebuild, like a recipe: ten writes would be ten
         # heard crossfades.
-        self.assertEqual(voice_effect_builder.revision(), before + 1)
+        self.assertEqual(builder.revision(), before + 1)
 
     def test_a_cleared_board_is_still_a_sound(self):
-        voice_effect_builder.clear()
+        builder.clear()
         processor = voice_effects._EffectProcessor(voice_effects.BUILDER_EFFECT)
         out = play(processor, to_pcm(tone(seconds=0.30, amplitude=0.4)))
         self.assertTrue(np.all(np.isfinite(out)))
@@ -1518,22 +1519,22 @@ class TheVoiceBuilderTests(unittest.TestCase):
     def test_the_line_rebuilds_when_a_slot_moves(self):
         line = voice_effects.VoiceEffectLine()
         pcm = to_pcm(tone(seconds=0.2))
-        with mock.patch.object(voice_effects, "effect_id",
+        with mock.patch.object(dsp, "effect_id",
                                return_value=voice_effects.BUILDER_EFFECT):
             self.assertEqual(len(line.shape(pcm[:FRAME])), FRAME)
             processor = line._processor
             self.assertIsNotNone(processor)
-            voice_effect_builder.set_value("space", "cave")
+            builder.set_value("space", "cave")
             line.shape(pcm[:FRAME])
             self.assertIsNot(line._processor, processor)
 
     def test_the_catalogue_row_is_a_live_description(self):
         self.assertIn("Crunch",
                       voice_effects.effect_note(voice_effects.BUILDER_EFFECT))
-        voice_effect_builder.set_value("movement", "zap")
-        self.assertEqual(voice_effect_builder.values()["movement"], "off")
-        voice_effect_builder.set_value("space", "space")
-        self.assertEqual(voice_effect_builder.values()["space"], "off")
+        builder.set_value("movement", "zap")
+        self.assertEqual(builder.values()["movement"], "off")
+        builder.set_value("space", "space")
+        self.assertEqual(builder.values()["space"], "off")
 
 
 class TheRoomLevelTests(unittest.TestCase):
@@ -1552,20 +1553,20 @@ class TheRoomLevelTests(unittest.TestCase):
         self.builder = {}
         self.amp = {}
         mock.patch.object(
-            voice_effect_builder.options, "get",
+            builder.options, "get",
             side_effect=lambda key, default=None: self.builder.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_builder.options, "set",
+            builder.options, "set",
             side_effect=lambda key, value, autosave=True:
             self.builder.__setitem__(key, value)
         ).start()
         mock.patch.object(
-            voice_effect_custom.options, "get",
+            custom.options, "get",
             side_effect=lambda key, default=None: self.amp.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_custom.options, "set",
+            custom.options, "set",
             side_effect=lambda key, value, autosave=True:
             self.amp.__setitem__(key, value)
         ).start()
@@ -1577,9 +1578,9 @@ class TheRoomLevelTests(unittest.TestCase):
     def test_every_recipe_hands_a_room_a_voice_average(self):
         signal = to_pcm(tone(seconds=1.2, amplitude=0.30))
         for recipe_id, label, _family, _note, _board in (
-                voice_effect_recipes.RECIPES):
+                recipes.RECIPES):
             with self.subTest(recipe=label):
-                voice_effect_recipes.apply(recipe_id)
+                recipes.apply(recipe_id)
                 processor = voice_effects._EffectProcessor(
                     voice_effects.BUILDER_EFFECT)
                 out = self.settled(processor, signal)
@@ -1597,7 +1598,7 @@ class TheRoomLevelTests(unittest.TestCase):
                             ("bass", "full"), ("mid", "presence"),
                             ("treble", "bright"), ("gate", "off"),
                             ("output", "loud")):
-            voice_effect_custom.set_value(slot, value)
+            custom.set_value(slot, value)
         processor = voice_effects._EffectProcessor(voice_effects.CUSTOM_EFFECT)
         out = self.settled(processor, to_pcm(tone(seconds=1.2, amplitude=0.30)))
         self.assertLessEqual(rms(out), voice_effects.VOICE_LOUDNESS * 1.10)
@@ -1648,90 +1649,90 @@ class TheRecipeTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         self.board = {}
         mock.patch.object(
-            voice_effect_builder.options, "get",
+            builder.options, "get",
             side_effect=lambda key, default=None: self.board.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_builder.options, "set",
+            builder.options, "set",
             side_effect=lambda key, value, autosave=True:
             self.board.__setitem__(key, value)
         ).start()
 
     def test_fifty_starting_points_in_five_families_of_ten(self):
-        self.assertEqual(voice_effect_recipes.count(), 50)
-        self.assertEqual(len(voice_effect_recipes.FAMILIES), 5)
-        for family_id, name, note in voice_effect_recipes.FAMILIES:
+        self.assertEqual(recipes.count(), 50)
+        self.assertEqual(len(recipes.FAMILIES), 5)
+        for family_id, name, note in recipes.FAMILIES:
             with self.subTest(family=family_id):
                 self.assertEqual(
-                    len(voice_effect_recipes.family_members(family_id)), 10)
+                    len(recipes.family_members(family_id)), 10)
                 self.assertTrue(name.strip())
                 self.assertTrue(note.strip())
 
     def test_the_table_has_nothing_to_lie_about(self):
-        self.assertEqual(voice_effect_recipes.problems(), [])
+        self.assertEqual(recipes.problems(), [])
 
     def test_the_families_offer_every_recipe_exactly_once(self):
         offered = []
-        for family_id, _name, _note in voice_effect_recipes.FAMILIES:
-            offered.extend(voice_effect_recipes.family_members(family_id))
+        for family_id, _name, _note in recipes.FAMILIES:
+            offered.extend(recipes.family_members(family_id))
         self.assertEqual(sorted(offered),
-                         sorted(row[0] for row in voice_effect_recipes.RECIPES))
+                         sorted(row[0] for row in recipes.RECIPES))
         self.assertEqual(len(offered), len(set(offered)))
 
     def test_no_two_recipes_are_the_same_voice(self):
-        boards = [tuple(sorted(voice_effect_builder.filled(row[4]).items()))
-                  for row in voice_effect_recipes.RECIPES]
+        boards = [tuple(sorted(builder.filled(row[4]).items()))
+                  for row in recipes.RECIPES]
         self.assertEqual(len(set(boards)), 50)
 
     def test_picking_one_fills_the_whole_board_in_a_single_revision(self):
-        before = voice_effect_builder.revision()
-        chosen = voice_effect_recipes.apply("oracle")
-        row = voice_effect_recipes.recipe("oracle")
-        self.assertEqual(chosen, voice_effect_builder.filled(row[4]))
-        self.assertEqual(voice_effect_builder.values(), chosen)
-        self.assertEqual(voice_effect_recipes.current_id(), "oracle")
-        self.assertEqual(voice_effect_recipes.current_label(), "Dub Oracle")
+        before = builder.revision()
+        chosen = recipes.apply("oracle")
+        row = recipes.recipe("oracle")
+        self.assertEqual(chosen, builder.filled(row[4]))
+        self.assertEqual(builder.values(), chosen)
+        self.assertEqual(recipes.current_id(), "oracle")
+        self.assertEqual(recipes.current_label(), "Dub Oracle")
         # One save and one rebuild: ten slot writes would be ten crossfades.
-        self.assertEqual(voice_effect_builder.revision(), before + 1)
+        self.assertEqual(builder.revision(), before + 1)
 
     def test_a_slot_moved_afterwards_reads_as_my_own(self):
-        voice_effect_recipes.apply("oracle")
-        voice_effect_builder.set_value("gate", "hard")
-        self.assertEqual(voice_effect_recipes.current_id(), "")
-        self.assertEqual(voice_effect_recipes.current_label(),
-                         voice_effect_recipes.MY_OWN)
-        self.assertIn(voice_effect_recipes.MY_OWN,
-                      voice_effect_recipes.start_note())
+        recipes.apply("oracle")
+        builder.set_value("gate", "hard")
+        self.assertEqual(recipes.current_id(), "")
+        self.assertEqual(recipes.current_label(),
+                         recipes.MY_OWN)
+        self.assertIn(recipes.MY_OWN,
+                      recipes.start_note())
 
     def test_the_board_line_names_the_voice_it_came_from(self):
-        voice_effect_recipes.apply("vocoder")
-        self.assertIn("Vocoder Stack", voice_effect_recipes.start_note())
+        recipes.apply("vocoder")
+        self.assertIn("Vocoder Stack", recipes.start_note())
 
     def test_a_recipe_the_table_does_not_offer_changes_nothing(self):
-        voice_effect_recipes.apply("oracle")
-        before = voice_effect_builder.values()
-        self.assertIsNone(voice_effect_recipes.apply("no_such_voice"))
-        self.assertEqual(voice_effect_builder.values(), before)
-        self.assertIsNone(voice_effect_recipes.board("no_such_voice"))
-        self.assertEqual(voice_effect_recipes.recipe_label("no_such_voice"),
-                         voice_effect_recipes.MY_OWN)
+        recipes.apply("oracle")
+        before = builder.values()
+        self.assertIsNone(recipes.apply("no_such_voice"))
+        self.assertEqual(builder.values(), before)
+        self.assertIsNone(recipes.board("no_such_voice"))
+        self.assertEqual(recipes.recipe_label("no_such_voice"),
+                         recipes.MY_OWN)
 
     def test_a_picked_recipe_survives_a_restart(self):
-        voice_effect_recipes.apply("cloud_choir")
+        recipes.apply("cloud_choir")
         self.assertEqual(
             self.board["music_bot_voice_effect_recipe"], "cloud_choir")
         # A second visit to the board reads the saved dict, not the press.
-        self.assertEqual(voice_effect_builder.values()["pitch"], "choir")
-        self.assertEqual(voice_effect_recipes.current_label(), "Cloud Choir")
+        self.assertEqual(builder.values()["pitch"], "choir")
+        self.assertEqual(recipes.current_label(), "Cloud Choir")
 
     def test_every_recipe_is_a_sound_and_never_a_silence(self):
         """Played, not just built: one frame in, one frame out, and audible."""
         signal = to_pcm(tone(seconds=0.30, amplitude=0.4))
         frames = len(signal) // FRAME
         for recipe_id, label, _family, _note, _board in (
-                voice_effect_recipes.RECIPES):
+                recipes.RECIPES):
             with self.subTest(recipe=label):
-                voice_effect_recipes.apply(recipe_id)
+                recipes.apply(recipe_id)
                 processor = voice_effects._EffectProcessor(
                     voice_effects.BUILDER_EFFECT)
                 out = play(processor, signal)
@@ -1747,8 +1748,8 @@ class TheRecipeTests(unittest.TestCase):
         frames = len(signal) // FRAME
         worst = 0.0
         for recipe_id, label, _family, _note, _board in (
-                voice_effect_recipes.RECIPES):
-            voice_effect_recipes.apply(recipe_id)
+                recipes.RECIPES):
+            recipes.apply(recipe_id)
             processor = voice_effects._EffectProcessor(
                 voice_effects.BUILDER_EFFECT)
             started = time.perf_counter()
@@ -1787,18 +1788,18 @@ class TheLineTests(unittest.TestCase):
     def test_off_returns_the_frame_untouched(self):
         line = voice_effects.VoiceEffectLine(None)
         frame = to_pcm(tone(seconds=0.02))
-        with mock.patch.object(voice_effects, "effect_id", return_value="off"):
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
             self.assertEqual(line.shape(frame), frame)
 
     def test_the_preset_is_read_every_frame(self):
         """A preset chosen mid-sentence lands on the words already leaving."""
         line = voice_effects.VoiceEffectLine(None)
         frame = to_pcm(tone(seconds=0.02))
-        with mock.patch.object(voice_effects, "effect_id", return_value="off"):
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
             dry = line.shape(frame)
-        with mock.patch.object(voice_effects, "effect_id", return_value="amp"):
+        with mock.patch.object(dsp, "effect_id", return_value="amp"):
             wet = line.shape(frame)
-        with mock.patch.object(voice_effects, "effect_id", return_value="fuzz"):
+        with mock.patch.object(dsp, "effect_id", return_value="fuzz"):
             fuzz = line.shape(frame)
         self.assertEqual(dry, frame)
         self.assertNotEqual(wet, dry)
@@ -1807,10 +1808,10 @@ class TheLineTests(unittest.TestCase):
     def test_turning_the_effect_off_crossfades_instead_of_cutting(self):
         line = voice_effects.VoiceEffectLine(None)
         frame = to_pcm(tone(amplitude=0.4, seconds=0.02))
-        with mock.patch.object(voice_effects, "effect_id", return_value="amp"):
+        with mock.patch.object(dsp, "effect_id", return_value="amp"):
             line.shape(frame)
             wet = line.shape(frame)
-        with mock.patch.object(voice_effects, "effect_id", return_value="off"):
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
             faded = line.shape(frame)
         # The first samples are still (mostly) the processed voice; later in
         # the frame the dry voice is arriving. A hard cut would be dry from its
@@ -1834,14 +1835,14 @@ class TheLineTests(unittest.TestCase):
         inner = _InnerLine()
         line = voice_effects.VoiceEffectLine(inner)
         frame = to_pcm(tone(seconds=0.02))
-        with mock.patch.object(voice_effects, "effect_id", return_value="off"):
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
             line.shape(frame)
         self.assertEqual(inner.frames, 1)
 
     def test_the_release_hands_the_look_ahead_back(self):
         inner = _InnerLine()
         line = voice_effects.VoiceEffectLine(inner)
-        with mock.patch.object(voice_effects, "effect_id", return_value="amp"):
+        with mock.patch.object(dsp, "effect_id", return_value="amp"):
             frames = line.tail_frames()
         self.assertEqual(inner.released, 1)
         self.assertEqual(len(frames), 1)
@@ -1850,7 +1851,7 @@ class TheLineTests(unittest.TestCase):
     def test_off_releases_the_dry_look_ahead(self):
         inner = _InnerLine()
         line = voice_effects.VoiceEffectLine(inner)
-        with mock.patch.object(voice_effects, "effect_id", return_value="off"):
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
             frames = line.tail_frames()
         self.assertEqual(frames, [bytes(FRAME)])
 
@@ -1872,14 +1873,14 @@ class TheVoicePathTests(unittest.TestCase):
         return SimpleNamespace(_speech_line=None)
 
     def test_only_the_broadcast_leg_is_shaped(self):
-        with mock.patch.object(voice_effects, "effect_id",
+        with mock.patch.object(dsp, "effect_id",
                                return_value="amp"):
             self.assertIsNone(
                 voice_chat.VoiceChatRecord._speech_line_for(self.press(),
                                                             mega=False))
 
     def test_an_effect_with_no_other_line_is_the_whole_line(self):
-        with mock.patch.object(voice_effects, "effect_id",
+        with mock.patch.object(dsp, "effect_id",
                                return_value="amp"):
             line = voice_chat.VoiceChatRecord._speech_line_for(
                 self.press(), mega=True)
@@ -1887,7 +1888,7 @@ class TheVoicePathTests(unittest.TestCase):
         self.assertIsNone(line.inner)
 
     def test_off_and_no_other_line_builds_no_line_at_all(self):
-        with mock.patch.object(voice_effects, "effect_id", return_value="off"):
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
             self.assertIsNone(
                 voice_chat.VoiceChatRecord._speech_line_for(self.press(),
                                                             mega=True))
@@ -1895,7 +1896,7 @@ class TheVoicePathTests(unittest.TestCase):
     def test_the_effect_wraps_autotune_rather_than_replacing_it(self):
         mock.patch.object(voice_chat, "autotune_enabled",
                           return_value=True).start()
-        with mock.patch.object(voice_effects, "effect_id",
+        with mock.patch.object(dsp, "effect_id",
                                return_value="amp"):
             line = voice_chat.VoiceChatRecord._speech_line_for(
                 self.press(), mega=True)
@@ -1905,11 +1906,11 @@ class TheVoicePathTests(unittest.TestCase):
     def test_a_preset_chosen_mid_press_wraps_the_running_line(self):
         key_line = voice_chat.SpeechKeyLine(semitones=2)
         record = SimpleNamespace(_speech_line=key_line)
-        with mock.patch.object(voice_effects, "effect_id", return_value="off"):
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
             self.assertIs(
                 voice_chat.VoiceChatRecord._speech_line_for(record, mega=True),
                 key_line)
-        with mock.patch.object(voice_effects, "effect_id",
+        with mock.patch.object(dsp, "effect_id",
                                return_value="fuzz"):
             wrapped = voice_chat.VoiceChatRecord._speech_line_for(record,
                                                                   mega=True)

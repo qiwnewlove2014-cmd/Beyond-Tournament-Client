@@ -3,9 +3,10 @@ favorites, downloads, recording and the keybinding hook that glues the media +
 streaming layers into the game.
 
 Every menu this bot opens is built in `menus.py` and the page groups under
-`menu_pages/` (a one-line shim per menu here), and the cinema room and crossfade
-machine live in `cinema_handler.py` and `crossfade_handler.py`. The state all of
-them read and write stays on this class."""
+`menu_pages/` (a one-line shim per menu here), and the cinema room, crossfade
+machine and track sources live in `cinema_handler.py`, `crossfade_handler.py`
+and `track_source.py`. The state all of them read and write stays on this
+class."""
 
 import contextlib
 import os
@@ -33,8 +34,9 @@ from ..audio.cinema import pan as cinema_pan
 from ..audio.cinema import peer as cinema_peer
 from .cinema_handler import CinemaHandler
 from .crossfade_handler import CrossfadeHandler
+from .track_source import TrackSourceHandler
 from ..game_audio_recorder import GameAudioRecorderManager
-from .music_downloader import MusicDownloadManager, is_supported_music_url
+from .music_downloader import MusicDownloadManager
 from ..speech import speak
 from ..audio_health import probe as audio_health
 from . import autotune
@@ -46,7 +48,7 @@ from . import subtitles
 from .media import (FFMPEG_PATH, DEFAULT_MAP_MUSIC, FALLBACK_PLAYLIST,
                     clamp_seek_position, format_track_position, YouTubeSearcher)
 from .menus import MusicBotMenus
-from .streaming import AudioStreamer, LiveRelayStreamer
+from .streaming import LiveRelayStreamer
 
 
 def _key_label(semitones):
@@ -228,7 +230,7 @@ class MapMusicBot:
             options.get("music_bot_autotune_amount", autotune.DEFAULT_AMOUNT))
         # The VOICE EFFECT (Settings -> Voice Effect): a guitar amp, a clean
         # amp with a chorus, a fuzz, a radio or a bitcrusher on the broadcast
-        # voice (libs/music_bot/voice_effects.py). It WRAPS whichever line the
+        # voice (libs/music_bot/voice_effects/dsp.py). It WRAPS whichever line the
         # press already has, so Auto-Tune and Harmony keep working and this is
         # the last thing measured before the frame leaves.
         self.voice_effect = voice_effects.clamp_effect(
@@ -1524,6 +1526,9 @@ class MapMusicBot:
     def _open_voice_effect_menu(self):
         return self._menus()._open_voice_effect_menu()
 
+    def _open_voice_tone_menu(self):
+        return self._menus()._open_voice_tone_menu()
+
     def _open_builder_recipes_menu(self, family_id=None, from_board=False):
         return self._menus()._open_builder_recipes_menu(family_id, from_board)
 
@@ -1907,113 +1912,42 @@ class MapMusicBot:
     def _show_help_menu(self):
         return self._menus()._show_help_menu()
 
+    # === Track sources (moved to track_source.py) ===
+    #
+    # A file, a search result and a pasted link all end in the same place: a
+    # playback generation, a `current_title` and an `AudioStreamer`. The
+    # behaviour lives in `TrackSourceHandler`; these forward so the menus, the
+    # queue, `_seek_restart` and a test that shadows one keep their call sites.
+
+    def _track_source(self):
+        """The track-source handler, built on first use.
+
+        A bot built without __init__ (a test fixture, a restored session) has
+        none yet, so every shim below asks for it through here rather than
+        holding a reference that may never have been made.
+        """
+        handler = getattr(self, "_track_source_handler", None)
+        if handler is None:
+            handler = TrackSourceHandler(self)
+            self._track_source_handler = handler
+        return handler
+
     def _open_file_dialog(self):
-        """Open Windows file chooser dialog in a background thread to prevent game freezing"""
-        import threading
-        from ..speech import speak
+        return self._track_source()._open_file_dialog()
 
-        def select_file():
-            try:
-                import tkinter as tk
-                from tkinter import filedialog
-                
-                root = tk.Tk()
-                root.withdraw()  # Hide the main tk window
-                root.attributes("-topmost", True)  # Bring file dialog to front
-                
-                # Audio AND video containers: the music bot decodes whatever
-                # ffmpeg can demux (movies, music videos, podcasts...).
-                media_types = (
-                    "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.opus *.wma *.mka "
-                    "*.mp4 *.mkv *.webm *.mov *.m4v *.avi *.mpg *.mpeg *.wmv "
-                    "*.flv *.ts *.m2ts *.mts *.3gp *.3g2 *.ogv *.vob *.rmvb "
-                    "*.asf *.f4v *.aiff *.ape *.mid *.midi"
-                )
-                filepath = filedialog.askopenfilename(
-                    title="Select Audio or Video File",
-                    filetypes=[
-                        ("All Media Files", media_types),
-                        ("Audio Files", "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.opus *.wma *.mka *.aiff *.ape *.mid *.midi"),
-                        ("Video Files", "*.mp4 *.mkv *.webm *.mov *.m4v *.avi *.mpg *.mpeg *.wmv *.flv *.ts *.m2ts *.mts *.3gp *.3g2 *.ogv *.vob *.rmvb *.asf *.f4v"),
-                        ("All Files", "*.*")
-                    ]
-                )
-                root.destroy()
-                
-                if filepath:
-                    # Resolve base name as title
-                    import os
-                    title = os.path.splitext(os.path.basename(filepath))[0]
-                    # Put stream start callback on the main game thread queue
-                    self.game.put(lambda: self._start_local_file_stream(filepath, title))
-                else:
-                    self.game.put(lambda: speak("No file selected."))
-            except Exception as ex:
-                print(f"[MusicBot] Error opening file dialog: {ex}")
-                self.game.put(lambda: speak("Error opening file dialog."))
-
-        t = threading.Thread(target=select_file, daemon=True)
-        t.start()
-        speak("Opening file explorer...")
-
-    def _start_local_file_stream(self, filepath, title, preserve_queue=False, preserve_feed=False,
+    def _start_local_file_stream(self, filepath, title, preserve_queue=False,
+                                 preserve_feed=False,
                                  playback_generation=None):
-        """Start streaming local file"""
-        import os
-        if not os.path.exists(filepath):
-            speak("File not found.")
-            return
-
-        if playback_generation is None:
-            playback_generation = self._begin_playback_generation()
-        if not self._is_current_playback_generation(playback_generation):
-            return
-
-        speak(f"Loading local file: {title}")
-        self.current_title = title
-        self.current_target = filepath
-        self.current_source = "local"
-
-        # Save for replay
-        self.last_track_title = title
-        self.last_track_target = filepath
-        self.last_track_source = "local"
-        self.is_loading_stream = True
-
-        # Stop any current playback
-        self.stop(
-            clear_queue=not preserve_queue,
-            clear_feed=not preserve_feed,
-            invalidate_pending=False,
-        )
-
-        # Start streaming local file via ffmpeg -> AudioStreamer
-        self._start_youtube_stream(filepath, title, playback_generation)
+        return self._track_source()._start_local_file_stream(
+            filepath, title, preserve_queue=preserve_queue,
+            preserve_feed=preserve_feed,
+            playback_generation=playback_generation)
 
     def _open_search_input(self):
-        """Open the text input for search query"""
-        self._gp = self._find_gameplay()
-        if self._gp:
-            self._gp.add_substate(self.game.input.run(
-                "Enter song name:",
-                handeler=self._on_search_submit
-            ))
+        return self._track_source()._open_search_input()
 
     def _open_link_input(self):
-        """Open the text input for a pasted YouTube link.
-
-        The line beside "Search YouTube" for a link somebody already has in
-        hand (a chat message, a browser tab): no search, no result list, the
-        link is read and played -- or queued, when Queue Mode is on, exactly
-        as a picked search result would be. Music Bot Mode is staff-only, so
-        this is a staff shortcut rather than a new permission.
-        """
-        self._gp = self._find_gameplay()
-        if self._gp:
-            self._gp.add_substate(self.game.input.run(
-                "Paste a YouTube link or livestream:",
-                handeler=self._on_link_submit
-            ))
+        return self._track_source()._open_link_input()
 
     def _find_gameplay(self):
         """Find the Gameplay state instance"""
@@ -2036,81 +1970,13 @@ class MapMusicBot:
         return bool(name and getattr(gp.megaphone, 'lock_owner', None) == name)
 
     def _on_search_submit(self, query):
-        """Called when user submits search query"""
-        # ALWAYS pop the input substate first — otherwise it blocks all events!
-        gp = self._gp or self._find_gameplay()
-        if gp:
-            gp.pop_last_substate()
-
-        if not query.strip():
-            speak("Search cancelled.")
-            return
-
-        speak(f"Searching: {query}")
-        self.searching = True
-
-        # Search in background thread to not block game
-        def do_search():
-            results = YouTubeSearcher.search(query, count=5)
-            self.search_results = results
-            self.searching = False
-            # Remember search durations so queued / replayed songs can later
-            # crossfade even before their own URL is resolved.
-            for r in results or ():
-                target = r.get("webpage_url") or r.get("url") or ""
-                self._note_track_duration(target, r.get("duration"))
-            # Show results menu on main thread
-            self.game.put(lambda: self._show_results_menu(results))
-
-        t = threading.Thread(target=do_search, daemon=True)
-        t.start()
+        return self._track_source()._on_search_submit(query)
 
     def _on_link_submit(self, raw_url):
-        """Called when a pasted link is submitted: read it, then play it."""
-        # Pop the input substate first, for the same reason as a search: it
-        # otherwise keeps every later key event.
-        gp = getattr(self, "_gp", None) or self._find_gameplay()
-        if gp:
-            gp.pop_last_substate()
-
-        url = (raw_url or "").strip()
-        if not url:
-            speak("Link cancelled.")
-            return
-        # Be kind to a link pasted without a scheme, and to an old http one:
-        # the bot resolves https YouTube pages only (is_supported_music_url).
-        if not url.lower().startswith(("http://", "https://")):
-            url = "https://" + url
-        if url.lower().startswith("http://"):
-            url = "https://" + url[len("http://"):]
-        if not is_supported_music_url(url):
-            speak("Only YouTube links can be played on the Music Bot.")
-            return
-
-        speak("Reading the link...")
-        self.searching = True
-
-        def do_read():
-            info = YouTubeSearcher.read_link(url)
-            self.searching = False
-            self.game.put(lambda: self._play_read_link(info))
-
-        threading.Thread(target=do_read, daemon=True).start()
+        return self._track_source()._on_link_submit(raw_url)
 
     def _play_read_link(self, info):
-        """What a pasted link becomes: a queued song in Queue Mode, else now."""
-        if not info or not info.get("webpage_url"):
-            speak("Could not read that YouTube link. Please check it.")
-            return
-        title = info.get("title") or "YouTube Audio"
-        webpage_url = info["webpage_url"]
-        # Queue Mode means "line it up": the same behaviour as pressing Enter
-        # on a search result, so the two ways of adding a song never diverge.
-        if self.queue_mode:
-            self._enqueue_track(title, webpage_url, "youtube",
-                                webpage_url=webpage_url)
-            return
-        self._start_youtube_stream_from_search(title, webpage_url, "")
+        return self._track_source()._play_read_link(info)
 
     def _show_results_menu(self, results):
         return self._menus()._show_results_menu(results)
@@ -2122,125 +1988,19 @@ class MapMusicBot:
         return self._menus()._on_result_selected(index, gp)
 
     def _start_youtube_stream_from_search(self, title, webpage_url, direct_url,
-                                          http_headers=None, preserve_queue=False):
-        from ..speech import speak
-        if self.is_loading_stream:
-            speak("Please wait, already loading a track.")
-            return
-
-        # A manually selected search result leaves the private feed.
-        self._clear_personal_feed()
-        playback_generation = self._begin_playback_generation()
-
-        speak(f"Loading: {title}")
-        self.current_title = title
-        self.current_target = webpage_url or direct_url
-        self.current_source = "youtube"
-
-        # Save for replay
-        self.last_track_title = title
-        self.last_track_target = webpage_url or direct_url
-        self.last_track_source = "youtube"
-        self.last_youtube_url = webpage_url
-        self.last_youtube_title = title
-        self.current_duration = None  # refreshed by the resolve below
-        self.is_loading_stream = True
-
-        # Stop any current playback (preserve the favorites/playlist queue
-        # when this track came from the play-next queue).
-        self.stop(invalidate_pending=False, fade=True,
-                  clear_queue=not preserve_queue)
-        self.is_loading_stream = True
-
-        # Get stream URL in background
-        def do_play():
-            import threading
-            # Resolve again at selection time so URL and authorization headers
-            # are fresh. Search result direct URLs are only a fallback for
-            # providers that do not expose a canonical webpage URL.
-            stream_info = (
-                YouTubeSearcher.get_stream_info(webpage_url,
-                    cancelled=lambda: not self._is_current_playback_generation(playback_generation))
-                if webpage_url else None
-            )
-            if not self._is_current_playback_generation(playback_generation):
-                return
-            if not stream_info and direct_url:
-                stream_info = {
-                    'url': direct_url,
-                    'http_headers': dict(http_headers or {}),
-                }
-            if not stream_info:
-                if self._is_current_playback_generation(playback_generation):
-                    speak("Failed to get audio stream.")
-                    self.is_loading_stream = False
-                return
-            self._note_track_duration(webpage_url or direct_url,
-                                      stream_info.get("duration"))
-            # Start streaming on main thread
-            self.game.put(lambda: self._start_youtube_stream(
-                stream_info['url'], title, playback_generation,
-                http_headers=stream_info.get('http_headers'),
-                canonical_url=webpage_url or direct_url,
-            ))
-
-        t = threading.Thread(target=do_play, daemon=True)
-        t.start()
+                                          http_headers=None,
+                                          preserve_queue=False):
+        return self._track_source()._start_youtube_stream_from_search(
+            title, webpage_url, direct_url, http_headers=http_headers,
+            preserve_queue=preserve_queue)
 
     def _start_youtube_stream(self, audio_url, title, playback_generation=None,
                               http_headers=None, canonical_url=None,
                               start_offset=0.0, start_paused=False):
-        """Start streaming from a YouTube audio URL or a local media file.
-
-                    start_offset seeks the new decode head to a content position in seconds (ffmpeg input
-                    seek, like the jukebox mid-song path); start_paused keeps the pre-buffered head silent.
-                    """
-        if (playback_generation is not None
-                and not self._is_current_playback_generation(playback_generation)):
-            return
-        self.is_loading_stream = False
-        self._create_stream_source()
-        if not self._output_source():
-            speak("Audio error.")
-            return
-
-        self.current_duration = (
-            self._known_durations.get(canonical_url)
-            if canonical_url else None
-        )
-        # The player's own device, when one is chosen and this song is not
-        # going into a room's speakers (those are map objects on the game's
-        # device). One slot per stream: a crossfade runs two at once.
-        remote, remote_slot = self._stream_remote()
-        self.streamer = AudioStreamer(
-            self.game, audio_url,
-            self._output_source(),
-            self.volume, bot=self,
-            http_headers=http_headers,
-            canonical_url=canonical_url,
-            start_offset=start_offset,
-            start_paused=start_paused,
-            # A room replaces the ear source entirely: the same interleaved
-            # stereo decode is rendered into one feed per speaker.
-            cinema=self.cinema_bank,
-            remote=remote,
-            remote_slot=remote_slot or 0,
-            remote_category=self._music_output_category(),
-        )
-        self.streamer.start()
-
-        self.mode = "youtube"
-        self.playing = True
-        # A seek performed while paused stays paused: the new streamer starts
-        # silent and only becomes audible when the bot is resumed.
-        self.paused = bool(start_paused)
-        self.current_title = title
-        # Captions for the page this stream came from. A seek restarts the same
-        # track through here, and that is on purpose: the cues are unchanged
-        # and the pump reads the new stream's own position, so a seek needs no
-        # caption bookkeeping at all.
-        self._begin_subtitles(canonical_url)
-        self._stream_announced = False
+        return self._track_source()._start_youtube_stream(
+            audio_url, title, playback_generation=playback_generation,
+            http_headers=http_headers, canonical_url=canonical_url,
+            start_offset=start_offset, start_paused=start_paused)
 
     # === Seeking (fast-forward / rewind) ===
 

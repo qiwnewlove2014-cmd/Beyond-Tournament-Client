@@ -1,6 +1,6 @@
 """The Pan Delay -- a delay the listener hears move.
 
-`libs/music_bot/voice_effect_pan.py` is the one preset that is not only a shape
+`libs/music_bot/voice_effects/pan.py` is the one preset that is not only a shape
 on the mono frame: a voice packet has no left or right in it, so the *movement*
 is applied by each listener's own machine, from three bytes the Server relays
 beside the voice. This file pins both halves.
@@ -36,8 +36,9 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import consts, event_handeler, voice_chat  # noqa: E402
-from libs.music_bot import voice_effect_builder as builder  # noqa: E402
-from libs.music_bot import voice_effect_pan as pan  # noqa: E402
+from libs.music_bot.voice_effects import builder  # noqa: E402
+from libs.music_bot.voice_effects import dsp  # noqa: E402
+from libs.music_bot.voice_effects import pan  # noqa: E402
 from libs.music_bot import voice_effects  # noqa: E402
 from libs.objects.entity import Entity  # noqa: E402
 
@@ -402,7 +403,7 @@ class ThePanMovementTests(unittest.TestCase):
 
     def test_the_line_answers_for_the_frame_it_just_shaped(self):
         line = voice_effects.VoiceEffectLine()
-        with mock.patch.object(voice_effects, "effect_id",
+        with mock.patch.object(dsp, "effect_id",
                                return_value=voice_effects.PAN_EFFECT):
             line.shape(bytes(FRAME))
             right, forward = line.motion()
@@ -411,7 +412,7 @@ class ThePanMovementTests(unittest.TestCase):
 
     def test_a_typed_delay_rebuilds_the_line(self):
         line = voice_effects.VoiceEffectLine()
-        with mock.patch.object(voice_effects, "effect_id",
+        with mock.patch.object(dsp, "effect_id",
                                return_value=voice_effects.PAN_EFFECT):
             line.shape(bytes(FRAME))
             processor = line._processor
@@ -596,7 +597,7 @@ class ThePanBoardTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(mock.patch.stopall)
         self.saved = {}
-        # One seam: `voice_effect_pan.options` and `voice_effect_builder.options`
+        # One seam: `pan.options` and `builder.options`
         # are the same module, so the two features are saved together here.
         mock.patch.object(
             pan.options, "get",

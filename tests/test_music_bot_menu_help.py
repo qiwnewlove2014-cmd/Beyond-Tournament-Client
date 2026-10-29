@@ -33,11 +33,11 @@ from libs.music_bot import autotune  # noqa: E402
 from libs.music_bot import gate as music_bot_gate  # noqa: E402
 from libs.music_bot import menus as menus_module  # noqa: E402
 from libs.music_bot.menu_pages import library as library_pages  # noqa: E402
-from libs.music_bot import voice_effect_builder  # noqa: E402
-from libs.music_bot import voice_effect_custom  # noqa: E402
-from libs.music_bot import voice_effect_pan  # noqa: E402
-from libs.music_bot import voice_effect_recipes  # noqa: E402
-from libs.music_bot import voice_effect_vocoder  # noqa: E402
+from libs.music_bot.voice_effects import builder  # noqa: E402
+from libs.music_bot.voice_effects import custom  # noqa: E402
+from libs.music_bot.voice_effects import pan  # noqa: E402
+from libs.music_bot.voice_effects import recipes  # noqa: E402
+from libs.music_bot.voice_effects import vocoder  # noqa: E402
 from libs.music_bot import voice_effects  # noqa: E402
 
 
@@ -197,7 +197,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
     def test_every_line_of_the_settings_submenus_is_described(self):
         # The vocoder board reads its saved values from the real options file;
         # a menu test must not depend on what the developer running it chose.
-        mock.patch.object(voice_effect_vocoder.options, "get",
+        mock.patch.object(vocoder.options, "get",
                           return_value={}).start()
         for opener in (self.handler._open_autotune_speed_menu,
                        self.handler._open_autotune_amount_menu,
@@ -209,12 +209,12 @@ class EveryLineIsDescribedTests(unittest.TestCase):
                        self.handler._open_voice_builder_menu,
                        self.handler._open_vocoder_lab_menu,
                        lambda: self.handler._open_custom_param_menu(
-                           "wave", voice_effect_vocoder),
+                           "wave", vocoder),
                        self.handler._open_builder_recipes_menu,
                        lambda: self.handler._open_builder_recipes_menu(
                            "machine"),
                        lambda: self.handler._open_custom_param_menu(
-                           "space", voice_effect_builder),
+                           "space", builder),
                        self.handler._open_eq_menu,
                        self.handler._open_transpose_menu,
                        self.handler._open_speech_transpose_menu):
@@ -281,7 +281,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         board = self.last_menu()
         names = [label_of(item).split(":")[0] for item in board.items]
         for _param_id, name, _note, _choices, _default in (
-                voice_effect_custom.PARAMS):
+                custom.PARAMS):
             self.assertIn(name, names)
         for item in board.items:
             self.assertGreaterEqual(len(item), 4)
@@ -289,7 +289,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
 
     def test_the_vocoder_family_ends_with_the_developer_board(self):
         """The board is the bottom line of Vocoder Lab, and it is not a preset."""
-        mock.patch.object(voice_effect_vocoder.options, "get",
+        mock.patch.object(vocoder.options, "get",
                           return_value={}).start()
         self.handler._open_voice_effect_menu("synth")
         labels = [label_of(item) for item in self.last_menu().items]
@@ -308,13 +308,14 @@ class EveryLineIsDescribedTests(unittest.TestCase):
             voice_effects.VOX_LAB_EFFECT)
         board = self.last_menu()
         names = [label_of(item).split(":")[0] for item in board.items]
-        for row in voice_effect_vocoder.rows():
+        for row in vocoder.rows():
             self.assertIn(row[1], names)
         # Current owns no note: those rows are hidden, not shown doing nothing.
         self.assertNotIn("Root", names)
         self.assertNotIn("Scale", names)
+        # The board's rows, its Tone line, and Back.
         self.assertEqual(len(board.items),
-                         len(voice_effect_vocoder.rows()) + 1)
+                         len(vocoder.rows()) + 2)
         for item in board.items:
             self.assertGreaterEqual(len(item), 4)
             self.assertTrue(text_of(item).strip())
@@ -322,7 +323,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
     def test_the_vocoder_family_line_names_the_mode_while_it_is_chosen(self):
         """The board's catalogue name is the family's own, so the line says the
         mode and note instead of reading "Vocoder Lab: Vocoder Lab"."""
-        mock.patch.object(voice_effect_vocoder.options, "get",
+        mock.patch.object(vocoder.options, "get",
                           return_value={}).start()
         self.bot.voice_effect = "vox_lab"
         self.handler._open_voice_effect_menu()
@@ -358,18 +359,18 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         self.assertIn("Developer", menus_module.speak.call_args.args[0])
 
     def test_noise_is_refused_in_a_locked_note_mode_with_a_reason(self):
-        saved = {voice_effect_vocoder._OPTION: {"mode": "tune"}}
+        saved = {vocoder._OPTION: {"mode": "tune"}}
         mock.patch.object(
-            voice_effect_vocoder.options, "get",
+            vocoder.options, "get",
             side_effect=lambda key, default=None: saved.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_vocoder.options, "set",
+            vocoder.options, "set",
             side_effect=lambda key, value, autosave=True:
             saved.__setitem__(key, value)
         ).start()
         self.handler._open_vocoder_lab_menu()
-        self.handler._open_custom_param_menu("wave", voice_effect_vocoder)
+        self.handler._open_custom_param_menu("wave", vocoder)
         for item in self.last_menu().items:
             if label_of(item) == "Noise":
                 item[1]()
@@ -377,7 +378,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         else:
             self.fail("the wave page has no Noise line")
         self.assertEqual(
-            saved[voice_effect_vocoder._OPTION]["wave"], "saw")
+            saved[vocoder._OPTION]["wave"], "saw")
         self.bot.set_voice_effect.assert_called_once_with(
             voice_effects.VOX_LAB_EFFECT)
         said = menus_module.speak.call_args.args[0].lower()
@@ -387,11 +388,11 @@ class EveryLineIsDescribedTests(unittest.TestCase):
     def test_a_knob_page_writes_the_board_and_applies_it(self):
         board = {}
         mock.patch.object(
-            voice_effect_custom.options, "get",
+            custom.options, "get",
             side_effect=lambda key, default=None: board.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_custom.options, "set",
+            custom.options, "set",
             side_effect=lambda key, value, autosave=True:
             board.__setitem__(key, value)
         ).start()
@@ -408,7 +409,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         else:
             self.fail("the drive page has no Saturated line")
         self.bot.set_voice_effect.assert_called_with("custom")
-        self.assertEqual(voice_effect_custom.values()["drive"], "sat")
+        self.assertEqual(custom.values()["drive"], "sat")
 
     def test_the_voice_effect_page_ends_with_the_voice_builder(self):
         """Custom Voice is the page's last choice, after the families."""
@@ -430,10 +431,11 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         board = self.last_menu()
         names = [label_of(item).split(":")[0] for item in board.items]
         for _param_id, name, _note, _choices, _default in (
-                voice_effect_builder.PARAMS):
+                builder.PARAMS):
             self.assertIn(name, names)
-        # The ten slots, the starting line above them, Clear below them, Back.
-        self.assertEqual(len(board.items), len(voice_effect_builder.PARAMS) + 3)
+        # The ten slots, the starting line above them, the Tone line, Clear
+        # below it, Back.
+        self.assertEqual(len(board.items), len(builder.PARAMS) + 4)
         for item in board.items:
             self.assertGreaterEqual(len(item), 4)
             self.assertTrue(text_of(item).strip())
@@ -448,7 +450,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         """
         # The page's own settings are read from the real options file; a menu
         # test must not depend on what the developer running it chose.
-        mock.patch.object(voice_effect_pan.options, "get",
+        mock.patch.object(pan.options, "get",
                           side_effect=lambda key, default=None: default).start()
         self.handler._open_voice_effect_menu()
         menu = self.last_menu()
@@ -488,7 +490,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         else:
             self.fail("the Pan Delay page has no Preset line")
         names = [label_of(item) for item in self.last_menu().items]
-        for _stored, label, _ms, _mode, _note in voice_effect_pan.PRESETS:
+        for _stored, label, _ms, _mode, _note in pan.PRESETS:
             self.assertTrue(any(name.startswith(label) for name in names),
                             names)
 
@@ -506,22 +508,22 @@ class EveryLineIsDescribedTests(unittest.TestCase):
             self.fail("the Custom Voice board has no Pan Delay slot")
         choices = [label_of(item) for item in self.last_menu().items]
         self.assertTrue(any(name.startswith("Off") for name in choices), choices)
-        for _stored, name, _ms, _mode, _note in voice_effect_pan.PRESETS:
+        for _stored, name, _ms, _mode, _note in pan.PRESETS:
             self.assertIn(name, choices)
 
     def test_a_voice_builder_slot_page_writes_the_board_and_applies_it(self):
         board = {}
         mock.patch.object(
-            voice_effect_builder.options, "get",
+            builder.options, "get",
             side_effect=lambda key, default=None: board.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_builder.options, "set",
+            builder.options, "set",
             side_effect=lambda key, value, autosave=True:
             board.__setitem__(key, value)
         ).start()
         self.handler._open_voice_builder_menu()
-        self.handler._open_custom_param_menu("space", voice_effect_builder)
+        self.handler._open_custom_param_menu("space", builder)
         menu = self.last_menu()
         labels = [label_of(item) for item in menu.items]
         self.assertIn("Off (active)", labels)
@@ -533,7 +535,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         else:
             self.fail("the Space page has no Cave line")
         self.bot.set_voice_effect.assert_called_with("voice_build")
-        self.assertEqual(voice_effect_builder.values()["space"], "cave")
+        self.assertEqual(builder.values()["space"], "cave")
 
     def test_every_choice_page_ends_with_a_clear_for_that_one_setting(self):
         """`Clear: back to <default>` sits above Back on every page, named.
@@ -544,7 +546,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         line the player presses says which value they are being put back on,
         read from the board's own table rather than typed out here.
         """
-        for board in (voice_effect_custom, voice_effect_builder):
+        for board in (custom, builder):
             for param_id, name, _note, _choices, _default in board.PARAMS:
                 with self.subTest(board=board.EFFECT_ID, setting=name):
                     self.handler._open_custom_param_menu(param_id, board)
@@ -559,33 +561,33 @@ class EveryLineIsDescribedTests(unittest.TestCase):
     def test_the_clear_line_puts_one_setting_back_and_leaves_the_others(self):
         saved = {}
         mock.patch.object(
-            voice_effect_builder.options, "get",
+            builder.options, "get",
             side_effect=lambda key, default=None: saved.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_builder.options, "set",
+            builder.options, "set",
             side_effect=lambda key, value, autosave=True:
             saved.__setitem__(key, value)
         ).start()
-        voice_effect_builder.set_values({"colour": "fuzz", "space": "cave",
+        builder.set_values({"colour": "fuzz", "space": "cave",
                                           "texture": "vocoder"})
         self.handler._open_voice_builder_menu()
-        self.handler._open_custom_param_menu("colour", voice_effect_builder)
+        self.handler._open_custom_param_menu("colour", builder)
         page = self.last_menu()
-        before = voice_effect_builder.revision()
+        before = builder.revision()
         for item in page.items:
             if label_of(item) == "Clear: back to Crunch":
                 item[1]()
                 break
         else:
             self.fail("the Colour page has no clear line")
-        board = voice_effect_builder.values()
+        board = builder.values()
         self.assertEqual(board["colour"], "crunch")
         # The other nine slots are where the player left them: this is one
         # setting's way out, not the whole board's Clear.
         self.assertEqual(board["space"], "cave")
         self.assertEqual(board["texture"], "vocoder")
-        self.assertEqual(voice_effect_builder.revision(), before + 1)
+        self.assertEqual(builder.revision(), before + 1)
         self.bot.set_voice_effect.assert_called_with("voice_build")
         # No question, and no page to come back from: the page the press
         # happened on is the page that stays open, saying what it now holds.
@@ -596,11 +598,11 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         """`Start From:` is the board's first line, and a press is a sound."""
         saved = {}
         mock.patch.object(
-            voice_effect_builder.options, "get",
+            builder.options, "get",
             side_effect=lambda key, default=None: saved.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_builder.options, "set",
+            builder.options, "set",
             side_effect=lambda key, value, autosave=True:
             saved.__setitem__(key, value)
         ).start()
@@ -611,7 +613,7 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         families = [label_of(item) for item in self.last_menu().items]
         self.assertEqual(
             families,
-            [name for _id, name, _note in voice_effect_recipes.FAMILIES]
+            [name for _id, name, _note in recipes.FAMILIES]
             + ["Back"])
         for item in self.last_menu().items:
             if label_of(item) == "Machine":
@@ -629,9 +631,9 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         else:
             self.fail("the Machine family has no Vocoder Stack")
         self.bot.set_voice_effect.assert_called_with("voice_build")
-        self.assertEqual(voice_effect_builder.values()["texture"], "vocoder")
-        self.assertEqual(voice_effect_builder.values()["pitch"], "octave")
-        self.assertEqual(voice_effect_recipes.current_label(), "Vocoder Stack")
+        self.assertEqual(builder.values()["texture"], "vocoder")
+        self.assertEqual(builder.values()["pitch"], "octave")
+        self.assertEqual(recipes.current_label(), "Vocoder Stack")
         said = menus_module.speak.call_args.args[0]
         self.assertIn("Vocoder Stack", said)
         self.assertIn("synth", said)
@@ -707,11 +709,11 @@ class ThePagesStayOpenTests(unittest.TestCase):
         # A board in memory: the player's own settings file is never read.
         self.saved = {}
         mock.patch.object(
-            voice_effect_builder.options, "get",
+            builder.options, "get",
             side_effect=lambda key, default=None: self.saved.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_builder.options, "set",
+            builder.options, "set",
             side_effect=lambda key, value, autosave=True:
             self.saved.__setitem__(key, value)
         ).start()
@@ -729,14 +731,14 @@ class ThePagesStayOpenTests(unittest.TestCase):
 
     def test_a_slot_page_stays_open_and_its_title_follows_the_value(self):
         self.handler._open_voice_builder_menu()
-        self.handler._open_custom_param_menu("space", voice_effect_builder)
+        self.handler._open_custom_param_menu("space", builder)
         page = self.top()
         self.assertEqual(len(self.stack), 2)
         self.press(page, "Cave")
         # The same page, still on the stack, with nothing rebuilt.
         self.assertIs(self.top(), page)
         self.assertEqual(len(self.stack), 2)
-        self.assertEqual(voice_effect_builder.values()["space"], "cave")
+        self.assertEqual(builder.values()["space"], "cave")
         self.assertEqual(page.title, "Music Bot Custom Voice Space: Cave")
         labels = [label_of(item) for item in page.items]
         self.assertIn("Cave (active)", labels)
@@ -759,7 +761,7 @@ class ThePagesStayOpenTests(unittest.TestCase):
         self.assertIs(self.top(), page)
         self.assertEqual(len(self.stack), 3)
         self.assertIs(self.stack[0], board)
-        self.assertEqual(voice_effect_recipes.current_label(), "Vocoder Stack")
+        self.assertEqual(recipes.current_label(), "Vocoder Stack")
         self.assertIn("Vocoder Stack (active)",
                       [label_of(item) for item in page.items])
         # Back once returns to the five families, still above the board.
@@ -789,7 +791,7 @@ class ThePagesStayOpenTests(unittest.TestCase):
     def test_clear_asks_first_and_no_keeps_everything(self):
         self.handler._open_voice_builder_menu()
         board = self.top()
-        voice_effect_builder.set_value("space", "cave")
+        builder.set_value("space", "cave")
         self.press(board, "Clear: back to the defaults")
         question = self.top()
         self.assertIsNot(question, board)
@@ -797,25 +799,25 @@ class ThePagesStayOpenTests(unittest.TestCase):
                          ["Yes, clear the board", "No, keep it"])
         self.press(question, "No, keep it")
         self.assertIs(self.top(), board)
-        self.assertEqual(voice_effect_builder.values()["space"], "cave")
+        self.assertEqual(builder.values()["space"], "cave")
 
     def test_yes_clears_ten_slots_and_forgets_the_starting_point(self):
         self.handler._open_voice_builder_menu()
         board = self.top()
-        voice_effect_recipes.apply("vocoder")
-        self.assertEqual(voice_effect_recipes.current_label(), "Vocoder Stack")
+        recipes.apply("vocoder")
+        self.assertEqual(recipes.current_label(), "Vocoder Stack")
         self.press(board, "Clear: back to the defaults")
         self.press(self.top(), "Yes, clear the board")
         # The board is still the page: its slots and its title are read fresh.
         self.assertIs(self.top(), board)
-        self.assertEqual(voice_effect_builder.values(),
-                         voice_effect_builder.filled({}))
-        self.assertEqual(voice_effect_recipes.current_label(),
-                         voice_effect_recipes.MY_OWN)
+        self.assertEqual(builder.values(),
+                         builder.filled({}))
+        self.assertEqual(recipes.current_label(),
+                         recipes.MY_OWN)
         self.assertEqual(
             board.title,
             f"Music Bot {voice_effects.effect_label(voice_effects.BUILDER_EFFECT)}: "
-            f"{voice_effect_builder.summary()}")
+            f"{builder.summary()}")
         self.assertIn("My Own", label_of(board.items[0]))
         self.assertIn("cleared",
                       menus_module.speak.call_args.args[0].lower())
@@ -1196,11 +1198,11 @@ class BackAndEscapeLeaveOnePageTests(unittest.TestCase):
         music_bot_gate.clear()
         self.saved = {}
         mock.patch.object(
-            voice_effect_builder.options, "get",
+            builder.options, "get",
             side_effect=lambda key, default=None: self.saved.get(key, default)
         ).start()
         mock.patch.object(
-            voice_effect_builder.options, "set",
+            builder.options, "set",
             side_effect=lambda key, value, autosave=True:
             self.saved.__setitem__(key, value)
         ).start()
@@ -1249,7 +1251,7 @@ class BackAndEscapeLeaveOnePageTests(unittest.TestCase):
         self.press(page, "Cave")
         # A choice is one write on the page already open -- it does not move.
         self.assertIs(self.stack[-1], page)
-        self.assertEqual(voice_effect_builder.values()["space"], "cave")
+        self.assertEqual(builder.values()["space"], "cave")
         self.press(page, "Back")
         landed = self.stack[-1]
         self.assertIsNot(landed, page)
@@ -1258,7 +1260,7 @@ class BackAndEscapeLeaveOnePageTests(unittest.TestCase):
         # what it held when it opened.
         self.assertEqual(landed.title,
                          f"Music Bot Custom Voice: "
-                         f"{voice_effect_builder.summary()}")
+                         f"{builder.summary()}")
         self.assertIn("Cave", landed.title)
         labels = [label_of(item) for item in landed.items]
         self.assertIn("Space: Cave", labels)

@@ -170,7 +170,7 @@ class LinkSubmitTests(unittest.TestCase):
     def test_anything_that_is_not_youtube_is_refused_before_it_is_read(self):
         seen = []
         bot = make_bot(lambda url: seen.append(url) or None)
-        with mock.patch("libs.music_bot.controller.speak") as say:
+        with mock.patch("libs.music_bot.track_source.speak") as say:
             self.submit(bot, "https://example.com/song")
 
         self.assertEqual(seen, [])
@@ -180,7 +180,7 @@ class LinkSubmitTests(unittest.TestCase):
 
     def test_an_empty_input_is_cancelled(self):
         bot = make_bot(lambda url: self.fail("must not resolve an empty link"))
-        with mock.patch("libs.music_bot.controller.speak") as say:
+        with mock.patch("libs.music_bot.track_source.speak") as say:
             self.submit(bot, "   ")
         say.assert_called_once_with("Link cancelled.")
 
@@ -197,7 +197,7 @@ class LinkSubmitTests(unittest.TestCase):
 
     def test_a_link_that_cannot_be_read_says_so_and_plays_nothing(self):
         bot = make_bot(lambda url: None)
-        with mock.patch("libs.music_bot.controller.speak") as say:
+        with mock.patch("libs.music_bot.track_source.speak") as say:
             self.submit(bot, "https://youtu.be/dead")
 
         self.assertEqual(bot.resolved, [])
