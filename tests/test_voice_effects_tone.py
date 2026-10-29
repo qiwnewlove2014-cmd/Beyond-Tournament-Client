@@ -18,6 +18,10 @@ what this file holds them to is:
    band on one preset leaves every other preset exactly where it was.
 5. **It is a slider a blind player can use.** Tab, arrows, Page Up/Down, Home
    and `R`, with every press spoken, saved once when the page closes.
+6. **The three controls around the bands are a mixer's.** A low cut takes the
+   rumble off the bottom before the bands see it, a mix puts the pedal beside
+   the voice instead of over it, a level matches one preset to the next, and
+   `M` speaks the level of the last frame that left.
 
 No game, OpenAL, ffmpeg or network is required.
 """
@@ -460,19 +464,25 @@ class TheToneSliderTests(ToneCase):
         return slider.update([pygame.event.Event(pygame.KEYDOWN, key=key,
                                                  mod=mod)])
 
-    def test_the_page_opens_on_the_saved_bands(self):
-        slider = self._open("amp", {"amp": {"low": 3}})
+    def test_the_page_opens_on_the_saved_strip(self):
+        slider = self._open("amp", {"amp": {"low": 3, "cut": 80,
+                                            "mix": 60, "level": -2}})
         self.assertEqual(slider.preset, "amp")
         self.assertEqual(slider.name, "Guitar Amp")
         self.assertEqual(slider.values["low"], 3)
         self.assertEqual(slider.values["air"], 0)
+        self.assertEqual(slider.values["cut"], 80)
+        self.assertEqual(slider.values["mix"], 60)
+        self.assertEqual(slider.values["level"], -2)
+        # The cut is the first row, because it is what the bands see first.
         self.assertEqual(slider.current_index, 0)
 
     def test_a_band_survives_a_restart(self):
         """The setting is in the options file, so a new page reads it back."""
         slider = self._open("amp")
+        self._press(slider, pygame.K_TAB)          # Low Cut -> Low
         self._press(slider, pygame.K_UP)
-        self._press(slider, pygame.K_TAB)
+        self._press(slider, pygame.K_TAB)          # Low -> Body
         self._press(slider, pygame.K_PAGEUP)
         self._press(slider, pygame.K_RETURN)
         self.gp.substates.clear()
@@ -485,25 +495,26 @@ class TheToneSliderTests(ToneCase):
         self._press(slider, pygame.K_TAB)
         self.assertEqual(slider.current_index, 1)
         self._press(slider, pygame.K_UP)
-        self.assertEqual(tone.values("amp")["body"], 1)
-        self.assertEqual(slider.values["body"], 1)
+        self.assertEqual(tone.values("amp")["low"], 1)
+        self.assertEqual(slider.values["low"], 1)
         self._press(slider, pygame.K_PAGEUP)
-        self.assertEqual(tone.values("amp")["body"], 7)
+        self.assertEqual(tone.values("amp")["low"], 7)
         self._press(slider, pygame.K_DOWN)
-        self.assertEqual(tone.values("amp")["body"], 6)
+        self.assertEqual(tone.values("amp")["low"], 6)
         self._press(slider, pygame.K_HOME)
-        self.assertEqual(tone.values("amp")["body"], 0)
-        # Shift+Tab walks backwards, wrapped.
+        self.assertEqual(tone.values("amp")["low"], 0)
+        # Shift+Tab walks backwards, wrapped: the cut is first, the level last.
         self._press(slider, pygame.K_TAB, mod=pygame.KMOD_SHIFT)
         self.assertEqual(slider.current_index, 0)
         self._press(slider, pygame.K_TAB, mod=pygame.KMOD_SHIFT)
-        self.assertEqual(slider.current_index, 3)
+        self.assertEqual(slider.current_index, len(tone.ROW_IDS) - 1)
         said = " ".join(self.said).lower()
-        self.assertIn("body", said)
+        self.assertIn("low", said)
         self.assertIn("flat", said)
 
     def test_the_band_is_clamped_and_the_page_keeps_working(self):
         slider = self._open("amp")
+        self._press(slider, pygame.K_TAB)          # the cut is first
         for _ in range(20):
             self._press(slider, pygame.K_PAGEUP)
         self.assertEqual(tone.values("amp")["low"], 12)
@@ -512,17 +523,23 @@ class TheToneSliderTests(ToneCase):
         self.assertEqual(tone.values("amp")["low"], -12)
         self.assertFalse(slider._closed)
 
-    def test_r_puts_all_four_back_flat(self):
+    def test_r_puts_the_whole_strip_back_flat(self):
         slider = self._open("fuzz", {
-            "fuzz": {"low": 4, "body": -3, "presence": 2, "air": 6}})
+            "fuzz": {"cut": 80, "low": 4, "body": -3, "presence": 2,
+                     "air": 6, "mix": 55, "comp": -24, "ratio": 8,
+                     "attack": 3, "release": 500, "level": -2}})
         self._press(slider, pygame.K_r)
         self.assertEqual(tone.summary("fuzz"), "Flat")
         self.assertEqual(slider.values,
-                         {"low": 0, "body": 0, "presence": 0, "air": 0})
-        self.assertIn("every band flat", " ".join(self.said).lower())
+                         {"cut": 0, "low": 0, "body": 0, "presence": 0,
+                          "air": 0, "deess": 0, "highcut": 0, "mix": 100,
+                          "comp": 0, "ratio": 4, "attack": 10,
+                          "release": 250, "level": 0})
+        self.assertIn("every row back", " ".join(self.said).lower())
 
     def test_a_visit_saves_once_on_close_and_not_on_every_press(self):
         slider = self._open("amp")
+        self._press(slider, pygame.K_TAB)          # past the cut
         for _ in range(4):
             self._press(slider, pygame.K_UP)
         self._press(slider, pygame.K_TAB)
@@ -547,6 +564,7 @@ class TheToneSliderTests(ToneCase):
 
     def test_escape_is_the_same_close_as_enter(self):
         slider = self._open("amp")
+        self._press(slider, pygame.K_TAB)
         self._press(slider, pygame.K_UP)
         self._press(slider, pygame.K_ESCAPE)
         self.assertTrue(slider._closed)
@@ -603,6 +621,78 @@ class TheToneSliderTests(ToneCase):
         self.assertEqual(self.gp.substates, [menu])
         self.assertIn("pick a voice effect", " ".join(self.said).lower())
 
+    def test_the_cut_walks_its_ladder_and_home_turns_it_off(self):
+        slider = self._open("amp")
+        self._press(slider, pygame.K_UP)
+        self.assertEqual(tone.cut("amp"), 60)
+        self._press(slider, pygame.K_PAGEUP)
+        self.assertEqual(tone.cut("amp"), 100)
+        self._press(slider, pygame.K_HOME)
+        self.assertEqual(tone.cut("amp"), 0)
+
+    def test_the_mix_moves_in_fives_and_pages_in_twenty_fives(self):
+        slider = self._open("amp")
+        slider.current_index = tone.ROW_IDS.index("mix")
+        self._press(slider, pygame.K_DOWN)
+        self.assertEqual(tone.mix("amp"), 95)
+        self._press(slider, pygame.K_PAGEDOWN)
+        self.assertEqual(tone.mix("amp"), 70)
+        self._press(slider, pygame.K_HOME)
+        self.assertEqual(tone.mix("amp"), 100)
+
+    def test_the_level_is_a_fader_and_m_speaks_the_meter(self):
+        slider = self._open("amp")
+        slider.current_index = tone.ROW_IDS.index("level")
+        self._press(slider, pygame.K_UP)
+        self.assertEqual(tone.level("amp"), 1)
+        self._press(slider, pygame.K_PAGEDOWN)
+        self.assertEqual(tone.level("amp"), -5)
+        self._press(slider, pygame.K_m)
+        self.assertIn("nothing has gone through",
+                      " ".join(self.said).lower())
+        tone.report("amp", 0.1, 0.2)
+        self._press(slider, pygame.K_m)
+        self.assertIn("peak", self.said[-1].lower())
+
+    def test_the_compressor_rows_walk_their_ladders_and_speak(self):
+        slider = self._open("amp")
+        for _ in range(tone.ROW_IDS.index("comp")):
+            self._press(slider, pygame.K_TAB)       # Low Cut -> ... -> Comp
+        self.assertEqual(slider._current()[0], "comp")
+        self._press(slider, pygame.K_UP)
+        self.assertEqual(tone.compressor("amp")[0], -36)
+        self.assertIn("compressing above minus 36 decibels",
+                      " ".join(self.said).lower())
+        self._press(slider, pygame.K_PAGEUP)        # two stops, not +6 dB
+        self.assertEqual(tone.compressor("amp")[0], -24)
+        self._press(slider, pygame.K_HOME)
+        self.assertEqual(tone.compressor("amp")[0], 0)
+        self._press(slider, pygame.K_TAB)           # Ratio
+        self.assertEqual(slider._current()[0], "ratio")
+        self._press(slider, pygame.K_UP)
+        self.assertEqual(tone.compressor("amp")[1], 6)
+        self.assertIn("six to one", " ".join(self.said).lower())
+        self._press(slider, pygame.K_TAB)           # Attack
+        self._press(slider, pygame.K_PAGEDOWN)
+        self.assertEqual(tone.compressor("amp")[2], 1)
+        self._press(slider, pygame.K_TAB)           # Release
+        self._press(slider, pygame.K_UP)
+        self.assertEqual(tone.compressor("amp")[3], 500)
+        self.assertIn("500 milliseconds", " ".join(self.said).lower())
+
+    def test_the_compressor_survives_a_restart(self):
+        slider = self._open("amp")
+        for _ in range(tone.ROW_IDS.index("comp")):
+            self._press(slider, pygame.K_TAB)
+        self._press(slider, pygame.K_UP)
+        self._press(slider, pygame.K_TAB)
+        self._press(slider, pygame.K_UP)
+        self._press(slider, pygame.K_RETURN)
+        self.gp.substates.clear()
+        again = self._open("amp")
+        self.assertEqual(again.values["comp"], -36)
+        self.assertEqual(again.values["ratio"], 6)
+
     def test_a_board_page_offers_the_tone_of_its_own_preset(self):
         mock.patch.object(
             voice_effects.custom.options, "get",
@@ -621,8 +711,6 @@ class TheToneSliderTests(ToneCase):
         self.assertEqual(slider.preset, voice_effects.CUSTOM_EFFECT)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 # ------------------------------------------------------ the mark on the list
@@ -703,3 +791,688 @@ class TheTunedMarkTests(ToneCase):
                      if label_of(item) == "Fuzz")
         note = other[3]() if callable(other[3]) else other[3]
         self.assertEqual(note, voice_effects.effect_note("fuzz"))
+# ------------------------------------------------------- the strip around it
+
+class TheStripTests(ToneCase):
+    """The three controls a mixer puts around its EQ, and the rows they make."""
+
+    def test_the_page_walks_thirteen_rows_in_a_mixer_order(self):
+        self.assertEqual(tone.ROW_IDS, ("cut", "low", "body", "presence",
+                                        "air", "deess", "highcut", "mix",
+                                        "comp", "ratio", "attack", "release",
+                                        "level"))
+        self.assertEqual([entry[2] for entry in tone.ROWS],
+                         ["cut", "db", "db", "db", "db", "deess",
+                          "highcut", "mix", "comp", "ratio", "attack",
+                          "release", "level"])
+        self.assertEqual(tone.default_of("cut"), 0)
+        self.assertEqual(tone.default_of("highcut"), 0)
+        self.assertEqual(tone.default_of("deess"), 0)
+        self.assertEqual(tone.default_of("mix"), 100)
+        self.assertEqual(tone.default_of("level"), 0)
+        self.assertEqual(tone.default_of("low"), 0)
+        # The compressor opens off, at the ratio and times a voice wants when
+        # it is turned on.
+        self.assertEqual(tone.default_of("comp"), 0)
+        self.assertEqual(tone.default_of("ratio"), 4)
+        self.assertEqual(tone.default_of("attack"), 10)
+        self.assertEqual(tone.default_of("release"), 250)
+
+    def test_the_state_of_an_untouched_preset_is_what_it_opens_with(self):
+        self.assertEqual(tone.state("amp"), {
+            "cut": 0, "low": 0, "body": 0, "presence": 0, "air": 0,
+            "deess": 0, "highcut": 0, "mix": 100, "comp": 0, "ratio": 4,
+            "attack": 10, "release": 250, "level": 0})
+
+    def test_every_row_is_saved_under_the_one_preset(self):
+        tone.set_cut("amp", 80, save=False)
+        tone.set_mix("amp", 60, save=False)
+        tone.set_comp("amp", -18, save=False)
+        tone.set_ratio("amp", 6, save=False)
+        tone.set_level("amp", -3, save=False)
+        self.assertEqual(tone.summary("amp"),
+                         "Cut 80, Mix 60%, Comp -18 dB 6:1, Level -3 dB")
+        self.assertEqual(tone.state("amp")["cut"], 80)
+        self.assertEqual(tone.state("amp")["mix"], 60)
+        self.assertEqual(tone.state("amp")["comp"], -18)
+        self.assertEqual(tone.state("amp")["level"], -3)
+        # Another preset is untouched by any of it.
+        self.assertEqual(tone.summary("fuzz"), "Flat")
+
+    def test_reset_forgets_the_whole_strip(self):
+        tone.set_band("amp", "low", 3, save=False)
+        tone.set_cut("amp", 80, save=False)
+        tone.set_mix("amp", 60, save=False)
+        tone.set_level("amp", -3, save=False)
+        tone.reset("amp", save=False)
+        self.assertEqual(tone.summary("amp"), "Flat")
+        self.assertFalse(tone.has_tone("amp"))
+
+    def test_a_row_at_what_the_preset_opens_with_is_not_a_saved_key(self):
+        tone.set_mix("amp", 55, save=False)
+        self.assertIn("mix", self.store[tone._OPTION]["amp"])
+        tone.set_mix("amp", 100, save=False)
+        self.assertNotIn("amp", self.store[tone._OPTION])
+
+    def test_the_words_name_what_each_row_is(self):
+        self.assertEqual(tone.cut_spoken(0), "off, the voice's own bottom")
+        self.assertEqual(tone.cut_spoken(80), "80 hertz")
+        self.assertEqual(tone.mix_spoken(100), "fully wet, the effect alone")
+        self.assertEqual(tone.mix_spoken(0), "fully dry, the effect silent")
+        self.assertEqual(tone.mix_spoken(60), "60 percent wet")
+        self.assertEqual(tone.level_spoken(-3), "minus 3 decibels")
+
+
+class TheLowCutTests(ToneCase):
+    """The cut takes the bottom off before the bands see it."""
+
+    def test_the_ladder_is_off_and_five_corners(self):
+        self.assertEqual(tone.CUT_FREQS, (0, 60, 80, 100, 120, 160))
+        self.assertEqual(tone.cut("amp"), 0)
+
+    def test_a_value_off_the_ladder_snaps_to_the_nearest_corner(self):
+        tone.set_cut("amp", 95)
+        self.assertEqual(tone.cut("amp"), 100)
+        tone.set_cut("amp", 5)
+        self.assertEqual(tone.cut("amp"), 60)      # nearest offered corner
+        tone.set_cut("amp", -4)
+        self.assertEqual(tone.cut("amp"), 0)
+        tone.set_cut("amp", 999)
+        self.assertEqual(tone.cut("amp"), 160)
+
+    def test_the_cut_can_be_turned_off_again_while_a_voice_runs(self):
+        """Off is a response in its own right, not a missing one.
+
+        `_retune_cut` runs the frame through the old corner and the new one and
+        blends them, so turning the cut back to off needs the identity as two
+        triples, exactly like any other retune. Splatting the one identity
+        tuple there raised `TypeError` on the press instead of easing the
+        bottom back -- a live client, 2026-10-29 -- and no test rendered a
+        frame *after* the cut was switched off.
+        """
+        bottom = sinusoid(50.0, 0.2)
+        tone.set_cut("direct", 100, save=False)
+        processor = dsp._EffectProcessor("direct", with_tone=True)
+        cut = play(processor, bottom)
+        tone.set_cut("direct", 0, save=False)
+        off = play(processor, bottom)          # the press that used to raise
+        self.assertGreater(rms(off), rms(cut) * 1.5)
+        # ... and back on again, the same way round.
+        tone.set_cut("direct", 100, save=False)
+        again = play(processor, bottom)
+        self.assertLess(rms(again), rms(off))
+
+    def test_the_cut_takes_the_bottom_and_leaves_the_words(self):
+        bottom = sinusoid(50.0, 0.2)
+        words = sinusoid(1000.0, 0.2)
+        before_bottom = play(dsp._EffectProcessor("direct", with_tone=True),
+                             bottom)
+        before_words = play(dsp._EffectProcessor("direct", with_tone=True),
+                            words)
+        tone.set_cut("direct", 100, save=False)
+        after_bottom = play(dsp._EffectProcessor("direct", with_tone=True),
+                            bottom)
+        after_words = play(dsp._EffectProcessor("direct", with_tone=True),
+                           words)
+        self.assertLess(gain_db(after_bottom, before_bottom), -6.0)
+        self.assertGreater(gain_db(after_words, before_words), -1.5)
+
+
+class TheHighCutTests(ToneCase):
+    """The other end of the strip: where the top stops."""
+
+    def test_the_ladder_is_off_and_six_corners(self):
+        self.assertEqual(tone.HIGH_CUT_FREQS,
+                         (0, 16000, 12000, 9000, 7000, 5500, 4000))
+        self.assertEqual(tone.high_cut("amp"), 0)
+
+    def test_a_value_off_the_ladder_snaps_to_the_nearest_corner(self):
+        tone.set_high_cut("amp", 6000)
+        self.assertEqual(tone.high_cut("amp"), 5500)
+        tone.set_high_cut("amp", 100)
+        self.assertEqual(tone.high_cut("amp"), 4000)
+        tone.set_high_cut("amp", 99999)
+        self.assertEqual(tone.high_cut("amp"), 16000)
+        tone.set_high_cut("amp", -5)
+        self.assertEqual(tone.high_cut("amp"), 0)
+
+    def test_the_high_cut_takes_the_top_and_leaves_the_words(self):
+        top = sinusoid(12000.0, 0.2)
+        words = sinusoid(1000.0, 0.2)
+        before_top = play(dsp._EffectProcessor("direct", with_tone=True), top)
+        before_words = play(dsp._EffectProcessor("direct", with_tone=True),
+                            words)
+        tone.set_high_cut("direct", 4000, save=False)
+        after_top = play(dsp._EffectProcessor("direct", with_tone=True), top)
+        after_words = play(dsp._EffectProcessor("direct", with_tone=True),
+                           words)
+        self.assertLess(gain_db(after_top, before_top), -15.0)
+        self.assertGreater(gain_db(after_words, before_words), -2.0)
+
+    def test_the_high_cut_can_be_turned_off_again_while_a_voice_runs(self):
+        """Off is a response like any other, on this edge as on the low one."""
+        top = sinusoid(9000.0, 0.2)
+        tone.set_high_cut("direct", 4000, save=False)
+        processor = dsp._EffectProcessor("direct", with_tone=True)
+        cut = play(processor, top)
+        tone.set_high_cut("direct", 0, save=False)
+        off = play(processor, top)            # the press that used to raise
+        self.assertGreater(rms(off), rms(cut) * 2.0)
+        tone.set_high_cut("direct", 7000, save=False)
+        again = play(processor, top)
+        self.assertLess(rms(again), rms(off))
+
+
+class TheDeEssTests(ToneCase):
+    """The one block on the strip that moves with the words, not before them."""
+
+    def test_the_ladder_is_off_and_four_amounts(self):
+        self.assertEqual(tone.DEESS_AMOUNTS, (0, 3, 6, 9, 12))
+        self.assertEqual(tone.deess("amp"), 0)
+
+    def test_a_sibilant_is_taken_down_and_the_words_are_left_alone(self):
+        sibilant = sinusoid(8000.0, 0.3)
+        words = sinusoid(200.0, 0.3)
+        before_s = play(dsp._EffectProcessor("direct", with_tone=True),
+                        sibilant)
+        before_words = play(dsp._EffectProcessor("direct", with_tone=True),
+                            words)
+        tone.set_deess("direct", 12, save=False)
+        after_s = play(dsp._EffectProcessor("direct", with_tone=True),
+                       sibilant)
+        after_words = play(dsp._EffectProcessor("direct", with_tone=True),
+                           words)
+        self.assertLess(gain_db(after_s, before_s), -8.0)
+        self.assertAlmostEqual(gain_db(after_words, before_words), 0.0,
+                              delta=0.2)
+
+    def test_a_quiet_s_is_left_alone(self):
+        quiet = sinusoid(8000.0, 0.004)
+        before = play(dsp._EffectProcessor("direct", with_tone=True), quiet)
+        tone.set_deess("direct", 12, save=False)
+        after = play(dsp._EffectProcessor("direct", with_tone=True), quiet)
+        self.assertAlmostEqual(gain_db(after, before), 0.0, delta=0.2)
+
+    def test_the_amount_is_a_ceiling_and_not_a_ratio(self):
+        loud = sinusoid(8000.0, 0.3)
+        flat = play(dsp._EffectProcessor("direct", with_tone=True), loud)
+        levels = {}
+        for amount in (6, 12):
+            tone.set_deess("direct", amount, save=False)
+            levels[amount] = gain_db(
+                play(dsp._EffectProcessor("direct", with_tone=True), loud),
+                flat)
+        self.assertLess(levels[6], -4.0)
+        self.assertGreater(levels[6], -7.5)
+        self.assertLess(levels[12], levels[6] - 3.0)
+
+    def test_turning_the_row_off_is_a_ramp_not_a_step(self):
+        """A `s` still sounding while the row goes off must not click.
+
+        The gain is read out of the block itself (`out / block`), because the
+        payload and the trigger are the same tone: an 8 kHz tone that is over
+        the detector's threshold the whole time. A hard switch to off would
+        jump from a quarter to one between two samples.
+        """
+        t = np.arange(FRAME // 2) / SR
+        block = (0.3 * np.sin(2.0 * np.pi * 8000.0 * t)).astype(np.float32)
+        deesser = dsp._DeEsser()
+        for _ in range(4):
+            deesser.process(block, 12)
+        out = deesser.process(block, 0)          # the press that turns it off
+        usable = np.abs(block) > 1e-4
+        gains = (out.astype(np.float64)[usable]
+                 / block.astype(np.float64)[usable])
+        # The press lands on the frame it happens on, from the gain that was
+        # already there -- then it opens across the 20 ms rather than at once.
+        self.assertLess(float(gains[0]), 0.35)
+        self.assertGreater(float(gains[-1]), 0.99)
+        self.assertLess(float(np.abs(np.diff(gains)).max()), 0.02)
+
+    def test_the_words_name_the_two_new_rows(self):
+        self.assertEqual(tone.high_cut_spoken(0), "off, the voice's own top")
+        self.assertEqual(tone.high_cut_spoken(7000),
+                         "cutting above 7 kilohertz")
+        self.assertEqual(tone.deess_spoken(0), "off, no de-essing")
+        self.assertEqual(tone.deess_spoken(9),
+                         "up to 9 decibels off the s")
+        tone.set_deess("amp", 6, save=False)
+        tone.set_high_cut("amp", 7000, save=False)
+        self.assertEqual(tone.summary("amp"), "De-ess 6 dB, High Cut 7000")
+        self.assertTrue(tone.has_tone("amp"))
+        self.assertIn("de-essing up to 6 decibels off the s",
+                      tone.description("amp"))
+        self.assertIn("a high cut above 7 kilohertz",
+                      tone.description("amp"))
+
+
+class TheMixTests(ToneCase):
+    """How much of the pedal is heard, beside the voice that carries it."""
+
+    def test_the_mix_is_fully_wet_unless_it_is_moved(self):
+        self.assertEqual(tone.mix("fuzz"), 100)
+
+    def test_dry_is_the_voice_and_a_half_is_halfway_between(self):
+        processor = dsp._EffectProcessor("fuzz", with_tone=True)
+        dry = np.full(FRAME // 2, 0.1, dtype=np.float32)
+        wet = np.full(FRAME // 2, 0.5, dtype=np.float32)
+        tone.set_mix("fuzz", 0, save=False)
+        out = dry
+        for _ in range(20):
+            out = processor._blend(dry, wet)
+        self.assertEqual(out.tolist(), dry.tolist())
+        tone.set_mix("fuzz", 50, save=False)
+        processor = dsp._EffectProcessor("fuzz", with_tone=True)
+        for _ in range(20):
+            out = processor._blend(dry, wet)
+        self.assertAlmostEqual(float(out[0]), 0.3, places=4)
+
+    def test_a_lower_mix_is_quieter_each_step_of_the_way(self):
+        signal = sinusoid(300.0, 0.2)
+        levels = []
+        for percent in (100, 60, 20, 0):
+            tone.set_mix("fuzz", percent, save=False)
+            out = play(dsp._EffectProcessor("fuzz", with_tone=True), signal)
+            levels.append(rms(out))
+        self.assertEqual(levels, sorted(levels, reverse=True))
+        self.assertLess(levels[-1], levels[0])
+
+    def test_a_mix_fades_rather_than_steps(self):
+        """A 40 percent move between two frames is a ramp, not a corner."""
+        processor = dsp._EffectProcessor("fuzz", with_tone=True)
+        dry = np.zeros(FRAME // 2, dtype=np.float32)
+        wet = np.ones(FRAME // 2, dtype=np.float32)
+        tone.set_mix("fuzz", 0, save=False)
+        first = processor._blend(dry, wet)
+        # Fully wet to start, one frame of fade: the first sample is still
+        # near the wet side and the last is already nearer the dry one.
+        self.assertGreater(float(first[0]), float(first[-1]))
+        self.assertGreater(float(first[0]), 0.7)
+
+
+class TheLevelTests(ToneCase):
+    """The fader that matches one preset to the next."""
+
+    def test_the_level_is_zero_unless_it_is_moved(self):
+        self.assertEqual(tone.level("direct"), 0)
+
+    def test_the_level_lifts_and_lowers_the_whole_voice(self):
+        signal = sinusoid(400.0, 0.1)
+        flat = play(dsp._EffectProcessor("direct", with_tone=True), signal)
+        tone.set_level("direct", 6, save=False)
+        up = play(dsp._EffectProcessor("direct", with_tone=True), signal)
+        tone.set_level("direct", -6, save=False)
+        down = play(dsp._EffectProcessor("direct", with_tone=True), signal)
+        self.assertAlmostEqual(gain_db(up, flat), 6.0, delta=0.4)
+        self.assertAlmostEqual(gain_db(down, flat), -6.0, delta=0.4)
+
+    def test_a_level_makes_the_preset_count_as_moved(self):
+        tone.set_level("amp", -4, save=False)
+        self.assertTrue(tone.has_tone("amp"))
+        self.assertEqual(tone.summary("amp"), "Level -4 dB")
+
+
+class TheMeterTests(ToneCase):
+    """The number a fader is set against, and the honesty of it going quiet."""
+
+    def test_the_meter_reads_the_frame_that_left(self):
+        play(dsp._EffectProcessor("direct", with_tone=True),
+             sinusoid(400.0, 0.2))
+        reading = tone.reading("direct")
+        self.assertIsNotNone(reading)
+        rms_db, peak_db = reading
+        self.assertGreater(peak_db, rms_db)
+        self.assertLess(rms_db, 0.0)
+
+    def test_a_reading_goes_stale_when_the_press_stops(self):
+        tone.report("direct", 0.1, 0.2, now=10.0)
+        self.assertIsNotNone(tone.reading("direct", now=11.0))
+        self.assertIsNone(tone.reading("direct", now=20.0))
+
+    def test_the_words_are_a_level_and_a_peak(self):
+        tone.report("direct", 0.1, 0.5, now=10.0)
+        said = tone.meter_spoken("direct", now=10.5).lower()
+        self.assertIn("level minus 20", said)
+        self.assertIn("peak minus 6", said)
+        self.assertIn("nothing has gone through",
+                      tone.meter_spoken("direct", now=30.0).lower())
+
+
+# ------------------------------------------------------------- the compressor
+
+class TheCompressorTests(ToneCase):
+    """The level rider: a quiet sentence and a loud one arrive together.
+
+    The four things that make it a compressor rather than a volume knob are
+    measured here, not read off the table: the curve bends instead of switching
+    (a soft knee), the detector listens over the rumble (a high-pass at 120 Hz),
+    the attack and release are the times they say, and the fader after it is the
+    make-up. The one thing it must never do is change a preset that has not been
+    compressed -- that is checked byte for byte.
+    """
+
+    def _through(self, signal):
+        return play(dsp._EffectProcessor("direct", with_tone=True), signal)
+
+    def _reduction(self, signal, threshold=-24, ratio=8, attack=3, release=250):
+        """The deepest pull of one signal through the compressor alone."""
+        comp = dsp._Compressor()
+        pcm = to_pcm(signal)
+        out = []
+        for start in range(0, len(pcm) - FRAME + 1, FRAME):
+            out.append(comp.process(from_pcm(pcm[start:start + FRAME]).astype(
+                np.float32), threshold, ratio, attack, release))
+        return comp.reduction(), np.concatenate(out)
+
+    def test_the_ladders_are_the_choices_the_page_offers(self):
+        self.assertEqual(tone.COMP_THRESHOLDS, (0, -36, -30, -24, -18, -12, -6))
+        self.assertEqual(tone.COMP_RATIOS, (2, 3, 4, 6, 8, 12, 20))
+        self.assertEqual(tone.COMP_ATTACKS, (1, 3, 10, 30, 60))
+        self.assertEqual(tone.COMP_RELEASES, (60, 120, 250, 500, 1000))
+        # Off is the first stop of the threshold ladder, so the rest reads
+        # quiet-to-loud rather than small-to-large.
+        self.assertEqual(tone.COMP_THRESHOLDS[0], 0)
+        for ladder in (tone.COMP_THRESHOLDS[1:], tone.COMP_RATIOS,
+                       tone.COMP_ATTACKS, tone.COMP_RELEASES):
+            self.assertEqual(list(ladder), sorted(ladder))
+        self.assertEqual(tone.LADDERS["comp"], tone.COMP_THRESHOLDS)
+
+    def test_a_threshold_off_the_ladder_snaps_to_a_stop(self):
+        tone.set_comp("amp", -20)
+        self.assertEqual(tone.compressor("amp")[0], -18)
+        # Zero and anything above it is off -- not a threshold a frame can cross.
+        tone.set_comp("amp", 6)
+        self.assertEqual(tone.compressor("amp")[0], 0)
+        tone.set_ratio("amp", 100)
+        self.assertEqual(tone.compressor("amp")[1], 20)
+        tone.set_attack("amp", 0)
+        self.assertEqual(tone.compressor("amp")[2], 1)
+        tone.set_release("amp", 400)
+        self.assertEqual(tone.compressor("amp")[3], 500)
+
+    def test_a_quiet_voice_is_left_alone_and_a_loud_one_is_pulled_down(self):
+        quiet = sinusoid(1000.0, 0.05)
+        loud = sinusoid(1000.0, 0.3)
+        quiet_flat = self._through(quiet)
+        loud_flat = self._through(loud)
+        tone.set_comp("direct", -18, save=False)
+        tone.set_ratio("direct", 4, save=False)
+        self.assertAlmostEqual(gain_db(self._through(quiet), quiet_flat), 0.0,
+                               delta=0.05)
+        self.assertLess(gain_db(self._through(loud), loud_flat), -2.0)
+
+    def test_the_curve_is_bent_rather_than_switched(self):
+        """A soft knee: nothing below the knee, a lean at it, no step at it."""
+        pulled = []
+        for amplitude in (0.01, 0.05, 0.1, 0.2, 0.4):
+            tone.set_comp("direct", -18, save=False)
+            tone.set_ratio("direct", 4, save=False)
+            processor = dsp._EffectProcessor("direct", with_tone=True)
+            play(processor, sinusoid(1000.0, amplitude, 0.3))
+            pulled.append(processor._tone.compression())
+        self.assertLess(pulled[0], 0.05)
+        self.assertLess(pulled[2], 0.1)          # 0.1 is 2 dB under the knee
+        self.assertEqual(pulled, sorted(pulled))
+        self.assertGreater(pulled[-1], 3.0)
+        # Doubling the level is 6 dB; a hard switch would jump the whole 6 dB
+        # at the threshold. The bent curve takes less than that at every step.
+        for before, after in zip(pulled, pulled[1:]):
+            self.assertLess(after - before, 6.0)
+
+    def test_the_detector_listens_over_the_rumble(self):
+        """The bottom of the room does not duck the words (a 120 Hz detector)."""
+        low = self._reduction(sinusoid(45.0, 0.5, 0.4))[0]
+        words = self._reduction(sinusoid(1000.0, 0.5, 0.4))[0]
+        self.assertGreater(words, 8.0)
+        self.assertLess(low, words / 4.0)
+        # ... and a thump under a sentence changes what the sentence loses by
+        # less than a decibel. A full-band detector would duck it with the thump.
+        plain = sinusoid(1000.0, 0.2, 0.4)
+        thumped = (plain + sinusoid(40.0, 0.8, 0.4)).astype(np.float32)
+        flat_thumped = self._through(thumped)
+        flat_words = self._through(plain)
+        tone.set_comp("direct", -24, save=False)
+        tone.set_ratio("direct", 8, save=False)
+        self.assertAlmostEqual(gain_db(self._through(thumped), flat_thumped),
+                               gain_db(self._through(plain), flat_words),
+                               delta=1.0)
+
+    def test_a_fast_attack_catches_more_of_a_burst_than_a_slow_one(self):
+        burst = np.concatenate([np.zeros(4800, dtype=np.float32),
+                                sinusoid(1000.0, 0.5, 0.2)])
+        heads = {}
+        for attack in (1, 60):
+            _pull, out = self._reduction(burst, attack=attack)
+            heads[attack] = rms(out[4800:7200])
+        self.assertLess(heads[1], heads[60] * 0.6)
+
+    def test_the_release_lets_go_at_the_time_it_says(self):
+        signal = np.concatenate([sinusoid(1000.0, 0.5, 0.2),
+                                 sinusoid(1000.0, 0.05, 0.3)])
+        levels = {}
+        for release in (60, 1000):
+            _pull, out = self._reduction(signal, release=release)
+            levels[release] = rms(out[9600 + 4800:9600 + 6720])
+        # 100 ms after the loud part stopped, the fast release is nearly back
+        # and the slow one is still holding the quiet tail down.
+        self.assertGreater(levels[60], levels[1000] * 2.0)
+
+    def test_re_engaging_after_a_break_starts_clean(self):
+        """The detector does not carry the press that has already ended."""
+        tone.set_comp("direct", -30, save=False)
+        tone.set_ratio("direct", 12, save=False)
+        tone.set_release("direct", 1000, save=False)
+        used = dsp._EffectProcessor("direct", with_tone=True)
+        loud = to_pcm(sinusoid(1000.0, 0.5, 0.2))
+        for start in range(0, len(loud) - FRAME + 1, FRAME):
+            used.process(loud[start:start + FRAME])
+        self.assertGreater(used._tone.compression(), 4.0)
+        tone.set_comp("direct", 0, save=False)
+        for _ in range(10):                      # a second of silence, switched off
+            used.process(bytes(FRAME))
+        tone.set_comp("direct", -30, save=False)
+        quiet = sinusoid(1000.0, 0.05, 0.2)
+        self.assertAlmostEqual(
+            gain_db(play(used, quiet),
+                    play(dsp._EffectProcessor("direct", with_tone=True), quiet)),
+            0.0, delta=1.0)
+
+    def test_the_level_row_is_the_makeup(self):
+        signal = sinusoid(1000.0, 0.3)
+        flat = self._through(signal)
+        tone.set_comp("direct", -24, save=False)
+        tone.set_ratio("direct", 4, save=False)
+        missing = -gain_db(self._through(signal), flat)
+        self.assertGreater(missing, 2.0)
+        tone.set_level("direct", int(round(missing)), save=False)
+        self.assertAlmostEqual(gain_db(self._through(signal), flat), 0.0,
+                               delta=1.0)
+
+    def test_a_compressor_switched_off_is_the_pedal_it_was(self):
+        tone.set_ratio("direct", 20)
+        tone.set_attack("direct", 1)
+        tone.set_release("direct", 1000)
+        signal = noise()
+        plain = _all_bytes(dsp._EffectProcessor("direct"), signal)
+        tuned = _all_bytes(dsp._EffectProcessor("direct", with_tone=True),
+                           signal)
+        self.assertEqual(plain, tuned)
+
+    def test_switching_it_off_is_ramped_rather_than_cut(self):
+        """A hard let-go would be a step; the frame it moves on is a slope."""
+        signal = sinusoid(1000.0, 0.3, 0.6)
+        # What one sample-to-sample step of this tone is with nothing done to
+        # it: the seam must not be larger than the waveform itself.
+        steady = max(abs(float(value)) for value in np.diff(
+            frames_of(dsp._EffectProcessor("direct", with_tone=True),
+                      signal)[-1]))
+        tone.set_comp("direct", -30, save=False)
+        tone.set_ratio("direct", 12, save=False)
+        tone.set_attack("direct", 1, save=False)
+        processor = dsp._EffectProcessor("direct", with_tone=True)
+        pcm = to_pcm(signal)
+        out = []
+        for index in range(len(pcm) // FRAME):
+            if index == 8:
+                tone.set_comp("direct", 0, save=False)
+            out.append(from_pcm(processor.process(
+                pcm[index * FRAME:(index + 1) * FRAME])))
+        seam = max(abs(float(out[index + 1][0] - out[index][-1]))
+                   for index in (7, 8, 9))
+        self.assertLessEqual(seam, steady * 1.1)
+
+    def test_the_meter_reports_how_far_it_pulled(self):
+        tone.report("direct", 0.1, 0.5, reduction=3.4, now=10.0)
+        self.assertAlmostEqual(tone.reduction("direct", now=10.5), 3.4)
+        said = tone.meter_spoken("direct", now=10.5).lower()
+        self.assertIn("the compressor pulled 3 decibels", said)
+        # A stale reading is not a reading, for the reduction as for the level.
+        self.assertEqual(tone.reduction("direct", now=30.0), 0.0)
+        # And half a decibel is not worth saying.
+        tone.report("direct", 0.1, 0.5, reduction=0.4, now=10.0)
+        self.assertNotIn("pulled", tone.meter_spoken("direct", now=10.5))
+
+    def test_only_a_threshold_counts_as_a_moved_strip(self):
+        tone.set_ratio("amp", 12, save=False)
+        tone.set_attack("amp", 1, save=False)
+        self.assertFalse(tone.has_tone("amp"))
+        tone.set_comp("amp", -18, save=False)
+        self.assertTrue(tone.has_tone("amp"))
+
+    def test_the_words_name_each_compressor_row(self):
+        self.assertEqual(tone.comp_spoken(0), "off, no compression")
+        self.assertEqual(tone.comp_spoken(-18),
+                         "compressing above minus 18 decibels")
+        self.assertEqual(tone.ratio_spoken(4), "four to one")
+        self.assertEqual(tone.ratio_spoken(12), "twelve to one")
+        self.assertEqual(tone.attack_spoken(3), "3 milliseconds")
+        self.assertEqual(tone.release_spoken(1000), "1000 milliseconds")
+        tone.set_comp("amp", -18, save=False)
+        self.assertIn("compression above minus 18 decibels at 4 to one",
+                      tone.description("amp"))
+        # The times are only worth saying when they are not what a voice wants
+        # anyway, which is why an untouched pair stays out of the sentence.
+        self.assertNotIn("attack", tone.description("amp"))
+        tone.set_attack("amp", 3, save=False)
+        self.assertIn("3 milliseconds of attack", tone.description("amp"))
+        tone.set_release("amp", 500, save=False)
+        self.assertIn("500 milliseconds of release", tone.description("amp"))
+
+
+# --------------------------------------------------------------- the whole strip
+
+class TheChannelStripSweepTests(ToneCase):
+    """Every row, every value, with a frame still running.
+
+    The cut's off branch raised `TypeError` on a live key press (2026-10-29)
+    and every test of the strip had rendered *before* the row changed, never
+    after it. This walks all thirteen rows at every value they offer, out of
+    what the preset opens with and back to it, and then the page's own keys
+    over the same ground: a row that cannot be reached, cannot be left, or
+    cannot be put back is a failure here rather than a crash in somebody's
+    ears.
+    """
+
+    #: Every value each row offers. The bands and the level are walked whole;
+    #: the ladders are already finite.
+    VALUES = {
+        "cut": tone.CUT_FREQS,
+        "low": tuple(range(-12, 13)),
+        "body": tuple(range(-12, 13)),
+        "presence": tuple(range(-12, 13)),
+        "air": tuple(range(-12, 13)),
+        "mix": tuple(range(0, 101, 5)),
+        "deess": tone.DEESS_AMOUNTS,
+        "highcut": tone.HIGH_CUT_FREQS,
+        "comp": tone.COMP_THRESHOLDS,
+        "ratio": tone.COMP_RATIOS,
+        "attack": tone.COMP_ATTACKS,
+        "release": tone.COMP_RELEASES,
+        "level": tuple(range(-12, 13)),
+    }
+
+    @staticmethod
+    def _frames():
+        """A quiet part and a loud part, so every block is asked to move."""
+        signal = np.concatenate([sinusoid(220.0, 0.01, 0.12),
+                                 sinusoid(220.0, 0.4, 0.12)])
+        pcm = to_pcm(signal)
+        return [pcm[start:start + FRAME]
+                for start in range(0, len(pcm) - FRAME + 1, FRAME)]
+
+    @staticmethod
+    def _render(processor, frames, count=1):
+        for index in range(count):
+            processor.process(frames[index % len(frames)])
+
+    def test_every_row_at_every_value_while_frames_run(self):
+        frames = self._frames()
+        for preset in ("direct", "fuzz", dsp.CUSTOM_EFFECT):
+            for row_id, values in self.VALUES.items():
+                with self.subTest(preset=preset, row=row_id):
+                    processor = dsp._EffectProcessor(preset, with_tone=True)
+                    self._render(processor, frames, 3)
+                    for value in values:
+                        self.assertIsNotNone(
+                            tone.set_row(preset, row_id, value, save=False))
+                        self._render(processor, frames)
+                    # ... and back, one value at a time and then in one press.
+                    for value in reversed(values):
+                        tone.set_row(preset, row_id, value, save=False)
+                        self._render(processor, frames)
+                    tone.set_row(preset, row_id, tone.default_of(row_id),
+                                 save=False)
+                    self._render(processor, frames, 2)
+                    tone.reset(preset, save=False)
+                    self._render(processor, frames, 2)
+
+    def test_every_row_reset_while_frames_run(self):
+        frames = self._frames()
+        for preset in ("direct", "radio", dsp.CUSTOM_EFFECT):
+            with self.subTest(preset=preset):
+                processor = dsp._EffectProcessor(preset, with_tone=True)
+                for row_id, values in self.VALUES.items():
+                    tone.set_row(preset, row_id, values[-1], save=False)
+                self._render(processor, frames, 2)
+                tone.reset(preset, save=False)
+                self._render(processor, frames, 2)
+
+    def test_the_page_can_walk_and_leave_every_row(self):
+        FakeMenu.built = []
+        mock.patch("libs.menu.Menu", FakeMenu).start()
+        mock.patch("libs.menus.set_default_sounds").start()
+        mock.patch.object(menus_module, "speak", side_effect=lambda text: None).start()
+        mock.patch("libs.options.save").start()
+        bot = make_bot()
+        handler = menus_module.MusicBotMenus(bot)
+        gp = bot._find_gameplay.return_value
+        handler._open_voice_tone_menu("amp")
+        slider = gp.substates[-1]
+        slider.enter()
+
+        def press(key, mod=0):
+            slider.update([pygame.event.Event(pygame.KEYDOWN, key=key,
+                                              mod=mod)])
+
+        for index, row_id in enumerate(tone.ROW_IDS):
+            with self.subTest(row=row_id):
+                while slider.current_index != index:
+                    press(pygame.K_TAB)
+                # Every arrow, past both ends of every row, then Home.
+                for key in (pygame.K_UP, pygame.K_PAGEUP,
+                            pygame.K_PAGEDOWN, pygame.K_DOWN):
+                    for _ in range(len(self.VALUES[row_id]) + 4):
+                        press(key)
+                press(pygame.K_HOME)
+                self.assertEqual(slider.values[row_id],
+                                 tone.default_of(row_id))
+                press(pygame.K_m)
+                self.assertFalse(slider._closed)
+        press(pygame.K_r)
+        press(pygame.K_RETURN)
+        self.assertTrue(slider._closed)
+        self.assertEqual(gp.substates, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

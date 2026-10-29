@@ -7,8 +7,9 @@ family's pedals. `_open_voice_builder_menu`, `_open_builder_recipes_menu`,
 points, its Clear question and the knob pages every board shares;
 `_open_vocoder_lab_menu` is the Vocoder Lab board, the Developer/Contributor
 carrier page at the end of that family. `_open_voice_tone_menu` and
-`_VoiceToneSlider` are the four tone bands one preset carries of its own
-(`voice_effects/tone.py`): a `state.State`, not a page, for the same reason
+`_VoiceToneSlider` are the channel strip one preset carries of its own -- the
+low cut, four bands, the mix and the level (`voice_effects/tone.py`): a
+`state.State`, not a page, for the same reason
 the Music Bot's own equalizer is one -- a slider is Tab, arrows and speech,
 not a list of steps.
 
@@ -31,10 +32,13 @@ from .settings import _speak
 
 #: What Tab says about the `Tone:` line, on every page that offers it.
 _TONE_NOTE = (
-    "Four tone bands for this one effect: Low for the chest and the room, "
+    "The channel strip for this one effect: Low Cut takes the rumble under "
+    "the voice, then four tone bands -- Low for the chest and the room, "
     "Body for the mud under the words, Presence for the clarity of the "
-    "words, Air for the breath on top. Each moves twelve decibels either "
-    "way, and Flat is the pedal exactly as it was made.")
+    "words, Air for the breath on top -- then De-ess for the spit on an s, "
+    "High Cut for where the top stops, Mix for how much of the effect is "
+    "heard, and Level for how loud it leaves. M speaks the level of the "
+    "last frame, and Flat is the pedal exactly as it was made.")
 
 
 class VoiceEffectMenus:
@@ -981,24 +985,32 @@ class VoiceEffectMenus:
 
 
 class _VoiceToneSlider(state.State):
-    """Four tone bands of one voice effect, as Tab, arrows and speech.
+    """The channel strip of one voice effect: thirteen rows, walked by Tab.
 
     The same keyboard shape as the Music Bot's own Bass/Mid/Treble slider
     (`_MusicBotEqSlider` in `menu_pages/settings.py`), because a player who has
-    set the song's EQ already knows this one: Tab walks the bands, Up and Down
-    move a decibel, Page Up and Down move six, Home puts the band under the
-    cursor back flat, `R` puts all four back, and Enter keeps them. Every press
-    is spoken, so the page is usable without seeing it -- which is the reason
-    the Music Bot's equalizer is a `state.State` and not a list of steps.
+    set the song's EQ already knows this one: Tab walks the rows, Up and Down
+    move the row, Page Up and Down move it further, Home puts the row back to
+    what the preset opens with, `R` puts the whole strip back, and Enter keeps
+    everything. `M` speaks the meter -- the level and peak of the last frame
+    that went through the effect -- because a fader nobody can see needs a
+    meter to be set against. Every press is spoken.
+
+    The rows are `tone.ROWS`, in the order a mixer would put them: the low cut
+    first, because it is what the bands see; the bands and the de-esser next,
+    because the de-esser is the answer to what presence and air bring out; the
+    high cut, which is where the top stops; then the mix and the compressor,
+    which are what the sound does once it has a shape; and the level last,
+    because it is the fader after all of it.
 
     **The working copy is the slider's own.** `values` is what the speech
     reads; `voice_effects.tone` is written on every move with
-    `autosave=False`, so the capture thread hears the band on the next frame
+    `autosave=False`, so the capture thread hears the row on the next frame
     while the settings file is written once, when the page closes. A page
     closed without a key press writes nothing at all.
 
     Closing pops only: the page underneath reads its labels live, so the
-    `Tone:` line it is revealed with already names the new value.
+    `Tone:` line it is revealed with already names the new strip.
     """
 
     def __init__(self, game, bot, preset):
@@ -1008,8 +1020,8 @@ class _VoiceToneSlider(state.State):
         self.bot = bot
         self.preset = preset
         self.name = voice_effects.effect_label(preset)
-        self.bands = tone.BANDS
-        self.values = tone.values(preset)
+        self.rows = tone.ROWS
+        self.values = tone.state(preset)
         self.current_index = 0
         self._closed = False
         self._touched = False
@@ -1017,12 +1029,17 @@ class _VoiceToneSlider(state.State):
     def enter(self):
         super().enter()
         _speak(
-            f"Tone for {self.name}. Tab switches the four bands: Low, the "
-            "chest and the room under the voice; Body, where a voice turns "
-            "muddy; Presence, the clarity of the words; Air, the breath on "
-            "top. Up and Down move one decibel, Page Up and Page Down six. "
-            "Home puts this band back flat, R puts all four back, Enter keeps "
-            "them.")
+            f"Channel strip for {self.name}. Tab switches the thirteen rows: "
+            "Low Cut, the rumble under the voice; Low, the chest and the "
+            "room; Body, where a voice turns muddy; Presence, the clarity "
+            "of the words; Air, the breath on top; De-ess, how much of the "
+            "s is taken off; High Cut, where the top stops; Mix, how much of "
+            "the effect you hear; Comp and Ratio, where the compressor starts "
+            "and how hard it leans; Attack and Release, how fast it moves; "
+            "and Level, how loud it leaves. Up and Down move a row, Page Up "
+            "and Page Down move it further. Home puts this row back, R puts "
+            "everything back, M speaks the level and the compression, "
+            "Enter keeps it.")
         self._announce_current()
 
     def update(self, events):
@@ -1034,7 +1051,7 @@ class _VoiceToneSlider(state.State):
             if key == pygame.K_TAB:
                 direction = -1 if event.mod & pygame.KMOD_SHIFT else 1
                 self.current_index = ((self.current_index + direction)
-                                      % len(self.bands))
+                                      % len(self.rows))
                 self._announce_current()
             elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE):
                 self._close_and_commit()
@@ -1048,37 +1065,72 @@ class _VoiceToneSlider(state.State):
             elif key == pygame.K_PAGEDOWN:
                 self._adjust(-6)
             elif key == pygame.K_HOME:
-                self._set_current(0)
+                self._default_current()
             elif key == pygame.K_r:
                 self._reset_all()
+            elif key == pygame.K_m:
+                self._speak_meter()
         return True
+
+    def _current(self):
+        """The row under the cursor: `(id, name, kind)`."""
+        return self.rows[self.current_index]
 
     def _announce_current(self):
         from ..voice_effects import tone
-        band_id, label, hz, _kind, _q, _note = self.bands[self.current_index]
-        _speak(f"{label}, {int(hz)} hertz. "
-               f"{tone.spoken(self.values[band_id])}.")
+        row_id, label, kind = self._current()
+        value = self.values[row_id]
+        if kind == "db":
+            _speak(f"{label}, {int(tone.band(row_id)[2])} hertz. "
+                   f"{tone.spoken(value)}.")
+            return
+        _speak(f"{label}. {tone.spoken_row(row_id, value)}.")
 
     def _adjust(self, amount):
-        band_id = self.bands[self.current_index][0]
-        self._set_current(self.values[band_id] + amount)
+        from ..voice_effects import tone
+        row_id, _label, kind = self._current()
+        value = self.values[row_id]
+        ladder = tone.LADDERS.get(kind)
+        if ladder is not None:
+            # A ladder is walked, not added to: the cut, the compressor's
+            # threshold, its ratio and its two times are choices, and Page Up
+            # is two choices rather than a bigger number.
+            stops = 2 if abs(amount) >= 6 else 1
+            index = ladder.index(value) if value in ladder else 0
+            index = max(0, min(len(ladder) - 1,
+                               index + (stops if amount > 0 else -stops)))
+            self._set_current(ladder[index])
+        elif kind == "mix":
+            step = tone.MIX_PAGE if abs(amount) >= 6 else tone.MIX_STEP
+            self._set_current(value + (step if amount > 0 else -step))
+        else:
+            self._set_current(value + amount)
 
     def _set_current(self, value):
         from ..voice_effects import tone
-        band_id = self.bands[self.current_index][0]
-        stored = tone.set_band(self.preset, band_id, value, save=False)
+        row_id = self._current()[0]
+        stored = tone.set_row(self.preset, row_id, value, save=False)
         if stored is None:
             return
-        self.values[band_id] = stored
+        self.values[row_id] = stored
         self._touched = True
-        _speak(tone.spoken(stored))
+        _speak(tone.spoken_row(row_id, stored))
+
+    def _default_current(self):
+        from ..voice_effects import tone
+        self._set_current(tone.default_of(self._current()[0]))
 
     def _reset_all(self):
         from ..voice_effects import tone
         tone.reset(self.preset, save=False)
-        self.values = {row[0]: 0 for row in self.bands}
+        self.values = tone.state(self.preset)
         self._touched = True
-        _speak("Every band flat: the effect is exactly as it was made again.")
+        _speak("Every row back flat: the effect is exactly as it was made "
+               "again.")
+
+    def _speak_meter(self):
+        from ..voice_effects import tone
+        _speak(tone.meter_spoken(self.preset))
 
     def _close_and_commit(self):
         if self._closed:
@@ -1087,11 +1139,12 @@ class _VoiceToneSlider(state.State):
         from ... import options
         from ..voice_effects import tone
         if self._touched:
-            # One write for the whole visit: a key press moves the band in
+            # One write for the whole visit: a key press moves the row in
             # memory (the capture thread reads it per frame), and the settings
             # file is encrypted and rewritten here instead of on every arrow.
             options.save()
         gp = self.bot._find_gameplay()
-        _speak(f"Tone for {self.name}: {tone.description(self.preset)}")
+        _speak(f"Channel strip for {self.name}: "
+               f"{tone.description(self.preset)}")
         if gp is not None:
             gp.pop_last_substate()
