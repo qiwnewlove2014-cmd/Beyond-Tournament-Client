@@ -63,7 +63,7 @@ def open_menu(game, gameplay=None, mode=MODE_PAN):
     if gp is None or game is None:
         return
     if not allowed(gp):
-        speak("Cinema panning is for technicians and contributors.")
+        speak("Cinema panning is for staff.")
         return
     if mode == MODE_TEST:
         _cabinets_menu(game, gp, None, None, MODE_TEST)
@@ -211,7 +211,7 @@ def _fire(game, gp, cabinet, direction):
     """
     def _send():
         if not allowed(gp):
-            speak("Cinema sound testing is for technicians and contributors.")
+            speak("Cinema sound testing is for staff.")
         elif cinema_sound_test.fire(game, gp, cabinet, direction):
             # What was *asked*, not what happened: the answers come back a
             # moment later and are spoken then (see ``note_result``), because

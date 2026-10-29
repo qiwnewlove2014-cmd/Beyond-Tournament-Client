@@ -2730,6 +2730,18 @@ class EventHandeler:
             return
         opener(None)
 
+    def cinema_speaker_list(self, data=None):
+        # The Server's Back callback from a speaker's element menu, opened from
+        # Alt + C. The list is the client's own (it resolves the speakers from
+        # this map), so the Server only invites it to reopen; the old list had
+        # already closed when its speaker was picked. Building it fresh also
+        # speaks the title, which is what a Back through the element menu used
+        # to leave silent.
+        opener = getattr(self.gameplay, "open_cinema_speaker_list", None)
+        if opener is None:
+            return
+        opener()
+
     def sound_engine_report(self, data):
         # The technician menu asked what the sound card's effect slots hold. The pool belongs to the
         # machine that listens -- the driver grants 64 auxiliary effect slots for the life of the process

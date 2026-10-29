@@ -644,7 +644,7 @@ class TheMenuTests(unittest.TestCase):
         with mock.patch.object(cinema_pan_menu, "speak") as spoke:
             cinema_pan_menu.open_menu(game, game.gameplay,
                                       cinema_pan_menu.MODE_TEST)
-        self.assertIn("technicians", spoke.call_args[0][0])
+        self.assertIn("for staff", spoke.call_args[0][0])
         self.assertEqual(game.network.sent, [])
 
 
@@ -671,7 +671,7 @@ class TheEntryPointsTests(unittest.TestCase):
         gp.can_use_cinema_pan = False
         with mock.patch.object(gameplay, "speak") as spoke:
             gp.open_cinema_test(None)
-        self.assertIn("technicians", spoke.call_args[0][0])
+        self.assertIn("for staff", spoke.call_args[0][0])
         gp.can_use_cinema_pan = True
         game = make_game()
         gp.game = game

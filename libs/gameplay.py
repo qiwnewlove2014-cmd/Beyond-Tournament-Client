@@ -1757,6 +1757,14 @@ class Gameplay(state.State):
 
     # stats
     def speak_location(self, mod):
+        if mod and mod & pygame.KMOD_ALT:
+            # Alt + the Speak Location key is the technicians' speaker list,
+            # the same chord shape Alt + V uses on the Speak Zone key: the
+            # map's cinema speakers, how many there are, where each one stands
+            # and -- on Enter -- that speaker's own edit menu, without walking
+            # Builder -> Edit Map Elements -> a speaker -> its coordinates.
+            self.open_cinema_speaker_list()
+            return
         target = self.camera.focus_object
         template = options.get(
             "location_template",
@@ -1816,6 +1824,19 @@ class Gameplay(state.State):
         zone_name = focus.map.get_zone_at(focus.x, focus.y, focus.z)
         speak(str(zone_name) if zone_name else "No zone")
 
+    def open_cinema_speaker_list(self, mod=None):
+        """Every staff rank: read and reach the map's cinema speakers.
+
+        Opened by ``Alt + C`` from the world. Tab reads a speaker's settings;
+        Enter asks the Server to open that speaker's own element menu, whose
+        rank, lock and game-in-progress checks still run. The list itself owns
+        no state; the Server's ``can_use_cinema_pan`` flag is the same staff
+        rule the pan and the cabinet sound test use, and the menu refuses
+        again here so a hand-built path cannot reveal it.
+        """
+        from . import cinema_speaker_menu
+        cinema_speaker_menu.open_menu(self.game, self)
+
     def open_voice_effect_menu(self, mod=None):
         """Open the Voice Effect page from the world, without the Music Bot hub.
 
@@ -1853,7 +1874,7 @@ class Gameplay(state.State):
             self.game.network.send(consts.CHANNEL_MENUS, "staff_menu_open", {})
 
     def open_cinema_pan(self, mod=None):
-        """Technicians and contributors: move a player's sound to a cabinet.
+        """Every staff rank: move a player's sound to a cabinet.
 
         Reached from the Builder/Technician menu, where the Server checks the permission
         (``can_use_cinema_pan``) before inviting this client -- and the menu refuses
@@ -1865,12 +1886,12 @@ class Gameplay(state.State):
         """
         from . import cinema_pan_menu
         if not cinema_pan_menu.allowed(self):
-            speak("Cinema panning is for technicians and contributors.")
+            speak("Cinema panning is for staff.")
             return
         cinema_pan_menu.open_menu(self.game, self)
 
     def open_cinema_test(self, mod=None):
-        """Technicians and contributors: fire one test note at a cabinet.
+        """Every staff rank: fire one test note at a cabinet.
 
         Opened the same way as the pan and gated by the *same* flag
         (``can_use_cinema_pan``): the two actions have one rank, and a second flag that
@@ -1882,7 +1903,7 @@ class Gameplay(state.State):
         """
         from . import cinema_pan_menu
         if not cinema_pan_menu.allowed(self):
-            speak("Cinema sound testing is for technicians and contributors.")
+            speak("Cinema sound testing is for staff.")
             return
         cinema_pan_menu.open_test_menu(self.game, self)
 
