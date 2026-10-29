@@ -992,7 +992,16 @@ class _VoiceToneSlider(state.State):
     set the song's EQ already knows this one: Tab walks the rows, Up and Down
     move the row, Page Up and Down move it further, Home puts the row back to
     what the preset opens with, `R` puts the whole strip back, and Enter keeps
-    everything. `M` speaks the meter -- the level and peak of the last frame
+    everything.
+
+    **Tab stops at the ends; it does not wrap.** Thirteen rows is enough that
+    the loop back from `Level` to `Low Cut` is read as the page losing the
+    place -- the last press of a walk and the first press of a walk sound the
+    same, and the row a player was about to set is now three rows away. So the
+    walk is a line with two ends: at the last row a Tab reads `Level` again,
+    and at the first row Shift+Tab reads `Low Cut` again. It still speaks, so
+    the press is never silent, and it still says where the end of the strip
+    is. `M` speaks the meter -- the level and peak of the last frame
     that went through the effect -- because a fader nobody can see needs a
     meter to be set against. Every press is spoken.
 
@@ -1037,9 +1046,10 @@ class _VoiceToneSlider(state.State):
             "the effect you hear; Comp and Ratio, where the compressor starts "
             "and how hard it leans; Attack and Release, how fast it moves; "
             "and Level, how loud it leaves. Up and Down move a row, Page Up "
-            "and Page Down move it further. Home puts this row back, R puts "
-            "everything back, M speaks the level and the compression, "
-            "Enter keeps it.")
+            "and Page Down move it further. Tab stops at the last row rather "
+            "than jumping back to the first, and Shift plus Tab the same at "
+            "the top. Home puts this row back, R puts everything back, M "
+            "speaks the level and the compression, Enter keeps it.")
         self._announce_current()
 
     def update(self, events):
@@ -1050,8 +1060,13 @@ class _VoiceToneSlider(state.State):
             key = event.key
             if key == pygame.K_TAB:
                 direction = -1 if event.mod & pygame.KMOD_SHIFT else 1
-                self.current_index = ((self.current_index + direction)
-                                      % len(self.rows))
+                moved = self.current_index + direction
+                # A line, not a ring: at an end the row under the cursor is
+                # read again rather than jumped to the other end. The silence
+                # an ignored press would leave is the one thing worse than the
+                # wrap, so the end row still speaks.
+                if 0 <= moved < len(self.rows):
+                    self.current_index = moved
                 self._announce_current()
             elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE):
                 self._close_and_commit()

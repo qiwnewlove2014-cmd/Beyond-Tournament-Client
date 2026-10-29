@@ -503,14 +503,43 @@ class TheToneSliderTests(ToneCase):
         self.assertEqual(tone.values("amp")["low"], 6)
         self._press(slider, pygame.K_HOME)
         self.assertEqual(tone.values("amp")["low"], 0)
-        # Shift+Tab walks backwards, wrapped: the cut is first, the level last.
+        # Shift+Tab walks backwards and stops at the cut: it does not wrap.
         self._press(slider, pygame.K_TAB, mod=pygame.KMOD_SHIFT)
         self.assertEqual(slider.current_index, 0)
         self._press(slider, pygame.K_TAB, mod=pygame.KMOD_SHIFT)
-        self.assertEqual(slider.current_index, len(tone.ROW_IDS) - 1)
+        self.assertEqual(slider.current_index, 0)
         said = " ".join(self.said).lower()
         self.assertIn("low", said)
         self.assertIn("flat", said)
+
+    def test_tab_stops_at_the_last_row_and_reads_it_again(self):
+        """Tab at the bottom keeps Level, and still speaks it.
+
+        A ring of thirteen rows sends the press after the last row back to
+        the cut, which is a player setting Level and finding themselves at
+        the bottom of the voice. The end row is read again instead, so the
+        press says where the walk stopped.
+        """
+        slider = self._open("amp")
+        last = len(tone.ROW_IDS) - 1
+        for _ in range(last):
+            self._press(slider, pygame.K_TAB)
+        self.assertEqual(slider.current_index, last)
+        self.assertEqual(slider._current()[0], "level")
+        self.said.clear()
+        for _ in range(4):
+            self._press(slider, pygame.K_TAB)
+            self.assertEqual(slider.current_index, last)
+        # Four presses at the end of the strip: four readings of Level, none
+        # of them the cut, and the page has not closed or moved a value.
+        self.assertEqual(len(self.said), 4)
+        for line in self.said:
+            self.assertTrue(line.lower().startswith("level"), line)
+        self.assertFalse(slider._closed)
+        self.assertFalse(slider._touched)
+        # And Shift+Tab from there walks back into the strip, not to the cut.
+        self._press(slider, pygame.K_TAB, mod=pygame.KMOD_SHIFT)
+        self.assertEqual(slider.current_index, last - 1)
 
     def test_the_band_is_clamped_and_the_page_keeps_working(self):
         slider = self._open("amp")
@@ -1456,8 +1485,9 @@ class TheChannelStripSweepTests(ToneCase):
 
         for index, row_id in enumerate(tone.ROW_IDS):
             with self.subTest(row=row_id):
-                while slider.current_index != index:
-                    press(pygame.K_TAB)
+                # The walk itself is pinned above; this sweep starts on the
+                # row directly, so it cannot depend on which way Tab faces.
+                slider.current_index = index
                 # Every arrow, past both ends of every row, then Home.
                 for key in (pygame.K_UP, pygame.K_PAGEUP,
                             pygame.K_PAGEDOWN, pygame.K_DOWN):

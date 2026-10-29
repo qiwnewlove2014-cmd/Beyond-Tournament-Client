@@ -89,8 +89,9 @@ How a player sets it
 The `Tone:` line on the Voice Effect page (and on each board's own page) opens
 `menu_pages.voice_effect._VoiceToneSlider`, which is one page of thirteen rows
 in the order a mixer would put them: Low Cut, Low, Body, Presence, Air,
-De-ess, High Cut, Mix, Comp, Ratio, Attack, Release, Level. Tab switches rows,
-Up and Down move the row, Page Up and Page Down move it further, Home puts the
+De-ess, High Cut, Mix, Comp, Ratio, Attack, Release, Level. Tab walks the
+rows and stops at both ends (it never wraps), Up and Down move the
+row, Page Up and Page Down move it further, Home puts the
 row back to what the preset opens with, `R` puts the whole strip back, `M`
 speaks the level of the last frame that went through and how far the
 compressor pulled it, and Enter keeps everything. It is the same keyboard
