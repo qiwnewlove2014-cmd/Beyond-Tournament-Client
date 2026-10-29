@@ -68,6 +68,11 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
 
     def __init__(self, bot):
         self._bot = bot          # back-reference to MapMusicBot
+        # True while the Voice Effect page was opened from the world (Alt+V)
+        # rather than from Music Bot Settings. Its Back then closes to the
+        # game; the pages under it (families, boards) re-open it with no
+        # answer and inherit the visit's own mode.
+        self._voice_effect_standalone = False
 
     def _say(self, text, **kwargs):
         """Speak a line through this module's `speak`, looked up at call time.
@@ -308,6 +313,9 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
         volume_up_key = friendly_key_name(
             self._bot.game.keyconfig.get("music_bot_vol_up", pygame.K_F10)
         )
+        voice_key = friendly_key_name(
+            self._bot.game.keyconfig.get("speak_zone", pygame.K_v)
+        )
 
         def say_tab_help():
             speak("Tab reads what the line you are standing on does. It works "
@@ -343,6 +351,10 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
              "private or broadcast."),
             (f"Alt + {toggle_key}: Toggle broadcast (Private/Public)", lambda: None, None,
              "Chooses whether other players hear the song or only you do."),
+            (f"Alt + {voice_key}: Voice Effect", lambda: None, None,
+             "Opens the Voice Effect page straight from the world, without "
+             "going through Music Bot Settings. Back closes it and returns "
+             "to the game."),
             ("Personal Music Feed: Ctrl left bracket for previous; Ctrl right bracket for next",
              lambda: None, None,
              "Moves through your shuffled Favorites feed without opening a "

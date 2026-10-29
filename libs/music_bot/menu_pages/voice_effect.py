@@ -44,7 +44,7 @@ _TONE_NOTE = (
 class VoiceEffectMenus:
     """The Voice Effect page, its families and the three boards."""
 
-    def _open_voice_effect_menu(self, group=None):
+    def _open_voice_effect_menu(self, group=None, standalone=None):
         """The pedals a player can put their broadcast voice through.
 
         Two levels: the families, then the pedals in one of them. A hundred
@@ -88,6 +88,13 @@ class VoiceEffectMenus:
         breath and mix -- exposed. It is Developer/Contributor-only, so the
         line is added only when the Server's snapshot allows it, and the board
         itself refuses to open without that answer.
+
+        `standalone` is the world's own door (Alt + the Speak Zone key, V by
+        default): the same page, with Back closing to the game instead of
+        walking back into Music Bot Settings. Passing None -- what a family,
+        a board or Pan Delay passes when it re-opens this page -- inherits the
+        visit's own mode; Settings passes False so its visit always ends where
+        it began.
         """
         from ... import menu as menu_mod, menus
         from .. import gate as music_bot_gate
@@ -102,6 +109,12 @@ class VoiceEffectMenus:
             return
         if music_bot_gate.blocked("voice_fx"):
             return
+        # The mode belongs to the visit, not to the player: the world's entry
+        # sets it, Settings clears it, and every page underneath inherits it
+        # rather than guessing from the page it came from.
+        if standalone is not None:
+            self._voice_effect_standalone = bool(standalone)
+        standalone_mode = self._voice_effect_standalone
 
         def current():
             return voice_effects.clamp_effect(
@@ -141,7 +154,8 @@ class VoiceEffectMenus:
 
         def go_back():
             gp.pop_last_substate()
-            self._open_settings_menu()
+            if not standalone_mode:
+                self._open_settings_menu()
 
         def go_to_groups():
             gp.pop_last_substate()
@@ -271,13 +285,17 @@ class VoiceEffectMenus:
         def open_tone():
             self._open_voice_tone_menu(current())
 
-        m = menu_mod.Menu(
-            self._bot.game,
-            f"Music Bot Voice Effect: {self._bot.voice_effect_label()}"
-            if group is None else
-            f"Music Bot Voice Effect: {voice_effects.group_label(group)}",
-            parrent=gp,
-        )
+        if standalone_mode:
+            title = (f"Voice Effect: {self._bot.voice_effect_label()}"
+                     if group is None else
+                     f"Voice Effect: {voice_effects.group_label(group)}")
+        else:
+            title = (f"Music Bot Voice Effect: "
+                     f"{self._bot.voice_effect_label()}"
+                     if group is None else
+                     f"Music Bot Voice Effect: "
+                     f"{voice_effects.group_label(group)}")
+        m = menu_mod.Menu(self._bot.game, title, parrent=gp)
         if group is None:
             items = [(make_label(voice_effects.DEFAULT_EFFECT),
                       pick(voice_effects.DEFAULT_EFFECT), None,
@@ -302,6 +320,8 @@ class VoiceEffectMenus:
                     items.append((make_builder_label(), go_builder, None,
                                   note_for(effect_id)))
             items.append(("Back", go_back, None,
+                          "Closes the page and returns to the game."
+                          if standalone_mode else
                           "Returns to Music Bot Settings."))
         else:
             # The board is in the family (so the top page can name it when it

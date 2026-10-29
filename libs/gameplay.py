@@ -1795,6 +1795,13 @@ class Gameplay(state.State):
 
 
     def speak_zone(self, mod):
+        if mod & pygame.KMOD_ALT:
+            # Alt + the Speak Zone key (V by default) is the Voice Effect
+            # page, straight from the world: the pedal belongs to the voice
+            # the key beside it broadcasts, and walking Music Bot -> Settings
+            # -> Voice Effect for every adjustment is the long way round.
+            self.open_voice_effect_menu()
+            return
         focus = self.camera.focus_object
         tp = focus.map.get_travel_point_at(focus.x, focus.y, focus.z)
         if tp:
@@ -1808,6 +1815,26 @@ class Gameplay(state.State):
             return
         zone_name = focus.map.get_zone_at(focus.x, focus.y, focus.z)
         speak(str(zone_name) if zone_name else "No zone")
+
+    def open_voice_effect_menu(self, mod=None):
+        """Open the Voice Effect page from the world, without the Music Bot hub.
+
+        The page is the Music Bot's own -- the pedals, Pan Delay, Custom Voice
+        and the tone strip (`voice_effects/tone.py`) -- but Back closes it
+        to the game, because this visit never came through Music Bot Settings.
+
+        The two checks are the ones the M key makes: the Server's rank answer
+        (`can_use_music_bot`) and the Developer's Voice Effect lock. A regular
+        player is silent, exactly as M is, because the Jukebox is their music;
+        a lock says so in the Server's own words (`gate.blocked`).
+        """
+        if not getattr(self, "music_bot", None):
+            return
+        if not self._can_use_music_bot():
+            return
+        if music_bot_gate.blocked("voice_fx"):
+            return
+        self.music_bot._open_voice_effect_menu(standalone=True)
 
     def speak_fps(self, mod):
         speak(f"{self.game.last_fps} FPS")

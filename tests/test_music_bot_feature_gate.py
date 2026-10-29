@@ -81,6 +81,9 @@ class FakeMusicBot:
     def has_last_track(self):
         return False
 
+    def _open_voice_effect_menu(self, standalone=False):
+        self.calls.append(("open_voice_effect", standalone))
+
 
 class GateStateTestCase(unittest.TestCase):
     """Every case starts and ends with an empty gate.
@@ -225,6 +228,43 @@ class KeyBindingTests(GateStateTestCase):
         self.assertTrue(gp._can_use_music_bot())
         gate.apply_locked({"bot": "Music Bot itself"})
         self.assertFalse(gp._can_use_music_bot())
+
+
+class VoiceEffectKeyTests(GateStateTestCase):
+    """Alt + the Speak Zone key is the Voice Effect page, from the world."""
+
+    def test_alt_v_opens_the_voice_effect_page(self):
+        gp = make_gp(is_staff=True)
+        gp.speak_zone(pygame.KMOD_ALT)
+        self.assertEqual(gp.music_bot.calls,
+                         [("open_voice_effect", True)])
+
+    def test_alt_v_is_silent_for_a_player_without_the_music_bot(self):
+        gp = make_gp()
+        gp.speak_zone(pygame.KMOD_ALT)
+        self.assertEqual(gp.music_bot.calls, [])
+
+    def test_alt_v_stops_when_voice_effects_are_locked(self):
+        gp = make_gp(is_staff=True)
+        gate.apply_locked({"voice_fx": "Voice effects"})
+        with mock.patch("libs.music_bot.gate.speak") as speak:
+            gp.speak_zone(pygame.KMOD_ALT)
+        self.assertEqual(gp.music_bot.calls, [])
+        self.assertIn("locked by staff", speak.call_args[0][0])
+
+    def test_plain_v_still_speaks_the_zone(self):
+        gp = make_gp(is_staff=True)
+        gp.camera = SimpleNamespace(focus_object=SimpleNamespace(
+            x=0, y=0, z=0,
+            map=SimpleNamespace(
+                get_travel_point_at=lambda *args: None,
+                get_zone_at=lambda *args: "Plaza",
+            ),
+        ))
+        with mock.patch("libs.gameplay.speak") as speak:
+            gp.speak_zone(0)
+        speak.assert_called_once_with("Plaza")
+        self.assertEqual(gp.music_bot.calls, [])
 
 
 class MenuTests(GateStateTestCase):

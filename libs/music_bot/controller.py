@@ -1523,8 +1523,8 @@ class MapMusicBot:
     def _open_harmony_menu(self):
         return self._menus()._open_harmony_menu()
 
-    def _open_voice_effect_menu(self):
-        return self._menus()._open_voice_effect_menu()
+    def _open_voice_effect_menu(self, standalone=False):
+        return self._menus()._open_voice_effect_menu(standalone=standalone)
 
     def _open_voice_tone_menu(self):
         return self._menus()._open_voice_tone_menu()

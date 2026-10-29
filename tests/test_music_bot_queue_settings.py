@@ -649,6 +649,16 @@ class TestTheMenuModule(unittest.TestCase):
         self.assertNotIn("menu_mod.Menu(", controller)
         self.assertTrue(all_menus.count("menu_mod.Menu(") >= 20)
 
+    def test_the_voice_effect_shim_hands_the_world_mode_to_the_page(self):
+        """Alt+V reaches the page through the bot's own one-line shim."""
+        bot = MapMusicBot.__new__(MapMusicBot)
+        seen = {}
+        bot._menus_handler = SimpleNamespace(
+            _open_voice_effect_menu=lambda group=None, standalone=None:
+            seen.update(group=group, standalone=standalone))
+        bot._open_voice_effect_menu(standalone=True)
+        self.assertEqual(seen, {"group": None, "standalone": True})
+
     def test_a_menu_never_passes_the_handler_where_the_bot_goes(self):
         _controller, _menus, all_menus, _ctree, mtree, page_trees = self._modules()
         for builder in self._builder_classes(mtree, page_trees):

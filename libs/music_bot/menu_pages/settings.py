@@ -188,7 +188,9 @@ class SettingsMenus:
 
         def go_voice_effect():
             gp.pop_last_substate()
-            self._open_voice_effect_menu()
+            # Settings' own visit ends in Settings, even when the last visit
+            # was the world's (Alt+V): the mode is per visit, not per player.
+            self._open_voice_effect_menu(standalone=False)
 
         # The dials are only in the list while the switch is on: off, they
         # change nothing a player can hear, and Auto-Tune lines that do nothing

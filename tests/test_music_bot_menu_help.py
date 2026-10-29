@@ -1176,6 +1176,13 @@ class TabSpeaksTheDescriptionTests(unittest.TestCase):
                                             mod=pygame.KMOD_NONE)])
         said = speak.call_args.args[0]
         self.assertIn("Tab reads what the line", said)
+        # Alt + the Speak Zone key opens the Voice Effect page from the world.
+        labels = [label_of(item) for item in menu.items]
+        voice = [item for item in menu.items
+                 if "Voice Effect" in label_of(item)]
+        self.assertTrue(voice, labels)
+        self.assertIn("Alt +", label_of(voice[0]))
+        self.assertTrue(voice[0][3], "the Voice Effect key needs a description")
 
 
 class BackAndEscapeLeaveOnePageTests(unittest.TestCase):
@@ -1320,6 +1327,39 @@ class BackAndEscapeLeaveOnePageTests(unittest.TestCase):
         labels = [label_of(item) for item in landed.items]
         self.assertTrue(any(label.startswith("Start From: ")
                             for label in labels), labels[:2])
+
+    def test_the_world_s_page_backs_out_to_the_world(self):
+        """Alt+V's page is the same page, with Back going home to the game."""
+        self.handler._open_voice_effect_menu(standalone=True)
+        page = self.stack[-1]
+        self.assertIn("Voice Effect", page.title)
+        self.assertNotIn("Music Bot", page.title)
+        self.press(page, "Back")
+        self.assertEqual(self.stack, [])
+
+    def test_a_board_under_the_world_s_page_keeps_its_way_home(self):
+        """A board's Back is the Voice Effect page, still in world mode."""
+        self.handler._open_voice_effect_menu(standalone=True)
+        self.press(self.stack[-1], "Custom Voice:")
+        board = self.stack[-1]
+        self.press(board, "Back")
+        landed = self.stack[-1]
+        self.assertIn("Voice Effect", landed.title)
+        self.assertNotIn("Music Bot", landed.title)
+        self.press(landed, "Back")
+        self.assertEqual(self.stack, [])
+
+    def test_a_settings_visit_keeps_its_own_back(self):
+        """The mode is per visit: Settings does not inherit the world's."""
+        self.handler._open_voice_effect_menu(standalone=True)
+        self.press(self.stack[-1], "Back")
+        self.assertEqual(self.stack, [])
+        self.handler._open_voice_effect_menu(standalone=False)
+        page = self.stack[-1]
+        self.assertIn("Music Bot Voice Effect", page.title)
+        self.handler._open_settings_menu = lambda: self.stack.append("settings")
+        self.press(page, "Back")
+        self.assertEqual(self.stack, ["settings"])
 
     def test_no_page_of_the_board_leaves_a_second_copy_of_itself(self):
         """Re-opening the page under a page is one page, not a growing pile."""
