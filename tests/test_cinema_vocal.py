@@ -70,6 +70,13 @@ class VocalFocusTests(unittest.TestCase):
         self.assertEqual(normalize("LEFT"), LEFT)
         self.assertEqual(VocalFocus("typo").mode, IN_SONG)
 
+    def test_the_cinema_package_exposes_the_cabinet_reader(self):
+        # The Music Bot imports this through the package, not the module. A
+        # reader that exists only in plugin.py is an import-time crash, which
+        # no byte-level DSP test below the package can see.
+        from libs.audio.cinema import cabinet_vocal
+        self.assertTrue(callable(cabinet_vocal))
+
 
 if __name__ == "__main__":
     unittest.main()
