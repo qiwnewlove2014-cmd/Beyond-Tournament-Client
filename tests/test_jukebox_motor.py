@@ -601,7 +601,8 @@ class CabinetSwitchMenuTests(unittest.TestCase):
         return game.gameplay.substates[-1]
 
     def labels(self, menu):
-        return [label() if callable(label) else label for label, _action in menu.items]
+        return [item[0]() if callable(item[0]) else item[0]
+                for item in menu.items]
 
     def test_a_dark_cabinet_offers_only_its_switch(self):
         from libs import jukebox
@@ -609,7 +610,8 @@ class CabinetSwitchMenuTests(unittest.TestCase):
         menu = self.menu(game, lambda g: jukebox.open_jukebox_switch_menu(g, gp, "cab1"))
         self.assertEqual(self.labels(menu), ["Turn on the cabinet", "Cancel"])
         with mock.patch("libs.jukebox.menu.speak"):
-            dict((label, action) for label, action in menu.items)["Turn on the cabinet"]()
+            next(item[1] for item in menu.items
+                 if item[0] == "Turn on the cabinet")()
         self.assertEqual(sent, [("jukebox_switch", {"id": "cab1", "on": True})])
 
     def test_staff_are_offered_the_way_off_at_the_end(self):
@@ -620,7 +622,7 @@ class CabinetSwitchMenuTests(unittest.TestCase):
         self.assertEqual(labels[-1], "Cancel")
         self.assertEqual(labels[-2], "Turn off the cabinet (Staff only)")
         with mock.patch("libs.jukebox.menu.speak"):
-            dict((label, action) for label, action in menu.items)[labels[-2]]()
+            next(item[1] for item in menu.items if item[0] == labels[-2])()
         self.assertEqual(sent, [("jukebox_switch", {"id": "cab1", "on": False})])
 
     def test_a_player_is_never_offered_the_way_off(self):

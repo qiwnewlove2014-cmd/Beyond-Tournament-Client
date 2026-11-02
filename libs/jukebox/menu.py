@@ -22,6 +22,11 @@ from .view import (_closest_jukebox, _current_state, _get_eq_values,
 from .widgets import _JukeboxScrubControl, _open_eq_menu, _open_volume_menu
 
 
+def _line(label, action, description):
+    """One cabinet menu line, with the explanation Tab reads for it."""
+    return (label, action, None, description)
+
+
 def open_jukebox_menu(game, gp):
     """Open the jukebox song-queue menu."""
     from .. import menu as menu_mod, menus
@@ -162,9 +167,20 @@ def open_jukebox_menu(game, gp):
     lock_now = _cabinet_cinema_lock(gp, jukebox_id)
 
     menu_items = [
-        ("Search YouTube and queue a song", go_search),
-        ("Queue by YouTube or Facebook URL or livestream", go_direct_url),
-        (lambda: _pause_menu_label(gp, jukebox_id), go_pause),
+        _line(
+            "Search YouTube and queue a song", go_search,
+            "Searches YouTube and lets you pick one result to add to this "
+            "cabinet's queue. It plays in turn and does not interrupt the "
+            "current song."),
+        _line(
+            "Queue by YouTube or Facebook URL or livestream", go_direct_url,
+            "Adds one YouTube or Facebook video, reel or livestream from a "
+            "link. A playlist link queues one song, not the whole list."),
+        _line(
+            lambda: _pause_menu_label(gp, jukebox_id), go_pause,
+            "Pauses or resumes the current song for everyone at this cabinet. "
+            "The Server owns the shared state, so every listener hears the "
+            "same pause."),
     ]
 
     # The scrub sits under Pause/Resume because that is what it is built on: reaching for an arrow
@@ -173,38 +189,84 @@ def open_jukebox_menu(game, gp):
     # and it is offered only when there is a needle to move.
     if _scrub_spot(gp, jukebox_id) is not None:
         scrub = _JukeboxScrubControl(game, gp, jukebox_id)
-        menu_items.append((scrub.label, scrub))
+        menu_items.append(_line(
+            scrub.label, scrub,
+            "Moves the current song's needle without restarting it. Left and "
+            "Right step 10 seconds, Shift 30 and Control 60; the cabinet "
+            "pauses while you scrub and plays on when you stop."))
 
     menu_items.extend([
-        ("Skip current song", go_skip),
-        ("Stop playback", go_stop),
-        (_repeat_label, go_repeat),
-        ("Shuffle queue", go_shuffle),
-        (_volume_label, go_volume),
-        ("View queue", go_queue),
-        ("Remove my queued song", go_remove),
+        _line(
+            "Skip current song", go_skip,
+            "Ends the current song and starts the next one in the queue for "
+            "everyone."),
+        _line(
+            "Stop playback", go_stop,
+            "Stops the current song for everyone. The waiting queue stays "
+            "where it is."),
+        _line(
+            _repeat_label, go_repeat,
+            "Changes the cabinet's repeat mode between off, repeat one and "
+            "repeat all. The Server stores it for every listener."),
+        _line(
+            "Shuffle queue", go_shuffle,
+            "Shuffles the waiting queue for everyone. The current song keeps "
+            "playing."),
+        _line(
+            _volume_label, go_volume,
+            "Changes this cabinet's own volume for everyone. It does not "
+            "change your game or voice volume."),
+        _line(
+            "View queue", go_queue,
+            "Lists the current song and every song waiting, with the name of "
+            "the person who requested it. It is read-only."),
+        _line(
+            "Remove my queued song", go_remove,
+            "Opens a list of the songs you queued so you can take one back. "
+            "You cannot remove somebody else's song."),
     ])
 
     if is_staff:
-        menu_items.append((_eq_label, go_eq))
-        menu_items.append(("Clear queue and stop (Staff only)", go_clear_all))
+        menu_items.append(_line(
+            _eq_label, go_eq,
+            "Opens the Bass, Mid and Treble sliders for this cabinet's sound "
+            "profile. Changes are previewed locally and saved to the Server "
+            "when you close the sliders."))
+        menu_items.append(_line(
+            "Clear queue and stop (Staff only)", go_clear_all,
+            "Removes every waiting song and stops the current one for "
+            "everyone. This is a staff action and cannot be undone."))
         # What this cabinet plays through, said at the cabinet itself - a *staff* read-out, like the
         # lines under it. A room is heard, and hearing it needs no account of its mode or plumbing.
-        menu_items.append((f"Cinema: {_cinema_mode_label(mode_now)}", go_cinema_status))
+        menu_items.append(_line(
+            f"Cinema: {_cinema_mode_label(mode_now)}", go_cinema_status,
+            "Reads what this cabinet is playing through, why its room is "
+            "shaped that way, and which of its speakers are silent."))
         # The cabinets around this one, read where a person is standing: two cabinets close enough to
         # share the speakers between them is the one thing a map does not show by itself. Staff's
         # because it names another element by its id.
         if nearby:
-            menu_items.append((nearby, lambda: speak(neighbour_note(game, jukebox_id))))
-        menu_items.append((f"Set cinema mode (now: {mode_now})", go_cinema_mode))
+            menu_items.append(_line(
+                nearby, lambda: speak(neighbour_note(game, jukebox_id)),
+                "Reads the nearest other cabinet, how far it is, and whether "
+                "its room overlaps this one's speakers."))
+        menu_items.append(_line(
+            f"Set cinema mode (now: {mode_now})", go_cinema_mode,
+            "Chooses how this cabinet uses the speakers around it: auto, off, "
+            "a named room shape, or exactly the speakers placed for it. The "
+            "choice is written into the map."))
         # How big this room is. It sits under the mode because it answers the
         # next question a staff member asks at a cabinet: the room is on, but
         # the speakers down the hall are silent -- are they mine?
-        menu_items.append((f"Set cinema reach (now: {_cabinet_cinema_reach(gp, jukebox_id):.0f} m)",
-                           go_cinema_reach))
-        menu_items.append((
+        menu_items.append(_line(
+            f"Set cinema reach (now: {_cabinet_cinema_reach(gp, jukebox_id):.0f} m)",
+            go_cinema_reach,
+            "Sets how far this cabinet's room reaches. A speaker beyond that "
+            "distance belongs to another room, and the cabinet is not heard "
+            "past it."))
+        menu_items.append(_line(
             f"Set vocal focus (now: {_cinema_vocal_label(_cabinet_cinema_vocal(gp, jukebox_id))})",
-            go_cinema_vocal, None,
+            go_cinema_vocal,
             "Moves the centre layer of the song to the left or right of this "
             "room. It is a centre extractor, not a stem separator: centre-panned "
             "instruments and the snare travel with the voice. In the song leaves "
@@ -215,17 +277,28 @@ def open_jukebox_menu(game, gp):
     if lock_now:
         owner, coded = lock_now
         if _may_lock_cinema_mode(gp) or owner == _own_name(gp):
-            menu_items.append((f"Manage cinema mode lock (owner: {owner})…",
-                               go_cinema_lock))
+            menu_items.append(_line(
+                f"Manage cinema mode lock (owner: {owner})…", go_cinema_lock,
+                "Opens the lock controls for this cabinet's cinema mode. A "
+                "code lets only people who know it re-tune the room."))
         elif coded:
-            menu_items.append((f"Cinema mode is locked by {owner} "
-                               "(the code opens one change)", speak_lock))
+            menu_items.append(_line(
+                f"Cinema mode is locked by {owner} "
+                "(the code opens one change)", speak_lock,
+                "Says who locked this cabinet's mode and that the code opens "
+                "one change. The room keeps playing exactly as it is."))
     elif _may_lock_cinema_mode(gp):
-        menu_items.append(("Lock cinema mode (set a code)…", go_cinema_lock))
+        menu_items.append(_line(
+            "Lock cinema mode (set a code)…", go_cinema_lock,
+            "Puts a code on this cabinet's cinema mode. The lock decides who "
+            "may re-tune it; it does not change how the room sounds."))
 
     # Last, beside the cinema lock: a listening choice for the person standing
     # here, not a setting of the cabinet (it takes nothing from anyone else).
-    menu_items.append((_voice_label, go_voice))
+    menu_items.append(_line(
+        _voice_label, go_voice,
+        "Turns the cabinet's spoken voice on or off for you alone. Other "
+        "listeners keep their own choice; this is not a cabinet setting."))
 
     # Staff may take the cabinet's own switch -- at the end, beside Cancel, like
     # the other lines that change the cabinet rather than listen to it. The map's
@@ -240,9 +313,14 @@ def open_jukebox_menu(game, gp):
                 network.send(consts.CHANNEL_MISC, "jukebox_switch",
                              {"id": jukebox_id, "on": False})
             speak("Switching the cabinet off.")
-        menu_items.append(("Turn off the cabinet (Staff only)", go_switch_off))
+        menu_items.append(_line(
+            "Turn off the cabinet (Staff only)", go_switch_off,
+            "Switches the cabinet's power off for everyone. The map still "
+            "supplies power; this closes the appliance and its queue."))
 
-    menu_items.append(("Cancel", go_cancel))
+    menu_items.append(_line(
+        "Cancel", go_cancel,
+        "Closes this menu without changing anything."))
 
     # The title says which thing this is: a plain cabinet, or one playing
     # through a room. Read once here (the menu's own ``Cinema:`` line stays a
@@ -277,8 +355,13 @@ def open_jukebox_switch_menu(game, gp, jukebox_id):
         speak("Turning the cabinet on.")
 
     menu_items = [
-        ("Turn on the cabinet", go_on),
-        ("Cancel", go_cancel),
+        _line(
+            "Turn on the cabinet", go_on,
+            "Switches this cabinet's power back on for everyone, so it can "
+            "play and accept songs again."),
+        _line(
+            "Cancel", go_cancel,
+            "Leaves the cabinet off and closes this screen."),
     ]
     m = menu_mod.Menu(game, "Music Jukebox", parrent=gp)
     m.add_items(menu_items)
@@ -456,8 +539,13 @@ def _show_results_menu(game, gp, jukebox_id, results):
         else:
             dur_str = "?"
         title = r.get("title", "Unknown")
-        items.append((f"{title} ({dur_str})", make_callback(i)))
-    items.append(("Cancel", lambda: gp.pop_last_substate()))
+        items.append(_line(
+            f"{title} ({dur_str})", make_callback(i),
+            "Adds this search result to the cabinet's queue. It plays in "
+            "turn; it does not interrupt the current song."))
+    items.append(_line(
+        "Cancel", lambda: gp.pop_last_substate(),
+        "Closes the results without adding a song."))
     m.add_items(items)
     menus.set_default_sounds(m)
     gp.add_substate(m)
@@ -545,25 +633,33 @@ def _view_queue(game, gp):
     m = menu_mod.Menu(game, "Jukebox Queue", parrent=gp)
     items = []
     repeat_names = {"off": "Off", "one": "Repeat one", "all": "Repeat all"}
-    items.append((
+    items.append(_line(
         f"Repeat mode: {repeat_names.get(jb_state.get('repeat') or 'off', 'Off')}",
         lambda: None,
-    ))
+        "Reads the cabinet's repeat setting. Use Toggle repeat mode on the "
+        "cabinet menu to change it."))
     if current:
-        items.append((
+        items.append(_line(
             f"Now playing: {current.get('title', 'Unknown')} "
             f"(requested by {current.get('queuedBy', '?')})",
             lambda: None,
-        ))
+            "Reads the song currently playing and who requested it. This "
+            "line is read-only."))
     if not queue:
-        items.append(("The queue is empty. Search YouTube to add a song.", lambda: None))
+        items.append(_line(
+            "The queue is empty. Search YouTube to add a song.", lambda: None,
+            "The queue is empty; use Search YouTube on the cabinet menu to "
+            "add a song."))
     for i, song in enumerate(queue):
-        items.append((
+        items.append(_line(
             f"{i + 1}. {song.get('title', 'Unknown')} "
             f"(requested by {song.get('queuedBy', '?')})",
             lambda: None,
-        ))
-    items.append(("Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))))
+            "Waits in the queue in play order; this line is read-only. The "
+            "requester's name is shown."))
+    items.append(_line(
+        "Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp)),
+        "Returns to the cabinet menu."))
     m.add_items(items)
     menus.set_default_sounds(m)
     gp.add_substate(m)
@@ -587,10 +683,17 @@ def _remove_my_song(game, gp):
     m = menu_mod.Menu(game, "Remove My Song", parrent=gp)
     items = []
     if not mine:
-        items.append(("You have no songs in the queue.", lambda: None))
+        items.append(_line(
+            "You have no songs in the queue.", lambda: None,
+            "You have no songs waiting in this cabinet's queue."))
     for i, song in mine:
-        items.append((song.get("title", "Unknown"), make_callback(i)))
-    items.append(("Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))))
+        items.append(_line(
+            song.get("title", "Unknown"), make_callback(i),
+            "Removes this song of yours from the queue. Other listeners' "
+            "songs stay."))
+    items.append(_line(
+        "Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp)),
+        "Returns to the cabinet menu without removing anything."))
     m.add_items(items)
     menus.set_default_sounds(m)
     gp.add_substate(m)

@@ -58,7 +58,8 @@ class FakeMenu:
         pass
 
     def labels(self):
-        return [label() if callable(label) else label for label, _action in self.items]
+        return [item[0]() if callable(item[0]) else item[0]
+                for item in self.items]
 
 
 def open_cabinet_menu(game):

@@ -366,7 +366,8 @@ class CabinetMenuTests(unittest.TestCase):
         return game.gameplay.substates[-1]
 
     def labels(self, menu):
-        return [label() if callable(label) else label for label, _action in menu.items]
+        return [item[0]() if callable(item[0]) else item[0]
+                for item in menu.items]
 
     def test_the_line_is_last_before_cancel_and_available_to_a_player(self):
         with mock.patch("libs.options.get", return_value=None):
@@ -388,8 +389,9 @@ class CabinetMenuTests(unittest.TestCase):
         with mock.patch("libs.options.get", return_value=True), \
                 mock.patch("libs.options.set") as saved, \
                 mock.patch("libs.jukebox.menu.speak") as spoken:
-            dict((label() if callable(label) else label, action) for label, action in menu.items)[
-                "Cabinet voice: ON (you hear the cabinet speak)"]()
+            next(item[1] for item in menu.items
+                 if (item[0]() if callable(item[0]) else item[0])
+                 == "Cabinet voice: ON (you hear the cabinet speak)")()
         saved.assert_called_once_with(voice.OPTION_ENABLED, False)
         self.assertTrue(group.destroyed)
         spoken.assert_called_once_with("The cabinets stay silent.")
@@ -401,8 +403,9 @@ class CabinetMenuTests(unittest.TestCase):
         with mock.patch("libs.options.get", return_value=False), \
                 mock.patch("libs.options.set") as saved, \
                 mock.patch("libs.jukebox.menu.speak") as spoken:
-            dict((label() if callable(label) else label, action) for label, action in menu.items)[
-                "Cabinet voice: OFF (cabinets stay silent)"]()
+            next(item[1] for item in menu.items
+                 if (item[0]() if callable(item[0]) else item[0])
+                 == "Cabinet voice: OFF (cabinets stay silent)")()
         saved.assert_called_once_with(voice.OPTION_ENABLED, True)
         spoken.assert_called_once_with("You hear the cabinet speak again.")
 

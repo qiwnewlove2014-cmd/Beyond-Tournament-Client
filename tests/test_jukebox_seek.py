@@ -200,8 +200,8 @@ class FakeMenu:
                              f"{[i[0]() if callable(i[0]) else i[0] for i in self.items]}")
 
     def labels(self):
-        return [label() if callable(label) else label
-                for label, _action in self.items]
+        return [item[0]() if callable(item[0]) else item[0]
+                for item in self.items]
 
 
 def open_menu(gp, game=None):

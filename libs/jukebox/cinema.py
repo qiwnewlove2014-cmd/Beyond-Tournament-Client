@@ -15,12 +15,19 @@ from ..audio.cinema.crossover import FULL_RANGE as CROSSOVER_FULL_RANGE
 from ..audio.cinema.crossover import band_edges, describe as crossover_band
 from ..audio.cinema.crossover import hz_label, mark_of
 from ..audio.cinema.vocal import (IN_SONG as VOCAL_IN_SONG,
+                                  LEFT as VOCAL_LEFT,
                                   LABELS as VOCAL_LABELS, MODES as VOCAL_MODES,
+                                  RIGHT as VOCAL_RIGHT,
                                   normalize as normalize_vocal)
 from ..speech import speak
 
 from .constants import CINEMA_PROFILES
 from .view import _current_state, _own_name
+
+
+def _line(label, action, description):
+    """One cinema menu line, with the explanation Tab reads for it."""
+    return (label, action, None, description)
 
 
 def _cabinet_cinema_lock(gp, jukebox_id):
@@ -64,6 +71,53 @@ CINEMA_REACHES = (
     (90, "Hall"),
     (140, "Wide stage or outdoor"),
 )
+
+
+_CINEMA_REACH_HELP = {
+    20: "A booth or very small room: only the nearest speakers belong to "
+        "this cabinet.",
+    60: "The default room size: a hall-sized listening area around the "
+        "cabinet.",
+    90: "A large hall: the back of the room still belongs to this cabinet.",
+    140: "A wide stage or outdoor area: the cabinet reaches the far edge "
+         "without taking another room's speakers.",
+}
+
+
+_CINEMA_MODE_HELP = {
+    CINEMA_AUTO: "Lets the speakers placed around this cabinet make the "
+                 "room. A cabinet nobody has tuned keeps this choice.",
+    CINEMA_OFF: "Keeps this cabinet's own stereo and ignores the speakers "
+                "around it. The room is not heard from this cabinet.",
+    CINEMA_CUSTOM: "Plays exactly the speakers placed for this cabinet, "
+                   "with no fallback ring. Speakers the shape does not use "
+                   "stay silent.",
+}
+
+
+_CINEMA_VOCAL_HELP = {
+    VOCAL_IN_SONG: "Leaves the song exactly as the cabinet received it. "
+                  "This is the off switch for vocal focus.",
+    VOCAL_LEFT: "Moves the song's centre layer to the left side of the "
+                "room. The left feed is unchanged; the right feed has the "
+                "filtered centre removed. Centre-panned instruments and the "
+                "snare travel too.",
+    VOCAL_RIGHT: "Moves the song's centre layer to the right side of the "
+                 "room. The right feed is unchanged; the left feed has the "
+                 "filtered centre removed. Centre-panned instruments and the "
+                 "snare travel too.",
+}
+
+
+def _cinema_mode_help(value):
+    """What Tab says about one mode line, including a profile's own shape."""
+    description = _CINEMA_MODE_HELP.get(
+        value,
+        f"Forces this cabinet to play the {value} room shape. The map's "
+        "speakers are used where they fit; missing roles come from the ring "
+        "behind the cabinet.")
+    return (description + " The Server writes the choice into the map, so "
+            "every listener hears the same room.")
 
 
 def _cinema_reach_label(reach):
@@ -353,13 +407,23 @@ def _open_cinema_mode_menu(game, gp, jukebox_id):
     from .menu import open_jukebox_menu
 
     current, choices = _cinema_mode_choices(game, gp, jukebox_id)
+    lock = _cabinet_cinema_lock(gp, jukebox_id)
+    needs_code = bool(lock) and not _may_lock_cinema_mode(gp) \
+        and lock[0] != _own_name(gp)
+    code_note = f" - needs {lock[0]}'s code" if needs_code else ""
 
     items = []
     for value, description in choices:
         label = f"{description}{' (now)' if value == current else ''}"
-        items.append((label, functools.partial(
-            _apply_cinema_mode, game, gp, jukebox_id, value)))
-    items.append(("Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))))
+        help_text = _cinema_mode_help(value)
+        if code_note:
+            help_text += (" This cabinet is locked, so applying this choice "
+                          "asks for the owner's code.")
+        items.append(_line(label, functools.partial(
+            _apply_cinema_mode, game, gp, jukebox_id, value), help_text))
+    items.append(_line(
+        "Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp)),
+        "Returns to the cabinet menu without changing the mode."))
 
     m = menu_mod.Menu(game, "Jukebox Cinema Mode", parrent=gp)
     m.add_items(items)
@@ -392,9 +456,16 @@ def _open_cinema_reach_menu(game, gp, jukebox_id):
         label = (f"{value} m - {description}"
                  f"{' (now)' if abs(current - value) < 0.5 else ''}"
                  f"{geometry}{code_note}")
-        items.append((label, functools.partial(
-            _apply_cinema_reach, game, gp, jukebox_id, value)))
-    items.append(("Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))))
+        help_text = _CINEMA_REACH_HELP.get(
+            value, f"Sets this cabinet's room to reach {value} metres.")
+        if code_note:
+            help_text += (" This cabinet is locked, so applying this choice "
+                          "asks for the owner's code.")
+        items.append(_line(label, functools.partial(
+            _apply_cinema_reach, game, gp, jukebox_id, value), help_text))
+    items.append(_line(
+        "Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp)),
+        "Returns to the cabinet menu without changing the reach."))
 
     m = menu_mod.Menu(game, "Jukebox Cinema Reach", parrent=gp)
     m.add_items(items)
@@ -439,9 +510,15 @@ def _open_cinema_vocal_menu(game, gp, jukebox_id):
         label = f"{_cinema_vocal_label(value)}{' (now)' if value == current else ''}"
         if code_note:
             label += code_note
-        items.append((label, functools.partial(
-            _apply_cinema_vocal, game, gp, jukebox_id, value)))
-    items.append(("Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))))
+        help_text = _CINEMA_VOCAL_HELP[value]
+        if code_note:
+            help_text += (" This cabinet is locked, so applying this choice "
+                          "asks for the owner's code.")
+        items.append(_line(label, functools.partial(
+            _apply_cinema_vocal, game, gp, jukebox_id, value), help_text))
+    items.append(_line(
+        "Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp)),
+        "Returns to the cabinet menu without changing the vocal focus."))
 
     m = menu_mod.Menu(game, "Jukebox Cinema Vocal", parrent=gp)
     m.add_items(items)

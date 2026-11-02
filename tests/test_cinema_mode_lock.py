@@ -181,7 +181,8 @@ class CabinetMenuTests(unittest.TestCase):
                 mock.patch("libs.menus.set_default_sounds"):
             jukebox.open_jukebox_menu(game, game.gameplay)
         menu = game.gameplay.substates[-1]
-        return [label() if callable(label) else label for label, _action in menu.items]
+        return [item[0]() if callable(item[0]) else item[0]
+                for item in menu.items]
 
     def test_a_developer_at_a_free_cabinet_is_offered_the_lock(self):
         game = make_game(state_with(), can_lock=True)

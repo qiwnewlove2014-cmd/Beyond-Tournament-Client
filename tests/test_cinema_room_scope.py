@@ -492,7 +492,8 @@ class TheCabinetsAroundACabinetTests(unittest.TestCase):
                 mock.patch("libs.menus.set_default_sounds"):
             jukebox.open_jukebox_menu(game, game.gameplay)
         menu = game.gameplay.substates[-1]
-        return [label() if callable(label) else label for label, _action in menu.items]
+        return [item[0]() if callable(item[0]) else item[0]
+                for item in menu.items]
 
     def test_a_lone_cabinet_says_nothing_about_neighbours(self):
         game, _map = build(speakers=pair(10.0, 26.0))
@@ -561,8 +562,9 @@ class TheCabinetsAroundACabinetTests(unittest.TestCase):
         game.gameplay.is_staff = True
         label = "Another cabinet at 40 m (j2)"
         self.assertIn(label, self.labels(game))
-        action = dict((label() if callable(label) else label, act)
-                      for label, act in game.gameplay.substates[-1].items)[label]
+        action = next(
+            item[1] for item in game.gameplay.substates[-1].items
+            if (item[0]() if callable(item[0]) else item[0]) == label)
         with mock.patch("libs.jukebox.menu.speak") as said:
             action()
         self.assertIn("shared out by distance", said.call_args.args[0])
@@ -753,7 +755,7 @@ class TheReachMenuKnowsTheRoomsGeometryTests(unittest.TestCase):
         with mock.patch("libs.menu.Menu", FakeMenu), \
                 mock.patch("libs.menus.set_default_sounds"):
             cinema._open_cinema_reach_menu(game, gp, "j1")
-        labels = {str(label)[:5]: str(label) for label, _call in opened[0].items}
+        labels = {str(item[0])[:5]: str(item[0]) for item in opened[0].items}
         # 20 m is the menu's first preset and it is below this room's own edge,
         # so its line says so; 60 m covers the room and its line stays short.
         self.assertIn("far end of this room is silent", labels["20 m "])
