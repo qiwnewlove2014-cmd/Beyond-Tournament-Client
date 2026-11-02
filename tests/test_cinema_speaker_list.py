@@ -7,8 +7,8 @@ than a second way to open the builder:
     * it counts what the map placed and names every speaker by role and
       coordinates -- never by its element id, which speech engines read out
       as a string of letters;
-    * Tab reads one speaker's room, level, delay, tone, crossover, aim and
-      position; Enter asks the Server to open that speaker's own element menu
+    * Tab reads one speaker's room assignment, level, delay, tone, crossover,
+      aim and position; Enter asks the Server to open that speaker's own element menu
       instead, so the list itself writes nothing;
     * it is opened by the chord and not by a new keyconfig row, because the
       file holds one key per action and no modifiers;
@@ -125,7 +125,7 @@ class ListTests(unittest.TestCase):
                                             mod=pygame.KMOD_NONE)])
         said = spoke.call_args.args[0]
         for expected in ("Speaker 2 of 2", "Channel rear_l",
-                         "Room j1", "Level 30 percent", "Delay 40 milliseconds",
+                         "Room assigned to j1", "Level 30 percent", "Delay 40 milliseconds",
                          "Tone 75 percent", "Crossover: below 120 Hz",
                          "Aim: omnidirectional", "At X 34, Y 51, Z 2"):
             self.assertIn(expected, said)
@@ -141,11 +141,20 @@ class ListTests(unittest.TestCase):
         }, 1, 10)
         self.assertEqual(
             said,
-            "Speaker 1 of 10. Channel side_l. Room none. Level 200 percent. "
-            "Delay 0 milliseconds. Tone 100 percent. Crossover: full range. "
-            "Aim: omnidirectional. At X 5, Y 50, Z 15.")
+            "Speaker 1 of 10. Channel side_l. Room unassigned (resolver chooses). "
+            "Level 200 percent. Delay 0 milliseconds. Tone 100 percent. "
+            "Crossover: full range. Aim: omnidirectional. At X 5, Y 50, Z 15.")
         self.assertNotIn("KyEQCFy5", said)
         self.assertNotIn("Element", said)
+
+    def test_an_assigned_room_is_spoken_exactly_as_the_map_stores_it(self):
+        said = cinema_speaker_menu.detail({
+            "channel": "front_l", "room": "Hall 2 / bS749DH2",
+            "level": 100, "delay_ms": 0, "tone": 100,
+            "crossover": 0, "crossover_high": 0,
+            "x": 0, "y": 0, "z": 0,
+        }, 1, 1)
+        self.assertIn("Room assigned to Hall 2 / bS749DH2.", said)
 
     def test_enter_opens_that_speakers_element_menu_on_the_server(self):
         self.build().items[1][1]()

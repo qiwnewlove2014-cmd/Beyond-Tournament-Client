@@ -83,13 +83,19 @@ def detail(speaker, index, total):
 
     The label carries what is needed while arrowing (which speaker, which
     role, where it stands); this is what Tab reads when the line *is* the one
-    being investigated -- its room, level, trim, voicing and crossover. The
-    element id is omitted for the same reason as the label: it is internal
-    plumbing, and a speech engine reads it as a string of letters.
+    being investigated -- its room assignment, level, trim, voicing and
+    crossover. The element id is omitted for the same reason as the label: it
+    is internal plumbing, and a speech engine reads it as a string of letters.
     """
     parts = [f"Speaker {index} of {total}.", f"Channel {_channel(speaker)}."]
+    # ``room`` is the map's own assignment label, not the cabinet's mode: an
+    # empty value leaves the cabinet choice to the resolver, and a value is
+    # spoken exactly as stored because ids differ between maps and servers.
     room = str(speaker.get("room") or "").strip()
-    parts.append(f"Room {room or 'none'}.")
+    if room:
+        parts.append(f"Room assigned to {room}.")
+    else:
+        parts.append("Room unassigned (resolver chooses).")
     parts.append(f"Level {_number(speaker.get('level', 100))} percent.")
     parts.append(f"Delay {_number(speaker.get('delay_ms', 0))} milliseconds.")
     parts.append(f"Tone {_number(speaker.get('tone', 100))} percent.")
