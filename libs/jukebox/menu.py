@@ -10,10 +10,11 @@ from ..media_links import is_facebook_url, is_supported_page_url, is_youtube_url
 from ..speech import speak
 
 from .cinema import (_cabinet_cinema_lock, _cabinet_cinema_mode,
-                     _cabinet_cinema_reach, _cabinet_title, _cinema_detail,
+                     _cabinet_cinema_reach, _cabinet_cinema_vocal,
+                     _cabinet_title, _cinema_detail, _cinema_vocal_label,
                      _cinema_mode_label, _may_lock_cinema_mode,
                      _open_cinema_lock_menu, _open_cinema_mode_menu,
-                     _open_cinema_reach_menu)
+                     _open_cinema_reach_menu, _open_cinema_vocal_menu)
 from . import voice
 from .view import (_closest_jukebox, _current_state, _get_eq_values,
                    _get_jukebox_volume, _get_repeat_mode, _own_name,
@@ -124,6 +125,10 @@ def open_jukebox_menu(game, gp):
         gp.pop_last_substate()
         _open_cinema_reach_menu(game, gp, jukebox_id)
 
+    def go_cinema_vocal():
+        gp.pop_last_substate()
+        _open_cinema_vocal_menu(game, gp, jukebox_id)
+
     def go_cinema_lock():
         gp.pop_last_substate()
         _open_cinema_lock_menu(game, gp, jukebox_id)
@@ -197,6 +202,13 @@ def open_jukebox_menu(game, gp):
         # the speakers down the hall are silent -- are they mine?
         menu_items.append((f"Set cinema reach (now: {_cabinet_cinema_reach(gp, jukebox_id):.0f} m)",
                            go_cinema_reach))
+        menu_items.append((
+            f"Set vocal focus (now: {_cinema_vocal_label(_cabinet_cinema_vocal(gp, jukebox_id))})",
+            go_cinema_vocal, None,
+            "Moves the centre layer of the song to the left or right of this "
+            "room. It is a centre extractor, not a stem separator: centre-panned "
+            "instruments and the snare travel with the voice. In the song leaves "
+            "the cabinet exactly as it was."))
     # A locked cabinet says who holds it and how to get in, and only the
     # accounts that may lock one get the line that manages it -- a menu line
     # that exists is a line that works (the Server answers the same rank).

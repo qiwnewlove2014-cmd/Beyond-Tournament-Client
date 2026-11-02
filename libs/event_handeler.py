@@ -3306,6 +3306,8 @@ class EventHandeler:
                 reach = box.get("cinema_reach", box.get("cinema_radius"))
                 if reach is not None:
                     player.set_local_cinema_reach(jid, reach)
+                if box.get("cinema_vocal") is not None:
+                    player.set_local_cinema_vocal(jid, box.get("cinema_vocal"))
                 if box.get("paused") or not box.get("current"):
                     self.game.put(lambda jid=jid: player.stop(jid))
         # The machinery. A cabinet switched on before this client arrived is a
@@ -3554,6 +3556,7 @@ class EventHandeler:
                 # the cabinet is the plain two-source jukebox, unchanged.
                 cinema_mode=data.get("cinema_mode"),
                 cinema_profile=data.get("cinema_profile"),
+                cinema_vocal=data.get("cinema_vocal"),
                 received_at=received_at,
             ))
 

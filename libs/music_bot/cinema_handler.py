@@ -38,6 +38,7 @@ from ..audio.cinema import (ROOM_REFERENCE_DISTANCE,
                             set_enabled as cinema_set_enabled,
                             set_live_instruments, set_rooms_enabled,
                             set_speech_enabled as set_cinema_speech,
+                            cabinet_vocal,
                             speech_enabled as cinema_speech_enabled)
 from ..audio.cinema import pan as cinema_pan
 from ..audio.cinema import peer as cinema_peer
@@ -524,6 +525,9 @@ class CinemaHandler:
             # The bot's own output answers to the Music slider, not the
             # Jukebox one: the room is only where it comes out.
             category="music",
+            # The centre layer is a property of the cabinet's room, so a bot
+            # feeding that room obeys the same setting as the cabinet's song.
+            vocal_mode=cabinet_vocal(self.game, self.cinema_target),
         )
         if bank is None:
             return None

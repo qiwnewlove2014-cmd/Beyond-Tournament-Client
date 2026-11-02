@@ -24,6 +24,7 @@ from .placement import (AUTO_PROFILE, CUSTOM_PROFILE, ROOM_RADIUS, RoomPlan,
                         room_profile)
 from .profiles import DEFAULT_PROFILE, get_profile
 from .router import CinemaRenderer, renderer_for
+from .vocal import IN_SONG as VOCAL_IN_SONG
 
 # Player preference. The per-cabinet decision is made by the map (the
 # jukebox element's cinema mode), so this is only a local override for the
@@ -389,6 +390,7 @@ class CinemaSpeakerHost:
         reverb_slot = options.pop("reverb_slot", None)
         eq_slot = options.pop("eq_slot", None)
         category = options.pop("category", None)
+        vocal_mode = options.pop("vocal_mode", VOCAL_IN_SONG)
         renderer = self.acquire(jukebox_id, anchor, **options)
         if renderer is None:
             return None
@@ -402,12 +404,14 @@ class CinemaSpeakerHost:
             bank.set_eq_slot(eq_slot)
             if category:
                 bank.category = str(category)
+            bank.set_vocal_mode(vocal_mode)
             return bank
         bank = CinemaSpeakerBank(
             self.game, renderer, volume=volume, cabinet_volume=cabinet_volume,
             reference_distance=reference_distance, max_distance=max_distance,
             occlusion_provider=occlusion_provider, reverb_slot=reverb_slot,
             eq_slot=eq_slot, category=category or DEFAULT_CATEGORY,
+            vocal_mode=vocal_mode,
         )
         self._banks[key] = bank
         return bank
@@ -677,6 +681,32 @@ def cabinet_reach(game, jukebox_id, default=None):
     if value < MIN_ROOM_REACH or value > MAX_ROOM_REACH:
         return fallback
     return value
+
+
+def cabinet_vocal(game, jukebox_id):
+    """The map's vocal-focus side for this cabinet, or the bypass.
+
+    The value travels with every play event and with the cabinet state.  The
+    player's cache is asked first because a play event updates it; the state
+    fallback is what lets a Music Bot room answer before its first cabinet
+    song has ever played.
+    """
+    player = getattr(_gameplay_or(game), "jukebox_player", None)
+    reader = getattr(player, "cinema_vocal", None)
+    value = None
+    if callable(reader):
+        try:
+            value = reader(jukebox_id)
+        except Exception:
+            value = None
+    if value is None:
+        state = getattr(_gameplay_or(game), "jukebox_state", None)
+        boxes = state.get("jukeboxes") if isinstance(state, dict) else None
+        box = (boxes or {}).get(str(jukebox_id))
+        if isinstance(box, dict):
+            value = box.get("cinema_vocal")
+    from .vocal import normalize
+    return normalize(value)
 
 
 def _state_reach(game, jukebox_id):

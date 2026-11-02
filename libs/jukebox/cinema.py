@@ -14,6 +14,9 @@ from ..audio.cinema import (CINEMA_AUTO, CINEMA_CUSTOM, CINEMA_OFF,
 from ..audio.cinema.crossover import FULL_RANGE as CROSSOVER_FULL_RANGE
 from ..audio.cinema.crossover import band_edges, describe as crossover_band
 from ..audio.cinema.crossover import hz_label, mark_of
+from ..audio.cinema.vocal import (IN_SONG as VOCAL_IN_SONG,
+                                  LABELS as VOCAL_LABELS, MODES as VOCAL_MODES,
+                                  normalize as normalize_vocal)
 from ..speech import speak
 
 from .constants import CINEMA_PROFILES
@@ -120,7 +123,25 @@ def _cinema_detail(game, gp, jukebox_id, mode=None):
     # It ends with the neighbours - two cabinets close enough to share speakers is exactly why a
     # speaker here can be somebody else's.
     return (_cinema_room_sentence(game, gp, jukebox_id, mode)
+            + _cinema_vocal_note(gp, jukebox_id)
             + neighbour_note(game, jukebox_id))
+
+
+def _cabinet_cinema_vocal(gp, jukebox_id):
+    """The map's centre-layer side for this cabinet, from the cached state."""
+    box = (_current_state(gp).get("jukeboxes", {}) or {}).get(jukebox_id) or {}
+    return normalize_vocal(box.get("cinema_vocal"))
+
+
+def _cinema_vocal_label(mode):
+    return VOCAL_LABELS[normalize_vocal(mode)]
+
+
+def _cinema_vocal_note(gp, jukebox_id):
+    mode = _cabinet_cinema_vocal(gp, jukebox_id)
+    if mode == VOCAL_IN_SONG:
+        return ""
+    return f" Vocal focus: {_cinema_vocal_label(mode).lower()}."
 
 
 def _cinema_room_sentence(game, gp, jukebox_id, mode=None):
@@ -399,6 +420,48 @@ def _apply_cinema_reach(game, gp, jukebox_id, reach):
     geometry = extent.note(reach, prefix=" ") if extent is not None else ""
     speak(f"Cinema reach {int(reach)} m ({_cinema_reach_label(reach)}). "
           "Re-shaping this cabinet's room." + geometry)
+
+
+def _open_cinema_vocal_menu(game, gp, jukebox_id):
+    # Staff menu: where the centre layer leans inside this room. It is a
+    # property of the room, not a listener's private preference, so it sits
+    # beside the mode and reach and is written into the map by the Server.
+    from .. import menu as menu_mod, menus
+    from .menu import open_jukebox_menu
+
+    current = _cabinet_cinema_vocal(gp, jukebox_id)
+    lock = _cabinet_cinema_lock(gp, jukebox_id)
+    needs_code = bool(lock) and not _may_lock_cinema_mode(gp) \
+        and lock[0] != _own_name(gp)
+    code_note = f" - needs {lock[0]}'s code" if needs_code else ""
+    items = []
+    for value in VOCAL_MODES:
+        label = f"{_cinema_vocal_label(value)}{' (now)' if value == current else ''}"
+        if code_note:
+            label += code_note
+        items.append((label, functools.partial(
+            _apply_cinema_vocal, game, gp, jukebox_id, value)))
+    items.append(("Back", lambda: (gp.pop_last_substate(), open_jukebox_menu(game, gp))))
+
+    m = menu_mod.Menu(game, "Jukebox Cinema Vocal", parrent=gp)
+    m.add_items(items)
+    menus.set_default_sounds(m)
+    gp.add_substate(m)
+
+
+def _apply_cinema_vocal(game, gp, jukebox_id, vocal):
+    """Ask the Server to move this cabinet's centre layer (it checks who may)."""
+    from .. import consts
+
+    gp.pop_last_substate()
+    game.network.send(consts.CHANNEL_MISC, "jukebox_cinema_vocal",
+                      {"id": jukebox_id, "vocal": vocal})
+    player = getattr(game, "gameplay", None)
+    jukebox_player = getattr(player, "jukebox_player", None)
+    if jukebox_player is not None:
+        jukebox_player.set_local_cinema_vocal(jukebox_id, vocal)
+    speak(f"Vocal focus: {_cinema_vocal_label(vocal)}. "
+          "The centre of the song leans that way; centre-panned instruments follow it.")
 
 
 def _open_cinema_lock_menu(game, gp, jukebox_id):

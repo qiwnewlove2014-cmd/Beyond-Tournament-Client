@@ -15,6 +15,8 @@ import time
 from ..audio.cinema import (CINEMA_AUTO, CINEMA_OFF, ROOM_REFERENCE_DISTANCE,
                             acquire_bank, cabinet_anchor, cinema_room,
                             detach_bank, release_renderer)
+from ..audio.cinema.vocal import IN_SONG as CINEMA_VOCAL_IN_SONG
+from ..audio.cinema.vocal import normalize as normalize_cinema_vocal
 from ..audio_diagnostics import probe as audio_probe
 from ..audio_health import probe as audio_health
 from ..deferred_log import log_deferred as log_line
@@ -103,6 +105,9 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
         # room takes speakers in and how far from a listener it is heard. One
         # number, two names -- see ``audio.cinema.plugin.cabinet_reach``.
         self._cinema_reaches = {}
+        # Each cabinet's centre-layer side, as last told by the Server. The
+        # default is the bypass that keeps a plain cabinet plain.
+        self._cinema_vocals = {}
         # Placement warnings already written to the log, per cabinet.
         self._cinema_warned = {}
         # When the playing rooms last re-resolved their shape (see
@@ -423,6 +428,7 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
             # the cache before the room is resolved: it decides which speakers
             # the room takes in, not only how far it is heard.
             self._cinema_reach(jukebox_id, kwargs)
+            vocal_mode = self._cinema_vocal(jukebox_id, kwargs)
             requested = None if mode == CINEMA_AUTO else mode
             plan = cinema_room(self.game, jukebox_id, (float(x), float(y), float(z)),
                                requested)
@@ -464,6 +470,7 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
                 occlusion_provider=self.occlusion_tier,
                 reverb_slot=keep.reverb_slot if keep is not None else None,
                 eq_slot=keep.eq_slot if keep is not None else None,
+                vocal_mode=vocal_mode,
             )
         except Exception as ex:
             from .. import logger
@@ -521,6 +528,26 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
         self._cinema_reaches[jukebox_id] = reach
         return reach
 
+    def cinema_vocal(self, jukebox_id):
+        """Where this cabinet's centre layer leans (bypass when unknown)."""
+        return self._cinema_vocals.get(str(jukebox_id), CINEMA_VOCAL_IN_SONG)
+
+    def set_local_cinema_vocal(self, jukebox_id, mode):
+        # The Server owns the value; this echo makes the menu answer before
+        # the round trip and lets the room update on the next re-offer.
+        self._cinema_vocals[str(jukebox_id)] = normalize_cinema_vocal(mode)
+
+    def _cinema_vocal(self, jukebox_id, kwargs=None):
+        # The value travels with every play event and with the cabinet state.
+        # An unrecognised value is the bypass rather than a guess: a cabinet
+        # whose setting nobody understands must behave like every other one.
+        kwargs = kwargs or {}
+        if "cinema_vocal" not in kwargs:
+            return self.cinema_vocal(jukebox_id)
+        mode = normalize_cinema_vocal(kwargs.get("cinema_vocal"))
+        self._cinema_vocals[str(jukebox_id)] = mode
+        return mode
+
     def _cinema_mode(self, jukebox_id, kwargs=None):
         # What the map says this cabinet plays through, right now. The mode arrives with every
         # play event (and with the cabinet state, so a menu can read it with nothing playing).
@@ -562,7 +589,8 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
                 # last time: a cabinet that only ever had a map room must not be handed a synthetic ring
                 # because its speakers were deleted mid-song. The mode is the one this output was BUILT with.
                 options = {"cinema_mode": running_mode or self.cinema_mode(jukebox_id),
-                           "cinema_reach": self.cinema_reach(jukebox_id)}
+                           "cinema_reach": self.cinema_reach(jukebox_id),
+                           "cinema_vocal": self.cinema_vocal(jukebox_id)}
                 bank = self._acquire_cinema(
                     jukebox_id, anchor[0], anchor[1], anchor[2],
                     self.volume, options, keep=expected,
@@ -600,6 +628,9 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
             return False
         mode = self._cinema_mode(jukebox_id, kwargs)
         self._cinema_reach(jukebox_id, kwargs)
+        self._cinema_vocal(jukebox_id, kwargs)
+        with self._lock:
+            entry["cinema_vocal"] = self.cinema_vocal(jukebox_id)
         try:
             pending = entry.get("cinema_pending")
             running = entry.get("cinema")
@@ -932,7 +963,12 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
                 and existing.get("cinema_mode")
                 != self._cinema_mode(jukebox_id, _kwargs)
             )
-            if (mode_changed and existing is not None
+            vocal_changed = (
+                existing is not None
+                and existing.get("cinema_vocal")
+                != self._cinema_vocal(jukebox_id, _kwargs)
+            )
+            if ((mode_changed or vocal_changed) and existing is not None
                     and existing.get("playback_key") == playback_key
                     and existing.get("transport") == transport
                     and same_relay_identity):
@@ -942,7 +978,7 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
                 and existing.get("playback_key") == playback_key
                 and existing.get("transport") == transport
                 and same_relay_identity
-                and not mode_changed
+                and not (mode_changed or vocal_changed)
             ):
                 # Idempotent even while yt-dlp/ffmpeg is still resolving. Two map
                 # sync routes must never cancel the same in-flight playback.
@@ -1205,6 +1241,7 @@ class JukeboxPlayer(RecoveryWatchdog, RelayRoutes):
                 # song that carries a different mode is a request to re-tune,
                 # not seamless continuity.
                 "cinema_mode": self.cinema_mode(jukebox_id),
+                "cinema_vocal": self.cinema_vocal(jukebox_id),
                 "streamer": streamer,
                 "title": title,
                 "url": url,

@@ -25,6 +25,7 @@ from .crossover import crossover_hz, mark_of
 from .layout import ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE
 from .listener import (distance_gain, occlusion_filter, restore_filter,
                        speaker_aim_gain, speaker_filter)
+from .vocal import IN_SONG as VOCAL_IN_SONG, VocalFocus
 
 # One pool per speaker (BUFFERS_PER_SLOT 16): 10 = the deepest relay queue, 4 = a pump's
 # un-reclaimed frames, 2 slack, plus a trimmed speaker's whole-frame hold (100 ms = five
@@ -98,6 +99,7 @@ class CinemaSpeakerBank:
                  max_distance=ROOM_MAX_DISTANCE,
                  occlusion_provider=None, reverb_slot=None, eq_slot=None,
                  category=DEFAULT_CATEGORY, duck=1.0,
+                 vocal_mode=VOCAL_IN_SONG,
                  buffers_per_slot=None, clock=None):
         self.game = game
         self.renderer = renderer
@@ -109,6 +111,9 @@ class CinemaSpeakerBank:
         # is applied per frame by update_output() because a room has no single
         # source anyone could set a gain on.
         self.duck = float(duck)
+        # The centre layer's own state belongs to this room: the biquads run
+        # across frame boundaries, so a new bank (or a new song) starts clean.
+        self.vocal = VocalFocus(vocal_mode)
         self.volume = max(0, min(100, int(volume)))
         self.cabinet_volume = max(0.0, min(1.0, float(cabinet_volume) / 100.0))
         self.reference_distance = float(reference_distance)
@@ -330,6 +335,12 @@ class CinemaSpeakerBank:
         # skipped rather than fed, so it rejoins on the live frame instead of a growing backlog.
         if self._stopped or not self.slot_sources:
             return False
+        # The default is a true bypass: a cabinet nobody set to Vocal focus
+        # hands the room the same bytes it always did.  Only an active mode
+        # pays for the centre extraction, and the transformed pair is what
+        # every speaker's history holds, so a speaker that joins late hears
+        # the same side as the ones already playing.
+        left, right = self.vocal.apply(left, right)
         targets = set(self._feed_slots())
         programmes = self._programme(left, right, targets)
         # The frame itself travels with the feeds: every group is a window cut
@@ -383,6 +394,15 @@ class CinemaSpeakerBank:
                     pool.append(buffer)
             self._reset_output()
             return False
+
+    @property
+    def vocal_mode(self):
+        return self.vocal.mode
+
+    @_serialized
+    def set_vocal_mode(self, mode):
+        """Change the centre-layer side without rebuilding the room."""
+        return self.vocal.set_mode(mode)
 
     @_serialized
     def reclaim(self, *, drain_stopped=False):
