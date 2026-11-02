@@ -6,6 +6,7 @@ sliders, scrub, the Party Sync requests and My Song all branch from here."""
 import threading
 
 from ..audio.cinema import neighbour_line, neighbour_note
+from ..media_links import is_facebook_url, is_supported_page_url, is_youtube_url
 from ..speech import speak
 
 from .cinema import (_cabinet_cinema_lock, _cabinet_cinema_mode,
@@ -157,7 +158,7 @@ def open_jukebox_menu(game, gp):
 
     menu_items = [
         ("Search YouTube and queue a song", go_search),
-        ("Queue by YouTube URL or livestream", go_direct_url),
+        ("Queue by YouTube or Facebook URL or livestream", go_direct_url),
         (lambda: _pause_menu_label(gp, jukebox_id), go_pause),
     ]
 
@@ -297,7 +298,7 @@ def _on_search_submit(game, gp, jukebox_id, query):
 
 def _open_url_input(game, gp, jukebox_id):
     gp.add_substate(game.input.run(
-        "Enter YouTube video URL (or paste a livestream link):",
+        "Enter a YouTube or Facebook video URL (or paste a livestream link):",
         handeler=lambda url: _on_url_submit(game, gp, jukebox_id, url),
     ))
 
@@ -308,22 +309,19 @@ def _on_url_submit(game, gp, jukebox_id, raw_url):
     if not url:
         speak("Cancelled.")
         return
-    # The jukebox streams through the server's YouTube relay, so only YouTube links are
-    # supported. Other yt-dlp sites would resolve here and then be mangled into a bogus
-    # youtube.com/watch?v=<foreign-id> queue entry that can never play.
-    if url and not url.startswith(("http://", "https://")):
+    # The jukebox streams through the server's relay, so the page must be one
+    # the relay accepts: YouTube, or a Facebook video, reel or live. A foreign
+    # yt-dlp site would resolve here and then become a queue entry the relay
+    # cannot play.
+    if not url.lower().startswith(("http://", "https://")):
         # Be kind to links pasted without a scheme.
         url = "https://" + url
-    try:
-        from urllib.parse import urlparse
-        host = (urlparse(url).hostname or "").lower()
-    except Exception:
-        host = ""
-    if not url.startswith(("http://", "https://")) or not (
-            host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"):
-        speak("Only YouTube links are supported on the jukebox.")
+    if url.lower().startswith("http://"):
+        url = "https://" + url[len("http://"):]
+    if not is_supported_page_url(url):
+        speak("Only YouTube and Facebook links are supported on the jukebox.")
         return
-    speak("Loading YouTube song info...")
+    speak("Loading song info...")
 
     def do_fetch():
         try:
@@ -348,11 +346,23 @@ def _on_url_submit(game, gp, jukebox_id, raw_url):
                 if not entries:
                     raise ValueError("empty playlist")
                 info = entries[0]
-            title = info.get('title', 'YouTube Audio')
-            duration = int(info.get('duration') or 300)
+            is_live = bool(info.get('is_live')) or info.get('live_status') == 'is_live'
+            if is_live:
+                title = info.get('title') or 'Live audio'
+                duration = 0
+            else:
+                title = info.get('title') or (
+                    'Facebook video' if is_facebook_url(url) else 'YouTube Audio'
+                )
+                duration = int(info.get('duration') or 300)
             webpage_url = info.get('webpage_url') or ""
-            if not _is_canonical_youtube(webpage_url) and info.get('id'):
-                webpage_url = f"https://www.youtube.com/watch?v={info['id']}"
+            # A Facebook page is its own canonical URL; never invent a
+            # youtube.com/watch?v=<foreign-id> entry the relay cannot play.
+            if not _is_canonical_page(webpage_url):
+                if is_youtube_url(url) and info.get('id'):
+                    webpage_url = f"https://www.youtube.com/watch?v={info['id']}"
+                elif is_facebook_url(url):
+                    webpage_url = url
             if not webpage_url:
                 webpage_url = url
 
@@ -363,7 +373,7 @@ def _on_url_submit(game, gp, jukebox_id, raw_url):
         except Exception as ex:
             from .. import logger
             logger.log_exception(ex, "Jukebox direct URL load")
-            game.put(lambda: speak("Could not load YouTube URL. Please check the link."))
+            game.put(lambda: speak("Could not load that link. Please check it."))
 
     threading.Thread(target=do_fetch, daemon=True).start()
 
@@ -441,16 +451,9 @@ def _show_results_menu(game, gp, jukebox_id, results):
     gp.add_substate(m)
 
 
-def _is_canonical_youtube(url):
-    """True when the URL is a stable https youtube.com / youtu.be page URL."""
-    try:
-        from urllib.parse import urlparse
-        host = urlparse(url).hostname or ""
-        return (url or "").startswith("https://") and (
-            host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"
-        )
-    except Exception:
-        return False
+def _is_canonical_page(url):
+    """True when the URL is a stable https YouTube or Facebook page."""
+    return is_supported_page_url(url)
 
 
 def _queue_song(game, gp, jukebox_id, title, url, duration):
@@ -477,7 +480,7 @@ def _pick_song(game, gp, jukebox_id, result):
     url = result.get("webpage_url") or ""
     if not url and result.get("id"):
         url = f"https://www.youtube.com/watch?v={result['id']}"
-    if not url and _is_canonical_youtube(result.get("url", "")):
+    if not url and _is_canonical_page(result.get("url", "")):
         url = result.get("url")
     if url:
         _queue_song(game, gp, jukebox_id, title, url, duration)
@@ -505,7 +508,7 @@ def _pick_song(game, gp, jukebox_id, result):
                 if info:
                     vid = info.get('id') or ""
                     wp = info.get('webpage_url') or ""
-                    if wp and _is_canonical_youtube(wp):
+                    if wp and _is_canonical_page(wp):
                         canonical = wp
                     elif vid:
                         canonical = f"https://www.youtube.com/watch?v={vid}"

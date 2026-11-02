@@ -50,12 +50,22 @@ class MusicDownloaderTests(unittest.TestCase):
         self.manager = MusicDownloadManager(self.game, lambda: None, "C:/game/ffmpeg.exe")
         self.manager._progress_bar = Mock()
 
-    def test_only_https_youtube_pages_are_accepted(self):
+    def test_only_https_youtube_and_facebook_pages_are_accepted(self):
         self.assertTrue(is_supported_music_url("https://youtu.be/abc"))
         self.assertTrue(is_supported_music_url("https://music.youtube.com/playlist?list=abc"))
         for value in (
-            "http://youtube.com/watch?v=abc", "file:///song.mp3",
+            "https://www.facebook.com/watch/?v=123",
+            "https://m.facebook.com/reel/123",
+            "https://www.facebook.com/page/videos/123",
+            "https://www.facebook.com/page/live",
+            "https://fb.watch/abc/",
+        ):
+            self.assertTrue(is_supported_music_url(value), value)
+        for value in (
+            "http://youtube.com/watch?v=abc", "http://facebook.com/watch/?v=123",
+            "file:///song.mp3",
             "https://example.com/song", "https://youtube.com@example.com/song",
+            "https://facebook.com.evil.invalid/watch/?v=123",
         ):
             self.assertFalse(is_supported_music_url(value), value)
 

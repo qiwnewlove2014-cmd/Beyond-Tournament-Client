@@ -165,10 +165,10 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
              "play-next queue while Queue Mode is on."),
             # Right beside the search: staff who already hold the link should not
             # have to search for the song they are looking at.
-            ("search", "Play a YouTube link", go_link,
+            ("search", "Play a YouTube or Facebook link", go_link,
              "Plays a link you already have instead of searching for it: a "
-             "youtube.com or youtu.be address, from a chat message or a "
-             "browser. Every other site is refused."),
+             "YouTube or Facebook address (a video, a reel or a live), from a "
+             "chat message or a browser. Every other site is refused."),
             ("search", "Choose Local File", go_local,
              "Plays a song file already on this computer, through the same "
              "speakers, key and equalizer this bot uses for YouTube."),

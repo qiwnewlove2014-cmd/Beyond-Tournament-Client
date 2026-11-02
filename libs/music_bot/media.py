@@ -6,6 +6,7 @@ import os
 import sys
 
 from .. import logger
+from ..media_links import is_facebook_url, is_supported_page_url
 from ..speech import speak
 
 
@@ -164,12 +165,13 @@ class YouTubeSearcher:
 
     @staticmethod
     def read_link(url):
-        """Read one pasted YouTube link: its title, length and canonical page.
+        """Read one pasted YouTube or Facebook link: title, length, page.
 
         The Music Bot's "Play a YouTube link" line needs what a search result
         already carries, without the search: a pasted link may be a watch page, a
-        youtu.be short link or a livestream, and the caller then resolves the
-        *stream* from the canonical page exactly as a picked result does. Flat
+        youtu.be short link, a Facebook video, reel or live, and the caller then
+        resolves the *stream* from the canonical page exactly as a picked result
+        does. Flat
         extraction is deliberate: the page's own metadata is one request, and no
         signed media URL is taken from here to expire before it is played.
         Returns None when the link cannot be read (a dead video, yt-dlp missing).
@@ -203,17 +205,32 @@ class YouTubeSearcher:
                 return None
             video_id = info.get('id') or ''
             webpage_url = info.get('webpage_url') or ""
-            if not webpage_url and video_id:
+            if not webpage_url and video_id and not is_facebook_url(url):
                 webpage_url = f"https://www.youtube.com/watch?v={video_id}"
             if not webpage_url and _is_youtube_watch_url(info.get('url', '')):
                 webpage_url = info.get('url')
-            if not webpage_url:
+            # Facebook names the page itself: a watch page, a /videos/ page, a
+            # reel or a live. yt-dlp usually returns it; when it does not, the
+            # pasted page is the stable one, never a YouTube id for a foreign
+            # video (which the relay would try to play and never could).
+            if not webpage_url and is_facebook_url(url):
+                webpage_url = url
+            if not webpage_url or not is_supported_page_url(webpage_url):
                 return None
-            return {
-                'title': info.get('title') or 'YouTube Audio',
+            result = {
+                'title': info.get('title') or (
+                    'Facebook video' if is_facebook_url(url) else 'YouTube Audio'
+                ),
                 'duration': int(info.get('duration') or 0),
                 'webpage_url': webpage_url,
             }
+            # A live page has no length to schedule a crossfade against, and a
+            # guessed one would end the stream early; the bot plays it until it
+            # ends or the player stops it.
+            if info.get('is_live') or info.get('live_status') == 'is_live':
+                result['is_live'] = True
+                result['duration'] = 0
+            return result
         except Exception as ex:
             logger.log_exception(ex, "YouTubeSearcher.read_link")
             return None

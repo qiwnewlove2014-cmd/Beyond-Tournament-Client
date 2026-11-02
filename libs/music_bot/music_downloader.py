@@ -15,12 +15,12 @@ import os
 import queue
 import threading
 import time
-from urllib.parse import urlparse
 
 from .. import folder_dialog
 from .. import logger
 from .. import options
 from ..accessible_progress import AccessibleProgressBar
+from ..media_links import is_supported_page_url
 from ..speech import speak
 
 
@@ -58,17 +58,8 @@ _PRELOAD_STARTED = threading.Event()
 
 
 def is_supported_music_url(value):
-    """Accept only normal HTTPS YouTube pages used by the current Music Bot."""
-    try:
-        parsed = urlparse(str(value).strip())
-        host = (parsed.hostname or "").lower()
-        return parsed.scheme == "https" and (
-            host == "youtube.com"
-            or host.endswith(".youtube.com")
-            or host == "youtu.be"
-        )
-    except Exception:
-        return False
+    """Accept the normal HTTPS YouTube and Facebook pages the bot can read."""
+    return is_supported_page_url(value)
 
 
 def _preload_download_backend():

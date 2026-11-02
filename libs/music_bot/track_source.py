@@ -133,7 +133,7 @@ class TrackSourceHandler:
             ))
 
     def _open_link_input(self):
-        """Open the text input for a pasted YouTube link.
+        """Open the text input for a pasted YouTube or Facebook link.
 
         The line beside "Search YouTube" for a link somebody already has in
         hand (a chat message, a browser tab): no search, no result list, the
@@ -144,7 +144,7 @@ class TrackSourceHandler:
         self._bot._gp = self._bot._find_gameplay()
         if self._bot._gp:
             self._bot._gp.add_substate(self._bot.game.input.run(
-                "Paste a YouTube link or livestream:",
+                "Paste a YouTube or Facebook link (video, reel or live):",
                 handeler=self._bot._on_link_submit
             ))
 
@@ -191,13 +191,13 @@ class TrackSourceHandler:
             speak("Link cancelled.")
             return
         # Be kind to a link pasted without a scheme, and to an old http one:
-        # the bot resolves https YouTube pages only (is_supported_music_url).
+        # the bot resolves https YouTube and Facebook pages only.
         if not url.lower().startswith(("http://", "https://")):
             url = "https://" + url
         if url.lower().startswith("http://"):
             url = "https://" + url[len("http://"):]
         if not is_supported_music_url(url):
-            speak("Only YouTube links can be played on the Music Bot.")
+            speak("Only YouTube and Facebook links can be played on the Music Bot.")
             return
 
         speak("Reading the link...")
@@ -213,9 +213,9 @@ class TrackSourceHandler:
     def _play_read_link(self, info):
         """What a pasted link becomes: a queued song in Queue Mode, else now."""
         if not info or not info.get("webpage_url"):
-            speak("Could not read that YouTube link. Please check it.")
+            speak("Could not read that link. Please check it.")
             return
-        title = info.get("title") or "YouTube Audio"
+        title = info.get("title") or "Audio"
         webpage_url = info["webpage_url"]
         # Queue Mode means "line it up": the same behaviour as pressing Enter
         # on a search result, so the two ways of adding a song never diverge.

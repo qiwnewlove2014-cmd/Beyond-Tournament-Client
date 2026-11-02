@@ -316,7 +316,7 @@ class MenuTests(GateStateTestCase):
             "subtitles": "Spoken subtitles",
         })
         labels = self._labels(bot, "_show_mode_menu")
-        for gone in ("Search YouTube", "Play a YouTube link",
+        for gone in ("Search YouTube", "Play a YouTube or Facebook link",
                      "Choose Local File", "Queue Mode: OFF",
                      "Subtitles: OFF", "Broadcast to Megaphone: OFF"):
             self.assertNotIn(gone, labels, labels)
@@ -328,7 +328,7 @@ class MenuTests(GateStateTestCase):
     def test_the_mode_menu_keeps_every_line_when_nothing_is_locked(self):
         bot = self._bot()
         labels = self._labels(bot, "_show_mode_menu")
-        for present in ("Search YouTube", "Play a YouTube link",
+        for present in ("Search YouTube", "Play a YouTube or Facebook link",
                         "Choose Local File", "Queue Mode: OFF",
                         "Subtitles: OFF", "Broadcast to Megaphone: OFF"):
             self.assertIn(present, labels, labels)

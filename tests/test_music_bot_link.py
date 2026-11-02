@@ -1,4 +1,4 @@
-"""Music Bot Mode's "Play a YouTube link" line.
+"""Music Bot Mode's "Play a YouTube or Facebook link" line.
 
 Staff already hold the link they want (a chat message, a browser tab) and had
 to search for the song to reach it. The line sits directly under "Search
@@ -104,7 +104,8 @@ class LinkLineTests(unittest.TestCase):
     def test_the_link_line_sits_directly_under_search(self):
         labels = self.menu()
         index = labels.index("Search YouTube")
-        self.assertEqual(labels[index + 1], "Play a YouTube link", labels)
+        self.assertEqual(labels[index + 1],
+                         "Play a YouTube or Facebook link", labels)
 
     def test_the_line_opens_the_link_input(self):
         bot = make_bot()
@@ -132,7 +133,7 @@ class LinkLineTests(unittest.TestCase):
         labels = [label() if callable(label) else label
                   for label, _action, *_extra in captured[-1].items]
         action = dict(zip(labels, [a for _l, a, *_extra in captured[-1].items]))[
-            "Play a YouTube link"]
+            "Play a YouTube or Facebook link"]
         action()
         self.assertEqual(opened, [True])
 
@@ -167,7 +168,23 @@ class LinkSubmitTests(unittest.TestCase):
         self.submit(bot, "http://youtu.be/abc")
         self.assertEqual(seen, ["https://youtu.be/abc"])
 
-    def test_anything_that_is_not_youtube_is_refused_before_it_is_read(self):
+    def test_a_facebook_link_is_read_and_played(self):
+        seen = []
+
+        def read(url):
+            seen.append(url)
+            return {"title": "A Reel", "duration": 30,
+                    "webpage_url": "https://www.facebook.com/reel/123"}
+
+        bot = make_bot(read)
+        self.submit(bot, "facebook.com/reel/123")
+
+        self.assertEqual(seen, ["https://facebook.com/reel/123"])
+        self.assertEqual(bot.resolved, [
+            ("A Reel", "https://www.facebook.com/reel/123", "")
+        ])
+
+    def test_another_site_is_refused_before_it_is_read(self):
         seen = []
         bot = make_bot(lambda url: seen.append(url) or None)
         with mock.patch("libs.music_bot.track_source.speak") as say:
@@ -176,7 +193,7 @@ class LinkSubmitTests(unittest.TestCase):
         self.assertEqual(seen, [])
         self.assertEqual(bot.resolved, [])
         say.assert_called_once_with(
-            "Only YouTube links can be played on the Music Bot.")
+            "Only YouTube and Facebook links can be played on the Music Bot.")
 
     def test_an_empty_input_is_cancelled(self):
         bot = make_bot(lambda url: self.fail("must not resolve an empty link"))
@@ -202,7 +219,7 @@ class LinkSubmitTests(unittest.TestCase):
 
         self.assertEqual(bot.resolved, [])
         say.assert_any_call("Reading the link...")
-        say.assert_called_with("Could not read that YouTube link. Please check it.")
+        say.assert_called_with("Could not read that link. Please check it.")
 
 
 class ReadLinkTests(unittest.TestCase):
@@ -242,6 +259,29 @@ class ReadLinkTests(unittest.TestCase):
         self.assertEqual(result["title"], "First")
         self.assertEqual(result["webpage_url"],
                          "https://www.youtube.com/watch?v=first")
+
+    def test_a_facebook_video_keeps_its_own_page(self):
+        result = self.read(
+            {"id": "123", "title": "Video", "duration": 42,
+             "webpage_url": "https://www.facebook.com/page/videos/123"},
+            url="https://www.facebook.com/page/videos/123")
+        self.assertEqual(result, {
+            "title": "Video", "duration": 42,
+            "webpage_url": "https://www.facebook.com/page/videos/123",
+        })
+
+    def test_a_facebook_live_has_no_length(self):
+        result = self.read(
+            {"id": "live", "title": "Live", "is_live": True,
+             "webpage_url": "https://www.facebook.com/page/live"},
+            url="https://www.facebook.com/page/live")
+        self.assertTrue(result["is_live"])
+        self.assertEqual(result["duration"], 0)
+
+    def test_a_facebook_link_without_a_page_url_falls_back_to_the_pasted_page(self):
+        result = self.read({"id": "123", "title": "Video", "duration": 10},
+                           url="https://fb.watch/abc/")
+        self.assertEqual(result["webpage_url"], "https://fb.watch/abc/")
 
     def test_a_page_that_cannot_be_read_is_none(self):
         self.assertIsNone(self.read(None))
