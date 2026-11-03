@@ -156,6 +156,20 @@ class PartyMenus:
                     "Who may send audio", do_jam, None,
                     "Lets a listener send their own program or instrument "
                     "into this session. Up to %d listeners at once." % MAX_JAMMERS))
+            def do_cinema():
+                close_top()
+                self._open_party_cinema_menu(ps)
+            cinema_label = (
+                f"Party cinema room: jukebox {ps.cinema_cabinet}"
+                if getattr(ps, "cinema_cabinet", "")
+                else "Party cinema room: OFF"
+            )
+            items.append((
+                cinema_label, do_cinema, None,
+                "Sends the mixed audio of everyone jamming in this party "
+                "through one cinema cabinet's speakers. People outside the "
+                "party on this map hear it; party members do not, so their "
+                "private feed is never doubled."))
             def do_invite():
                 close_top()
                 # A session is not map-scoped, so the picker lists every player
@@ -200,6 +214,13 @@ class PartyMenus:
                           "The host whose song you are hearing. It comes "
                           "straight to your headphones, not through the map's "
                           "speakers."))
+            if getattr(ps, "cinema_cabinet", ""):
+                items.append((
+                    f"Party playing in jukebox {ps.cinema_cabinet}",
+                    lambda: None, None,
+                    "The host sent this party's mixed audio into that "
+                    "cinema room. You keep hearing the direct party feed, "
+                    "not the room."))
             # Read-only: whether this party takes song requests (/p) is the
             # host's decision, and it arrives with the session state. A listener
             # reads it here instead of finding out by asking.
@@ -245,6 +266,59 @@ class PartyMenus:
 
         items.append(("Back", back_to_bot_menu, None,
                       "Returns to the Music Bot menu. Nothing is ended."))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_party_cinema_menu(self, ps):
+        """Host only: choose the cabinet that hears the party's mixed audio."""
+        from ... import menu as menu_mod, menus
+        from ...speech import speak
+        gp, _ = self._bot._party_sync_pair()
+        if gp is None:
+            return
+        m = menu_mod.Menu(self._bot.game, "Party cinema room", parrent=gp)
+        items = []
+
+        def close_top():
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+
+        def choose(cabinet, label):
+            close_top()
+            self._bot.party_sync_set_cinema(cabinet)
+            speak(label)
+
+        items.append((
+            "Off (private party feed only)",
+            lambda: choose("", "Party audio is back on the private party feed."),
+            None,
+            "Stops sending the party to a cinema room. Every party member "
+            "keeps hearing the direct private feed."))
+        ready = 0
+        for cabinet_id, _anchor, room in self._bot.cinema_cabinets():
+            if room is None:
+                continue
+            ready += 1
+            try:
+                where = room.summary()
+            except Exception:
+                where = "ready"
+            items.append((
+                f"Send to jukebox {cabinet_id} ({where})",
+                lambda c=cabinet_id: choose(
+                    c, f"Party audio is playing in jukebox {c}."),
+                None,
+                "People on this map who are not in the party hear the mixed "
+                "audio through that cabinet's speakers. Party members keep "
+                "their direct feed and do not hear the room copy."))
+        if not ready:
+            items.append((
+                "No cinema room on this map has speakers", lambda: None, None,
+                "The cabinet needs cinema speakers around it before its room "
+                "can be used."))
+        items.append(("Back", close_top, None,
+                      "Returns to the Party Sync menu without changing the room."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)

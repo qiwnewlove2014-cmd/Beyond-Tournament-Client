@@ -144,6 +144,12 @@ def main():
     from libs import options
 
     options.initialize()
+    # Opt-in JSONL trace for the two-machine audio run. The marker is checked
+    # here, not by the audio modules, so a test suite never opens a real log.
+    from libs import audio_trace
+    _trace_path = audio_trace.start()
+    if _trace_path:
+        logger.log(f"[AUDIO TRACE] writing {_trace_path}")
     from libs import consts, menus
     from libs.version import version, note
 

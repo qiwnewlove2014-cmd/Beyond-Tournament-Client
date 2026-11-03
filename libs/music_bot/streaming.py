@@ -17,6 +17,7 @@ import cyal.exceptions
 from .. import consts
 from .. import logger
 from .. import voice_chat
+from .. import audio_trace
 from ..audio_diagnostics import probe
 from ..jukebox_clock import PAIR_KEY, SpotClock, mono_ms
 from ..party_sync import stereo_upload_eligible
@@ -1099,6 +1100,20 @@ class AudioStreamer(threading.Thread):
                     # The mono legs (public broadcast, PA) have one channel by
                     # design, so a stereo program is averaged into them here.
                     mono_live_frames = list(live_frames)
+                    # Party Sync -> cinema: the host's own guitar/mic is not
+                    # in the room yet while a song is playing (the live-only
+                    # relay is parked then), so tap the centre instruments
+                    # here too. External audio is NOT included: its source
+                    # already hands every 10 ms frame to the room mixer.
+                    mixer = getattr(self.bot, 'party_room_mixer', None)
+                    if mixer is not None and live_frames:
+                        host_mix = voice_chat.mix_audio_frames(
+                            list(live_frames),
+                            state_key=voice_chat.audio_limiter_key(
+                                "party-room-host-song", self),
+                        )
+                        if host_mix:
+                            mixer.push("host-instrument", host_mix, stereo=False)
                     for frame in external_frames:
                         mono_ext = downmix_to_mono(frame)
                         if mono_ext:
@@ -2498,13 +2513,74 @@ class LiveRelayStreamer(threading.Thread):
         voice_chat.reset_audio_limiter(
             voice_chat.audio_limiter_key("live-relay-mix", self))
 
+    def _pace(self, pace):
+        """Wait for the next IDEAL frame deadline, not for "sleep just ended".
+
+        The relay used to base the next wait on the wall-clock instant after
+        the previous sleep. A Windows sleep that woke 1-2 ms late therefore
+        moved the deadline permanently, and a 10 ms stream ran at about 87
+        frames per second: its queue filled for a few seconds and then dropped
+        a burst (the every-5-7-seconds stutter). Keeping the ideal deadline,
+        as AudioStreamer does, makes the next wait shorter and corrects the
+        overshoot instead of accumulating it. A real stall still starts a new
+        cadence rather than bursting an unbounded catch-up.
+        """
+        now = time.perf_counter()
+        if self.last_send_time is None or now - self.last_send_time > 0.100:
+            if self.last_send_time is not None and audio_trace.enabled():
+                audio_trace.event(
+                    "relay_stall", reason="long",
+                    gap_ms=audio_trace.gap_ms(now, self.last_send_time),
+                    context=audio_trace.party_context(self.game)
+                )
+            deadline = now
+        else:
+            deadline = self.last_send_time + pace
+            if now < deadline:
+                sleep_time = deadline - now
+                if sleep_time > 0.001:
+                    time.sleep(sleep_time - 0.001)
+                while time.perf_counter() < deadline:
+                    pass
+            elif now - deadline > 0.040:
+                if audio_trace.enabled():
+                    audio_trace.event(
+                        "relay_stall", reason="late",
+                        late_ms=round((now - deadline) * 1000.0, 2),
+                        context=audio_trace.party_context(self.game)
+                    )
+                deadline = now
+        self.last_send_time = deadline
+
     def run(self):
         import audioop
+        trace_prev_send = None
+        trace_seq = 0
+        trace_started_at = time.perf_counter()
+        trace_last_idle = 0.0
+        audio_trace.event(
+            "relay_start", live_supported=bool(getattr(
+                self.game, "music_live_supported", False)),
+            party_upload=bool(getattr(self.bot, "party_sync_force_upload", False)),
+            megaphone=bool(getattr(self.bot, "broadcast_to_megaphone", False)),
+            context=audio_trace.party_context(self.game)
+        )
         while self.running and live_relay_needed(self.bot):
             # If main AudioStreamer MP3 thread is active, let it handle the network stream
             if self.bot.streamer and self.bot.streamer.is_alive():
                 break
 
+            trace_on = audio_trace.enabled()
+            if trace_on:
+                def _qlen(name):
+                    try:
+                        return len(getattr(self.bot, name, None) or ())
+                    except Exception:
+                        return 0
+                q_live0 = _qlen("external_live_queue")
+                q_song0 = _qlen("external_pcm_queue")
+                q_guitar0 = _qlen("guitar_pcm_queue")
+                q_mic0 = _qlen("mic_pcm_queue")
             guitar_data = None
             mic_data = None
             external_frames = []
@@ -2559,12 +2635,22 @@ class LiveRelayStreamer(threading.Thread):
                 live_10 = False
 
             if guitar_data is None and mic_data is None and not external_frames:
+                if trace_on:
+                    now = time.monotonic()
+                    if now - trace_last_idle >= 1.0:
+                        trace_last_idle = now
+                        audio_trace.event(
+                            "relay_idle", q_live=q_live0, q_song=q_song0,
+                            q_guitar=q_guitar0, q_mic=q_mic0,
+                            context=audio_trace.party_context(self.game)
+                        )
                 time.sleep(0.010)
                 continue
 
             # One output frame: 10 ms stereo on a live jam with no instrument,
             # 20 ms otherwise. Live inputs are aligned and added in wide
             # precision before compression, never saturating mid-mix.
+            trace_mix_start = time.perf_counter() if trace_on else 0.0
             frame_bytes = 1920 if live_10 else 3840
             mono_len = frame_bytes // 2
             mono_data = b'\x00' * mono_len
@@ -2607,6 +2693,23 @@ class LiveRelayStreamer(threading.Thread):
                         stereo_data = side_frame
 
                 current_volume_scale = (self.bot.volume / 100.0) * getattr(self.bot, 'duck_multiplier', 1.0)
+                # Party Sync -> cinema: the host's own guitar/mic is not in
+                # external_frames (that capture is tapped at its source), so
+                # add just the centre instruments to the room mixer. This is
+                # what makes "everyone jamming" include the host too.
+                mixer = getattr(self.bot, 'party_room_mixer', None)
+                if mixer is not None and (guitar_data is not None or mic_data is not None):
+                    host_parts = [
+                        (_align(frame), 0.85)
+                        for frame in (guitar_data, mic_data) if frame
+                    ]
+                    host_mix = voice_chat.mix_audio_frames(
+                        host_parts,
+                        state_key=voice_chat.audio_limiter_key(
+                            "party-room-host", self),
+                    )
+                    if host_mix:
+                        mixer.push("host-instrument", host_mix, stereo=False)
                 if current_volume_scale != 1.0:
                     mono_data = audioop.mul(mono_data, 2, current_volume_scale)
                     if stereo_data:
@@ -2642,29 +2745,64 @@ class LiveRelayStreamer(threading.Thread):
                 # everywhere else. Pacing at 20 ms would halve the jam's rate
                 # and turn two 10 ms frames into an audible 20 ms hold.
                 pace = 0.010 if live_10 else 0.020
-                now = time.perf_counter()
-                if self.last_send_time is not None:
-                    elapsed = now - self.last_send_time
-                    if elapsed < pace:
-                        sleep_time = pace - elapsed
-                        if sleep_time > 0.001:
-                            time.sleep(sleep_time - 0.001)
-                        while time.perf_counter() - self.last_send_time < pace:
-                            pass
-                self.last_send_time = time.perf_counter()
+                trace_mix_ms = ((time.perf_counter() - trace_mix_start) * 1000.0
+                                if trace_on else 0.0)
+                self._pace(pace)
+                trace_late_ms = ((time.perf_counter() - self.last_send_time) * 1000.0
+                                 if trace_on else 0.0)
+                trace_encode_start = time.perf_counter() if trace_on else 0.0
 
                 if stereo_data:
                     encoded = self.encoder_stereo.encode(bytearray(stereo_data))
                 else:
                     encoded = self.encoder.encode(bytearray(mono_data))
+                trace_encode_ms = ((time.perf_counter() - trace_encode_start) * 1000.0
+                                   if trace_on else 0.0)
                 # The PA's sequenced upload (channel 31), the live counterpart
                 # of the music bot's: position on the frame, so a listener
                 # conceals a hole rather than holding the legacy reserve.
                 target_channel, encoded = sequence_pa_frame(
                     self, target_channel, encoded)
                 if self.game and self.game.network:
-                    self.game.network.send(target_channel, "n/a", encoded, reliable=False)
-            except Exception:
+                    trace_send_start = time.perf_counter() if trace_on else 0.0
+                    self.game.network.send(target_channel, "n/a", encoded,
+                                           reliable=False)
+                    if trace_on:
+                        trace_send_ms = (time.perf_counter() - trace_send_start) * 1000.0
+                        gap_ms = audio_trace.gap_ms(trace_send_start, trace_prev_send)
+                        trace_prev_send = trace_send_start
+                        if live_10:
+                            source = "external_live"
+                        elif external_frames:
+                            source = "external_song"
+                        elif guitar_data is not None or mic_data is not None:
+                            source = "instrument"
+                        else:
+                            source = "none"
+                        audio_trace.event(
+                            "relay_send", seq=trace_seq, source=source,
+                            live=bool(live_10), frame_bytes=frame_bytes,
+                            channel=target_channel, stereo=bool(stereo_data),
+                            q_live=q_live0, q_song=q_song0,
+                            q_guitar=q_guitar0, q_mic=q_mic0,
+                            gap_ms=gap_ms, late_ms=round(trace_late_ms, 2),
+                            pace_ms=round(pace * 1000.0, 2),
+                            mix_ms=round(trace_mix_ms, 2),
+                            encode_ms=round(trace_encode_ms, 2),
+                            send_ms=round(trace_send_ms, 2),
+                            context=audio_trace.party_context(self.game)
+                        )
+                        trace_seq += 1
+            except Exception as exc:
+                audio_trace.event(
+                    "relay_error", error=type(exc).__name__,
+                    context=audio_trace.party_context(self.game)
+                )
                 time.sleep(0.010)
+        audio_trace.event(
+            "relay_stop", sent=trace_seq,
+            elapsed_s=round(time.perf_counter() - trace_started_at, 2),
+            context=audio_trace.party_context(self.game)
+        )
         voice_chat.reset_audio_limiter(
             voice_chat.audio_limiter_key("live-relay-mix", self))

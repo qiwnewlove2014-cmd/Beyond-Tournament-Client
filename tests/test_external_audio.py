@@ -19,6 +19,7 @@ import time
 import unittest
 from collections import deque
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
@@ -722,7 +723,7 @@ class TestTheRelaySendsStereoToTheParty(unittest.TestCase):
 
 
 class TestTheJamLeg(unittest.TestCase):
-    """A party's live channel: 20 ms, not the song path's 240 ms.
+    """A party's live channel: 10 ms frames, not the song path's 240 ms.
 
     A song has a shared clock every listener is lined up against; a person
     playing over a captured program does not. The live leg is selected only
@@ -750,6 +751,7 @@ class TestTheJamLeg(unittest.TestCase):
         self.assertIn("external_live_queue", relay)
         self.assertIn("live_10", relay)
         self.assertIn("pace = 0.010 if live_10 else 0.020", relay)
+        self.assertIn("self._pace(pace)", relay)
         # One frame per tick: a second frame summed into the same slot is not
         # a queue, it is two slices of the program played on top of each other.
         self.assertIn("external_frames.append(live_queue.popleft())", relay)
@@ -765,14 +767,40 @@ class TestTheJamLeg(unittest.TestCase):
             "def process_music_timeline_data", 1)[0]
         self.assertIn("live=True", live)
 
-    def test_a_live_jam_buffers_twenty_ms_and_grows_only_on_a_cut(self):
+    def test_a_live_jam_buffers_sixty_ms_and_grows_only_on_a_cut(self):
         source = self._source("libs", "voice_chat.py")
-        self.assertIn("PRE_BUFFER_MS_LIVE = 20.0", source)
-        self.assertIn("MAX_PRE_BUFFER_MS_LIVE = 60.0", source)
+        self.assertIn("PRE_BUFFER_MS_LIVE = 60.0", source)
+        self.assertIn("MAX_PRE_BUFFER_MS_LIVE = 100.0", source)
         self.assertIn("if live:", source)
         self.assertIn("threshold = max(2, int(round(target / frame_ms)))", source)
         self.assertIn("MAX_PRE_BUFFER_MS_LIVE", source)
         self.assertIn("+ 10.0", source)
+
+    def test_a_late_wakeup_keeps_the_ideal_deadline(self):
+        """A 1 ms oversleep must not move the next deadline by 1 ms forever.
+
+        The relay ran at ~87 frames/s on a 10 ms stream because it measured
+        the next wait from the wall-clock instant after the previous sleep.
+        Windows waking 1-2 ms late then accumulated into a queue overflow and
+        an audible drop every 5-7 seconds. The deadline is ideal time now.
+        """
+        from libs.music_bot.streaming import LiveRelayStreamer
+        relay = LiveRelayStreamer.__new__(LiveRelayStreamer)
+        relay.last_send_time = 1.000
+        with mock.patch("libs.music_bot.streaming.time.perf_counter",
+                        return_value=1.011):
+            relay._pace(0.010)
+        self.assertAlmostEqual(relay.last_send_time, 1.010, places=6)
+
+    def test_a_long_stall_starts_a_fresh_cadence(self):
+        from libs.music_bot.streaming import LiveRelayStreamer
+        relay = LiveRelayStreamer.__new__(LiveRelayStreamer)
+        relay.last_send_time = 1.000
+        with mock.patch("libs.music_bot.streaming.time.perf_counter",
+                        return_value=1.250):
+            relay._pace(0.010)
+        # 250 ms behind: catch up from now instead of bursting 25 frames.
+        self.assertAlmostEqual(relay.last_send_time, 1.250, places=6)
 
     def test_the_mix_can_cut_a_ten_ms_frame(self):
         from libs.music_bot.streaming import mix_live_stereo

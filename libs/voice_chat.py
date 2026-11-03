@@ -10,6 +10,7 @@ from . import radio_voice
 from .speech import speak
 from . import options
 from . import logger
+from . import audio_trace
 # A note held for a song waits on the audio the listener is *hearing*, and that
 # rule has one home (``libs/jukebox_clock.py``): a member's music feed is an
 # output exactly as a cabinet's pair is, so it builds the same clock.
@@ -2431,12 +2432,16 @@ class MusicCompression(threading.Thread):
     RESUME_FRAMES     = 8   # 160ms before resuming after underrun (increased
                             # from 5 to prevent rapid re-underrun cycles)
     # A live jam (Party Sync, channel 25) has no song clock to align to, so
-    # the buffer is measured in TIME: 20 ms is two 10 ms frames, and the
-    # threshold is at least two frames whatever the packet shape. An underrun
-    # grows it by 10 ms up to 60 -- the low-latency default on a clean link,
-    # a stable one on a jittery link, and never a 240 ms song buffer.
-    PRE_BUFFER_MS_LIVE = 20.0
-    MAX_PRE_BUFFER_MS_LIVE = 60.0
+    # the buffer is measured in TIME: 60 ms is six 10 ms frames (the shape a
+    # captured program uses) or three 20 ms frames (a guitar/microphone), and
+    # the threshold is at least two frames whatever the packet shape. The old
+    # 20 ms floor left a 10 ms program only two packets of cushion, which ran
+    # dry on ordinary scheduler jitter; a 7 s live-sender run still had one
+    # 43.8 ms gap, so 40 ms was one frame short. An underrun still grows the
+    # target by 10 ms, now up to 100 -- low enough for a jam, never a 240 ms
+    # song buffer.
+    PRE_BUFFER_MS_LIVE = 60.0
+    MAX_PRE_BUFFER_MS_LIVE = 100.0
     TIMELINE_EVENT_TIMEOUT = 1.0
     MAX_TIMELINE_EVENTS = 256
 
@@ -2463,6 +2468,9 @@ class MusicCompression(threading.Thread):
             # owns one source per speaker, so only the decode and the music timeline are shared.
             self.cinema_channel = None
             self.cinema_feed = None
+            # Party Sync -> cinema room: a live jam frame can also be handed
+            # to the host's mixer, which sums every jammer into one room feed.
+            self.room_sink = None
             # Format-switch coordination (see set_output_stereo): the decoder generation lets
             # _play_music_frame drop frames decoded with a stale format, and the pending flag
             # flushes the source on the main thread when the first new-format frame lands.
@@ -2484,6 +2492,9 @@ class MusicCompression(threading.Thread):
             self._pair_source = None
             # The live jam's current buffer target (ms); see PRE_BUFFER_MS_LIVE.
             self._live_target_ms = self.PRE_BUFFER_MS_LIVE
+            self._trace_last_rx = None
+            self._trace_frames = 0
+            self._trace_underruns = 0
             self._running = True
             self.start()
         except Exception as e:
@@ -2530,6 +2541,10 @@ class MusicCompression(threading.Thread):
                                 one creates OpenAL sources.
                                 """
         self.cinema_channel = None if channel is None else int(channel)
+
+    def set_room_sink(self, sink):
+        """Hand each live jam frame to ``sink(pcm, stereo)`` as well (or None)."""
+        self.room_sink = sink
 
     def _room_feed(self):
         """MAIN THREAD ONLY: the room this stream should play through now.
@@ -2818,15 +2833,49 @@ class MusicCompression(threading.Thread):
         if music_source is None:
             return
 
+        trace_on = bool(live and audio_trace.enabled())
+        trace_started = time.perf_counter() if trace_on else 0.0
         # Decode Opus packet OUTSIDE the batch lock to prevent GIL/OpenAL deadlocks!
         try:
             pcm = bytearray(self.decoder.decode(bytearray(data)))
         except Exception as e:
+            if trace_on:
+                audio_trace.event(
+                    "party_live_decode_error", channel=channelID,
+                    opus=len(data), error=type(e).__name__,
+                    context=audio_trace.party_context(self.game)
+                )
             if not hasattr(self, '_last_err'): self._last_err = 0
             if time.time() - self._last_err > 1.0:
                 print(f"[ERROR MusicCompression] Opus decoding failed: {e}")
                 self._last_err = time.time()
             return
+
+        if trace_on:
+            trace_now = time.perf_counter()
+            gap = audio_trace.gap_ms(trace_now, self._trace_last_rx)
+            self._trace_last_rx = trace_now
+            self._trace_frames += 1
+            audio_trace.event(
+                "party_live_rx", channel=channelID, opus=len(data),
+                pcm=len(pcm), stereo=bool(getattr(self, "_stereo", False)),
+                decode_ms=round((trace_now - trace_started) * 1000.0, 2),
+                gap_ms=gap, frames=self._trace_frames,
+                context=audio_trace.party_context(self.game)
+            )
+
+        sink = getattr(self, "room_sink", None)
+        if live and callable(sink):
+            if trace_on:
+                audio_trace.event(
+                    "party_live_roomtap", channel=channelID,
+                    pcm=len(pcm), stereo=bool(getattr(self, "_stereo", False)),
+                    context=audio_trace.party_context(self.game)
+                )
+            try:
+                sink(bytes(pcm), bool(getattr(self, "_stereo", False)))
+            except Exception as e:
+                logger.log_exception(e, "MusicCompression.room_sink")
 
         # All OpenAL (and the timeline bookkeeping that schedules plays) runs on the MAIN
         # thread via the audio inbox; only the Opus decode stays on this worker thread.
@@ -2845,7 +2894,11 @@ class MusicCompression(threading.Thread):
         """MAIN THREAD ONLY: session recovery + buffer queue/play for one
         decoded music-bot frame. Runs via AudioManager.defer_audio() inside
         the main thread's frame batch; the batch below nests safely because
-        it is on the same (main) thread."""
+        it is on the same (main) thread.
+        """
+        trace_on = bool(live and audio_trace.enabled())
+        previous_recv = self._last_recv_time
+        trace_underrun = False
         try:
             with self.game.audio_mngr.context.batch():
                 if gameplay.player.dead:
@@ -2883,6 +2936,15 @@ class MusicCompression(threading.Thread):
                     or timeline_changed
                     or sequence_discontinuity
                 )
+                if is_new_session and trace_on:
+                    audio_trace.event(
+                        "party_live_session", channel=channelID,
+                        first=bool(previous_recv is None),
+                        gap_ms=audio_trace.gap_ms(now, previous_recv),
+                        timeline=bool(timeline_changed),
+                        sequence=bool(sequence_discontinuity),
+                        context=audio_trace.party_context(self.game)
+                    )
                 if is_new_session:
                     if live:
                         # A fresh jam starts on the low-latency target again.
@@ -2923,6 +2985,13 @@ class MusicCompression(threading.Thread):
                 # shared on purpose - the session reset, the format flush and the timeline
                 # bookkeeping all describe the song, not the output it comes out of.
                 if room_feed is not None:
+                    if trace_on:
+                        audio_trace.event(
+                            "party_live_play", channel=channelID, queued=0,
+                            room_feed=True, started=bool(self._has_started),
+                            stereo=bool(stereo), underrun=trace_underrun,
+                            context=audio_trace.party_context(self.game)
+                        )
                     self._play_room_frame(room_feed, pcm, epoch, frame_seq, stereo)
                     self._dispatch_timeline_events()
                     return
@@ -2941,12 +3010,25 @@ class MusicCompression(threading.Thread):
                         # An underrun on a live jam is a jittery link, not a
                         # missing song: grow the target instead of cutting
                         # again on the next frame.
+                        before_target = float(getattr(self, "_live_target_ms", 0.0) or 0.0)
                         self._live_target_ms = min(
                             self.MAX_PRE_BUFFER_MS_LIVE,
                             max(self.PRE_BUFFER_MS_LIVE,
                                 float(getattr(self, "_live_target_ms", 0.0) or 0.0))
                             + 10.0,
                         )
+                        self._trace_underruns += 1
+                        trace_underrun = True
+                        if trace_on:
+                            audio_trace.event(
+                                "party_live_underrun", channel=channelID,
+                                queued=int(getattr(music_source, "buffers_queued", 0) or 0),
+                                target_before=round(before_target, 1),
+                                target_after=round(self._live_target_ms, 1),
+                                gap_ms=audio_trace.gap_ms(now, previous_recv),
+                                count=self._trace_underruns,
+                                context=audio_trace.party_context(self.game)
+                            )
                     try:
                         self._has_started = False
                         self._timeline_first_queued_seq = None
@@ -3009,6 +3091,20 @@ class MusicCompression(threading.Thread):
                     return
 
                 queued = getattr(music_source, 'buffers_queued', 0)
+                trace_frame_ms = trace_target = trace_threshold = None
+                if trace_on:
+                    trace_frame_ms = max(
+                        1.0,
+                        len(pcm) / (48000.0 * 2 * (2 if stereo else 1))
+                        * 1000.0,
+                    )
+                    trace_target = max(
+                        self.PRE_BUFFER_MS_LIVE,
+                        float(getattr(self, "_live_target_ms", 0.0) or 0.0),
+                    )
+                    trace_threshold = max(
+                        2, int(round(trace_target / trace_frame_ms))
+                    )
 
                 # Start or resume playback
                 if state == cyal.SourceState.STOPPED or state == cyal.SourceState.INITIAL:
@@ -3042,6 +3138,16 @@ class MusicCompression(threading.Thread):
                         except Exception:
                             pass
 
+                if trace_on:
+                    audio_trace.event(
+                        "party_live_play", channel=channelID, queued=int(queued or 0),
+                        room_feed=False, started=bool(self._has_started),
+                        stereo=bool(stereo), underrun=trace_underrun,
+                        target_ms=None if trace_target is None else round(trace_target, 1),
+                        threshold=trace_threshold,
+                        frame_ms=None if trace_frame_ms is None else round(trace_frame_ms, 1),
+                        context=audio_trace.party_context(self.game)
+                    )
                 self._dispatch_timeline_events()
 
         except Exception as e:

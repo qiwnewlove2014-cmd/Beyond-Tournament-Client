@@ -41,6 +41,10 @@ CHANNEL_MUSICBOT_TIMELINE = 24
 #: here while nothing is playing, so the party hears them play, not a quarter
 #: second later. Only used once the Server advertises `music_live_v1`.
 CHANNEL_MUSICBOT_LIVE = 25
+#: Party Sync's cinema-room leg: the host's ONE mixed Opus stream, already
+#: summed from every jammer. Only non-members on the cabinet's map receive it;
+#: session members keep their direct private feed and must not hear the room.
+CHANNEL_MUSICBOT_PARTY_ROOM = 26
 CHANNEL_MEGAPHONE = 30
 # PA upload with the frame's position in it: version, epoch and frame sequence
 # in front of the Opus frame, so a listener can see that a frame is MISSING and

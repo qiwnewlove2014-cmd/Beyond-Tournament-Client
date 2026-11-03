@@ -145,6 +145,10 @@ def parse_state(data):
                 seen_jammers.add(key)
                 jammers.append(name)
     max_guests = _int(data.get("max_guests"), 8, 1, 32)
+    # The host's cinema link, if any. The room key is the key its
+    # announcement used; the cabinet is what a listener resolves on its own map.
+    cinema_cabinet = _text(data.get("cinema_cabinet"), 64)
+    cinema_room_key = _int(data.get("cinema_room_key"), 0, 1, 4095)
     return {
         "session_id": session_id,
         "host_name": host_name,
@@ -161,6 +165,8 @@ def parse_state(data):
         # after the last change read the queue without waiting for one.
         "now_playing": _one_line(data.get("now_playing"), MAX_QUEUE_TITLE_LEN),
         "queue": _parse_queue_items(data.get("queue")),
+        "cinema_cabinet": cinema_cabinet,
+        "cinema_room_key": cinema_room_key if cinema_cabinet else 0,
     }
 
 
@@ -596,6 +602,8 @@ class PartySyncState:
         # otherwise.
         self.now_playing = ""
         self.queue = []
+        self.cinema_cabinet = ""
+        self.cinema_room_key = 0
 
     # ── pending invite ──────────────────────────────────────────────
     def set_pending(self, invite):
@@ -651,6 +659,8 @@ class PartySyncState:
         self.song_requests = parsed["song_requests"]
         self.now_playing = parsed["now_playing"]
         self.queue = parsed["queue"]
+        self.cinema_cabinet = parsed["cinema_cabinet"]
+        self.cinema_room_key = parsed["cinema_room_key"]
         self.role = "host" if same_player(parsed["host_name"], self_name) else "guest"
         return self.role
 
@@ -669,6 +679,8 @@ class PartySyncState:
         self.song_requests = False
         self.now_playing = ""
         self.queue = []
+        self.cinema_cabinet = ""
+        self.cinema_room_key = 0
         self.clear_pending()
 
 

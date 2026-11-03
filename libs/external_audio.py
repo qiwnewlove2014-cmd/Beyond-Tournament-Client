@@ -44,6 +44,8 @@ from collections import deque
 
 import numpy as np
 
+from . import audio_trace
+
 SAMPLE_RATE = 48_000
 CHANNELS = 2
 SAMPLE_WIDTH = 2
@@ -184,11 +186,15 @@ class ExternalAudioSource(threading.Thread):
     """
 
     def __init__(self, backend, sink=None, mode=MODE_STEREO,
-                 gain=DEFAULT_GAIN, label="", live_sink=None):
+                 gain=DEFAULT_GAIN, label="", live_sink=None, room_sink=None):
         super().__init__(daemon=True)
         self.backend = backend
         self.sink = sink
         self.live_sink = live_sink
+        # Party Sync -> cinema: the same shaped 10 ms frame, handed to the
+        # host's mixer. Kept separate from live_sink so the party relay and a
+        # room can both receive it without one consuming the other's queue.
+        self.room_sink = room_sink
         self.label = str(label or "")
         self.mode = mode_label(mode)
         self.gain = clamped_gain(gain)
@@ -200,6 +206,13 @@ class ExternalAudioSource(threading.Thread):
         self.error = None
         self.dropped = 0
         self.frames_out = 0
+        self.live_frames_out = 0
+        self.song_frames_out = 0
+        self.packets_in = 0
+        self.bytes_in = 0
+        self._trace_last_live = None
+        self._trace_last_song = None
+        self._trace_last_summary = time.monotonic()
         self.signal_log = deque()
         self.peak = 0
         self.last_frame_at = None
@@ -216,6 +229,8 @@ class ExternalAudioSource(threading.Thread):
         """
         if not stereo:
             return
+        self.packets_in += 1
+        self.bytes_in += len(stereo)
         self._pending += stereo
         if self.live_sink is not None:
             self._live_pending += stereo
@@ -234,7 +249,18 @@ class ExternalAudioSource(threading.Thread):
         if not shaped:
             return
         self.frames_out += 1
-        self.last_frame_at = time.monotonic()
+        self.song_frames_out += 1
+        now = time.monotonic()
+        self.last_frame_at = now
+        if audio_trace.enabled():
+            gap = audio_trace.gap_ms(now, self._trace_last_song)
+            self._trace_last_song = now
+            if gap is not None and gap > 40.0:
+                audio_trace.event(
+                    "ext_song_gap", label=self.label, gap_ms=gap,
+                    song_frames=self.song_frames_out,
+                )
+            self._trace_source_summary(now)
         if self.sink is not None:
             try:
                 self.sink(shaped)
@@ -255,13 +281,44 @@ class ExternalAudioSource(threading.Thread):
         twice; this path only shapes the audio the relay sends.
         """
         shaped = shape_frame(frame, self.mode, self.gain)
-        if not shaped or self.live_sink is None:
+        if not shaped:
             return
-        self.last_frame_at = time.monotonic()
+        self.live_frames_out += 1
+        now = time.monotonic()
+        if audio_trace.enabled():
+            gap = audio_trace.gap_ms(now, self._trace_last_live)
+            self._trace_last_live = now
+            if gap is not None and gap > 30.0:
+                audio_trace.event(
+                    "ext_live_gap", label=self.label, gap_ms=gap,
+                    live_frames=self.live_frames_out,
+                )
+            self._trace_source_summary(now)
+        if self.live_sink is None:
+            return
+        self.last_frame_at = now
         try:
             self.live_sink(shaped)
         except Exception:
             pass
+        if self.room_sink is not None:
+            try:
+                self.room_sink(shaped, True)
+            except Exception:
+                pass
+
+    def _trace_source_summary(self, now):
+        """One line a second: is the capture itself still producing frames?"""
+        if now - self._trace_last_summary < 1.0:
+            return
+        self._trace_last_summary = now
+        audio_trace.event(
+            "ext_source", label=self.label, mode=self.mode, gain=self.gain,
+            live_frames=self.live_frames_out, song_frames=self.song_frames_out,
+            packets=self.packets_in, bytes=self.bytes_in,
+            dropped=self.dropped, peak=self.peak,
+            idle_ms=round(self.idle_seconds() * 1000.0, 1),
+        )
 
     def drain(self, limit=2):
         """Pop up to ``limit`` frames (the streamer's per-frame budget)."""
@@ -395,8 +452,14 @@ class ExternalAudioSource(threading.Thread):
     def run(self):
         try:
             self.backend.open()
+            audio_trace.event(
+                "ext_open", label=self.label, mode=self.mode, gain=self.gain,
+                backend=type(self.backend).__name__,
+            )
         except Exception as exc:
             self.error = str(exc) or exc.__class__.__name__
+            audio_trace.event("ext_error", label=self.label,
+                              error=self.error)
             self.running = False
             return
         try:
@@ -415,15 +478,26 @@ class ExternalAudioSource(threading.Thread):
                     # One malformed packet is dropped, not the whole capture:
                     # a driver that changes format mid-stream must cost a frame.
                     self.error = str(exc) or exc.__class__.__name__
+                    audio_trace.event("ext_error", label=self.label,
+                                      error=self.error)
         finally:
             try:
                 self.backend.close()
             except Exception:
                 pass
             self.running = False
+            audio_trace.event(
+                "ext_close", label=self.label, error=self.error,
+                live_frames=self.live_frames_out, song_frames=self.song_frames_out,
+                packets=self.packets_in, bytes=self.bytes_in,
+                dropped=self.dropped,
+            )
 
     def stop(self):
         self.running = False
+        audio_trace.event("ext_stop", label=self.label,
+                          live_frames=self.live_frames_out,
+                          song_frames=self.song_frames_out)
         try:
             if self.is_alive():
                 self.join(timeout=1.5)

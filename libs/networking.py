@@ -184,6 +184,9 @@ class Client(threading.Thread):
                 # assigns 25 as an ordinary voice channel, and reading that as
                 # music would break somebody's voice.
                 return self.event_handeler.process_music_live_data(data)
+            elif (channelID == consts.CHANNEL_MUSICBOT_PARTY_ROOM
+                  and getattr(self.game, 'music_party_room_supported', False)):
+                return self.event_handeler.process_party_cinema_data(data)
             elif channelID == consts.CHANNEL_MUSICBOT_TIMELINE:
                 return self.event_handeler.process_music_timeline_data(data)
             elif channelID == consts.CHANNEL_JUKEBOX_RELAY:

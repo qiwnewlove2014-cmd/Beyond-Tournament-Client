@@ -742,6 +742,12 @@ class CinemaBankTests(unittest.TestCase):
         for source in bank.sources:
             self.assertEqual(source.played, 1)
 
+    def test_a_refill_hold_waits_for_a_deeper_cushion(self):
+        game, renderer, bank = self.make(profile="front_only")
+        bank._begin_refill_hold(2)
+        self.assertTrue(bank.awaiting_refill)
+        self.assertEqual(bank.wanted_for_start(), 6)
+
     def test_configure_does_not_refresh_by_itself(self):
         game, renderer, bank = self.make(profile="front_only")
         bank.configure(volume=50, cabinet_volume=50, fade=1.0)

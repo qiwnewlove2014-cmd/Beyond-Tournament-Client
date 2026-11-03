@@ -34,7 +34,7 @@ from .vocal import IN_SONG as VOCAL_IN_SONG, VocalFocus
 # song" and looked like it had a mind of its own.
 BUFFERS_PER_SLOT = 16
 PREBUFFER_FRAMES = 4
-RESUME_FRAMES = 3
+RESUME_FRAMES = 6           # 120 ms: a 60 ms restart was followed by another hold
 MAX_QUEUED_FRAMES = 6
 
 # LOW_QUEUE_FRAMES 2: the floor a *playing* room never lets its shallowest speaker reach.
@@ -979,7 +979,13 @@ class CinemaSpeakerBank:
         return True
 
     def wanted_for_start(self):
-        return RESUME_FRAMES if self._plays_started else PREBUFFER_FRAMES
+        # Only a refill hold uses the deeper cushion. An ordinary start (or a
+        # trimmed speaker still waiting out its hold) keeps PREBUFFER_FRAMES:
+        # raising the threshold during a partial start can leave the room
+        # waiting for a frame the caller has already stopped sending.
+        if self._refill_hold:
+            return RESUME_FRAMES
+        return PREBUFFER_FRAMES
 
     def prime_frames(self):
         # How many frames this room can be handed at once and still start - what request_room primes

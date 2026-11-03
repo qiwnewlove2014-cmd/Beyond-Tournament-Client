@@ -164,3 +164,7 @@ ffmpeg.exe
 oalinst.exe
 nuitka-crash-report.xml
 sounds.dat
+
+# Two-machine audio debug traces (libs/audio_trace.py)
+audio_trace.on
+audio_trace_*.jsonl

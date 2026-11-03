@@ -296,6 +296,9 @@ class MapMusicBot:
         # shape and a jam does not wait for a 20 ms frame to fill.
         self.external_live_queue = deque(maxlen=50)
         self.external_audio = None
+        # Party Sync -> cinema room mixer (host only). It sums every jammer
+        # into one Opus stream; see libs/music_bot/party_room.py.
+        self.party_room_mixer = None
         self.external_audio_mode = str(
             options.get("music_bot_external_audio_mode", "stereo") or "stereo"
         ).lower()
@@ -826,6 +829,53 @@ class MapMusicBot:
         """Host: take that permission back (the relay stops on the next frame)."""
         self._party_sync_send("party_sync_jam_revoke", {"name": str(name or "")})
 
+    def party_sync_set_cinema(self, cabinet):
+        """Host: send the party's mixed audio into a cabinet's room ("" = off)."""
+        self._party_sync_send(
+            "party_sync_cinema", {"cabinet": str(cabinet or "").strip()[:64]}
+        )
+
+    def sync_party_room(self):
+        """Follow the authoritative session state: host + link = mixer on."""
+        _gp, ps = self._party_sync_pair()
+        active = bool(
+            ps is not None
+            and getattr(ps, "role", None) == "host"
+            and getattr(ps, "cinema_cabinet", "")
+            and getattr(ps, "cinema_room_key", 0)
+            and getattr(self.game, "music_party_room_supported", False)
+        )
+        if not active:
+            self._stop_party_room()
+            return
+        key = int(ps.cinema_room_key)
+        mixer = getattr(self, "party_room_mixer", None)
+        if mixer is None or not mixer.is_alive() or mixer.room_key != key:
+            self._stop_party_room()
+            from .party_room import PartyRoomMixer
+            mixer = PartyRoomMixer(self.game, key, ps.cinema_cabinet)
+            mixer.start()
+            self.party_room_mixer = mixer
+            self.game.party_room_mixer = mixer
+        else:
+            mixer.cabinet = ps.cinema_cabinet
+        source = getattr(self, "external_audio", None)
+        if source is not None:
+            source.room_sink = mixer.push_host
+
+    def _stop_party_room(self):
+        mixer, self.party_room_mixer = getattr(self, "party_room_mixer", None), None
+        if mixer is not None:
+            try:
+                mixer.stop()
+            except Exception:
+                pass
+        if getattr(self.game, "party_room_mixer", None) is mixer:
+            self.game.party_room_mixer = None
+        source = getattr(self, "external_audio", None)
+        if source is not None:
+            source.room_sink = None
+
     def _party_sync_external_allowed(self):
         """Whether this machine may capture into the session it is listening to.
 
@@ -1143,6 +1193,9 @@ class MapMusicBot:
         # party, the PA or a room, and it starts on a queue that has a frame.
         self._ensure_live_relay_streamer()
         self.external_audio = source
+        mixer = getattr(self, "party_room_mixer", None)
+        if mixer is not None:
+            source.room_sink = mixer.push_host
         self.external_audio_mode = source.mode
         self.external_audio_gain = source.gain
         return source
@@ -1151,6 +1204,7 @@ class MapMusicBot:
         """Stop the capture and drop its queued frames (safe to call twice)."""
         source, self.external_audio = getattr(self, "external_audio", None), None
         if source is not None:
+            source.room_sink = None
             try:
                 source.stop()
             except Exception:

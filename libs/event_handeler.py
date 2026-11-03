@@ -11,6 +11,7 @@ import webbrowser
 import cyal
 from . import audio_manager, buffer, gameplay, local_player_documents, menu, menus, options, consts
 from . import party_sync_audio
+from . import audio_trace
 from .speech import speak
 from .weapons import weapon
 from . import tickets
@@ -206,6 +207,11 @@ class EventHandeler:
         # makes it late but audible. Nothing else changes.
         self.game.music_live_supported = bool(
             data.get("music_live_v1", False)
+        )
+        # ...and the Party Sync cinema-room leg (channel 26): the host's
+        # already-mixed party audio, sent only to non-members on the map.
+        self.game.music_party_room_supported = bool(
+            data.get("music_party_room_v1", False)
         )
         # Same negotiation for the PA's sequenced channel: without it a Client
         # uploads its PA frames on channel 30, which is the only transport a
@@ -2621,11 +2627,38 @@ class EventHandeler:
             return
         entity_channel_id = data[0]
         opus_data = data[1:]
+        trace_on = audio_trace.enabled()
+        if trace_on:
+            now = time.monotonic()
+            last = getattr(self, "_trace_live_net_last", None)
+            if last is None:
+                last = {}
+                self._trace_live_net_last = last
+            gap = audio_trace.gap_ms(now, last.get(entity_channel_id))
+            last[entity_channel_id] = now
+            audio_trace.event(
+                "party_live_net", channel=entity_channel_id,
+                opus=len(opus_data), gap_ms=gap,
+                room_tap=bool(getattr(self.game, "party_room_mixer", None)),
+                context=audio_trace.party_context(self.game)
+            )
         entity = self._party_audio_receiver(entity_channel_id)
         if entity is None:
+            if trace_on:
+                audio_trace.event(
+                    "party_live_drop", channel=entity_channel_id,
+                    reason="no_receiver",
+                    context=audio_trace.party_context(self.game)
+                )
             return
         music_src = getattr(entity, 'music_source', None)
         if music_src is None:
+            if trace_on:
+                audio_trace.event(
+                    "party_live_drop", channel=entity_channel_id,
+                    reason="no_music_source",
+                    context=audio_trace.party_context(self.game)
+                )
             return
         self._party_leg_report(
             entity, entity_channel_id,
@@ -2635,6 +2668,17 @@ class EventHandeler:
         if not hasattr(entity, 'music_compression') or not entity.music_compression:
             from .voice_chat import MusicCompression
             entity.music_compression = MusicCompression(self.game)
+        # If this client is the party host and has a cinema room linked, the
+        # same live frame is also summable into the room's single stream. The
+        # party's own direct feed is untouched.
+        mixer = getattr(self.game, "party_room_mixer", None)
+        if mixer is not None:
+            entity.music_compression.set_room_sink(
+                lambda pcm, stereo, key=entity_channel_id:
+                    mixer.push(key, pcm, stereo)
+            )
+        else:
+            entity.music_compression.set_room_sink(None)
         entity._music_last_recv = time.time()
         _route_music_to_room(self.game, entity, entity_channel_id)
         try:
@@ -2643,6 +2687,66 @@ class EventHandeler:
                 live=True)
         except Exception:
             pass
+
+    def process_party_cinema_data(self, data):
+        """The host's mixed party audio for a cinema room (channel 26).
+
+        Payload: [room key 2][version 1][epoch 2][sequence 2][Opus, stereo
+        48 kHz 20 ms], all multi-byte fields big-endian. The Server sends it
+        only to players on the cabinet's map who are NOT in that Party Sync
+        session; a member therefore never hears this copy on top of the direct
+        ear feed. Leaving the session includes them again on the next frame.
+
+        Only the header is read here. Decoding waits for the main thread's
+        sequence buffer, so a late packet is decoded in its proper place
+        instead of advancing the Opus state out of order.
+        """
+        from .music_bot.party_room import PartyRoomReceiver, parse_room_packet
+        trace_on = audio_trace.enabled()
+        packet = parse_room_packet(data)
+        if packet is None:
+            if trace_on:
+                audio_trace.event(
+                    "room_net_drop", reason="invalid_header",
+                    raw=len(data) if isinstance(data, (bytes, bytearray, memoryview)) else 0,
+                    context=audio_trace.party_context(self.game)
+                )
+            return
+        key, epoch, seq, opus = packet
+        if not opus or len(opus) > 1275:
+            if trace_on:
+                audio_trace.event(
+                    "room_net_drop", reason="bad_frame", key=key,
+                    epoch=epoch, seq=seq, opus=len(opus or b""),
+                    context=audio_trace.party_context(self.game)
+                )
+            return
+        if trace_on:
+            now = time.monotonic()
+            last = getattr(self, "_trace_room_net_last", None)
+            if last is None:
+                last = {}
+                self._trace_room_net_last = last
+            gap = audio_trace.gap_ms(now, last.get(key))
+            last[key] = now
+            audio_trace.event(
+                "room_net", key=key, epoch=epoch, seq=seq,
+                opus=len(opus), gap_ms=gap, raw=len(data),
+                context=audio_trace.party_context(self.game)
+            )
+        receiver = getattr(self.game, "party_room_receiver", None)
+        if receiver is None:
+            receiver = PartyRoomReceiver(self.game)
+            self.game.party_room_receiver = receiver
+            if trace_on:
+                audio_trace.event(
+                    "room_receiver_new", key=key,
+                    context=audio_trace.party_context(self.game)
+                )
+        self.game.put(
+            lambda key=key, epoch=epoch, seq=seq, opus=opus:
+            receiver.play(key, epoch, seq, opus)
+        )
 
     def process_music_timeline_data(self, data):
         # Relay: version(1), entity channel(1), epoch(4), frame seq(4), Opus.
@@ -3012,6 +3116,10 @@ class EventHandeler:
             return
         self._sync_party_sync_upload()
         self._sync_party_sync_direct_audio()
+        bot = getattr(self.gameplay, "music_bot", None)
+        sync_room = getattr(bot, "sync_party_room", None)
+        if callable(sync_room):
+            sync_room()
         # A session's song-request switch is the host's own (`Song Requests:`, set from the Party Sync
         # menus), and the Server carries it in the state so every listener knows. Push ours once per
         # session: a state push arrives on every roster change, and re-announcing it each time is noise.
@@ -3145,6 +3253,10 @@ class EventHandeler:
         self._sync_party_sync_upload()
         self._sync_party_sync_direct_audio()
         self._clear_party_song_requests()
+        bot = getattr(self.gameplay, "music_bot", None)
+        sync_room = getattr(bot, "sync_party_room", None)
+        if callable(sync_room):
+            sync_room()
 
     def party_sync_ended(self, data):
         ps = self._party_sync()
@@ -3154,6 +3266,10 @@ class EventHandeler:
         self._sync_party_sync_upload()
         self._sync_party_sync_direct_audio()
         self._clear_party_song_requests()
+        bot = getattr(self.gameplay, "music_bot", None)
+        sync_room = getattr(bot, "sync_party_room", None)
+        if callable(sync_room):
+            sync_room()
         if was_guest:
             speak("The Party Sync session ended.")
 

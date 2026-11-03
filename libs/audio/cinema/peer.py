@@ -39,6 +39,8 @@ the cabinet's *own* playback rather than a veto over somebody else's stream.
 
 import time
 
+from ... import audio_trace
+
 from ...deferred_log import log_deferred as log_line
 from .crossover import mark_key, mark_of
 from .layout import ROOM_REFERENCE_DISTANCE
@@ -449,6 +451,8 @@ class PeerRoomFeed:
         self._epoch = None
         self._started = False
         self._started_at = None
+        self._trace_last_holds = 0
+        self._trace_last_playing = None
 
     # -------------------------------------------------------------- quality
     def matches(self, plan):
@@ -515,6 +519,7 @@ class PeerRoomFeed:
         # while the pre-buffer is still filling hands back the very frames the
         # room is waiting on. The queue can then never reach
         # ``wanted_for_start`` and the room stays silent for the whole song.
+        trace_on = audio_trace.enabled()
         if self._started:
             if self._room_playing():
                 try:
@@ -526,12 +531,63 @@ class PeerRoomFeed:
                 # underrun): hand it the frames the room still holds and start
                 # every speaker again rather than queuing behind a queue
                 # nobody is playing.
+                if trace_on:
+                    audio_trace.event(
+                        "room_bank_restart", channel=self.channel,
+                        cabinet=self.cabinet_id,
+                        context=audio_trace.party_context(self.game)
+                    )
                 try:
                     self.bank.start_playback()
                 except Exception:
                     pass
         left, right = split_frame(pcm, stereo)
-        if not self.bank.queue_frame(left, right):
+        accepted = self.bank.queue_frame(left, right)
+        if trace_on:
+            try:
+                queued = int(self.bank.queued_frames())
+            except Exception:
+                queued = -1
+            try:
+                wanted = int(self.bank.wanted_for_start())
+            except Exception:
+                wanted = -1
+            try:
+                playing = bool(self.bank.playing())
+            except Exception:
+                playing = False
+            holds = int(getattr(self.bank, "refill_holds", 0) or 0)
+            audio_trace.event(
+                "room_bank_push", channel=self.channel, cabinet=self.cabinet_id,
+                bytes=len(pcm or b""), stereo=bool(stereo), accepted=bool(accepted),
+                queued=queued, wanted=wanted, playing=playing,
+                started=bool(self._started), refill_holds=holds,
+                awaiting_refill=bool(getattr(self.bank, "awaiting_refill", False)),
+                frame_ms=round(float(getattr(self.bank, "frame_ms", lambda: 20.0)() or 0.0), 2),
+                buffered_ms=int(getattr(self.bank, "buffered_ms", lambda: 0)() or 0),
+                context=audio_trace.party_context(self.game)
+            )
+            if not accepted:
+                audio_trace.event(
+                    "room_bank_refused", channel=self.channel,
+                    cabinet=self.cabinet_id, queued=queued, wanted=wanted,
+                    context=audio_trace.party_context(self.game)
+                )
+            if holds != self._trace_last_holds:
+                audio_trace.event(
+                    "room_bank_holds", channel=self.channel,
+                    cabinet=self.cabinet_id, count=holds, queued=queued,
+                    context=audio_trace.party_context(self.game)
+                )
+                self._trace_last_holds = holds
+            if playing != self._trace_last_playing:
+                audio_trace.event(
+                    "room_bank_playing", channel=self.channel,
+                    cabinet=self.cabinet_id, playing=playing, queued=queued,
+                    context=audio_trace.party_context(self.game)
+                )
+                self._trace_last_playing = playing
+        if not accepted:
             return False
         if not self._started:
             try:
@@ -545,6 +601,12 @@ class PeerRoomFeed:
                     pass
                 self._started = True
                 self._started_at = time.monotonic()
+                if trace_on:
+                    audio_trace.event(
+                        "room_bank_start", channel=self.channel,
+                        cabinet=self.cabinet_id,
+                        context=audio_trace.party_context(self.game)
+                    )
         try:
             self.bank.update_output()
         except Exception:
