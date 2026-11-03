@@ -98,14 +98,26 @@ class PartyMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _open_party_sync_menu(self):
-        """Host/guest Party Sync controls (entry from the Music Bot menu)."""
+    def _open_party_sync_menu(self, standalone=False, menu=None):
+        """Host/guest Party Sync controls.
+
+        ``standalone`` is the Ctrl+F8 entry from free gameplay: Back closes the
+        page instead of opening the Music Bot. ``menu`` refreshes an already
+        open page in place, so Start does not throw the host out of the UI.
+        """
         from ... import menu as menu_mod, menus
         gp, ps = self._bot._party_sync_pair()
         if gp is None:
             return
 
-        m = menu_mod.Menu(self._bot.game, "Party Sync", parrent=gp)
+        if menu is None:
+            m = menu_mod.Menu(self._bot.game, "Party Sync", parrent=gp)
+        else:
+            m = menu
+            m.items.clear()
+        # The state push looks for this marker to refresh the page after Start.
+        m._party_sync_menu = True
+        m._party_sync_standalone = bool(standalone)
         items = []
 
         def close_top():
@@ -114,12 +126,16 @@ class PartyMenus:
 
         def back_to_bot_menu():
             close_top()
-            self._show_mode_menu()
+            if not standalone:
+                self._show_mode_menu()
 
         if ps is None or ps.role is None:
             def do_start():
-                close_top()
+                # Stay on this page. The server's first state push refreshes
+                # it into the host controls; the host still has to invite.
+                m._party_sync_starting = True
                 self._bot._party_sync_send("party_sync_start")
+                self._say("Starting Party Sync session. Waiting for the server...")
             items.append((
                 "Start Party Sync session", do_start, None,
                 "Starts a session with you as the host: the song you play is "
@@ -255,7 +271,8 @@ class PartyMenus:
                 "Party Sync, never to the map. The host can stop it again."))
         if may_send:
             def do_external_audio():
-                close_top()
+                # Keep this page underneath: External audio's Back returns
+                # to the menu that opened it, not to a newly built copy.
                 self._open_external_audio_menu()
             items.append((
                 "External audio from a music program", do_external_audio, None,
@@ -264,11 +281,38 @@ class PartyMenus:
                 "computer -- to everyone who hears your music, in mono or in "
                 "stereo. It opens a short page with a search for the program."))
 
-        items.append(("Back", back_to_bot_menu, None,
-                      "Returns to the Music Bot menu. Nothing is ended."))
+        back_help = ("Closes Party Sync. Nothing is ended." if standalone
+                     else "Returns to the Music Bot menu. Nothing is ended.")
+        items.append(("Back", back_to_bot_menu, None, back_help))
         m.add_items(items)
         menus.set_default_sounds(m)
-        gp.add_substate(m)
+        if menu is None:
+            gp.add_substate(m)
+        else:
+            m.pos = max(0, min(getattr(m, "pos", 0), len(m.items) - 1))
+
+    def refresh_party_sync_menu(self):
+        """Refresh the open start page after the server confirms the host.
+
+        The page is updated in place: same menu object, same position, no
+        second menu and no invite picker stealing focus. The spoken line is the
+        confirmation the host asked for; inviting stays their next action.
+        """
+        gp, ps = self._bot._party_sync_pair()
+        if gp is None or not getattr(gp, "substates", None):
+            return False
+        top = gp.substates[-1]
+        if not getattr(top, "_party_sync_starting", False):
+            return False
+        top._party_sync_starting = False
+        if getattr(ps, "role", None) != "host":
+            return False
+        self._open_party_sync_menu(
+            standalone=bool(getattr(top, "_party_sync_standalone", False)),
+            menu=top,
+        )
+        self._say("Party Sync started. Invite players from this menu.")
+        return True
 
     def _open_party_cinema_menu(self, ps):
         """Host only: choose the cabinet that hears the party's mixed audio."""

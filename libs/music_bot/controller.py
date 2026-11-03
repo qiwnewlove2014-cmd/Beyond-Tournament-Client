@@ -1253,8 +1253,11 @@ class MapMusicBot:
         return (f"{line}; it is heard wherever this bot's music is heard "
                 f"(your party, the PA, a room, or a public broadcast).")
 
-    def _open_party_sync_menu(self):
-        return self._menus()._open_party_sync_menu()
+    def _open_party_sync_menu(self, standalone=False):
+        return self._menus()._open_party_sync_menu(standalone=standalone)
+
+    def refresh_party_sync_menu(self):
+        return self._menus().refresh_party_sync_menu()
 
     def _open_external_audio_menu(self):
         return self._menus()._open_external_audio_menu()

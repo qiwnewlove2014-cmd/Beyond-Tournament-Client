@@ -55,7 +55,11 @@ class ExternalAudioMenus:
 
         def back_to_party_menu():
             close_top()
-            self._open_party_sync_menu()
+            # The page that opened this one is still underneath (the full
+            # Party Sync page or the Ctrl+F8 quick menu), so going back is a
+            # pop. Only a page opened with no parent needs the fallback.
+            if not gp.substates:
+                self._open_party_sync_menu()
 
         def go_pick():
             close_top()

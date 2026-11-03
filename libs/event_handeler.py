@@ -3120,6 +3120,12 @@ class EventHandeler:
         sync_room = getattr(bot, "sync_party_room", None)
         if callable(sync_room):
             sync_room()
+        # A host who pressed Start is still standing on the Party Sync page.
+        # Let the server's first state push turn that page into the host
+        # controls in place; no second menu, and no auto-opened invite picker.
+        refresh_menu = getattr(bot, "refresh_party_sync_menu", None)
+        if callable(refresh_menu):
+            self.game.put(refresh_menu)
         # A session's song-request switch is the host's own (`Song Requests:`, set from the Party Sync
         # menus), and the Server carries it in the state so every listener knows. Push ours once per
         # session: a state push arrives on every roster change, and re-announcing it each time is noise.

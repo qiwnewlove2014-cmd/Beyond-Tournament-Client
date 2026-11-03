@@ -2139,16 +2139,23 @@ class Gameplay(state.State):
         self.music_bot_volume(direction * 10)
 
     def party_sync_leave_key(self, mod=0):
-        """Open the Party Sync quick menu from free gameplay.
+        """Open the Party Sync menu from free gameplay.
 
-        Never leaves instantly: the menu shows who is listening plus a Leave/End action,
-        so a stray Ctrl+F8 press cannot silently kick the player out of (or end) a
+        Before a session exists this is the door to the start page: a host
+        should not have to open the Music Bot first just to press Start.
+        With a session active it stays the quick roster/Leave menu, so a stray
+        Ctrl+F8 press cannot silently kick the player out of (or end) a
         session.
         """
         if music_bot_gate.blocked("party"):
             return
         ps = getattr(self, "party_sync", None)
         if not ps or not getattr(ps, "role", None):
+            bot = getattr(self, "music_bot", None)
+            opener = getattr(bot, "_open_party_sync_menu", None)
+            if (callable(opener) and self._can_use_music_bot()):
+                opener(standalone=True)
+                return
             speak("You are not in a Party Sync session.")
             return
         self._open_party_sync_quick_menu(ps)
@@ -2164,7 +2171,7 @@ class Gameplay(state.State):
             from . import menu as menu_mod, menus
         except Exception:
             return
-        from .party_sync import session_roster
+        from .party_sync import same_player, session_roster
         gp = self
         is_host = getattr(ps, "role", None) == "host"
         title = (
@@ -2202,9 +2209,11 @@ class Gameplay(state.State):
             if meta.get("name"):
                 channels_of.setdefault(meta["name"], channel)
         for name, _role in roster:
-            mark = " (you)" if own_name and name == own_name else ""
+            is_you = bool(own_name) and same_player(name, own_name)
+            mark = " (you)" if is_you else ""
             channel = channels_of.get(name)
-            if channel is not None and not member_is_local(self, channel):
+            if (not is_you and channel is not None
+                    and not member_is_local(self, channel)):
                 mark += " (another map)"
             items.append((f"{name}{mark}", lambda: None))
         if not roster and is_host:
@@ -2249,7 +2258,11 @@ class Gameplay(state.State):
             gp.add_substate(confirm_m)
 
         if is_host:
-            items.append(("Invite players from this map", do_invite))
+            items.append((
+                "Invite players (any map)", do_invite, None,
+                "Opens the list of everyone online. A listener on another "
+                "map hears the song as clearly as one standing beside you.",
+            ))
             # Ctrl+F8 is the host's other door onto the same session, so it
             # offers the same /p switch -- from the one builder, never a
             # second wording (MapMusicBot.song_requests_switch_item).
@@ -2286,6 +2299,27 @@ class Gameplay(state.State):
                     "the Party Sync session?",
                     do_leave,
                 ),
+            ))
+        # The quick menu is the session's own door, so the host (or a
+        # granted guest) must not have to leave it and walk the Music Bot
+        # menu just to reach the captured program. Keep the quick menu
+        # underneath: External audio's Back pops straight back here.
+        bot_for_audio = getattr(gp, "music_bot", None)
+        opener = getattr(bot_for_audio, "_open_external_audio_menu", None)
+        may_stream = getattr(ps, "may_stream", None)
+        may_send = (
+            getattr(ps, "role", None) != "guest"
+            or bool(may_stream and may_stream(own_name))
+        )
+        if callable(opener) and may_send:
+            def do_external_audio():
+                opener()
+            items.append((
+                "External audio from a music program", do_external_audio, None,
+                "Sends the sound of another program on this computer -- a "
+                "music program, a soft synth, a browser player, or the whole "
+                "computer -- to everyone who hears your music, in mono or in "
+                "stereo. It opens a short page with a search for the program.",
             ))
         items.append(("Close", close_top))
         m.add_items(items)
