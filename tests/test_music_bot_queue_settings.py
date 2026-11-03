@@ -606,7 +606,7 @@ class TestTheMenuModule(unittest.TestCase):
 
     #: The page modules beside menus.py; each one holds one group of menus.
     PAGES = ("settings.py", "autotune.py", "subtitles.py", "voice_effect.py",
-             "party.py", "recording.py", "library.py")
+             "party.py", "recording.py", "library.py", "external.py")
     #: Not menus: the constructor and the one speaker the pages share.
     NOT_MENUS = {"__init__", "_say"}
 
@@ -648,6 +648,34 @@ class TestTheMenuModule(unittest.TestCase):
         self.assertEqual(shims, handler)
         self.assertNotIn("menu_mod.Menu(", controller)
         self.assertTrue(all_menus.count("menu_mod.Menu(") >= 20)
+
+    def test_no_menu_line_puts_its_label_in_the_action_slot(self):
+        """A page's four-tuple is (label, action, key, description).
+
+        The Party Sync line for the external program was copied from the
+        Music Bot menu's `(feature id, label, action, description)` shape, so
+        its label sat where the action goes and pressing Enter called a
+        string: "'str' object is not callable" in `Menu.select_current_item`.
+        Nothing in the source reads wrong -- the tuple is well formed, only
+        the meaning of its slots is -- so the slots are read here.
+        """
+        root = (Path(__file__).resolve().parents[1]
+                / "libs" / "music_bot" / "menu_pages")
+        for name in self.PAGES:
+            tree = ast.parse((root / name).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "append"
+                        and node.args
+                        and isinstance(node.args[0], ast.Tuple)
+                        and len(node.args[0].elts) == 4):
+                    continue
+                action = node.args[0].elts[1]
+                self.assertFalse(
+                    isinstance(action, ast.Constant)
+                    and isinstance(action.value, str),
+                    f"{name}:{node.lineno} puts its label in the action slot")
 
     def test_the_voice_effect_shim_hands_the_world_mode_to_the_page(self):
         """Alt+V reaches the page through the bot's own one-line shim."""

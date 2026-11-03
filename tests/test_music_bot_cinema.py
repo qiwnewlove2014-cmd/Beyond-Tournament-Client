@@ -170,6 +170,37 @@ def make_bot(game, **attributes):
     return bot
 
 
+class LiveRelayForARoomTests(unittest.TestCase):
+    """A routed room is an upload leg even with Broadcast off."""
+
+    def test_a_routed_bot_starts_the_live_relay_without_broadcast(self):
+        started = []
+
+        class Relay:
+            def __init__(self, game, bot):
+                self.game = game
+                self.bot = bot
+
+            def start(self):
+                started.append(self)
+
+        bot = SimpleNamespace(
+            game=object(),
+            broadcast_enabled=False,
+            broadcast_to_megaphone=False,
+            party_sync_force_upload=False,
+            cinema_force_upload=True,
+            streamer=None,
+            guitar_pcm_queue=[b"\x00" * 1920],
+            mic_pcm_queue=[],
+            live_relay_streamer=None,
+        )
+        with mock.patch("libs.music_bot.controller.LiveRelayStreamer", Relay):
+            MapMusicBot._ensure_live_relay_streamer(bot)
+        self.assertEqual(len(started), 1)
+        self.assertIs(bot.live_relay_streamer, started[0])
+
+
 class FakeMenu:
     """Drop-in for libs.menu.Menu capturing the items it was built with."""
 

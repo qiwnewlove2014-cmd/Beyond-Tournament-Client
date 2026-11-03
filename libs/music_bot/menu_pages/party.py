@@ -18,7 +18,9 @@ test_music_bot_menu_help.py. Rules: .agents/skills/party-sync-system/.
 """
 
 from .. import gate
+from ... import options as _options
 from .. import song_requests
+from ...party_sync import MAX_JAMMERS, same_player
 
 
 class PartyMenus:
@@ -147,6 +149,13 @@ class PartyMenus:
                     "Kick a listener", do_kick, None,
                     "Removes one listener from the session. They stop hearing "
                     "your song at once and can be invited again."))
+                def do_jam():
+                    close_top()
+                    self._open_party_jam_menu(ps)
+                items.append((
+                    "Who may send audio", do_jam, None,
+                    "Lets a listener send their own program or instrument "
+                    "into this session. Up to %d listeners at once." % MAX_JAMMERS))
             def do_invite():
                 close_top()
                 # A session is not map-scoped, so the picker lists every player
@@ -209,8 +218,84 @@ class PartyMenus:
                 "Stops listening and leaves the session. The host keeps "
                 "playing, and you can be invited again."))
 
+        # The external program lives here, not in the Music Bot menu: it is
+        # the session's listeners who hear it, and that menu is long enough
+        # for a screen reader already. A guest may capture only with the
+        # host's grant -- the server drops the frames without it, so offering
+        # the page would capture into silence.
+        may_stream = getattr(ps, "may_stream", None)
+        may_send = (ps is None or ps.role != "guest"
+                    or bool(may_stream and may_stream(
+                        _options.get("username", ""))))
+        if ps is not None and ps.role == "guest" and may_send:
+            items.append((
+                "The host allows you to send audio", lambda: None, None,
+                "Your captured program or instrument goes only to this "
+                "Party Sync, never to the map. The host can stop it again."))
+        if may_send:
+            def do_external_audio():
+                close_top()
+                self._open_external_audio_menu()
+            items.append((
+                "External audio from a music program", do_external_audio, None,
+                "Sends the sound of another program on this computer -- a "
+                "music program, a soft synth, a browser player, or the whole "
+                "computer -- to everyone who hears your music, in mono or in "
+                "stereo. It opens a short page with a search for the program."))
+
         items.append(("Back", back_to_bot_menu, None,
                       "Returns to the Music Bot menu. Nothing is ended."))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_party_jam_menu(self, ps):
+        """Host only: allow or stop each listener's own captured audio."""
+        from ... import menu as menu_mod, menus
+        from ...speech import speak
+        gp, _ = self._bot._party_sync_pair()
+        if gp is None:
+            return
+        if not ps or not ps.guests:
+            speak("Nobody is listening right now.")
+            self._open_party_sync_menu()
+            return
+        m = menu_mod.Menu(self._bot.game, "Who may send audio", parrent=gp)
+        items = []
+
+        def close_top():
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+
+        def back_to_party():
+            close_top()
+            self._open_party_sync_menu()
+
+        for g in ps.guests:
+            name = g["name"]
+            allowed = any(same_player(name, n) for n in ps.jammers)
+
+            def make_toggle(target=name, currently=allowed):
+                def cb():
+                    close_top()
+                    if currently:
+                        self._bot.party_sync_revoke_jam(target)
+                    else:
+                        self._bot.party_sync_grant_jam(target)
+                return cb
+
+            if allowed:
+                label = "Stop %s sending audio" % name
+                desc = ("Stops %s's program or instrument in this session at "
+                        "once. They keep hearing the party." % name)
+            else:
+                label = "Allow %s sending audio" % name
+                desc = ("Lets %s send their program or instrument to this "
+                        "session only. Up to %d listeners can send at once."
+                        % (name, MAX_JAMMERS))
+            items.append((label, make_toggle(), None, desc))
+        items.append(("Back", back_to_party, None,
+                      "Returns to the Party Sync menu without changing anyone."))
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)

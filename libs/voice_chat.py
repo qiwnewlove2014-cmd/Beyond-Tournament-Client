@@ -2430,6 +2430,13 @@ class MusicCompression(threading.Thread):
                             # prevent underruns on real networks)
     RESUME_FRAMES     = 8   # 160ms before resuming after underrun (increased
                             # from 5 to prevent rapid re-underrun cycles)
+    # A live jam (Party Sync, channel 25) has no song clock to align to, so
+    # the buffer is measured in TIME: 20 ms is two 10 ms frames, and the
+    # threshold is at least two frames whatever the packet shape. An underrun
+    # grows it by 10 ms up to 60 -- the low-latency default on a clean link,
+    # a stable one on a jittery link, and never a 240 ms song buffer.
+    PRE_BUFFER_MS_LIVE = 20.0
+    MAX_PRE_BUFFER_MS_LIVE = 60.0
     TIMELINE_EVENT_TIMEOUT = 1.0
     MAX_TIMELINE_EVENTS = 256
 
@@ -2475,6 +2482,8 @@ class MusicCompression(threading.Thread):
             self.pair_frames_fed = 0
             self._pair_frame_ms = 0.0
             self._pair_source = None
+            # The live jam's current buffer target (ms); see PRE_BUFFER_MS_LIVE.
+            self._live_target_ms = self.PRE_BUFFER_MS_LIVE
             self._running = True
             self.start()
         except Exception as e:
@@ -2506,10 +2515,12 @@ class MusicCompression(threading.Thread):
                 print(f"[ERROR MusicCompression.run] {e}")
                 logger.log_exception(e, "MusicCompression.run")
 
-    def recieve(self, data, music_source, radio_source, channelID, gameplay):
+    def recieve(self, data, music_source, radio_source, channelID, gameplay,
+                live=False):
         if music_source is None:
             return
-        self.put(lambda: self.recieve_actual(data, music_source, radio_source, channelID, gameplay))
+        self.put(lambda: self.recieve_actual(
+            data, music_source, radio_source, channelID, gameplay, live=live))
 
     def set_cinema_channel(self, channel):
         """Point this feed at a cabinet's room, or at nothing (None).
@@ -2803,7 +2814,7 @@ class MusicCompression(threading.Thread):
         self._timeline_pending = remaining
 
     def recieve_actual(self, data, music_source, radio_source, channelID, gameplay,
-                       epoch=None, frame_seq=None):
+                       epoch=None, frame_seq=None, live=False):
         if music_source is None:
             return
 
@@ -2825,12 +2836,12 @@ class MusicCompression(threading.Thread):
         self.game.audio_mngr.defer_audio(
             lambda: self._play_music_frame(
                 music_source, pcm, epoch, frame_seq, gameplay,
-                generation=generation, stereo=stereo,
+                generation=generation, stereo=stereo, live=live,
             )
         )
 
     def _play_music_frame(self, music_source, pcm, epoch, frame_seq, gameplay,
-                          generation=None, stereo=None):
+                          generation=None, stereo=None, live=False):
         """MAIN THREAD ONLY: session recovery + buffer queue/play for one
         decoded music-bot frame. Runs via AudioManager.defer_audio() inside
         the main thread's frame batch; the batch below nests safely because
@@ -2873,6 +2884,9 @@ class MusicCompression(threading.Thread):
                     or sequence_discontinuity
                 )
                 if is_new_session:
+                    if live:
+                        # A fresh jam starts on the low-latency target again.
+                        self._live_target_ms = self.PRE_BUFFER_MS_LIVE
                     # New broadcast (or first after a stop): discard everything queued on the source -
                     # including the silent keep-alive buffers entity.loop() pushes when the queue runs
                     # empty - and reset the pre-buffer threshold, mirroring a fresh map load.
@@ -2923,6 +2937,16 @@ class MusicCompression(threading.Thread):
                 # comment stood where it belonged and the suite sat at the handler's own
                 # indentation, so it was dead and a stopped source was rebuilt one frame at a time.)
                 if self._has_started and state == cyal.SourceState.STOPPED:
+                    if live:
+                        # An underrun on a live jam is a jittery link, not a
+                        # missing song: grow the target instead of cutting
+                        # again on the next frame.
+                        self._live_target_ms = min(
+                            self.MAX_PRE_BUFFER_MS_LIVE,
+                            max(self.PRE_BUFFER_MS_LIVE,
+                                float(getattr(self, "_live_target_ms", 0.0) or 0.0))
+                            + 10.0,
+                        )
                     try:
                         self._has_started = False
                         self._timeline_first_queued_seq = None
@@ -2988,7 +3012,23 @@ class MusicCompression(threading.Thread):
 
                 # Start or resume playback
                 if state == cyal.SourceState.STOPPED or state == cyal.SourceState.INITIAL:
-                    threshold = self.PRE_BUFFER_FRAMES if not self._has_started else self.RESUME_FRAMES
+                    # A live jam starts on the small buffer; a song keeps the
+                    # alignment window every listener is scheduled against.
+                    if live:
+                        frame_ms = max(
+                            1.0,
+                            len(pcm) / (48000.0 * 2 * (2 if stereo else 1))
+                            * 1000.0,
+                        )
+                        target = max(
+                            self.PRE_BUFFER_MS_LIVE,
+                            float(getattr(self, "_live_target_ms", 0.0) or 0.0),
+                        )
+                        threshold = max(2, int(round(target / frame_ms)))
+                    else:
+                        threshold = (self.PRE_BUFFER_FRAMES
+                                     if not self._has_started
+                                     else self.RESUME_FRAMES)
                     if queued >= threshold:
                         try:
                             if getattr(music_source, 'gain', 0.0) < 0.2:

@@ -201,6 +201,12 @@ class EventHandeler:
         self.game.music_timeline_supported = bool(
             data.get("music_timeline_v1", False)
         )
+        # ...and the Party Sync live jam channel: without it this machine
+        # uploads a jam on channel 22, where the receiver's song pre-buffer
+        # makes it late but audible. Nothing else changes.
+        self.game.music_live_supported = bool(
+            data.get("music_live_v1", False)
+        )
         # Same negotiation for the PA's sequenced channel: without it a Client
         # uploads its PA frames on channel 30, which is the only transport a
         # Server that predates channel 31 understands.
@@ -2602,6 +2608,42 @@ class EventHandeler:
                 except Exception as e:
                     pass
 
+    def process_music_live_data(self, data):
+        """A jam frame from a session member's own machine (channel 25).
+
+        Same payload as process_music_data: [voice channel][Opus]. The only
+        difference is the receiving buffer -- a live jam starts on a 20 ms
+        (two 10 ms frames) pre-buffer instead of the song path's 240 ms, because nobody
+        is waiting for a timeline and a quarter second is the difference
+        between playing together and playing behind the person beside you.
+        """
+        if len(data) < 2:
+            return
+        entity_channel_id = data[0]
+        opus_data = data[1:]
+        entity = self._party_audio_receiver(entity_channel_id)
+        if entity is None:
+            return
+        music_src = getattr(entity, 'music_source', None)
+        if music_src is None:
+            return
+        self._party_leg_report(
+            entity, entity_channel_id,
+            isinstance(entity, party_sync_audio.PartyMemberSink),
+        )
+        import time
+        if not hasattr(entity, 'music_compression') or not entity.music_compression:
+            from .voice_chat import MusicCompression
+            entity.music_compression = MusicCompression(self.game)
+        entity._music_last_recv = time.time()
+        _route_music_to_room(self.game, entity, entity_channel_id)
+        try:
+            entity.music_compression.recieve(
+                opus_data, music_src, None, entity_channel_id, self.gameplay,
+                live=True)
+        except Exception:
+            pass
+
     def process_music_timeline_data(self, data):
         # Relay: version(1), entity channel(1), epoch(4), frame seq(4), Opus.
         if not isinstance(data, (bytes, bytearray, memoryview)) or len(data) < 11:
@@ -2809,7 +2851,15 @@ class EventHandeler:
         """
         ps = self._party_sync()
         bot = getattr(self.gameplay, "music_bot", None)
-        force = bool(bot) and ps.role == "host"
+        # A guest uploads only with the host's grant. The same flag turns on
+        # the stereo pair (party_sync.stereo_upload_eligible reads it) and
+        # makes the live relay start, so permission is one switch, not three.
+        allowed = bool(
+            ps.role == "host"
+            or (ps.role == "guest"
+                and ps.may_stream(self._party_sync_own_name()))
+        )
+        force = bool(bot) and allowed
         if bot is not None:
             # One routine line per change: whether this machine is uploading for its listeners is the other
             # half of "the listener hears nothing", and it is otherwise invisible on the host's own machine
@@ -2818,25 +2868,25 @@ class EventHandeler:
             if force != bool(getattr(bot, "party_sync_force_upload", False)):
                 if force:
                     _log(
-                        "[PartySync] hosting session "
-                        f"{getattr(ps, 'session_id', '')}: the music bot stream "
-                        "is being uploaded for the listeners (the Broadcast "
+                        "[PartySync] session "
+                        f"{getattr(ps, 'session_id', '')}: this machine's audio "
+                        "is being uploaded for the session (the Broadcast "
                         "switch is not what gates it here)"
                     )
                 else:
                     _log(
-                        "[PartySync] no session: the music bot goes back to the "
-                        "Broadcast switch for who hears it"
+                        "[PartySync] not uploading for a session: the music "
+                        "bot goes back to the Broadcast switch for who hears it"
                     )
             bot.party_sync_force_upload = force
 
     def _sync_party_sync_direct_audio(self):
-        # Schedule (main thread) all Party Sync direct-to-ear audio modes: 1. music (guest role) -- the
-        # host entity's music source stops being a 3D boombox and becomes a fixed, direct-to-ear feed.
+        # Schedule (main thread) all Party Sync direct-to-ear audio modes: 1. music -- EVERY member's
+        # music source stops being a 3D boombox and becomes a fixed, direct-to-ear feed, which is also
+        # what puts the leg on the stereo decoder a guest's captured program needs.
         # 2. voice (any member) -- every OTHER member entity's voice source also becomes direct-to-ear,
         # so a session doubles as a private "team talk" room, and leaving restores positional behaviour.
         ps = self._party_sync()
-        target_voice = ps.host_voice_channel if ps.role == "guest" else None
         in_session = getattr(ps, "role", None) in ("host", "guest")
 
         def apply():
@@ -2850,25 +2900,27 @@ class EventHandeler:
             gp = self.gameplay
             vc = getattr(gp, "voice_channels", None) or {}
             local_entity = getattr(gp, "player", None)
-            # 1) Music direct (existing guest rule).
-            enable_entity = vc.get(target_voice) if target_voice is not None else None
-            flagged = [
-                e for e in vc.values()
-                if e is not enable_entity and getattr(e, "_party_sync_direct", False)
-            ]
-            for e in flagged:
-                clear_direct_mode(e)
-            if enable_entity is not None:
-                try:
-                    music_vol = (
-                        gp.game.audio_mngr.volume_categories.get("music", [100])[0]
-                        / 100.0
-                    )
-                except Exception:
-                    music_vol = 1.0
-                set_direct_mode(enable_entity, music_vol)
-            # 2) Voice direct for every session member (except my own entity).
+            # 1) Music direct for EVERY session member, not only the host: a
+            # guest's captured program arrives on their own channel, and a leg
+            # left as a 3D boombox would also be left on the mono decoder,
+            # folding the two sides the sender kept.
             member_channels = party_member_channels(ps) if in_session else set()
+            try:
+                music_vol = (
+                    gp.game.audio_mngr.volume_categories.get("music", [100])[0]
+                    / 100.0
+                )
+            except Exception:
+                music_vol = 1.0
+            for ch, e in list(vc.items()):
+                if e is local_entity:
+                    continue
+                if in_session and ch in member_channels:
+                    if not getattr(e, "_party_sync_direct", False):
+                        set_direct_mode(e, music_vol)
+                elif getattr(e, "_party_sync_direct", False):
+                    clear_direct_mode(e)
+            # 2) Voice direct for every session member (except my own entity).
             for ch, e in list(vc.items()):
                 if e is local_entity:
                     continue

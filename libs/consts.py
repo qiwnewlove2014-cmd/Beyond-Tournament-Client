@@ -35,6 +35,12 @@ CHANNEL_VOICECHAT = 20
 CHANNEL_MUSICBOT = 22
 CHANNEL_JUKEBOX_RELAY = 23
 CHANNEL_MUSICBOT_TIMELINE = 24
+#: Party Sync's live jam leg: the same Opus upload as CHANNEL_MUSICBOT, but
+#: with no timeline and a receiver that starts on a 20 ms pre-buffer (two
+#: 10 ms frames) instead of the song path's 240 ms. A session member's captured program goes
+#: here while nothing is playing, so the party hears them play, not a quarter
+#: second later. Only used once the Server advertises `music_live_v1`.
+CHANNEL_MUSICBOT_LIVE = 25
 CHANNEL_MEGAPHONE = 30
 # PA upload with the frame's position in it: version, epoch and frame sequence
 # in front of the Opus frame, so a listener can see that a frame is MISSING and

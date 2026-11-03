@@ -48,7 +48,7 @@ from . import subtitles
 from .media import (FFMPEG_PATH, DEFAULT_MAP_MUSIC, FALLBACK_PLAYLIST,
                     clamp_seek_position, format_track_position, YouTubeSearcher)
 from .menus import MusicBotMenus
-from .streaming import LiveRelayStreamer
+from .streaming import LiveRelayStreamer, live_relay_has_input, live_relay_needed
 
 
 def _key_label(semitones):
@@ -287,6 +287,23 @@ class MapMusicBot:
         # mono16 frames while guitar mode is on and this broadcast is enabled;
         # AudioStreamer mixes them into the outgoing stream.
         self.guitar_pcm_queue = deque(maxlen=10)
+        # Captured audio from another program (libs/external_audio.py): 20 ms
+        # stereo frames in their own queue, so the stereo leg can place each
+        # side instead of downmixing the program into the centre.
+        self.external_pcm_queue = deque(maxlen=10)
+        # The low-latency jam leg's own 10 ms frames (channel 25): a second,
+        # smaller cut of the same capture, so the song path keeps its 20 ms
+        # shape and a jam does not wait for a 20 ms frame to fill.
+        self.external_live_queue = deque(maxlen=50)
+        self.external_audio = None
+        self.external_audio_mode = str(
+            options.get("music_bot_external_audio_mode", "stereo") or "stereo"
+        ).lower()
+        try:
+            self.external_audio_gain = float(
+                options.get("music_bot_external_audio_gain", 0.85) or 0.85)
+        except (TypeError, ValueError):
+            self.external_audio_gain = 0.85
 
         # Personal Playlist & Favorites Manager (Stored locally on Client)
         from ..playlist_manager import PlaylistManager
@@ -801,6 +818,31 @@ class MapMusicBot:
             consts.CHANNEL_MISC, event, data if data is not None else {}
         )
 
+    def party_sync_grant_jam(self, name):
+        """Host: allow one guest's captured program/instrument into the party."""
+        self._party_sync_send("party_sync_jam_grant", {"name": str(name or "")})
+
+    def party_sync_revoke_jam(self, name):
+        """Host: take that permission back (the relay stops on the next frame)."""
+        self._party_sync_send("party_sync_jam_revoke", {"name": str(name or "")})
+
+    def _party_sync_external_allowed(self):
+        """Whether this machine may capture into the session it is listening to.
+
+        A guest needs the host's grant. The server enforces the same rule on
+        every frame; this half keeps the menu honest and says why, instead of
+        capturing into a stream the relay would drop.
+        """
+        _gp, ps = self._party_sync_pair()
+        if ps is None or getattr(ps, "role", None) != "guest":
+            return True
+        from .. import options as _options
+        if ps.may_stream(_options.get("username", "")):
+            return True
+        from ..speech import speak
+        speak("The host has not allowed you to send audio to this Party Sync.")
+        return False
+
     # ── Song requests (/p) ──────────────────────────────────────────────
     # The queue this fills is THIS machine's, so the host owns the switch and
     # the answer; a guest only asks (see libs/music_bot/song_requests.py for
@@ -1056,11 +1098,124 @@ class MapMusicBot:
             return
         clear_all_party_direct(gp)
 
+    # ------------------------------------------------ external audio source
+    def start_external_audio(self, kind="app", target="", label="",
+                            mode=None, gain=None):
+        """Capture another program's (or the computer's) audio for the live legs.
+
+        Returns the running source, or None when the request names no program.
+        A capture the machine refuses does not raise here: the source thread
+        records the reason in ``source.error`` and the menu says it, so a click
+        on a program can never take the game down with it.
+        """
+        from ..external_audio import ExternalAudioSource, LoopbackBackend
+        if not self._party_sync_external_allowed():
+            return None
+        self.stop_external_audio()
+        pid = None
+        device_id = ""
+        if kind == "device":
+            device_id = str(target or "").strip()
+            if not device_id:
+                return None
+        if kind == "app":
+            try:
+                pid = int(target)
+            except (TypeError, ValueError):
+                return None
+            if pid <= 0:
+                return None
+        chosen_mode = mode or self.external_audio_mode
+        chosen_gain = self.external_audio_gain if gain is None else gain
+        backend = LoopbackBackend(
+            process_id=pid, whole_computer=(kind == "system"),
+            device_id=device_id)
+        source = ExternalAudioSource(
+            backend,
+            sink=self.external_pcm_queue.append,
+            live_sink=self.external_live_queue.append,
+            mode=chosen_mode,
+            gain=chosen_gain,
+            label=label,
+        )
+        source.start()
+        # No song may be playing: the relay is what sends the program to the
+        # party, the PA or a room, and it starts on a queue that has a frame.
+        self._ensure_live_relay_streamer()
+        self.external_audio = source
+        self.external_audio_mode = source.mode
+        self.external_audio_gain = source.gain
+        return source
+
+    def stop_external_audio(self):
+        """Stop the capture and drop its queued frames (safe to call twice)."""
+        source, self.external_audio = getattr(self, "external_audio", None), None
+        if source is not None:
+            try:
+                source.stop()
+            except Exception:
+                pass
+        try:
+            self.external_pcm_queue.clear()
+            self.external_live_queue.clear()
+        except Exception:
+            pass
+
+    def set_external_audio_mode(self, mode):
+        from ..external_audio import mode_label
+        self.external_audio_mode = mode_label(mode)
+        if self.external_audio is not None:
+            self.external_audio.set_mode(self.external_audio_mode)
+        options.set("music_bot_external_audio_mode", self.external_audio_mode)
+
+    def set_external_audio_gain(self, gain):
+        from ..external_audio import clamped_gain
+        self.external_audio_gain = clamped_gain(gain)
+        if self.external_audio is not None:
+            self.external_audio.set_gain(self.external_audio_gain)
+        options.set("music_bot_external_audio_gain", self.external_audio_gain)
+
+    def external_audio_signal_label(self):
+        """The menu's signal row: what is arriving, in one short phrase."""
+        source = getattr(self, "external_audio", None)
+        if source is None:
+            return "Signal: not capturing"
+        return source.signal_line()
+
+    def external_audio_signal_report(self):
+        """The verdict behind that row, with what to check when it is silent."""
+        source = getattr(self, "external_audio", None)
+        if source is None:
+            return ("Nothing is being captured. Choose a program on the page "
+                    "above first.")
+        return source.signal_report()
+
+    def external_audio_status(self):
+        """One line for the menu: what is captured, and how it is being sent."""
+        source = getattr(self, "external_audio", None)
+        if source is None:
+            return "External audio is off."
+        line = source.status_line()
+        return (f"{line}; it is heard wherever this bot's music is heard "
+                f"(your party, the PA, a room, or a public broadcast).")
+
     def _open_party_sync_menu(self):
         return self._menus()._open_party_sync_menu()
 
+    def _open_external_audio_menu(self):
+        return self._menus()._open_external_audio_menu()
+
+    def _open_external_program_menu(self, query=""):
+        return self._menus()._open_external_program_menu(query)
+
+    def _open_external_device_menu(self):
+        return self._menus()._open_external_device_menu()
+
     def _open_party_kick_menu(self, ps):
         return self._menus()._open_party_kick_menu(ps)
+
+    def _open_party_jam_menu(self, ps):
+        return self._menus()._open_party_jam_menu(ps)
 
     def _save_current_to_favorites(self):
         """Save currently playing track to Favorites"""
@@ -2463,7 +2618,7 @@ class MapMusicBot:
 
     def _ensure_live_relay_streamer(self):
         """Ensure background live relay thread runs when broadcast is enabled and live input exists without an active MP3 stream."""
-        if not (self.broadcast_enabled or self.broadcast_to_megaphone):
+        if not live_relay_needed(self):
             if getattr(self, 'live_relay_streamer', None):
                 self.live_relay_streamer.stop()
                 self.live_relay_streamer = None
@@ -2475,10 +2630,7 @@ class MapMusicBot:
                 self.live_relay_streamer = None
             return
 
-        has_guitar = bool(getattr(self, 'guitar_pcm_queue', None) and len(self.guitar_pcm_queue) > 0)
-        has_mic = bool(getattr(self, 'mic_pcm_queue', None) and len(self.mic_pcm_queue) > 0)
-
-        if has_guitar or has_mic:
+        if live_relay_has_input(self):
             if getattr(self, 'live_relay_streamer', None) is None or not self.live_relay_streamer.is_alive():
                 self.live_relay_streamer = LiveRelayStreamer(self.game, bot=self)
                 self.live_relay_streamer.start()

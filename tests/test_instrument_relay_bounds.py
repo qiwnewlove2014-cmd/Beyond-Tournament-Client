@@ -29,6 +29,7 @@ from unittest import mock
 import cyal
 
 from libs import instrument_input, voice_chat
+from libs.music_bot.streaming import live_relay_needed
 from libs.music_bot import voice_effects
 
 
@@ -156,6 +157,8 @@ class FakeRouteBot:
     def __init__(self):
         self.broadcast_enabled = False
         self.broadcast_to_megaphone = False
+        self.cinema_force_upload = False
+        self.party_sync_force_upload = False
         self.guitar_pcm_queue = collections.deque(maxlen=10)
 
 
@@ -218,6 +221,30 @@ class FrameRoutingTests(unittest.TestCase):
         self.assertEqual(len(bot.guitar_pcm_queue), 1)
         self.assertEqual(rec.voice_leg, [])
 
+    def test_a_room_routed_song_carries_a_strum_without_the_broadcast_switch(self):
+        """The room is uploaded even with Broadcast off; the strum must join it.
+
+        The streamer's upload gate already ORs in ``cinema_force_upload``, but
+        the line-in's own destination gate did not. A bot routed to a cabinet
+        with its Broadcast switch off therefore sent the song to the room and
+        dropped the plugged-in guitar onto the positional voice leg -- the
+        cabinet played the track with no instrument in it.
+        """
+        bot = FakeRouteBot()
+        bot.cinema_force_upload = True
+        rec = routing_input(bot)
+        rec._emit_frame(self.FRAME)
+        self.assertEqual(len(bot.guitar_pcm_queue), 1)
+        self.assertEqual(rec.voice_leg, [])
+
+    def test_a_party_sync_session_carries_a_strum_without_broadcast(self):
+        bot = FakeRouteBot()
+        bot.party_sync_force_upload = True
+        rec = routing_input(bot)
+        rec._emit_frame(self.FRAME)
+        self.assertEqual(len(bot.guitar_pcm_queue), 1)
+        self.assertEqual(rec.voice_leg, [])
+
     def test_no_third_destination_exists_for_a_frame(self):
         # The bot's queue and the voice leg are the whole routing table: a
         # cinema room is reached by the broadcast that already carries this
@@ -230,6 +257,19 @@ class FrameRoutingTests(unittest.TestCase):
                         if len(getattr(bot, name))]
         self.assertEqual(destinations, [])
         self.assertEqual(len(rec.voice_leg), 1)
+
+
+class LiveRelayGateTests(unittest.TestCase):
+    """The live relay follows every upload leg, including a room."""
+
+    def test_a_cinema_room_alone_needs_the_live_relay(self):
+        bot = SimpleNamespace(broadcast_enabled=False,
+                              broadcast_to_megaphone=False,
+                              party_sync_force_upload=False,
+                              cinema_force_upload=True)
+        self.assertTrue(live_relay_needed(bot))
+        bot.cinema_force_upload = False
+        self.assertFalse(live_relay_needed(bot))
 
 
 # --------------------------------------------------------------------------

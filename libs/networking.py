@@ -178,6 +178,12 @@ class Client(threading.Thread):
                 return self.event_handeler.process_megaphone_timeline_data(data)
             elif channelID == consts.CHANNEL_MUSICBOT:
                 return self.event_handeler.process_music_data(data)
+            elif (channelID == consts.CHANNEL_MUSICBOT_LIVE
+                  and getattr(self.game, 'music_live_supported', False)):
+                # Only when the Server advertised the channel: an older Server
+                # assigns 25 as an ordinary voice channel, and reading that as
+                # music would break somebody's voice.
+                return self.event_handeler.process_music_live_data(data)
             elif channelID == consts.CHANNEL_MUSICBOT_TIMELINE:
                 return self.event_handeler.process_music_timeline_data(data)
             elif channelID == consts.CHANNEL_JUKEBOX_RELAY:

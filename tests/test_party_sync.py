@@ -222,6 +222,88 @@ class TestUploadRule(unittest.TestCase):
         self.assertTrue(upload_should_send(self.bot(party=True, broadcast=True)))
 
 
+class TestJamPermission(unittest.TestCase):
+    """Who may send their own audio into a session, and who only listens.
+
+    One rule with two halves: the state push carries the host's grant, and the
+    server drops a guest's frames without it. These pin the client's half.
+    """
+
+    STATE = {
+        "session_id": "Alice:1",
+        "host": {"name": "Alice", "voice_channel": 21},
+        "guests": [
+            {"name": "Bob", "voice_channel": 22},
+            {"name": "Carol", "voice_channel": 23},
+        ],
+        "jammers": ["bob"],
+    }
+
+    def test_the_state_carries_the_granted_names(self):
+        parsed = parse_state(self.STATE)
+        self.assertEqual(parsed["jammers"], ["bob"])
+
+    def test_jammers_are_cleaned_and_deduplicated(self):
+        parsed = parse_state(dict(self.STATE, jammers=["  Bob ", "bob", "", 7]))
+        self.assertEqual(parsed["jammers"], ["Bob"])
+
+    def test_the_host_always_may_and_a_guest_needs_the_grant(self):
+        host_ps = PartySyncState()
+        host_ps.apply_state(self.STATE, "Alice")
+        self.assertTrue(host_ps.may_stream("alice"))
+        # The host may send even for somebody else's name: the question is
+        # about this machine, and this machine is the host.
+        self.assertTrue(host_ps.may_stream("Carol"))
+        guest_ps = PartySyncState()
+        guest_ps.apply_state(self.STATE, "Carol")
+        self.assertTrue(guest_ps.may_stream("BOB"))
+        self.assertFalse(guest_ps.may_stream("Carol"))
+
+    def test_a_listener_outside_a_session_never_may(self):
+        ps = PartySyncState()
+        self.assertFalse(ps.may_stream("Bob"))
+
+    def test_ending_the_session_clears_the_grants(self):
+        ps = PartySyncState()
+        ps.apply_state(self.STATE, "Bob")
+        self.assertTrue(ps.may_stream("Bob"))
+        ps.end_session()
+        self.assertEqual(ps.jammers, [])
+        self.assertFalse(ps.may_stream("Bob"))
+
+    def test_the_upload_switch_follows_the_grant(self):
+        # The one flag the sender reads: set for the host and for a granted
+        # guest, clear for a listener -- so a guest's capture is uploaded (and
+        # stereo) only when the host allowed it.
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "libs", "event_handeler.py",
+        )
+        with open(path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertIn('ps.role == "guest"', source)
+        self.assertIn("ps.may_stream(self._party_sync_own_name())", source)
+
+    def test_the_host_menu_lists_the_grant(self):
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "libs", "music_bot", "menu_pages", "party.py",
+        )
+        with open(path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertIn('"Who may send audio"', source)
+        self.assertIn("party_sync_grant_jam", source)
+        self.assertIn("party_sync_revoke_jam", source)
+        controller = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "libs", "music_bot", "controller.py",
+        )
+        with open(controller, "r", encoding="utf-8") as fh:
+            controller_source = fh.read()
+        self.assertIn("party_sync_jam_grant", controller_source)
+        self.assertIn("party_sync_jam_revoke", controller_source)
+
+
 class TestLeaveKeyConfig(unittest.TestCase):
     def test_default_keyconfig_binds_party_sync_leave(self):
         path = os.path.join(

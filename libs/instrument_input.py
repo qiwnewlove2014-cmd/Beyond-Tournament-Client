@@ -452,20 +452,26 @@ class InstrumentInput(threading.Thread):
         # toggle (same rule piano and drums follow), so the guitar
         # reaches the PA speakers just like the other instruments.
         #
-        # A cinema room is reached through those two legs and never by a
-        # third, per-frame route of its own: a room plays a live note by
-        # spawning one sample per speaker (``live.route_to_room``), which is
-        # a per-note contract - a continuous 20 ms capture stream has no note
-        # to spawn and no release to retire, so every frame would build a
-        # source and a buffer that nothing owns (the thread-and-buffer bloat a
-        # strummed hall was reported as). With the megaphone on, the frame
-        # reaches the room through ``voice_chat._feed_local_megaphone_direct``
-        # / the PA playout's room leg; through the broadcast it reaches the
-        # room the bot itself is feeding.
+        # A cinema room is reached through the bot's own mix: the streamer
+        # uploads a room-routed song even when the Broadcast switch is off
+        # (``cinema_force_upload``), so the line-in has to join that same mix
+        # or it is never heard at the cabinet. A Party Sync session is the
+        # same kind of private leg. Never a third, per-frame route
+        # of its own: a room plays a live note by spawning one sample per
+        # speaker (``live.route_to_room``), which is a per-note contract - a
+        # continuous 20 ms capture stream has no note to spawn and no release
+        # to retire, so every frame would build a source and a buffer that
+        # nothing owns (the thread-and-buffer bloat a strummed hall was
+        # reported as). With the megaphone on, the frame reaches the room
+        # through ``voice_chat._feed_local_megaphone_direct`` / the PA playout's
+        # room leg; through the broadcast it reaches the room the bot itself is
+        # feeding.
         music_bot = self._find_music_bot()
         route_to_bot = bool(music_bot and (
             getattr(music_bot, "broadcast_enabled", False)
             or getattr(music_bot, "broadcast_to_megaphone", False)
+            or getattr(music_bot, "cinema_force_upload", False)
+            or getattr(music_bot, "party_sync_force_upload", False)
         ))
         if route_to_bot:
             if not hasattr(music_bot, "guitar_pcm_queue"):

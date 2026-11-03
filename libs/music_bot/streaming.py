@@ -23,6 +23,82 @@ from ..party_sync import stereo_upload_eligible
 from ..speech import speak
 from .media import FFMPEG_PATH, YouTubeSearcher
 from .transpose import ChromaticTransposer
+from ..external_audio import downmix_to_mono
+
+
+def live_relay_needed(bot):
+    """Whether live input has a leg to leave on: public, PA, Party or a room.
+
+    A song routed into a cabinet's room is uploaded even while the Broadcast
+    switch is off (``cinema_force_upload``), and a Party Sync session is a
+    private upload for its guests. The live relay has to follow the same legs
+    or a line-in is left on the positional voice channel while the song reaches
+    the room without it.
+    """
+    if bot is None:
+        return False
+    return bool(
+        getattr(bot, "broadcast_enabled", False)
+        or getattr(bot, "broadcast_to_megaphone", False)
+        or getattr(bot, "party_sync_force_upload", False)
+        or getattr(bot, "cinema_force_upload", False)
+    )
+
+
+def live_relay_has_input(bot):
+    """True when a live queue holds a frame the relay should send.
+
+    One answer for both senders: the relay used to start on the guitar and the
+    microphone only, so a captured program with no song playing had frames in
+    its queue and no thread sending them -- the party heard silence while the
+    Signal row said good.
+    """
+    for name in ("guitar_pcm_queue", "mic_pcm_queue", "external_pcm_queue",
+                 "external_live_queue"):
+        try:
+            queue = getattr(bot, name, None)
+            if queue and len(queue) > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def mix_live_stereo(external_frames, centre_frames, state_key, frame_bytes=3840):
+    """One stereo frame: captured sides kept, live centres placed.
+
+    ``frame_bytes`` is the leg's own shape: 3840 for the 20 ms song path and
+    1920 for the 10 ms live jam, which is the whole point of the smaller cut.
+    A centre source is half as wide, so it is padded to ``frame_bytes // 2``.
+
+    The party leg carries two sides when it is a Party Sync or a room. A
+    captured program is the case this exists for -- a stereo mix folded into
+    one channel loses its picture -- while a guitar or a voice is a centre
+    source by nature and goes to both sides at the same level.
+    """
+    import audioop
+
+    def as_frame(pcm, size):
+        data = bytes(pcm or b"")[:size]
+        if len(data) < size:
+            data += b"\x00" * (size - len(data))
+        return data
+
+    frame_bytes = max(2, int(frame_bytes))
+    centre_bytes = max(2, frame_bytes // 2)
+    parts = [(as_frame(frame, frame_bytes), 0.85)
+             for frame in external_frames if frame]
+    centred = [(as_frame(frame, centre_bytes), 0.85)
+               for frame in centre_frames if frame]
+    if centred:
+        mono = voice_chat.mix_audio_frames(
+            centred, state_key="%s:centre" % state_key)
+        if mono:
+            parts.append((audioop.tostereo(bytes(mono), 2, 1.0, 1.0), 0.85))
+    if not parts:
+        return b""
+    mixed = voice_chat.mix_audio_frames(parts, state_key=state_key)
+    return as_frame(mixed, frame_bytes) if mixed else b""
 
 
 def sequence_pa_frame(sender, channel, encoded):
@@ -417,6 +493,58 @@ class AudioStreamer(threading.Thread):
             for side, suffix in ((left, ":l"), (right, ":r")):
                 mixed = voice_chat.mix_audio_frames(
                     [(side, 0.75)] + list(live_frames),
+                    state_key=f"{state_key}{suffix}",
+                )
+                sides.append(mixed or side)
+            return audioop.add(
+                audioop.tostereo(sides[0], 2, 1.0, 0.0),
+                audioop.tostereo(sides[1], 2, 0.0, 1.0),
+                2,
+            )
+        except Exception:
+            return bytes(payload)
+
+    @staticmethod
+    def _mix_external_into_stereo(payload, external_frames, state_key):
+        """Add a captured program's own left and right to the pair.
+
+        The line-in and mic path places one mono source in the centre on
+        purpose -- a guitar has no sides. An external program does: a song, a
+        stereo synth or a DAW mix was captured as two channels and the listener
+        asked for them, so each side is summed with its own side of the capture
+        while the song keeps its 0.75 weight per side. Nothing here decides
+        that left equals right; a source set to MONO arrives with identical
+        sides (``external_audio.shape_frame``) and lands in the centre by
+        construction rather than by a second rule.
+        """
+        if not payload or not external_frames:
+            return bytes(payload) if payload else b""
+        try:
+            import audioop
+            # Sum the capture first, in its own image, so one noisy frame
+            # cannot pull a side harder than the other.
+            ext = voice_chat.mix_audio_frames(
+                [(frame, 0.85) for frame in external_frames if frame],
+                state_key=f"{state_key}:ext",
+            )
+            if not ext:
+                return bytes(payload)
+            payload = bytes(payload)
+            ext = bytes(ext[:len(payload)])
+            if len(ext) < len(payload):
+                ext += b"\x00" * (len(payload) - len(ext))
+            length = len(payload) // 4 * 4
+            if length <= 0:
+                return payload
+            left, right = AudioStreamer._split_stereo_16(bytes(payload)[:length])
+            ext_left, ext_right = AudioStreamer._split_stereo_16(bytes(ext)[:length])
+            sides = []
+            for side, ext_side, suffix in (
+                (left, ext_left, ":l"),
+                (right, ext_right, ":r"),
+            ):
+                mixed = voice_chat.mix_audio_frames(
+                    [(side, 0.75), (ext_side, 1.0)],
                     state_key=f"{state_key}{suffix}",
                 )
                 sides.append(mixed or side)
@@ -837,16 +965,11 @@ class AudioStreamer(threading.Thread):
                 data = None
 
             if data is None:
-                # Keep the live mix flowing while the music bot broadcast is on
-                # OR the performer enabled "Broadcast to Megaphone" (an
-                # independent toggle, like piano/drums).
-                if self.bot and (
-                    getattr(self.bot, 'broadcast_enabled', False)
-                    or getattr(self.bot, 'broadcast_to_megaphone', False)
-                ):
-                    has_guitar = bool(getattr(self.bot, 'guitar_pcm_queue', None) and len(self.bot.guitar_pcm_queue) > 0)
-                    has_mic = bool(getattr(self.bot, 'mic_pcm_queue', None) and len(self.bot.mic_pcm_queue) > 0)
-                    if has_guitar or has_mic:
+                # Keep the live mix flowing on every leg that carries it -- a
+                # public broadcast, the megaphone, a Party Sync session or a
+                # cinema room routed without the Broadcast switch.
+                if self.bot and live_relay_needed(self.bot):
+                    if live_relay_has_input(self.bot):
                         data = b'\x00' * 3840
                         if not getattr(self.bot, 'broadcast_to_megaphone', False):
                             timeline_epoch, timeline_seq = self._claim_timeline_marker()
@@ -944,11 +1067,23 @@ class AudioStreamer(threading.Thread):
                         guitar_data = self.bot.guitar_pcm_queue.popleft()
                 except Exception:
                     pass
+            # A captured program (a DAW, a player, the whole computer) rides
+            # the same legs as the line-in but keeps its two sides: its own
+            # queue, so the stereo branch can place each side.
+            external_frames = []
+            if self.bot:
+                try:
+                    external_queue = getattr(self.bot, 'external_pcm_queue', None)
+                    while external_queue and len(external_frames) < 2:
+                        external_frames.append(external_queue.popleft())
+                except Exception:
+                    external_frames = []
             # The live input is kept as its own list as well as being mixed into
             # mono_data: the stereo branch needs to place it in the centre
             # without downmixing the song with it (see _mix_live_into_stereo).
             live_frames = []
-            if mic_data is not None or guitar_data is not None:
+            if (mic_data is not None or guitar_data is not None
+                    or external_frames):
                 try:
                     def _align(frame):
                         if len(frame) > len(mono_data):
@@ -961,11 +1096,18 @@ class AudioStreamer(threading.Thread):
                         live_frames.append((_align(mic_data), 0.85))
                     if guitar_data is not None:
                         live_frames.append((_align(guitar_data), 0.85))
+                    # The mono legs (public broadcast, PA) have one channel by
+                    # design, so a stereo program is averaged into them here.
+                    mono_live_frames = list(live_frames)
+                    for frame in external_frames:
+                        mono_ext = downmix_to_mono(frame)
+                        if mono_ext:
+                            mono_live_frames.append((_align(mono_ext), 0.85))
                     # Sum music and live inputs in wide precision, then apply
                     # one limiter. audioop.add saturates at each intermediate
                     # addition, so limiting its result cannot repair clipping.
                     mixed = voice_chat.mix_audio_frames(
-                        [(mono_data, 0.75)] + live_frames,
+                        [(mono_data, 0.75)] + mono_live_frames,
                         state_key=mix_limiter_key,
                     )
                     if mixed:
@@ -1016,6 +1158,9 @@ class AudioStreamer(threading.Thread):
                 if payload and live_frames:
                     payload = self._mix_live_into_stereo(
                         payload, live_frames, mix_limiter_key)
+                if payload and external_frames:
+                    payload = self._mix_external_into_stereo(
+                        payload, external_frames, mix_limiter_key)
             else:
                 enc = self.encoder
                 payload = mono_data
@@ -2339,6 +2484,13 @@ class LiveRelayStreamer(threading.Thread):
         self.encoder.set_application('audio')
         self.encoder.set_channels(1)  # Opus network stream is MONO
         self.encoder.set_sampling_frequency(48000)
+        # The party leg is the one leg that can carry two sides without a
+        # song: a captured program is stereo material, and centring it was
+        # the mix a listener could not tell apart.
+        self.encoder_stereo = OpusEncoder()
+        self.encoder_stereo.set_application('audio')
+        self.encoder_stereo.set_channels(2)
+        self.encoder_stereo.set_sampling_frequency(48000)
         self.last_send_time = None
 
     def stop(self):
@@ -2348,17 +2500,25 @@ class LiveRelayStreamer(threading.Thread):
 
     def run(self):
         import audioop
-        while self.running and self.bot and (
-            getattr(self.bot, 'broadcast_enabled', False)
-            or getattr(self.bot, 'broadcast_to_megaphone', False)
-            or getattr(self.bot, 'party_sync_force_upload', False)
-        ):
+        while self.running and live_relay_needed(self.bot):
             # If main AudioStreamer MP3 thread is active, let it handle the network stream
             if self.bot.streamer and self.bot.streamer.is_alive():
                 break
 
             guitar_data = None
             mic_data = None
+            external_frames = []
+            # The live leg is a Party Sync with no song in THIS machine: the
+            # Server advertised channel 25, and the PA path is excluded (it is
+            # mono by design). A 10 ms frame is used only while no instrument
+            # is playing, because guitar/mic frames are 20 ms -- an instrument
+            # keeps the 20 ms shape and still gets the low-latency channel.
+            live_leg = bool(
+                getattr(self.bot, 'party_sync_force_upload', False)
+                and not self.bot.broadcast_to_megaphone
+                and getattr(self.game, 'music_live_supported', False)
+            )
+            live_10 = False
             try:
                 if getattr(self.bot, 'guitar_pcm_queue', None) and self.bot.guitar_pcm_queue:
                     guitar_data = self.bot.guitar_pcm_queue.popleft()
@@ -2369,16 +2529,47 @@ class LiveRelayStreamer(threading.Thread):
                     mic_data = self.bot.mic_pcm_queue.popleft()
             except Exception:
                 pass
+            try:
+                if live_leg and guitar_data is None and mic_data is None:
+                    live_queue = getattr(self.bot, 'external_live_queue', None)
+                    # ONE 10 ms frame per 10 ms tick. Taking two and mixing
+                    # them would sum two consecutive slices into one and
+                    # swallow half of what the program played.
+                    if live_queue:
+                        external_frames.append(live_queue.popleft())
+                        live_10 = True
+                    if live_10:
+                        # The song path's 20 ms queue is not read on this leg;
+                        # drain it so a song starting later does not inherit a
+                        # half-second of stale audio.
+                        song_queue = getattr(self.bot, 'external_pcm_queue', None)
+                        drained = 0
+                        while song_queue and drained < 2:
+                            song_queue.popleft()
+                            drained += 1
+                if not live_10:
+                    external_queue = getattr(self.bot, 'external_pcm_queue', None)
+                    # One 20 ms frame per 20 ms tick, for the same reason: a
+                    # second frame mixed in here would be a summed slice, not
+                    # a queued one.
+                    if external_queue:
+                        external_frames.append(external_queue.popleft())
+            except Exception:
+                external_frames = []
+                live_10 = False
 
-            if guitar_data is None and mic_data is None:
+            if guitar_data is None and mic_data is None and not external_frames:
                 time.sleep(0.010)
                 continue
 
-            # One 20ms mono16 output frame; live inputs are aligned and added
-            # in wide precision before compression, never saturating mid-mix.
-            mono_data = b'\x00' * 1920
+            # One output frame: 10 ms stereo on a live jam with no instrument,
+            # 20 ms otherwise. Live inputs are aligned and added in wide
+            # precision before compression, never saturating mid-mix.
+            frame_bytes = 1920 if live_10 else 3840
+            mono_len = frame_bytes // 2
+            mono_data = b'\x00' * mono_len
             try:
-                def _align(frame, length=1920):
+                def _align(frame, length=mono_len):
                     if len(frame) > length:
                         return frame[:length]
                     if len(frame) < length:
@@ -2390,6 +2581,10 @@ class LiveRelayStreamer(threading.Thread):
                     mix.append((_align(guitar_data), 0.85))
                 if mic_data is not None:
                     mix.append((_align(mic_data), 0.85))
+                for frame in external_frames:
+                    mono_ext = downmix_to_mono(frame)
+                    if mono_ext:
+                        mix.append((_align(mono_ext), 0.85))
                 mixed = voice_chat.mix_audio_frames(
                     mix,
                     state_key=voice_chat.audio_limiter_key(
@@ -2398,16 +2593,37 @@ class LiveRelayStreamer(threading.Thread):
                 if mixed:
                     mono_data = mixed
 
+                # Stereo whenever the leg allows it: the captured program's
+                # two sides survive, and guitar/voice stay centred.
+                stereo_data = None
+                if stereo_upload_eligible(self.bot, 2):
+                    side_frame = mix_live_stereo(
+                        external_frames,
+                        [frame for frame in (guitar_data, mic_data) if frame],
+                        voice_chat.audio_limiter_key("live-relay-stereo", self),
+                        frame_bytes=frame_bytes,
+                    )
+                    if side_frame:
+                        stereo_data = side_frame
+
                 current_volume_scale = (self.bot.volume / 100.0) * getattr(self.bot, 'duck_multiplier', 1.0)
                 if current_volume_scale != 1.0:
                     mono_data = audioop.mul(mono_data, 2, current_volume_scale)
+                    if stereo_data:
+                        stereo_data = audioop.mul(stereo_data, 2, current_volume_scale)
 
                 party_private = bool(getattr(self.bot, 'party_sync_force_upload', False))
-                target_channel = (
-                    consts.CHANNEL_MUSICBOT
-                    if (not self.bot.broadcast_to_megaphone or party_private)
-                    else consts.CHANNEL_MEGAPHONE
-                )
+                # The live leg was chosen at the top of the loop (it also
+                # decides the frame size); a Server that has not advertised
+                # channel 25 keeps the proven channel-22 leg.
+                if live_leg:
+                    target_channel = consts.CHANNEL_MUSICBOT_LIVE
+                else:
+                    target_channel = (
+                        consts.CHANNEL_MUSICBOT
+                        if (not self.bot.broadcast_to_megaphone or party_private)
+                        else consts.CHANNEL_MEGAPHONE
+                    )
 
                 # Local zero-latency PA monitoring (the server no longer echoes
                 # the megaphone broadcast back to the sender). Skipped while a
@@ -2422,19 +2638,25 @@ class LiveRelayStreamer(threading.Thread):
                     except Exception:
                         pass
 
-                # Rate-limit to 20ms pacing
+                # Pace at the frame's own length: 10 ms on a live jam, 20 ms
+                # everywhere else. Pacing at 20 ms would halve the jam's rate
+                # and turn two 10 ms frames into an audible 20 ms hold.
+                pace = 0.010 if live_10 else 0.020
                 now = time.perf_counter()
                 if self.last_send_time is not None:
                     elapsed = now - self.last_send_time
-                    if elapsed < 0.020:
-                        sleep_time = 0.020 - elapsed
+                    if elapsed < pace:
+                        sleep_time = pace - elapsed
                         if sleep_time > 0.001:
                             time.sleep(sleep_time - 0.001)
-                        while time.perf_counter() - self.last_send_time < 0.020:
+                        while time.perf_counter() - self.last_send_time < pace:
                             pass
                 self.last_send_time = time.perf_counter()
 
-                encoded = self.encoder.encode(bytearray(mono_data))
+                if stereo_data:
+                    encoded = self.encoder_stereo.encode(bytearray(stereo_data))
+                else:
+                    encoded = self.encoder.encode(bytearray(mono_data))
                 # The PA's sequenced upload (channel 31), the live counterpart
                 # of the music bot's: position on the frame, so a listener
                 # conceals a hole rather than holding the legacy reserve.

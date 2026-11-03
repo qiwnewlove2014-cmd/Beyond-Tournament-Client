@@ -97,6 +97,11 @@ def parse_session_event(data):
     return {"session_id": session_id, "host_name": host_name}
 
 
+#: How many members the server lets send their own audio into one session.
+#: The menu says it before a host tries a third; the server enforces it.
+MAX_JAMMERS = 4
+
+
 def parse_state(data):
     # party_sync_state payload -> normalized dict or None. Host/guest names are
     # usernames (server-side identity); only members receive state, so the client
@@ -126,12 +131,26 @@ def parse_state(data):
                 "name": name,
                 "voice_channel": _int(g.get("voice_channel"), None, 0, 255),
             })
+    # Who the host has allowed to send their own audio (captured program or
+    # instrument). Names only, deduplicated and capped like every other list a
+    # state push carries; the server is the authority that enforces it.
+    jammers = []
+    seen_jammers = set()
+    raw_jammers = data.get("jammers")
+    if isinstance(raw_jammers, list):
+        for entry in raw_jammers[:MAX_LIST]:
+            name = _text(entry)
+            key = name.lower()
+            if name and key not in seen_jammers:
+                seen_jammers.add(key)
+                jammers.append(name)
     max_guests = _int(data.get("max_guests"), 8, 1, 32)
     return {
         "session_id": session_id,
         "host_name": host_name,
         "host_voice_channel": host_voice,
         "guests": guests,
+        "jammers": jammers,
         "max_guests": max_guests,
         # Whether this session's host is taking song requests (/p). Off until
         # the host turns it on, and carried on every state push so a guest can
@@ -564,6 +583,8 @@ class PartySyncState:
         self.host_name = ""
         self.host_voice_channel = None
         self.guests = []  # list of {"name", "voice_channel"}
+        # Names the host allowed to send their own audio into this session.
+        self.jammers = []
         self.max_guests = 8
         self.pending = None  # validated invite_request + expires_at
         self.invite_players = []  # latest host invite-candidate list
@@ -598,6 +619,19 @@ class PartySyncState:
         self.pending = None
 
     # ── session membership ──────────────────────────────────────────
+    def may_stream(self, self_name):
+        """Whether this member may send audio into the session right now.
+
+        The host always may. A guest may only after the host grants it; the
+        state push carries the grant, and the server drops frames from a guest
+        whose grant is missing, so this is the client's half of one rule.
+        """
+        if self.role == "host":
+            return True
+        if self.role != "guest":
+            return False
+        return any(same_player(name, self_name) for name in self.jammers)
+
     def is_host(self, self_name):
         return self.role == "host" or (
             bool(self.host_name) and same_player(self.host_name, self_name)
@@ -612,6 +646,7 @@ class PartySyncState:
         self.host_name = parsed["host_name"]
         self.host_voice_channel = parsed["host_voice_channel"]
         self.guests = parsed["guests"]
+        self.jammers = parsed["jammers"]
         self.max_guests = parsed["max_guests"]
         self.song_requests = parsed["song_requests"]
         self.now_playing = parsed["now_playing"]
@@ -630,6 +665,7 @@ class PartySyncState:
         self.host_name = ""
         self.host_voice_channel = None
         self.guests = []
+        self.jammers = []
         self.song_requests = False
         self.now_playing = ""
         self.queue = []

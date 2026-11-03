@@ -50,6 +50,7 @@ from ..speech import speak
 from ..string_utils import friendly_key_name
 from . import song_requests
 from .menu_pages.autotune import AutoTuneMenus
+from .menu_pages.external import ExternalAudioMenus
 from .menu_pages.library import LibraryMenus
 from .menu_pages.party import PartyMenus
 from .menu_pages.recording import RecordingMenus
@@ -63,7 +64,8 @@ __all__ = ["MusicBotMenus", "stand_on", "output_device", "_MusicBotEqSlider"]
 
 
 class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
-                    VoiceEffectMenus, PartyMenus, RecordingMenus, LibraryMenus):
+                    VoiceEffectMenus, PartyMenus, RecordingMenus, LibraryMenus,
+                    ExternalAudioMenus):
     """Builds and opens every Music Bot menu (see the module docstring)."""
 
     def __init__(self, bot):
