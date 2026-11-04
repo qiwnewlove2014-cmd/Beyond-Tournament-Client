@@ -2476,6 +2476,9 @@ class MusicCompression(threading.Thread):
             # flushes the source on the main thread when the first new-format frame lands.
             self._format_generation = 0
             self._pending_format_flush = False
+            # Bumped when a party leg switches; frames decoded before the
+            # switch must never reach OpenAL after it.
+            self._flush_generation = 0
             self._has_started = False
             self._last_recv_time = None
             self._timeline_epoch = None
@@ -2530,8 +2533,10 @@ class MusicCompression(threading.Thread):
                 live=False):
         if music_source is None:
             return
+        flush_generation = getattr(self, "_flush_generation", 0)
         self.put(lambda: self.recieve_actual(
-            data, music_source, radio_source, channelID, gameplay, live=live))
+            data, music_source, radio_source, channelID, gameplay, live=live,
+            flush_generation=flush_generation))
 
     def set_cinema_channel(self, channel):
         """Point this feed at a cabinet's room, or at nothing (None).
@@ -2677,11 +2682,25 @@ class MusicCompression(threading.Thread):
         self._has_started = False
         self._timeline_first_queued_seq = None
         self._timeline_anchor_seq = None
+
+    def flush_queued(self, music_source):
+        """MAIN THREAD ONLY: drop a paused party leg's queued audio.
+
+        A guest who steps into the cinema room stops receiving the direct
+        music, but frames already decoded and queued on this source still
+        describe the old leg. Empty them here so the room cannot start on top
+        of the tail of the direct feed. The next direct frame starts a fresh
+        pre-buffer; clearing `_last_recv_time` keeps it from being mistaken
+        for a continuation of the old one.
+        """
+        self._flush_generation = getattr(self, "_flush_generation", 0) + 1
+        self._timeline_pending = []
+        self._flush_source(music_source)
+        self._last_recv_time = None
+        self._pair_clock_reset()
         self._timeline_anchor_time = None
         self._timeline_epoch = None
         self._timeline_last_received_seq = None
-        self._last_recv_time = None
-        self._pair_clock_reset()
 
     # --------------------------------------------------- this feed's clock
     # A note played along a song someone else streams waits on the frames this feed has *played*,
@@ -2766,9 +2785,11 @@ class MusicCompression(threading.Thread):
                          gameplay, epoch, frame_seq):
         if music_source is None:
             return
+        flush_generation = getattr(self, "_flush_generation", 0)
         self.put(lambda: self.recieve_actual(
             data, music_source, radio_source, channelID, gameplay,
             epoch=epoch, frame_seq=frame_seq,
+            flush_generation=flush_generation,
         ))
 
     @staticmethod
@@ -2829,8 +2850,12 @@ class MusicCompression(threading.Thread):
         self._timeline_pending = remaining
 
     def recieve_actual(self, data, music_source, radio_source, channelID, gameplay,
-                       epoch=None, frame_seq=None, live=False):
+                       epoch=None, frame_seq=None, live=False,
+                       flush_generation=None):
         if music_source is None:
+            return
+        if (flush_generation is not None
+                and flush_generation != getattr(self, "_flush_generation", 0)):
             return
 
         trace_on = bool(live and audio_trace.enabled())
@@ -2886,16 +2911,21 @@ class MusicCompression(threading.Thread):
             lambda: self._play_music_frame(
                 music_source, pcm, epoch, frame_seq, gameplay,
                 generation=generation, stereo=stereo, live=live,
+                flush_generation=flush_generation,
             )
         )
 
     def _play_music_frame(self, music_source, pcm, epoch, frame_seq, gameplay,
-                          generation=None, stereo=None, live=False):
+                          generation=None, stereo=None, live=False,
+                          flush_generation=None):
         """MAIN THREAD ONLY: session recovery + buffer queue/play for one
         decoded music-bot frame. Runs via AudioManager.defer_audio() inside
         the main thread's frame batch; the batch below nests safely because
         it is on the same (main) thread.
         """
+        if (flush_generation is not None
+                and flush_generation != getattr(self, "_flush_generation", 0)):
+            return
         trace_on = bool(live and audio_trace.enabled())
         previous_recv = self._last_recv_time
         trace_underrun = False

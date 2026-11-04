@@ -510,6 +510,20 @@ class PartyRoomReceiver:
         self._epochs.pop(key, None)
         self._decoders.pop(key, None)
 
+    def forget(self, room_key):
+        """Drop one room's ordered frames and decoder (a listener left it).
+
+        The speaker bank is stopped by ``cinema_peer.forget`` in the same
+        transition; this half discards the packets that would otherwise play
+        into it after the listener returned to the direct Party Sync feed.
+        """
+        try:
+            key = int(room_key)
+        except (TypeError, ValueError):
+            return
+        self._forget_stream(key)
+        self._trace_last.pop(key, None)
+
     def decode(self, room_key, opus):
         """Decode one ordered frame; None when it is unusable."""
         if not opus or len(opus) > 1275:

@@ -8,8 +8,8 @@ the Music Bot menu is long enough for a screen reader already.
 
     Party Sync  ->  "External audio from a music program"
     External audio      status, Choose a program, whole computer, channel,
-                        level, stop, say status, Back          (at most 8)
-    Choose a program    "Type to search", the matches (at most 8), Back
+                        level, stop, say status, Back          (at most 24)
+    Choose a program    "Type to search", the matches (at most 24), Back
     a text box          type part of a program's name, Enter filters
 
 The capture itself is `libs/external_audio.py`; these pages only choose a
@@ -36,7 +36,9 @@ class ExternalAudioMenus:
 
     LEVELS = (40, 60, 85, 100)
     #: How many programs a picker page shows before it asks for a search word.
-    PAGE_MATCHES = 8
+    PAGE_MATCHES = 24
+    #: Devices stay a short list; a playback endpoint is not a program.
+    DEVICE_MATCHES = 8
 
     def _open_external_audio_menu(self):
         """The short root page: what is captured, and the four things to change."""
@@ -132,9 +134,9 @@ class ExternalAudioMenus:
 
         items.append((
             "Choose a program", go_pick, None,
-            "Opens a short list of the programs playing sound on this "
-            "computer, with a search box above it, so a long list never "
-            "arrives all at once. Choosing one captures only that program.",
+            f"Opens a list of up to {self.PAGE_MATCHES} programs playing sound "
+            "on this computer, with a search box above it. Choosing one "
+            "captures only that program.",
         ))
 
         source = getattr(self._bot, "external_audio", None)
@@ -225,7 +227,7 @@ class ExternalAudioMenus:
             devices = []
         if not devices:
             self._say("This computer reports no playback devices to capture.")
-        for item in devices[:self.PAGE_MATCHES]:
+        for item in devices[:self.DEVICE_MATCHES]:
             identifier = item.get("id")
             name = item.get("name") or "Unnamed device"
             if not identifier:
@@ -240,13 +242,14 @@ class ExternalAudioMenus:
                 "this device (or to a virtual cable listed here) and its "
                 "sound arrives with no session.",
             ))
-        if len(devices) > self.PAGE_MATCHES:
+        if len(devices) > self.DEVICE_MATCHES:
             items.append((
-                f"{len(devices) - self.PAGE_MATCHES} more devices are not shown",
+                f"{len(devices) - self.DEVICE_MATCHES} more devices are not shown",
                 lambda: None, None,
-                "Only the first eight devices are listed. Unplug or disable "
-                "one you do not use, or set the one you need as the default "
-                "playback device and use Capture this whole computer.",
+                f"Only the first {self.DEVICE_MATCHES} devices are listed. "
+                "Unplug or disable one you do not use, or set the one you "
+                "need as the default playback device and use Capture this "
+                "whole computer.",
             ))
         items.append((
             "Back", back_to_root, None,
@@ -260,7 +263,7 @@ class ExternalAudioMenus:
     def _open_external_program_menu(self, query=""):
         """The picker: a search line, then at most PAGE_MATCHES programs."""
         from ... import menu as menu_mod, menus
-        from ...external_audio import running_apps
+        from ...external_audio import display_program_name, running_apps
 
         gp = self._bot._find_gameplay()
         if gp is None:
@@ -336,8 +339,16 @@ class ExternalAudioMenus:
         except Exception:
             apps = []
         needle = (query or "").strip().casefold()
-        matches = [app for app in apps
-                   if needle in (app.get("name") or "").casefold()]
+        matches = []
+        for app in apps:
+            raw_name = app.get("name") or ""
+            label_name = display_program_name(raw_name)
+            # Searching still accepts the process name the player sees in
+            # Task Manager (``explorer.exe``), while the menu speaks the
+            # readable form (``explorer``).
+            if (needle in raw_name.casefold()
+                    or needle in label_name.casefold()):
+                matches.append(app)
         if needle:
             if matches:
                 self._say(f"{len(matches)} programs match {query}.")
@@ -371,7 +382,7 @@ class ExternalAudioMenus:
             ))
         else:
             for app in matches[:self.PAGE_MATCHES]:
-                name = app.get("name") or "Unknown program"
+                name = display_program_name(app.get("name") or "")
                 pid = app.get("pid")
                 if not pid:
                     continue
@@ -389,9 +400,9 @@ class ExternalAudioMenus:
                 items.append((
                     f"{hidden} more -- type to narrow the list",
                     ask_for_a_word, None,
-                    "The list stops at eight names so it stays readable. "
-                    "Typing a few letters of the one you want is faster than "
-                    "walking past the rest.",
+                    f"The list stops at {self.PAGE_MATCHES} names so it stays "
+                    "readable. Typing a few letters of the one you want is "
+                    "faster than walking past the rest.",
                 ))
 
         items.append((

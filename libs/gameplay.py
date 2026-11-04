@@ -2286,10 +2286,29 @@ class Gameplay(state.State):
             # reads what is playing and what is waiting here; Ctrl+F8 is the
             # session's own door, so the line is offered in both party menus.
             bot = getattr(gp, "music_bot", None)
-            if bot is not None:
+            if bot is not None:            items.append((
+                bot.party_queue_label,
+                bot.open_party_queue_view,
+            ))
+            cinema_cabinet = getattr(ps, "cinema_cabinet", "")
+            if cinema_cabinet:
+                check_listener = getattr(ps, "is_cinema_listener", None)
+                in_cinema = bool(
+                    callable(check_listener) and check_listener(own_name)
+                )
+                def toggle_cinema(in_cinema=in_cinema):
+                    close_top()
+                    self.game.network.send(
+                        consts.CHANNEL_MISC, "party_sync_cinema_listen",
+                        {"listen": not in_cinema},
+                    )
                 items.append((
-                    bot.party_queue_label,
-                    bot.open_party_queue_view,
+                    ("Back to the private party feed" if in_cinema
+                     else f"Listen in cinema room (jukebox {cinema_cabinet})"),
+                    toggle_cinema, None,
+                    "Moves your ears to the linked room's speakers while you "
+                    "are on its map. Party music is paused for you, so the "
+                    "two feeds never play together.",
                 ))
             items.append((
                 "Leave Party Sync session",

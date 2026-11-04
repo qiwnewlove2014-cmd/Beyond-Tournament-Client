@@ -144,6 +144,18 @@ def parse_state(data):
             if name and key not in seen_jammers:
                 seen_jammers.add(key)
                 jammers.append(name)
+    # Guests who chose the linked cinema room's speakers instead of the direct
+    # feed. The server is authoritative; this is the menu/status mirror.
+    cinema_listeners = []
+    seen_cinema = set()
+    raw_cinema = data.get("cinema_listeners")
+    if isinstance(raw_cinema, list):
+        for entry in raw_cinema[:MAX_LIST]:
+            name = _text(entry)
+            key = name.lower()
+            if name and key not in seen_cinema:
+                seen_cinema.add(key)
+                cinema_listeners.append(name)
     max_guests = _int(data.get("max_guests"), 8, 1, 32)
     # The host's cinema link, if any. The room key is the key its
     # announcement used; the cabinet is what a listener resolves on its own map.
@@ -167,6 +179,7 @@ def parse_state(data):
         "queue": _parse_queue_items(data.get("queue")),
         "cinema_cabinet": cinema_cabinet,
         "cinema_room_key": cinema_room_key if cinema_cabinet else 0,
+        "cinema_listeners": cinema_listeners,
     }
 
 
@@ -604,6 +617,7 @@ class PartySyncState:
         self.queue = []
         self.cinema_cabinet = ""
         self.cinema_room_key = 0
+        self.cinema_listeners = []
 
     # ── pending invite ──────────────────────────────────────────────
     def set_pending(self, invite):
@@ -645,6 +659,11 @@ class PartySyncState:
             bool(self.host_name) and same_player(self.host_name, self_name)
         )
 
+    def is_cinema_listener(self, self_name):
+        """Whether this client chose the cinema room's speakers."""
+        return any(same_player(name, self_name)
+                   for name in self.cinema_listeners)
+
     def apply_state(self, payload, self_name):
         """Apply party_sync_state; returns the role string or None."""
         parsed = parse_state(payload)
@@ -661,6 +680,7 @@ class PartySyncState:
         self.queue = parsed["queue"]
         self.cinema_cabinet = parsed["cinema_cabinet"]
         self.cinema_room_key = parsed["cinema_room_key"]
+        self.cinema_listeners = parsed["cinema_listeners"]
         self.role = "host" if same_player(parsed["host_name"], self_name) else "guest"
         return self.role
 
@@ -681,6 +701,7 @@ class PartySyncState:
         self.queue = []
         self.cinema_cabinet = ""
         self.cinema_room_key = 0
+        self.cinema_listeners = []
         self.clear_pending()
 
 

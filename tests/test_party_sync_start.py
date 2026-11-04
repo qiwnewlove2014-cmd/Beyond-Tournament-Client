@@ -16,8 +16,10 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from libs.event_handeler import EventHandeler
 from libs.music_bot import gate as music_bot_gate
 from libs.music_bot.menus import MusicBotMenus
+from libs.voice_chat import MusicCompression
 
 
 class FakeMenu:
@@ -164,6 +166,54 @@ class ShortcutAndStateWiringTests(_Source, unittest.TestCase):
         )
         self.assertIn('getattr(bot, "refresh_party_sync_menu", None)', body)
         self.assertIn("self.game.put(refresh_menu)", body)
+
+    def test_the_guest_menu_toggles_the_cinema_room(self):
+        full = self._source("libs", "music_bot", "menu_pages", "party.py")
+        self.assertIn("party_sync_set_cinema_listen", full)
+        self.assertIn("Listen in cinema room", full)
+        quick = self._function(
+            self._source("libs", "gameplay.py"),
+            "_open_party_sync_quick_menu",
+        )
+        self.assertIn("party_sync_cinema_listen", quick)
+        self.assertIn("is_cinema_listener", quick)
+
+    def test_the_switch_flushes_the_old_direct_leg(self):
+        source = self._source("libs", "event_handeler.py")
+        self.assertIn("_party_cinema_is_listening", source)
+        self.assertIn("_flush_party_music", source)
+        self.assertIn("flush_queued", source)
+        self.assertIn("_party_cinema_listening", source)
+
+    def test_a_frame_queued_before_the_switch_is_dropped(self):
+        # recieve_actual accesses self.decoder next; reaching it would raise
+        # AttributeError, so a clean return is the proof that the stale frame
+        # was stopped before decoding.
+        feed = SimpleNamespace(_flush_generation=4)
+        self.assertIsNone(MusicCompression.recieve_actual(
+            feed, b"old", object(), None, 1, None,
+            flush_generation=3,
+        ))
+
+    def test_flush_queued_advances_the_generation_and_drops_timeline_work(self):
+        feed = SimpleNamespace(
+            _flush_generation=0,
+            _timeline_pending=[object()],
+            _flush_source=lambda source: None,
+            _pair_clock_reset=lambda: None,
+        )
+        MusicCompression.flush_queued(feed, object())
+        self.assertEqual(feed._flush_generation, 1)
+        self.assertEqual(feed._timeline_pending, [])
+
+    def test_leaving_the_room_stops_its_feed_and_receiver_buffer(self):
+        receiver = mock.Mock()
+        game = SimpleNamespace(party_room_receiver=receiver)
+        feed = SimpleNamespace(game=game)
+        with mock.patch("libs.audio.cinema.peer.forget") as forget:
+            EventHandeler._flush_party_room(feed, 1030)
+        forget.assert_called_once_with(game, 1030)
+        receiver.forget.assert_called_once_with(1030)
 
     def test_the_quick_menu_offers_external_audio(self):
         body = self._function(

@@ -891,6 +891,20 @@ def _windowed_pids():
     return pids
 
 
+def display_program_name(name):
+    """The process name as a player reads it: no trailing ``.exe``.
+
+    ``running_apps`` keeps the real process name for matching and for the
+    capture, while the picker speaks this label. ``explorer.exe`` therefore
+    reads as ``explorer`` and ``FL64.EXE`` as ``FL64``; an unknown process is
+    never an empty line.
+    """
+    text = str(name or "").strip()
+    while text.casefold().endswith(".exe"):
+        text = text[:-4].rstrip()
+    return text or "Unknown program"
+
+
 def running_apps(own_pid=None, playing=None, windows=None, namer=None):
     """Everything a player could mean, as ``[{"pid", "name", "playing"}]``.
 

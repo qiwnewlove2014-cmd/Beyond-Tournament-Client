@@ -835,6 +835,12 @@ class MapMusicBot:
             "party_sync_cinema", {"cabinet": str(cabinet or "").strip()[:64]}
         )
 
+    def party_sync_set_cinema_listen(self, listen):
+        """Guest: hear the linked room's speakers instead of the direct feed."""
+        self._party_sync_send(
+            "party_sync_cinema_listen", {"listen": bool(listen)}
+        )
+
     def sync_party_room(self):
         """Follow the authoritative session state: host + link = mixer on."""
         _gp, ps = self._party_sync_pair()
@@ -1270,6 +1276,9 @@ class MapMusicBot:
 
     def _open_party_kick_menu(self, ps):
         return self._menus()._open_party_kick_menu(ps)
+
+    def _open_party_cinema_menu(self, ps):
+        return self._menus()._open_party_cinema_menu(ps)
 
     def _open_party_jam_menu(self, ps):
         return self._menus()._open_party_jam_menu(ps)

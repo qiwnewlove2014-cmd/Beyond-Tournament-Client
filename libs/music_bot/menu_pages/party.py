@@ -150,13 +150,18 @@ class PartyMenus:
             ))
         elif ps.role == "host":
             def guests_label():
+                in_room = getattr(ps, "cinema_listeners", [])
                 names = ", ".join(
-                    g["name"] for g in ps.guests
+                    g["name"] + (" (cinema)" if any(
+                        same_player(g["name"], n) for n in in_room
+                    ) else "")
+                    for g in ps.guests
                 ) if ps.guests else "nobody yet"
                 return f"Listeners ({len(ps.guests)}): {names}"
             items.append((guests_label, lambda: None, None,
-                          "Who is listening right now. Each of them hears what "
-                          "you hear, from the moment they joined."))
+                          "Who is listening right now. A listener marked "
+                          "(cinema) hears the linked room's speakers instead "
+                          "of the direct feed."))
             if ps.guests:
                 def do_kick():
                     close_top()
@@ -184,8 +189,9 @@ class PartyMenus:
                 cinema_label, do_cinema, None,
                 "Sends the mixed audio of everyone jamming in this party "
                 "through one cinema cabinet's speakers. People outside the "
-                "party on this map hear it; party members do not, so their "
-                "private feed is never doubled."))
+                "party on this map hear it; a guest can choose the room's "
+                "speakers in their own Party Sync menu and is then taken off "
+                "the direct feed, so the two never play together."))
             def do_invite():
                 close_top()
                 # A session is not map-scoped, so the picker lists every player
@@ -231,12 +237,21 @@ class PartyMenus:
                           "straight to your headphones, not through the map's "
                           "speakers."))
             if getattr(ps, "cinema_cabinet", ""):
+                own_name = _options.get("username", "")
+                check_listener = getattr(ps, "is_cinema_listener", None)
+                in_cinema = bool(
+                    callable(check_listener) and check_listener(own_name)
+                )
+                def toggle_cinema(in_cinema=in_cinema):
+                    close_top()
+                    self._bot.party_sync_set_cinema_listen(not in_cinema)
                 items.append((
-                    f"Party playing in jukebox {ps.cinema_cabinet}",
-                    lambda: None, None,
-                    "The host sent this party's mixed audio into that "
-                    "cinema room. You keep hearing the direct party feed, "
-                    "not the room."))
+                    ("Back to the private party feed" if in_cinema
+                     else f"Listen in cinema room (jukebox {ps.cinema_cabinet})"),
+                    toggle_cinema, None,
+                    "Moves your ears to that jukebox's room speakers while "
+                    "you are on its map. Party music is paused for you, so "
+                    "the direct feed and the room never play together."))
             # Read-only: whether this party takes song requests (/p) is the
             # host's decision, and it arrives with the session state. A listener
             # reads it here instead of finding out by asking.

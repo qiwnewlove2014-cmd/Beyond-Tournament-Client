@@ -261,6 +261,21 @@ class TestCinemaState(unittest.TestCase):
         self.assertEqual(ps.cinema_cabinet, "")
         self.assertEqual(ps.cinema_room_key, 0)
 
+    def test_state_parses_and_mirrors_room_listeners(self):
+        payload = self._payload(
+            cinema_cabinet="cab1", cinema_room_key=1030,
+            cinema_listeners=["Carol", "  carol ", "", 7],
+        )
+        parsed = parse_state(payload)
+        self.assertEqual(parsed["cinema_listeners"], ["Carol"])
+        ps = PartySyncState()
+        ps.apply_state(payload, "Carol")
+        self.assertTrue(ps.is_cinema_listener("carol"))
+        self.assertFalse(ps.is_cinema_listener("Alice"))
+        ps.end_session()
+        self.assertEqual(ps.cinema_listeners, [])
+        self.assertFalse(ps.is_cinema_listener("Carol"))
+
 
 class TestRoomReceiver(unittest.TestCase):
     class Feed:
@@ -292,6 +307,16 @@ class TestRoomReceiver(unittest.TestCase):
         with mock.patch("libs.audio.cinema.peer.route", return_value=None):
             self.assertFalse(receiver.play(1001, 7, 0, b"a"))
         self.assertNotIn(1001, receiver._jitter)
+
+    def test_forget_drops_the_buffered_stream_and_decoder(self):
+        receiver = self._receiver()
+        receiver._jitter[1001] = PartyRoomJitter()
+        receiver._epochs[1001] = 7
+        receiver._decoders[1001] = object()
+        receiver.forget(1001)
+        self.assertNotIn(1001, receiver._jitter)
+        self.assertNotIn(1001, receiver._epochs)
+        self.assertNotIn(1001, receiver._decoders)
 
     def test_a_missing_frame_is_filled_and_the_next_frames_keep_order(self):
         feed = self.Feed()

@@ -2588,6 +2588,11 @@ class EventHandeler:
         if len(data) < 2: return
         entity_channel_id = data[0]
         opus_data = data[1:]
+        # The Server has already removed this guest from the direct music
+        # relay; dropping a late frame here keeps the room and the old ear
+        # feed from overlapping at the switch.
+        if self._party_cinema_is_listening():
+            return
 
         # The member's entity when they are standing here, else the Party Sync
         # sink kept for them while they are on another map.
@@ -2627,6 +2632,8 @@ class EventHandeler:
             return
         entity_channel_id = data[0]
         opus_data = data[1:]
+        if self._party_cinema_is_listening():
+            return
         trace_on = audio_trace.enabled()
         if trace_on:
             now = time.monotonic()
@@ -2944,6 +2951,17 @@ class EventHandeler:
         from . import options as _options
         return _options.get("username", "")
 
+    def _party_cinema_is_listening(self):
+        """Whether this client chose the linked cinema room's speakers."""
+        ps = self._party_sync()
+        check = getattr(ps, "is_cinema_listener", None)
+        if not callable(check):
+            return False
+        try:
+            return bool(check(self._party_sync_own_name()))
+        except Exception:
+            return False
+
     def _party_sync_send(self, event, data=None):
         self.game.network.send(
             consts.CHANNEL_MISC, event, data if data is not None else {}
@@ -2992,8 +3010,31 @@ class EventHandeler:
         # so a session doubles as a private "team talk" room, and leaving restores positional behaviour.
         ps = self._party_sync()
         in_session = getattr(ps, "role", None) in ("host", "guest")
+        cinema_listening = self._party_cinema_is_listening()
 
         def apply():
+            previous_listening = bool(
+                getattr(self, "_party_cinema_listening", False)
+            )
+            previous_room_key = int(
+                getattr(self, "_party_cinema_room_key", 0) or 0
+            )
+            if cinema_listening != previous_listening:
+                self._party_cinema_listening = cinema_listening
+                if cinema_listening:
+                    self._party_cinema_room_key = int(
+                        getattr(ps, "cinema_room_key", 0) or 0
+                    )
+                else:
+                    # The room's receiver and speaker bank hold roughly a
+                    # quarter second. Stop them before the direct feed comes
+                    # back, or the two would overlap at the exit seam.
+                    if previous_room_key:
+                        self._flush_party_room(previous_room_key)
+                    self._party_cinema_room_key = 0
+                # Direct frames already queued would otherwise play on top
+                # of the room during its pre-buffer.
+                self._flush_party_music()
             from .party_sync import (
                 clear_direct_mode,
                 clear_voice_direct_mode,
@@ -3041,6 +3082,64 @@ class EventHandeler:
                 sinks.sync(gp, ps)
 
         self.game.put(apply)
+
+    def _flush_party_room(self, room_key):
+        """MAIN THREAD ONLY: stop a listener's room feed and its buffered frames.
+
+        The direct feed is resumed by the Server on the same state push, so the
+        room's jitter buffer and speaker bank must go now rather than finishing
+        their pre-buffer over the top of it.
+        """
+        try:
+            from .audio.cinema import peer as cinema_peer
+            cinema_peer.forget(self.game, int(room_key))
+        except Exception:
+            pass
+        receiver = getattr(self.game, "party_room_receiver", None)
+        forget = getattr(receiver, "forget", None)
+        if callable(forget):
+            try:
+                forget(int(room_key))
+            except Exception:
+                pass
+
+    def _flush_party_music(self):
+        """MAIN THREAD ONLY: empty queued direct music before a leg switch.
+
+        This is the client half of the cinema-room choice. The Server has
+        already stopped sending this guest the direct music (and started the
+        channel-26 room feed); the decoded packets still sitting on each
+        party member's music source are the only way the two could overlap.
+        """
+        from .party_sync import party_member_channels
+        gp = self.gameplay
+        ps = self._party_sync()
+        members = party_member_channels(ps)
+        sinks = party_sync_audio.sinks_for(gp, self.game)
+        for channel in members:
+            entity = (getattr(gp, "voice_channels", None) or {}).get(channel)
+            if entity is None and sinks is not None:
+                entity = sinks.sink_for(channel)
+            if entity is None:
+                continue
+            source = getattr(entity, "music_source", None)
+            compression = getattr(entity, "music_compression", None)
+            flush = getattr(compression, "flush_queued", None)
+            if source is None or not callable(flush):
+                continue
+            try:
+                flush(source)
+            except Exception:
+                pass
+            # `_flush_source` mutes while it drains; restore the live party
+            # volume so the direct leg is ready when the guest returns.
+            try:
+                if hasattr(entity, "music_gain"):
+                    source.gain = entity.music_gain()
+                elif getattr(entity, "_party_sync_direct", False):
+                    source.gain = entity._party_sync_direct_volume()
+            except Exception:
+                pass
 
     def _close_party_sync_prompt(self):
         """Remove an open invitation prompt menu, if any."""

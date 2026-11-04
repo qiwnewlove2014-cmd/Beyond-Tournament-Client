@@ -24,6 +24,7 @@ from unittest import mock
 import numpy as np
 
 from libs.external_audio import (
+    display_program_name,
     is_virtual_device,
     DEFAULT_GAIN,
     FRAME_BYTES,
@@ -469,6 +470,8 @@ class TestWhereTheEntryLives(unittest.TestCase):
         self.assertIn("game.input.run", picker)
         self.assertIn('kind="system"', picker)
         self.assertIn("self.PAGE_MATCHES", picker)
+        self.assertIn("PAGE_MATCHES = 24", source)
+        self.assertIn("DEVICE_MATCHES = 8", source)
 
 
 class TestSignalVerdict(unittest.TestCase):
@@ -589,6 +592,14 @@ class TestThePickerFindsAnyProgram(unittest.TestCase):
         picker = source.split("def _open_external_program_menu", 1)[1]
         self.assertIn("running_apps()", picker)
         self.assertIn("(playing now)", picker)
+        self.assertIn("display_program_name", picker)
+
+    def test_a_process_name_drops_its_exe_suffix(self):
+        self.assertEqual(display_program_name("explorer.exe"), "explorer")
+        self.assertEqual(display_program_name("FL64.EXE"), "FL64")
+        self.assertEqual(display_program_name("  Spotify.exe  "), "Spotify")
+        self.assertEqual(display_program_name("Process 77"), "Process 77")
+        self.assertEqual(display_program_name(""), "Unknown program")
 
 
 class TestAnyProgramByDevice(unittest.TestCase):
