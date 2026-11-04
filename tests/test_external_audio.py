@@ -630,16 +630,294 @@ class TestAnyProgramByDevice(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot"
                   / "controller.py").read_text(encoding="utf-8")
         self.assertIn("device_id=device_id", source)
-        self.assertIn('if kind == "device":', source)
+        self.assertIn('if kind in ("device", "input"):', source)
 
-    def test_the_picker_offers_the_device_page(self):
+    def test_the_root_offers_the_device_or_input_page(self):
         from pathlib import Path
         source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot"
                   / "menu_pages" / "external.py").read_text(encoding="utf-8")
-        self.assertIn('"Capture an audio device instead", go_devices, None,',
-                      source)
+        self.assertIn('"Choose a device or input", go_sources, None,', source)
+        self.assertIn('"Capture a playback device", go_playback, None,', source)
+        self.assertIn("def _open_external_source_menu(self):", source)
         self.assertIn("def _open_external_device_menu(self):", source)
         self.assertIn("render_devices()", source)
+
+    def test_the_playback_page_starts_the_playback_capture(self):
+        from libs import menu as menu_mod, menus
+        from libs.music_bot.menu_pages.external import ExternalAudioMenus
+
+        class Page:
+            def __init__(self, game, title, **kwargs):
+                self.title = title
+                self.items = []
+
+            def add_items(self, items):
+                self.items.extend(items)
+
+        gp = SimpleNamespace(
+            substates=[],
+            pop_last_substate=lambda: None,
+            add_substate=lambda page: gp.substates.append(page),
+        )
+        bot = SimpleNamespace(
+            game=object(), external_audio_mode=MODE_STEREO,
+            external_audio_gain=0.85, _find_gameplay=lambda: gp,
+            start_external_audio=mock.MagicMock(),
+        )
+        handler = ExternalAudioMenus()
+        handler._bot = bot
+        handler._say = lambda _text: None
+        handler._open_external_audio_menu = mock.MagicMock()
+        devices = [
+            {"id": "{speakers}", "name": "Speakers (USB DAC)"},
+            {"id": "{cable}", "name": "CABLE Input", "virtual": True},
+        ]
+        with mock.patch.object(menu_mod, "Menu", Page), \
+                mock.patch.object(menus, "set_default_sounds"), \
+                mock.patch("libs.external_audio.render_devices",
+                           return_value=devices):
+            handler._open_external_device_menu()
+
+        page = gp.substates[-1]
+        self.assertEqual(page.title, "Capture a playback device")
+        labels = [item[0] for item in page.items]
+        self.assertIn("Capture Speakers (USB DAC)", labels)
+        self.assertIn("Capture CABLE Input (virtual cable)", labels)
+
+        page.items[0][1]()
+        bot.start_external_audio.assert_called_once_with(
+            kind="device", target="{speakers}", label="Speakers (USB DAC)",
+            mode=MODE_STEREO, gain=0.85,
+        )
+        handler._open_external_audio_menu.assert_called_once_with()
+
+
+class TestAnAudioInputCanBeCaptured(unittest.TestCase):
+    """A line-in is a source of its own, not a program and not a loopback.
+
+    The playback-device route reaches a DAW Windows cannot name; the input
+    route reaches the thing plugged into the interface, which has no program
+    at all. Both feed the same queues, so the only new decisions are which
+    endpoint is opened and which WASAPI flags it is opened with.
+    """
+
+    def _source(self, *parts):
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1].joinpath(*parts)
+        return path.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+    def test_the_input_backend_does_not_ask_for_the_loopback_flag(self):
+        from libs.external_audio import InputDeviceBackend
+
+        class Recorder:
+            class ProcessLoopbackRecorder:
+                AUDCLNT_STREAMFLAGS_LOOPBACK = 0x2
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK = 0x4
+                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM = 0x80000000
+
+        flags = InputDeviceBackend(device_id="{input}")._stream_flags(Recorder)
+        self.assertFalse(flags & Recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_LOOPBACK)
+        self.assertTrue(flags & Recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_EVENTCALLBACK)
+        self.assertTrue(flags & Recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM)
+
+    def test_an_input_without_a_device_is_refused(self):
+        from libs.external_audio import InputDeviceBackend
+        with self.assertRaises(SourceUnavailable):
+            InputDeviceBackend(device_id="").open()
+
+    def test_capture_devices_reads_the_recording_flow(self):
+        source = self._source("libs", "external_audio.py")
+        self.assertIn("E_CAPTURE", source)
+        self.assertIn("def capture_devices():", source)
+        self.assertIn("_endpoint_devices(E_CAPTURE)", source)
+
+    def test_the_bot_builds_an_input_backend(self):
+        source = self._source("libs", "music_bot", "controller.py")
+        self.assertIn("InputDeviceBackend", source)
+        self.assertIn('if kind == "input":', source)
+        self.assertIn("kind=kind", source)
+
+    def test_the_program_picker_no_longer_mixes_in_hardware(self):
+        source = self._source("libs", "music_bot", "menu_pages", "external.py")
+        picker = source.split("def _open_external_program_menu", 1)[1]
+        self.assertNotIn("Capture an audio input instead", picker)
+        self.assertNotIn("Capture an audio device instead", picker)
+        self.assertIn('"Capture an audio input", go_input, None,', source)
+        self.assertIn("def _open_external_source_menu(self):", source)
+        self.assertIn("def _open_external_input_menu(self):", source)
+        self.assertIn("capture_devices()", source)
+        self.assertIn('kind="input"', source)
+
+    def test_the_source_page_groups_the_two_hardware_routes(self):
+        from libs import menu as menu_mod, menus
+        from libs.music_bot.menu_pages.external import ExternalAudioMenus
+
+        class Page:
+            def __init__(self, game, title, **kwargs):
+                self.title = title
+                self.items = []
+
+            def add_items(self, items):
+                self.items.extend(items)
+
+        gp = SimpleNamespace(
+            substates=[],
+            pop_last_substate=lambda: None,
+            add_substate=lambda page: gp.substates.append(page),
+        )
+        bot = SimpleNamespace(game=object(), _find_gameplay=lambda: gp)
+        handler = ExternalAudioMenus()
+        handler._bot = bot
+        with mock.patch.object(menu_mod, "Menu", Page), \
+                mock.patch.object(menus, "set_default_sounds"):
+            handler._open_external_source_menu()
+
+        page = gp.substates[-1]
+        self.assertEqual(page.title, "Choose a device or input")
+        labels = [item[0] for item in page.items]
+        self.assertEqual(labels[:2], ["Capture a playback device",
+                                      "Capture an audio input"])
+        self.assertEqual(labels[-1], "Back")
+
+        handler._open_external_device_menu = mock.MagicMock()
+        handler._open_external_input_menu = mock.MagicMock()
+        page.items[0][1]()
+        handler._open_external_device_menu.assert_called_once_with()
+        page.items[1][1]()
+        handler._open_external_input_menu.assert_called_once_with()
+
+    def test_the_input_page_builds_and_lists_the_recording_endpoints(self):
+        from libs import menu as menu_mod, menus
+        from libs.music_bot.menu_pages.external import ExternalAudioMenus
+
+        class Page:
+            def __init__(self, game, title, **kwargs):
+                self.title = title
+                self.items = []
+
+            def add_items(self, items):
+                self.items.extend(items)
+
+        gp = SimpleNamespace(
+            substates=[],
+            pop_last_substate=lambda: None,
+            add_substate=lambda page: gp.substates.append(page),
+        )
+        bot = SimpleNamespace(
+            game=object(), external_audio_mode=MODE_STEREO,
+            external_audio_gain=0.85, _find_gameplay=lambda: gp,
+            start_external_audio=mock.MagicMock(),
+        )
+        handler = ExternalAudioMenus()
+        handler._bot = bot
+        handler._say = lambda _text: None
+        handler._open_external_audio_menu = mock.MagicMock()
+        with mock.patch.object(menu_mod, "Menu", Page), \
+                mock.patch.object(menus, "set_default_sounds"), \
+                mock.patch("libs.external_audio.capture_devices",
+                           return_value=[{"id": "{input}", "name": "USB Interface"}]):
+            handler._open_external_input_menu()
+
+        page = gp.substates[-1]
+        self.assertEqual(page.title, "Capture an audio input")
+        self.assertIn("Capture input USB Interface", [item[0] for item in page.items])
+        self.assertIn("Back", [item[0] for item in page.items])
+        self.assertIn("microphone", page.items[0][3].lower())
+
+        page.items[0][1]()
+        bot.start_external_audio.assert_called_once_with(
+            kind="input", target="{input}", label="USB Interface",
+            mode=MODE_STEREO, gain=0.85,
+        )
+        handler._open_external_audio_menu.assert_called_once_with()
+
+    def test_the_input_report_talks_about_an_input_not_a_program(self):
+        source = ExternalAudioSource(None, kind="input")
+        source.started_at -= 3
+        report = source.signal_report()
+        self.assertIn("input", report)
+        self.assertNotIn("ASIO", report)
+
+
+class TestTheChooseADeviceOrInputSimulation(unittest.TestCase):
+    """What the two hardware routes do with several kinds of endpoint.
+
+    The menu tests prove the choice reaches the controller; this matrix proves
+    the capture itself handles the shapes a real machine reports. A fake
+    backend makes the test deterministic: each profile delivers exactly one
+    packet and then raises, so the source's worker exits at the end of the
+    packet without a sound card or a sleeping thread.
+    """
+
+    def _capture(self, packet, kind):
+        song, live = [], []
+        backend = FakeBackend(packets=[packet], read_error="finished")
+        source = ExternalAudioSource(
+            backend, sink=song.append, live_sink=live.append, kind=kind,
+            gain=1.0,
+        )
+        source.run()
+        return source, song, live
+
+    def test_a_playback_device_keeps_its_stereo_image(self):
+        source, song, live = self._capture(
+            (pcm(frames=960, left_only=True, value=9000), 2, 48000),
+            "device",
+        )
+        self.assertEqual(len(song), 1)
+        self.assertEqual(len(live), 2)
+        left, right = sides(song[0])
+        self.assertTrue((left == 9000).all())
+        self.assertTrue((right == 0).all())
+
+    def test_a_usb_interface_is_an_input_not_a_program(self):
+        source, song, live = self._capture(
+            (pcm(frames=960, value=6000), 2, 48000), "input",
+        )
+        self.assertEqual(source.kind, "input")
+        self.assertEqual(len(song), 1)
+        self.assertEqual(len(live), 2)
+        left, right = sides(song[0])
+        self.assertTrue((left == 6000).all())
+        self.assertTrue((right == 6000).all())
+
+    def test_a_mono_microphone_is_duplicated_to_both_sides(self):
+        source, song, _live = self._capture(
+            (pcm(frames=960, channels=1, value=4500), 1, 48000), "input",
+        )
+        self.assertEqual(source.peak, 4500)
+        left, right = sides(song[0])
+        self.assertTrue((left == 4500).all())
+        self.assertTrue((right == 4500).all())
+
+    def test_a_stereo_line_in_at_44_1_k_is_resampled_to_one_frame(self):
+        _source, song, live = self._capture(
+            (pcm(frames=882, value=1200), 2, 44100), "input",
+        )
+        self.assertEqual(len(song), 1)
+        self.assertEqual(len(song[0]), FRAME_BYTES)
+        self.assertEqual(len(live), 2)
+        left, right = sides(song[0])
+        self.assertTrue((left == 1200).all())
+        self.assertTrue((right == 1200).all())
+
+    def test_a_six_channel_device_keeps_the_first_pair(self):
+        block = np.zeros((960, 6), dtype=np.int16)
+        block[:, 0] = 10
+        block[:, 1] = 20
+        block[:, 2:] = 999
+        _source, song, _live = self._capture((block.tobytes(), 6, 48000), "device")
+        left, right = sides(song[0])
+        self.assertTrue((left == 10).all())
+        self.assertTrue((right == 20).all())
+
+    def test_a_silent_input_still_delivers_frames_and_says_silent(self):
+        source, song, _live = self._capture(
+            (b"\x00" * FRAME_BYTES, 2, 48000), "input",
+        )
+        self.assertEqual(len(song), 1)
+        self.assertTrue((np.frombuffer(song[0], dtype=np.int16) == 0).all())
+        self.assertEqual(source.signal_word(source.recent_peak()), "silent")
 
 
 class TestTheRelayCarriesItToTheParty(unittest.TestCase):

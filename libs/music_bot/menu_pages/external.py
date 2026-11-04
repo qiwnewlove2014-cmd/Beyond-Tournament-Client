@@ -1,15 +1,18 @@
 """The External audio pages of `MusicBotMenus`.
 
-Three short pages instead of one long one, because the first version put every
+Five short pages instead of one long one, because the first version put every
 program playing sound on the page the moment it opened: a wall of buttons with
 the search nowhere in sight. Where it lives moved too -- the Party Sync menu
 carries the entry, because that is the session whose listeners it feeds, and
 the Music Bot menu is long enough for a screen reader already.
 
     Party Sync  ->  "External audio from a music program"
-    External audio      status, Choose a program, whole computer, channel,
-                        level, stop, say status, Back          (at most 24)
+    External audio      status, Choose a program, Choose a device or input,
+                        whole computer, channel, level, stop, say status, Back
     Choose a program    "Type to search", the matches (at most 24), Back
+    Choose a device or input  a playback-device page, an input page, Back
+    Capture a playback device  the playback endpoints, at most 8, Back
+    Capture an audio input  the recording endpoints, at most 8, Back
     a text box          type part of a program's name, Enter filters
 
 The capture itself is `libs/external_audio.py`; these pages only choose a
@@ -24,10 +27,12 @@ Two rules the pages keep, both learned from the menus around them:
   and the page says which program and which channel mode, then re-opens with
   the new status at the top; nothing here is silent about what it just did.
 
-Pins: client/tests/test_external_audio.py (the three-page shape: the root does
-not list programs, the picker caps and filters, and the entry does not come
-back to the Music Bot menu), test_music_bot_queue_settings.py (a shim per
-menu), test_party_sync.py (the Party Sync page builds).
+Pins: client/tests/test_external_audio.py (the page shape: the root keeps the
+hardware routes beside the picker, the picker caps and filters and does not
+mix devices into program matches, and the entry does not come back to the
+Music Bot menu),
+test_music_bot_queue_settings.py (a shim per menu), test_party_sync.py (the
+Party Sync page builds).
 """
 
 
@@ -66,6 +71,10 @@ class ExternalAudioMenus:
         def go_pick():
             close_top()
             self._open_external_program_menu()
+
+        def go_sources():
+            close_top()
+            self._open_external_source_menu()
 
         def use_system():
             close_top()
@@ -139,6 +148,13 @@ class ExternalAudioMenus:
             "captures only that program.",
         ))
 
+        items.append((
+            "Choose a device or input", go_sources, None,
+            "Opens a short page that separates the two hardware routes: a "
+            "playback device for a program Windows cannot see, or a recording "
+            "input such as a line-in, USB interface or microphone.",
+        ))
+
         source = getattr(self._bot, "external_audio", None)
         if source is not None:
             items.append((
@@ -184,15 +200,20 @@ class ExternalAudioMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _open_external_device_menu(self):
-        """Capture a playback device: the route for a program Windows cannot see."""
+    def _open_external_source_menu(self):
+        """The short fork: a playback device or a recording input.
+
+        These two used to sit at the bottom of the program picker. That put
+        hardware choices among program matches, where a player looking for a
+        line-in had to walk past every program first. The picker now only
+        chooses a program; this page is the one place for the other routes.
+        """
         from ... import menu as menu_mod, menus
-        from ...external_audio import render_devices
 
         gp = self._bot._find_gameplay()
         if gp is None:
             return
-        m = menu_mod.Menu(self._bot.game, "Capture an audio device", parrent=gp)
+        m = menu_mod.Menu(self._bot.game, "Choose a device or input", parrent=gp)
         items = []
 
         def close_top():
@@ -202,6 +223,56 @@ class ExternalAudioMenus:
         def back_to_root():
             close_top()
             self._open_external_audio_menu()
+
+        def go_playback():
+            close_top()
+            self._open_external_device_menu()
+
+        def go_input():
+            close_top()
+            self._open_external_input_menu()
+
+        items.append((
+            "Capture a playback device", go_playback, None,
+            "Lists the playback devices on this computer, including a "
+            "virtual cable. Choose the device your program plays out of when "
+            "Windows cannot see the program itself -- an ASIO program has no "
+            "audio session, but its sound still reaches a device.",
+        ))
+        items.append((
+            "Capture an audio input", go_input, None,
+            "Lists the recording inputs on this computer, such as a USB "
+            "interface, a line-in or a microphone. Choose one to send what is "
+            "plugged into it; no program needs to be running. A microphone "
+            "also hears your speakers, so use headphones to avoid feedback.",
+        ))
+        items.append((
+            "Back", back_to_root, None,
+            "Returns to the External audio page. Nothing is changed.",
+        ))
+
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_external_device_menu(self):
+        """Capture a playback device: the route for a program Windows cannot see."""
+        from ... import menu as menu_mod, menus
+        from ...external_audio import render_devices
+
+        gp = self._bot._find_gameplay()
+        if gp is None:
+            return
+        m = menu_mod.Menu(self._bot.game, "Capture a playback device", parrent=gp)
+        items = []
+
+        def close_top():
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+
+        def back_to_root():
+            close_top()
+            self._open_external_source_menu()
 
         def use_device(identifier, name):
             close_top()
@@ -253,7 +324,81 @@ class ExternalAudioMenus:
             ))
         items.append((
             "Back", back_to_root, None,
-            "Returns to the External audio page. Nothing is changed.",
+            "Returns to the device or input page. Nothing is changed.",
+        ))
+
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_external_input_menu(self):
+        """Capture a recording endpoint: a line-in, USB interface or microphone."""
+        from ... import menu as menu_mod, menus
+        from ...external_audio import capture_devices
+
+        gp = self._bot._find_gameplay()
+        if gp is None:
+            return
+        m = menu_mod.Menu(self._bot.game, "Capture an audio input", parrent=gp)
+        items = []
+
+        def close_top():
+            if gp.substates and gp.substates[-1] is m:
+                gp.pop_last_substate()
+
+        def back_to_source():
+            close_top()
+            self._open_external_source_menu()
+
+        def use_input(identifier, name):
+            close_top()
+            source = self._bot.start_external_audio(
+                kind="input", target=identifier, label=name,
+                mode=self._bot.external_audio_mode,
+                gain=self._bot.external_audio_gain,
+            )
+            if source is None:
+                self._say(f"Could not start capturing {name}.")
+            else:
+                self._say(
+                    f"Capturing the input {name} in {source.mode}. Whatever "
+                    "is plugged into it is sent with your music. If it is a "
+                    "microphone, use headphones so the speakers do not feed "
+                    "back."
+                )
+            self._open_external_audio_menu()
+
+        devices = []
+        try:
+            devices = capture_devices()
+        except Exception:
+            devices = []
+        if not devices:
+            self._say("This computer reports no audio inputs to capture.")
+        for item in devices[:self.DEVICE_MATCHES]:
+            identifier = item.get("id")
+            name = item.get("name") or "Unnamed input"
+            if not identifier:
+                continue
+            items.append((
+                f"Capture input {name}",
+                lambda i=identifier, n=name: use_input(i, n),
+                None,
+                "Captures what is plugged into this input, not one program. "
+                "Use it for a mixer, a USB audio interface or a line-in. A "
+                "microphone also hears the room, so wear headphones.",
+            ))
+        if len(devices) > self.DEVICE_MATCHES:
+            items.append((
+                f"{len(devices) - self.DEVICE_MATCHES} more inputs are not shown",
+                lambda: None, None,
+                f"Only the first {self.DEVICE_MATCHES} inputs are listed. "
+                "Disable an input you do not use, or set the one you need as "
+                "the default recording device and reopen this page.",
+            ))
+        items.append((
+            "Back", back_to_source, None,
+            "Returns to the device or input page. Nothing is changed.",
         ))
 
         m.add_items(items)
@@ -329,10 +474,6 @@ class ExternalAudioMenus:
                 )
             self._open_external_audio_menu()
 
-        def go_devices():
-            close_top()
-            self._open_external_device_menu()
-
         apps = []
         try:
             apps = running_apps()
@@ -404,14 +545,6 @@ class ExternalAudioMenus:
                     "readable. Typing a few letters of the one you want is "
                     "faster than walking past the rest.",
                 ))
-
-        items.append((
-            "Capture an audio device instead", go_devices, None,
-            "Lists the playback devices on this computer, including a "
-            "virtual cable. Choose the device your program plays out of when "
-            "Windows cannot see the program itself -- an ASIO program has no "
-            "audio session, but its sound still reaches a device.",
-        ))
 
         items.append((
             "Capture this whole computer",

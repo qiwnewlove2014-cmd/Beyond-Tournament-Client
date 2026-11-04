@@ -1157,20 +1157,21 @@ class MapMusicBot:
     # ------------------------------------------------ external audio source
     def start_external_audio(self, kind="app", target="", label="",
                             mode=None, gain=None):
-        """Capture another program's (or the computer's) audio for the live legs.
+        """Capture a program, the computer, a playback device or an audio input.
 
-        Returns the running source, or None when the request names no program.
+        Returns the running source, or None when the request names no target.
         A capture the machine refuses does not raise here: the source thread
         records the reason in ``source.error`` and the menu says it, so a click
-        on a program can never take the game down with it.
+        on a source can never take the game down with it.
         """
-        from ..external_audio import ExternalAudioSource, LoopbackBackend
+        from ..external_audio import (ExternalAudioSource, InputDeviceBackend,
+                                      LoopbackBackend)
         if not self._party_sync_external_allowed():
             return None
         self.stop_external_audio()
         pid = None
         device_id = ""
-        if kind == "device":
+        if kind in ("device", "input"):
             device_id = str(target or "").strip()
             if not device_id:
                 return None
@@ -1183,9 +1184,12 @@ class MapMusicBot:
                 return None
         chosen_mode = mode or self.external_audio_mode
         chosen_gain = self.external_audio_gain if gain is None else gain
-        backend = LoopbackBackend(
-            process_id=pid, whole_computer=(kind == "system"),
-            device_id=device_id)
+        if kind == "input":
+            backend = InputDeviceBackend(device_id=device_id)
+        else:
+            backend = LoopbackBackend(
+                process_id=pid, whole_computer=(kind == "system"),
+                device_id=device_id)
         source = ExternalAudioSource(
             backend,
             sink=self.external_pcm_queue.append,
@@ -1193,6 +1197,7 @@ class MapMusicBot:
             mode=chosen_mode,
             gain=chosen_gain,
             label=label,
+            kind=kind,
         )
         source.start()
         # No song may be playing: the relay is what sends the program to the
@@ -1246,8 +1251,8 @@ class MapMusicBot:
         """The verdict behind that row, with what to check when it is silent."""
         source = getattr(self, "external_audio", None)
         if source is None:
-            return ("Nothing is being captured. Choose a program on the page "
-                    "above first.")
+            return ("Nothing is being captured. Choose a program, a device or "
+                    "an input on the page above first.")
         return source.signal_report()
 
     def external_audio_status(self):
@@ -1271,8 +1276,14 @@ class MapMusicBot:
     def _open_external_program_menu(self, query=""):
         return self._menus()._open_external_program_menu(query)
 
+    def _open_external_source_menu(self):
+        return self._menus()._open_external_source_menu()
+
     def _open_external_device_menu(self):
         return self._menus()._open_external_device_menu()
+
+    def _open_external_input_menu(self):
+        return self._menus()._open_external_input_menu()
 
     def _open_party_kick_menu(self, ps):
         return self._menus()._open_party_kick_menu(ps)

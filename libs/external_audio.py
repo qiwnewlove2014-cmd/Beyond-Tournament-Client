@@ -10,8 +10,9 @@ own rather than a second device on that path.
 
 This module is the source half of that pipe:
 
-* it captures one process's output (Windows process loopback) or the whole
-  output endpoint, as 48 kHz stereo s16 -- the recorder in
+* it captures one process's output (Windows process loopback), the whole
+  output endpoint, or a directly connected recording endpoint (a line-in, USB
+  interface or microphone), as 48 kHz stereo s16 -- the recorder in
   `libs/game_audio_recorder.py` is the sibling that writes a WAV, and its COM
   plumbing is reused here instead of copied;
 * it re-frames whatever the driver hands over into the game's own 20 ms frame,
@@ -66,7 +67,9 @@ MODES = (MODE_STEREO, MODE_MONO)
 
 KIND_APP = "app"
 KIND_SYSTEM = "system"
-KINDS = (KIND_APP, KIND_SYSTEM)
+KIND_DEVICE = "device"
+KIND_INPUT = "input"
+KINDS = (KIND_APP, KIND_SYSTEM, KIND_DEVICE, KIND_INPUT)
 
 #: Loudest gain a source may be given (the mix headroom is the streamer's).
 MAX_GAIN = 2.0
@@ -186,9 +189,11 @@ class ExternalAudioSource(threading.Thread):
     """
 
     def __init__(self, backend, sink=None, mode=MODE_STEREO,
-                 gain=DEFAULT_GAIN, label="", live_sink=None, room_sink=None):
+                 gain=DEFAULT_GAIN, label="", live_sink=None, room_sink=None,
+                 kind=KIND_APP):
         super().__init__(daemon=True)
         self.backend = backend
+        self.kind = kind if kind in KINDS else KIND_APP
         self.sink = sink
         self.live_sink = live_sink
         # Party Sync -> cinema: the same shaped 10 ms frame, handed to the
@@ -411,12 +416,28 @@ class ExternalAudioSource(threading.Thread):
         percent = int(peak / 327.68)
         return f"Signal: {self.signal_word(peak)} (peak {percent}%)"
 
+    def _source_noun(self):
+        """The word the status and signal lines use for this source."""
+        return {KIND_INPUT: "input", KIND_DEVICE: "device",
+                KIND_SYSTEM: "computer"}.get(self.kind, "program")
+
     def signal_report(self):
         """A verdict a blind player can act on, not just a number."""
+        noun = self._source_noun()
         if self.error:
-            return (f"The capture stopped: {self.error}. Choose the program "
+            return (f"The capture stopped: {self.error}. Choose the {noun} "
                     "again, or use the whole computer.")
         if self.last_frame_at is None:
+            if self.kind == KIND_INPUT:
+                return ("Nothing has arrived from this input yet. Check that "
+                        "the device is plugged in, that its input gain is up, "
+                        "and that the program using it is allowed to record. "
+                        "If another program holds it exclusively, close that "
+                        "program and choose this input again.")
+            if self.kind == KIND_DEVICE:
+                return ("Nothing has arrived from this playback device yet. "
+                        "Check that the program is playing, that it is not "
+                        "muted, and that its output is set to this device.")
             return ("Nothing has arrived from this program yet. Check that it "
                     "is playing, that it is not muted in the Windows volume "
                     "mixer, and that it plays through a Windows output device: "
@@ -426,26 +447,40 @@ class ExternalAudioSource(threading.Thread):
                     "Windows device such as the primary sound driver.")
         peak = self.recent_peak()
         if peak is None:
-            return ("The program was sending sound, but nothing has arrived "
+            return (f"The {noun} was sending sound, but nothing has arrived "
                     f"for {self.idle_seconds():.0f} seconds. If it is still "
-                    "playing, it may have changed its output device.")
+                    "active, it may have changed its output device.")
         word = self.signal_word(peak)
         percent = int(peak / 327.68)
         if word == "silent":
+            if self.kind == KIND_INPUT:
+                return ("The capture is running but every sample is silent. "
+                        "Check the cable, the input gain on the interface, "
+                        "and that the source is playing; a microphone muted "
+                        "by its own switch reads exactly like this.")
             return ("The capture is running but every sample is silent. The "
                     "program may be paused or muted, or it may be using an "
                     "ASIO driver, which bypasses the Windows audio engine -- "
                     "switch its output to a Windows device (the primary sound "
                     "driver is one) and press this row again.")
         if word in ("very quiet", "quiet"):
+            if self.kind == KIND_INPUT:
+                return (f"The input is running and sound is arriving, "
+                        f"quietly (peak {percent} percent). Raise the input "
+                        "gain, or the Level row, if listeners say they cannot "
+                        "hear it.")
             return (f"The capture is running and sound is arriving, quietly "
                     f"(peak {percent} percent). Turn the program up, or raise "
                     "the Level row, if listeners say they cannot hear it.")
         if word == "clipping":
+            if self.kind == KIND_INPUT:
+                return ("Sound is arriving and it is clipping at the top. "
+                        "Lower the input gain on the interface; the Level row "
+                        "cannot undo a clip that already happened.")
             return ("Sound is arriving and it is clipping at the top. Turn "
                     "the program down a little; the level row cannot undo a "
                     "clip that already happened.")
-        return (f"Sound is arriving from the program (peak {percent} "
+        return (f"Sound is arriving from the {noun} (peak {percent} "
                 "percent), so it is being sent wherever your music goes.")
 
     # ── worker ──────────────────────────────────────────────────────────
@@ -519,13 +554,13 @@ def is_virtual_device(name):
     return any(hint in text for hint in VIRTUAL_DEVICE_HINTS)
 
 
-def render_devices():
-    """Every active playback device, as ``[{"id", "name", "virtual"}]``.
+def _endpoint_devices(flow):
+    """Every active endpoint of one data flow, as ``id``/``name``/``virtual``.
 
-    The device is the one handle Windows always offers: a program that keeps
-    its audio out of the session list (ASIO, exclusive mode) still renders to
-    *some* device, and a program a player cannot name can be routed to a cable
-    whose device this lists. Empty off Windows or without COM.
+    The same enumerator serves both directions: a playback endpoint is the
+    handle that reaches a program Windows cannot see, and a recording endpoint
+    is the line-in, USB interface or microphone a player plugged in directly.
+    Empty off Windows or without COM.
     """
     import ctypes
     import os
@@ -552,7 +587,7 @@ def render_devices():
             interface=watch._IMMDeviceEnumerator,
             clsctx=watch.CLSCTX_ALL,
         )
-        devices = enumerator.EnumAudioEndpoints(E_RENDER, DEVICE_STATE_ACTIVE)
+        devices = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)
         for index in range(int(devices.GetCount())):
             try:
                 device = devices.Item(index)
@@ -573,6 +608,27 @@ def render_devices():
                 pass
     found.sort(key=lambda item: (item["name"].lower(), item["id"]))
     return found
+
+
+def render_devices():
+    """Every active playback device, for capturing a program by its output.
+
+    The device is the one handle Windows always offers: a program that keeps
+    its audio out of the session list (ASIO, exclusive mode) still renders to
+    *some* device, and a program a player cannot name can be routed to a cable
+    whose device this lists.
+    """
+    return _endpoint_devices(E_RENDER)
+
+
+def capture_devices():
+    """Every active recording device -- a line-in, USB interface or microphone.
+
+    Choosing one captures the signal plugged into it, so a mixer, pedal or
+    instrument can join the bot without an external program. The menu says
+    that a microphone also hears the room, so speakers can feed back.
+    """
+    return _endpoint_devices(E_CAPTURE)
 
 
 class DeviceLoopbackRecorder:
@@ -683,6 +739,19 @@ class LoopbackBackend:
     def _thread_alive(self):
         return bool(self._thread and self._thread.is_alive())
 
+    def _stream_flags(self, recorder):
+        """WASAPI flags for this backend's stream.
+
+        Loopback needs the loopback flag. A recording endpoint must NOT carry
+        it: the same IAudioClient is used, but the flag would ask Windows for
+        the render side of a capture device.
+        """
+        return (
+            recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_LOOPBACK
+            | recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+            | recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+        )
+
     # ── the worker (owns this thread's COM apartment) ───────────────────
     def _run(self):
         from . import game_audio_recorder as recorder
@@ -711,11 +780,7 @@ class LoopbackBackend:
                 1, CHANNELS, SAMPLE_RATE, SAMPLE_RATE * block_align,
                 block_align, SAMPLE_WIDTH * 8, 0,
             )
-            flags = (
-                recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_LOOPBACK
-                | recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                | recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-            )
+            flags = self._stream_flags(recorder)
             audio_client.Initialize(
                 recorder.ProcessLoopbackRecorder.AUDCLNT_SHAREMODE_SHARED,
                 flags, 500_000, 0, ctypes.byref(audio_format), None,
@@ -768,11 +833,40 @@ class LoopbackBackend:
                     pass
 
 
+class InputDeviceBackend(LoopbackBackend):
+    """WASAPI capture from a recording endpoint: line-in, USB interface, mic.
+
+    A capture device is not a loopback. It is activated through the same
+    off-the-shelf COM surface (`IMMDevice` -> `IAudioClient` -> capture
+    client), but the render-side loopback flag is removed, so Windows hands
+    over what is plugged into the input instead of what a speaker is playing.
+    The 48 kHz stereo s16 shape is requested with AUTOCONVERTPCM, which lets
+    the engine convert a microphone's mono mix format rather than failing the
+    open; the source's own `to_stereo48k` still handles a driver that ignores
+    the request.
+    """
+
+    def open(self):
+        import os
+        if os.name != "nt":
+            raise SourceUnavailable("Capturing an audio input requires Windows.")
+        if not self.device_id:
+            raise SourceUnavailable("No audio input was chosen to capture.")
+        super().open()
+
+    def _stream_flags(self, recorder):
+        return (
+            recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+            | recorder.ProcessLoopbackRecorder.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+        )
+
+
 # ── what the menu shows ─────────────────────────────────────────────────────
 
 #: The COM pieces `recording_watch` already declares are reused here: one
 #: description of the audio engine in this client, not two.
 E_RENDER = 0
+E_CAPTURE = 1
 DEVICE_STATE_ACTIVE = 1
 SESSION_STATE_ACTIVE = 1
 
