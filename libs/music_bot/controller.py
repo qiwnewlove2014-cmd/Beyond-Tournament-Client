@@ -2510,6 +2510,38 @@ class MapMusicBot:
             self._play_local_current()
             speak(f"Next: {self.current_title}")
 
+    def skip_track(self, direction=1):
+        """Step through the play-next queue or the batch that is playing.
+
+        Ctrl+[ and Ctrl+] call this when no Personal Music Feed is active;
+        the Queue Mode menu puts the same two moves on its own lines. Next
+        drains a play-next song first -- the order `_advance_track_queue`
+        uses at the end of a song -- then walks forward in the playlist/local
+        batch. Previous only walks that batch: a play-next entry is removed
+        when it starts, so there is nothing behind it to return to.
+        """
+        if direction >= 0:
+            if self.next_up_queue:
+                # A manual skip may leave a track that is still resolving; the
+                # new stream bumps the playback generation, so the old resolve
+                # cannot start behind it.
+                self.is_loading_stream = False
+                self._play_queued_next()
+                return True
+            if (self.play_queue
+                    and 0 <= self.play_queue_index < len(self.play_queue) - 1):
+                self.play_queue_index += 1
+                self._play_queued_track()
+                return True
+            speak("Nothing to skip to.")
+            return False
+        if self.play_queue and 0 < self.play_queue_index < len(self.play_queue):
+            self.play_queue_index -= 1
+            self._play_queued_track()
+            return True
+        speak("No previous song in this queue.")
+        return False
+
     def toggle_enabled(self):
         self.enabled = not self.enabled
         options.set("music_bot_enabled", self.enabled)

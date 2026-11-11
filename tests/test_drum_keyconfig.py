@@ -549,20 +549,26 @@ class HongKongKitTests(unittest.TestCase):
     def kit_folder(self):
         return os.path.join(self.kit_root(), "data", "drums", "HongkongDrum Set")
 
-    #: The one pad this set no longer ships: the owner deleted its cowbell
-    #: sample from the folder (2026-10-24). The pad stays in the canonical
-    #: 18-pad order and is silent -- `None`, the Salamander rule -- rather than
-    #: borrowing another kit's bell or being dropped (dropping it would move
-    #: the dedicated Rim from pad 17 to 16 and the cowbell key would play it).
-    SILENT_PAD = 16
+    #: The one pad this set does not ship: the owner deleted its cowbell sample
+    #: from the folder (2026-10-24) and then the pad itself (2026-11-02). The
+    #: slot stays in the canonical 18-pad order -- dropping the entry would move
+    #: the dedicated Rim from pad 17 to 16 -- but it carries no name, no sample
+    #: and no key of its own (`drum_keyconfig.KIT_MISSING_PADS`).
+    MISSING_PAD = 16
 
-    def test_the_kit_is_complete_except_the_deleted_cowbell(self):
+    def test_the_kit_has_no_cowbell_pad(self):
         pads = DrumAudio.KITS[self.KIT]
         self.assertEqual(len(pads), len(DrumAudio.PAD_DEFS))
-        silent = [index for index, pad in enumerate(pads) if pad[1] is None]
-        self.assertEqual(silent, [self.SILENT_PAD],
-                         "only the cowbell is missing from this set")
-        self.assertEqual(pads[self.SILENT_PAD][0], "Cowbell")
+        unnamed = [index for index, pad in enumerate(pads) if pad[0] is None]
+        self.assertEqual(unnamed, [self.MISSING_PAD],
+                         "only the cowbell slot has no piece in this set")
+        self.assertIsNone(pads[self.MISSING_PAD][1],
+                          "a removed pad must not borrow another kit's bell")
+        with_keys = {binding.pad for binding in drum_keyconfig.bindings(self.KIT)}
+        self.assertNotIn(self.MISSING_PAD, with_keys,
+                         "the removed pad has no key in this kit")
+        self.assertIn(15, with_keys)
+        self.assertIn(17, with_keys)
         self.assertEqual(
             DrumAudio.KITS[self.KIT][2][0], "Rim (Snare 2)",
             "the set's second snare is what pad 2 plays")
@@ -576,8 +582,8 @@ class HongKongKitTests(unittest.TestCase):
             self.assertGreaterEqual(polyphony, 1)
             if path is None:
                 # A pad with no sample is a piece this set does not ship; the
-                # deleted cowbell is the only one.
-                self.assertEqual(index, self.SILENT_PAD)
+                # removed cowbell is the only one.
+                self.assertEqual(index, self.MISSING_PAD)
                 continue
             full = os.path.join(root, "data", path.replace("/", os.sep))
             self.assertTrue(os.path.exists(full), f"pad {index} ({name}): {full}")
@@ -607,8 +613,8 @@ class HongKongKitTests(unittest.TestCase):
         for index, (name, path, scale, _polyphony) in enumerate(
                 DrumAudio.KITS[self.KIT]):
             if path is None:
-                # The deleted cowbell has no sample to measure.
-                self.assertEqual(index, self.SILENT_PAD)
+                # The removed cowbell pad has no sample to measure.
+                self.assertEqual(index, self.MISSING_PAD)
                 continue
             relative = os.path.relpath(
                 os.path.join(root, "data", path.replace("/", os.sep)))

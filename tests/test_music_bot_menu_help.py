@@ -187,6 +187,29 @@ class EveryLineIsDescribedTests(unittest.TestCase):
                 self.assertIn("file", text_of(item))
         self.assertIn("Personal Music Feed", labels)
 
+    def test_queue_mode_adds_the_skip_lines(self):
+        self.bot.queue_mode = True
+        self.handler._show_mode_menu()
+        labels = [label_of(item) for item in self.last_menu().items]
+        # Directly under the queue count, not beside Cancel at the end.
+        self.assertEqual(labels[labels.index("Next song") - 1],
+                         "Play Queue (empty)")
+        items = {label_of(item): item for item in self.last_menu().items}
+        for label in ("Next song", "Previous song"):
+            self.assertIn(label, items)
+            self.assertGreaterEqual(len(items[label]), 4)
+            self.assertTrue(text_of(items[label]).strip())
+        items["Next song"][1]()
+        items["Previous song"][1]()
+        self.bot.skip_track.assert_has_calls([
+            mock.call(1), mock.call(-1)])
+
+    def test_queue_mode_off_keeps_the_skip_lines_out(self):
+        self.handler._show_mode_menu()
+        labels = [label_of(item) for item in self.last_menu().items]
+        self.assertNotIn("Next song", labels)
+        self.assertNotIn("Previous song", labels)
+
     def test_every_line_of_the_settings_menu_is_described(self):
         self.handler._open_settings_menu()
         for item in self.last_menu().items:

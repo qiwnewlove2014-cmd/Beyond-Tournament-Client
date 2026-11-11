@@ -172,8 +172,10 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
              "YouTube or Facebook address (a video, a reel or a live), from a "
              "chat message or a browser. Every other site is refused."),
             ("search", "Choose Local File", go_local,
-             "Plays a song file already on this computer, through the same "
-             "speakers, key and equalizer this bot uses for YouTube."),
+             "Plays a song or video file already on this computer, through "
+             "the same speakers, key and equalizer this bot uses for YouTube. "
+             "Pick several at once and the rest wait in a local batch you "
+             "can skip through."),
             ("playlists", "My Playlists & Favorites", go_playlists,
              "Songs you saved and playlists you made: play them, save the song "
              "that is playing, or take one out again."),
@@ -290,6 +292,23 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
             (None, "Cancel", lambda: gp.pop_last_substate(),
              "Closes this menu. Nothing is changed."),
         ])
+        # Queue Mode is the only place these two lines exist: outside it the
+        # play-next queue is not what the player is working through, and two
+        # more lines would just be in the way. They sit directly under the
+        # queue count and call the same skip the Ctrl+[ / ] chords do, so a
+        # menu and a key cannot disagree.
+        if self._bot.queue_mode:
+            at = next((index + 1 for index, item in enumerate(items)
+                       if len(item) > 2 and item[2] is go_queue), len(items))
+            items[at:at] = [
+                ("queue", "Next song", lambda: self._bot.skip_track(1),
+                 "Plays the first song waiting in the play-next queue now, "
+                 "instead of waiting for this one to finish."),
+                ("queue", "Previous song", lambda: self._bot.skip_track(-1),
+                 "Goes back one song in the playlist or the batch of local "
+                 "files that is playing. A play-next song is removed once it "
+                 "starts, so the queue itself has nothing to go back to."),
+            ]
         m.add_items(gate.filter_items(items))
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -357,10 +376,14 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
              "Opens the Voice Effect page straight from the world, without "
              "going through Music Bot Settings. Back closes it and returns "
              "to the game."),
-            ("Personal Music Feed: Ctrl left bracket for previous; Ctrl right bracket for next",
-             lambda: None, None,
-             "Moves through your shuffled Favorites feed without opening a "
-             "menu."),
+            ("Ctrl + [: Previous song", lambda: None, None,
+             "Goes back one song. The Personal Music Feed moves first when "
+             "one is active; otherwise this is the playlist or the batch of "
+             "local files that is playing."),
+            ("Ctrl + ]: Next song", lambda: None, None,
+             "Skips forward: the Personal Music Feed when it is active, "
+             "otherwise a song waiting in the play-next queue or the next "
+             "track in the playlist/local batch."),
             (f"{volume_down_key}: Decrease volume", lambda: None, None,
              "Turns the song down, without touching the game's own sounds."),
             (f"{volume_up_key}: Increase volume", lambda: None, None,

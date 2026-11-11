@@ -10,11 +10,10 @@ from ..media_links import is_facebook_url, is_supported_page_url, is_youtube_url
 from ..speech import speak
 
 from .cinema import (_cabinet_cinema_lock, _cabinet_cinema_mode,
-                     _cabinet_cinema_reach, _cabinet_cinema_vocal,
-                     _cabinet_title, _cinema_detail, _cinema_vocal_label,
+                     _cabinet_cinema_reach, _cabinet_title, _cinema_detail,
                      _cinema_mode_label, _may_lock_cinema_mode,
                      _open_cinema_lock_menu, _open_cinema_mode_menu,
-                     _open_cinema_reach_menu, _open_cinema_vocal_menu)
+                     _open_cinema_reach_menu)
 from . import voice
 from .view import (_closest_jukebox, _current_state, _get_eq_values,
                    _get_jukebox_volume, _get_repeat_mode, _own_name,
@@ -45,6 +44,13 @@ def open_jukebox_menu(game, gp):
         or getattr(gp, "is_builder", False)
         or getattr(gp, "is_technician", False)
         or getattr(gp, "can_broadcast_megaphone", False)
+    )
+    # The Server's rank for the room-wide voice switch, exactly the rank that may
+    # switch the cabinet off. A technician who cannot moderate keeps the local
+    # listening choice rather than a line the Server would refuse.
+    can_mute_voice = bool(
+        getattr(gp, "is_staff", False)
+        or getattr(gp, "is_builder", False)
     )
     nearby = neighbour_line(game, jukebox_id)
 
@@ -130,10 +136,6 @@ def open_jukebox_menu(game, gp):
         gp.pop_last_substate()
         _open_cinema_reach_menu(game, gp, jukebox_id)
 
-    def go_cinema_vocal():
-        gp.pop_last_substate()
-        _open_cinema_vocal_menu(game, gp, jukebox_id)
-
     def go_cinema_lock():
         gp.pop_last_substate()
         _open_cinema_lock_menu(game, gp, jukebox_id)
@@ -144,15 +146,33 @@ def open_jukebox_menu(game, gp):
               "its code can change the mode; the room is heard exactly as it is.")
 
     def _voice_label():
-        # The listener's own switch, not the cabinet's: a cabinet says its lines
-        # to whoever wants to hear them. Callable like the other (now: …) lines,
-        # so the menu always reads the saved choice, and worded like the Music
-        # Bot's ``Cinema rooms:`` pair.
+        # For staff this is the cabinet's room switch, read from the Server's
+        # state; for everyone else it is the listener's own switch. Callable like
+        # the other (now: …) lines, so the menu always reads the current answer.
+        if can_mute_voice:
+            if voice.cabinet_muted(game, jukebox_id):
+                return "Cabinet voice: OFF (silent for everyone)"
+            return "Cabinet voice: ON (everyone hears this cabinet)"
         if voice.voice_enabled():
             return "Cabinet voice: ON (you hear the cabinet speak)"
         return "Cabinet voice: OFF (cabinets stay silent)"
 
     def go_voice():
+        if can_mute_voice:
+            muted = voice.cabinet_muted(game, jukebox_id)
+            network = getattr(game, "network", None)
+            if network is not None:
+                from .. import consts
+                network.send(consts.CHANNEL_MISC, "jukebox_voice_mute",
+                             {"id": jukebox_id, "muted": not muted})
+            if not muted:
+                # Stop the line immediately; the Server's broadcast repeats this
+                # on every client, including the one holding the menu.
+                voice.release_cabinet(game, jukebox_id)
+                speak("This cabinet's voice is now silent for everyone.")
+            else:
+                speak("This cabinet's voice is on again for everyone.")
+            return
         enabled = not voice.voice_enabled()
         voice.set_voice_enabled(enabled)
         if not enabled:
@@ -264,13 +284,6 @@ def open_jukebox_menu(game, gp):
             "Sets how far this cabinet's room reaches. A speaker beyond that "
             "distance belongs to another room, and the cabinet is not heard "
             "past it."))
-        menu_items.append(_line(
-            f"Set vocal focus (now: {_cinema_vocal_label(_cabinet_cinema_vocal(gp, jukebox_id))})",
-            go_cinema_vocal,
-            "Moves the centre layer of the song to the left or right of this "
-            "room. It is a centre extractor, not a stem separator: centre-panned "
-            "instruments and the snare travel with the voice. In the song leaves "
-            "the cabinet exactly as it was."))
     # A locked cabinet says who holds it and how to get in, and only the
     # accounts that may lock one get the line that manages it -- a menu line
     # that exists is a line that works (the Server answers the same rank).
@@ -293,12 +306,17 @@ def open_jukebox_menu(game, gp):
             "Puts a code on this cabinet's cinema mode. The lock decides who "
             "may re-tune it; it does not change how the room sounds."))
 
-    # Last, beside the cinema lock: a listening choice for the person standing
-    # here, not a setting of the cabinet (it takes nothing from anyone else).
-    menu_items.append(_line(
-        _voice_label, go_voice,
+    # Last, beside the cinema lock. Players get a listening choice of their own;
+    # staff get the cabinet's room switch, which mutes its voice for everyone.
+    voice_description = (
+        "Mutes this cabinet's spoken voice for everyone on the map, or brings "
+        "it back. Its music and queue keep playing."
+        if can_mute_voice else
         "Turns the cabinet's spoken voice on or off for you alone. Other "
-        "listeners keep their own choice; this is not a cabinet setting."))
+        "listeners keep their own choice; this is not a cabinet setting."
+    )
+    menu_items.append(_line(
+        _voice_label, go_voice, voice_description))
 
     # Staff may take the cabinet's own switch -- at the end, beside Cancel, like
     # the other lines that change the cabinet rather than listen to it. The map's

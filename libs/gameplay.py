@@ -1131,12 +1131,33 @@ class Gameplay(state.State):
             return buffer.cycle_item(4)
         buffer.cycle_item(2)
 
+    def _music_bot_cycle_track(self, direction):
+        """Ctrl + [ / ]: step through the feed, or through what is queued.
+
+        The Personal Music Feed has owned these two chords longer than the
+        queue had skip keys, so it keeps them while it is on. With no feed the
+        same chords walk the play-next queue and the playlist/local batch
+        (`MapMusicBot.skip_track`), so several files chosen together in the
+        local dialog can be stepped through without opening a menu.
+        """
+        if not (hasattr(self, 'music_bot') and self.music_bot
+                and self._can_use_music_bot()):
+            return
+        if getattr(self.music_bot, "feed_tracks", None):
+            if music_bot_gate.blocked("feed"):
+                return
+            if direction < 0:
+                self.music_bot.previous_feed_track()
+            else:
+                self.music_bot.next_feed_track()
+            return
+        if music_bot_gate.blocked("queue"):
+            return
+        self.music_bot.skip_track(direction)
+
     def buffer_cycle_l(self, mod=0):
         if mod & pygame.KMOD_CTRL:
-            if (hasattr(self, 'music_bot') and self.music_bot
-                    and self._can_use_music_bot()
-                    and not music_bot_gate.blocked("feed")):
-                self.music_bot.previous_feed_track()
+            self._music_bot_cycle_track(-1)
             return
         if mod & pygame.KMOD_SHIFT:
             return buffer.cycle(3)
@@ -1144,10 +1165,7 @@ class Gameplay(state.State):
 
     def buffer_cycle_r(self, mod=0):
         if mod & pygame.KMOD_CTRL:
-            if (hasattr(self, 'music_bot') and self.music_bot
-                    and self._can_use_music_bot()
-                    and not music_bot_gate.blocked("feed")):
-                self.music_bot.next_feed_track()
+            self._music_bot_cycle_track(1)
             return
         if mod & pygame.KMOD_SHIFT:
             return buffer.cycle(4)

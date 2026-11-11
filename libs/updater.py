@@ -1,9 +1,11 @@
 import os
 import shutil
+import ssl
 import zipfile
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import pygame
 import requests
 import pySmartDL as dl
@@ -25,6 +27,38 @@ nothing = lambda: None
 GITHUB_OWNER = "qiwnewlove2014-cmd"
 GITHUB_REPO = "Beyond-Tournament-Client"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+
+
+def _prepare_download_tls():
+    """Give pySmartDL the same CA bundle requests already trusts.
+
+    pySmartDL probes Range support inside SmartDL() and downloads through
+    urllib's default opener.  A standalone Windows build can see an incomplete
+    system certificate store, so GitHub's asset CDN fails with
+    CERTIFICATE_VERIFY_FAILED even though the release API (requests/certifi)
+    worked.  Install a certifi-backed opener before SmartDL is constructed and
+    hand the same context to the downloader for its worker threads.
+    """
+    context = ssl.create_default_context(cafile=requests.certs.where())
+    urllib.request.install_opener(
+        urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+    )
+    return context
+
+
+def _smartdl(url, dest):
+    """Build a SmartDL whose probes and worker threads use certifi's roots."""
+    context = _prepare_download_tls()
+    smart = dl.SmartDL(
+        url,
+        dest,
+        threads=2,
+        progress_bar=False,
+        timeout=120,
+        verify=True,
+    )
+    smart.context = context
+    return smart
 
 
 def get_latest_release():
@@ -239,13 +273,7 @@ def check_and_update(game, interactive=True):
     # ดาวน์โหลด .zip ไป temp
     tmp_zip = os.path.join(tempfile.gettempdir(), "bt_update.zip")
     try:
-        smart = dl.SmartDL(
-            release["zip_url"],
-            tmp_zip,
-            threads=2,
-            progress_bar=False,
-            timeout=120,
-        )
+        smart = _smartdl(release["zip_url"], tmp_zip)
         smart.start()
         smart.wait()  # รอจนดาวน์โหลดเสร็จ (blocking — ทำงานใน callback ของ menu)
         if not smart.isSuccessful():
@@ -512,13 +540,7 @@ class Updater(state.State):
         release = self.update_info
         tmp_zip = os.path.join(tempfile.gettempdir(), "bt_update.zip")
         try:
-            smart = dl.SmartDL(
-                release["zip_url"],
-                tmp_zip,
-                threads=2,
-                progress_bar=False,
-                timeout=120,
-            )
+            smart = _smartdl(release["zip_url"], tmp_zip)
             self.smart_dl = smart  # เก็บอ้างอิงให้ main thread ดูสถานะได้
             smart.start()
             smart.wait()

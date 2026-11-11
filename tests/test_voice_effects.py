@@ -1743,7 +1743,13 @@ class TheRecipeTests(unittest.TestCase):
                                      voice_effects.PEAK_CEILING + 1e-6)
 
     def test_a_recipe_costs_a_fraction_of_a_frame(self):
-        """The talker's own thread pays this per frame, so it has to fit."""
+        """The talker's own thread pays this per frame, so it has to fit.
+
+        Measured as CPU time, not wall clock: these tests share the machine
+        with every other worker process, and a wall-clock reading taken while
+        another one is mixing a whole song says nothing about what this frame
+        costs.  The ceiling is unchanged.
+        """
         signal = to_pcm(tone(seconds=0.20))
         frames = len(signal) // FRAME
         worst = 0.0
@@ -1752,9 +1758,9 @@ class TheRecipeTests(unittest.TestCase):
             recipes.apply(recipe_id)
             processor = voice_effects._EffectProcessor(
                 voice_effects.BUILDER_EFFECT)
-            started = time.perf_counter()
+            started = time.process_time()
             play(processor, signal)
-            cost = (time.perf_counter() - started) / frames * 1000.0
+            cost = (time.process_time() - started) / frames * 1000.0
             self.assertLess(cost, 12.0, f"{label} costs {cost:.1f} ms a frame")
             worst = max(worst, cost)
         self.assertLess(worst, 12.0)

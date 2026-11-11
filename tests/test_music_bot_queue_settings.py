@@ -8,6 +8,10 @@ Covers:
 - _advance_track_queue: queued songs play BEFORE the favorites/playlist queue,
   which resumes afterwards.
 - _play_queued_next preserves the favorites/playlist queue.
+- skip_track: next drains the play-next queue before walking the
+  playlist/local batch; previous walks that batch.
+- Local-file selection: several files become one local batch; one file keeps
+  the single-file path.
 - stop(clear_queue=True) clears the play-next queue; stop(clear_queue=False)
   preserves it.
 - _open_queue_menu: one item per queued song, and every line (count, now
@@ -38,6 +42,7 @@ from libs.camera import _apply_music_water_filter
 from libs.gameplay import Gameplay
 from libs.music_bot import MapMusicBot
 from libs.music_bot import subtitles
+from libs.music_bot.track_source import TrackSourceHandler
 
 
 def make_bot(**overrides):
@@ -302,6 +307,81 @@ class TestAdvanceTrackQueue(unittest.TestCase):
         self.assertEqual(bot.play_queue_index, 0)
 
 
+class TestSkipTrack(unittest.TestCase):
+    """Ctrl+[ / ] and Queue Mode's lines share one move.
+
+    Next drains the play-next queue first (the order an end-of-song advance
+    uses), then walks the playlist/local batch forward. Previous only walks
+    that batch: a play-next entry is removed when it starts.
+    """
+
+    def track(self, title):
+        return {"title": title, "target": title, "source": "youtube"}
+
+    def bot_with_queue(self, count=3, index=0):
+        bot = make_bot()
+        bot.play_queue = [self.track(f"P{i}") for i in range(count)]
+        bot.play_queue_index = index
+        bot.play_queue_label = "Favorites"
+        return bot
+
+    def test_next_drains_the_play_next_queue_first(self):
+        bot = self.bot_with_queue()
+        bot.next_up_queue = [self.track("Q1")]
+        played = []
+        bot._play_queued_next = lambda: played.append("Q1")
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertTrue(bot.skip_track(1))
+        self.assertEqual(played, ["Q1"])
+        self.assertEqual(bot.play_queue_index, 0)
+        speak.assert_not_called()
+
+    def test_next_cancels_a_track_that_is_still_loading(self):
+        bot = self.bot_with_queue()
+        bot.is_loading_stream = True
+        bot.next_up_queue = [self.track("Q1")]
+        seen = []
+        bot._play_queued_next = lambda: seen.append(bot.is_loading_stream)
+        with mock.patch("libs.music_bot.controller.speak"):
+            self.assertTrue(bot.skip_track(1))
+        self.assertEqual(seen, [False])
+
+    def test_next_walks_forward_in_the_local_batch(self):
+        bot = self.bot_with_queue()
+        played = []
+        bot._play_queued_track = lambda: played.append(bot.play_queue_index)
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertTrue(bot.skip_track(1))
+        self.assertEqual(played, [1])
+        self.assertEqual(bot.play_queue_index, 1)
+        speak.assert_not_called()
+
+    def test_next_at_the_end_keeps_the_last_song_playing(self):
+        bot = self.bot_with_queue(index=2)
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertFalse(bot.skip_track(1))
+        self.assertEqual(bot.play_queue_index, 2)
+        self.assertEqual(len(bot.play_queue), 3)
+        speak.assert_called_once_with("Nothing to skip to.")
+
+    def test_previous_walks_back_in_the_local_batch(self):
+        bot = self.bot_with_queue(index=2)
+        played = []
+        bot._play_queued_track = lambda: played.append(bot.play_queue_index)
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertTrue(bot.skip_track(-1))
+        self.assertEqual(played, [1])
+        self.assertEqual(bot.play_queue_index, 1)
+        speak.assert_not_called()
+
+    def test_previous_at_the_start_says_there_is_none(self):
+        bot = self.bot_with_queue(index=0)
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertFalse(bot.skip_track(-1))
+        self.assertEqual(bot.play_queue_index, 0)
+        speak.assert_called_once_with("No previous song in this queue.")
+
+
 class TestStopClearsNextUp(unittest.TestCase):
     def test_stop_clears_next_up_queue(self):
         bot = make_bot()
@@ -419,6 +499,14 @@ class TestQueueMenu(unittest.TestCase):
                     cb()
         speak.assert_called_once_with("1. Song A")
 
+    def test_queue_mode_adds_skip_lines(self):
+        bot = make_bot()
+        bot.queue_mode = True
+        bot.next_up_queue = [{"title": "Song A", "target": "t1"}]
+        self._open(bot)
+        labels = [norm(label) for label, _, *_extra in last_menu().items]
+        self.assertEqual(labels[:2], ["Next song", "Previous song"])
+
     def test_clear_queue_empties_and_rebuilds_menu(self):
         bot = make_bot()
         bot.next_up_queue = [{"title": "Song A", "target": "t1"}]
@@ -445,6 +533,68 @@ class TestQueueMenu(unittest.TestCase):
             "Playing now: Test Track",
             "Clear Queue", "Back",
         ])
+
+
+class _ImmediateThread:
+    """A Thread whose start() runs the dialog body now (no game loop here)."""
+
+    def __init__(self, target, daemon=False):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+class TestLocalFileDialog(unittest.TestCase):
+    """The file chooser: one path is a song, several are a local batch."""
+
+    def _run(self, paths):
+        bot = make_bot()
+        scheduled = []
+        bot.game.put = lambda callback: callback()
+        bot._start_local_file_stream = (
+            lambda path, title: scheduled.append(("file", path, title)))
+        bot._start_track_queue = (
+            lambda tracks, label: scheduled.append(("queue", tracks, label)))
+
+        asked = []
+        root = SimpleNamespace(withdraw=lambda: None,
+                               attributes=lambda *args: None,
+                               destroy=lambda: None)
+
+        def askopenfilenames(**kwargs):
+            asked.append(kwargs)
+            return tuple(paths)
+
+        filedialog = SimpleNamespace(askopenfilenames=askopenfilenames)
+        tkinter = SimpleNamespace(Tk=lambda: root, filedialog=filedialog)
+
+        with mock.patch.dict(sys.modules, {"tkinter": tkinter}), \
+                mock.patch("libs.music_bot.track_source.threading.Thread",
+                           _ImmediateThread), \
+                mock.patch("libs.music_bot.track_source.speak"):
+            TrackSourceHandler(bot)._open_file_dialog()
+        return scheduled, asked
+
+    def test_several_files_become_one_local_batch(self):
+        paths = [os.path.join("songs", "A.mp3"),
+                 os.path.join("songs", "B.flac")]
+        scheduled, asked = self._run(paths)
+        self.assertEqual(scheduled, [("queue", [
+            {"title": "A", "target": paths[0], "source": "local"},
+            {"title": "B", "target": paths[1], "source": "local"},
+        ], "Local files")])
+        self.assertEqual(asked[0]["title"], "Select Audio or Video File(s)")
+        self.assertIn("filetypes", asked[0])
+
+    def test_one_file_keeps_the_single_file_path(self):
+        paths = [os.path.join("songs", "A.mp3")]
+        scheduled, _asked = self._run(paths)
+        self.assertEqual(scheduled, [("file", paths[0], "A")])
+
+    def test_cancel_selects_nothing(self):
+        scheduled, _asked = self._run([])
+        self.assertEqual(scheduled, [])
 
 
 class TestSettings(unittest.TestCase):

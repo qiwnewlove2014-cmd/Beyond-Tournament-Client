@@ -1725,6 +1725,10 @@ class EventHandeler:
             min_val, max_val = 0.1, 20.0
         elif stage in ['reverb_diffusion', 'diffusion']:
             min_val, max_val = 0.0, 1.0
+        elif stage == 'reverbGain':
+            # A reverb zone's echo level, in percent of its wet gain (0 = dry). The
+            # Server sends this range with the prompt; this is the fallback for it.
+            min_val, max_val = 0, 100
         elif stage in ['price', 'cost', 'weaponCost', 'ammoCost', 'minpoints']:
             min_val, max_val = 0, 999999999
 
@@ -3558,6 +3562,14 @@ class EventHandeler:
                 if isinstance(box, dict) and box.get("current"):
                     box["position_at"] = now
         self.gameplay.jukebox_state = state
+        # A staff mute travels in the join state too. If this client is resyncing
+        # while a line is sounding, release it now rather than let a muted cabinet
+        # finish speaking into the room.
+        boxes = state.get("jukeboxes")
+        if isinstance(boxes, dict):
+            for jid, box in boxes.items():
+                if isinstance(box, dict) and box.get("voice_muted") is True:
+                    self.game.put(lambda jid=jid: self._release_jukebox_voice(jid))
         # A state resync is authoritative even if the real-time pause packet
         # was lost. Stop any local source that the server says is paused or
         # idle; do not construct a JukeboxPlayer merely to stop nothing.
@@ -3657,6 +3669,35 @@ class EventHandeler:
                 box.pop("position", None)
                 box.pop("position_at", None)
 
+    def jukebox_voice_mute(self, data):
+        """Staff muted one cabinet's spoken voice for everyone on the map.
+
+        The state is cached first so a line that was already on the wire is
+        refused on the main thread, then the group this cabinet is using is
+        released. The Server also refuses every new line for a muted cabinet;
+        this is the Client's half of the same room-wide switch.
+        """
+        if not isinstance(data, dict) or not data.get("id"):
+            return
+        if self.gameplay is None:
+            return
+        jid = data["id"]
+        muted = bool(data.get("muted"))
+        state = getattr(self.gameplay, "jukebox_state", None)
+        if not isinstance(state, dict):
+            state = {"jukeboxes": {}}
+            try:
+                self.gameplay.jukebox_state = state
+            except Exception:
+                state = None
+        boxes = state.setdefault("jukeboxes", {}) if isinstance(state, dict) else None
+        if isinstance(boxes, dict):
+            box = boxes.setdefault(jid, {"id": jid})
+            if isinstance(box, dict):
+                box["voice_muted"] = muted
+        if muted:
+            self.game.put(lambda: self._release_jukebox_voice(jid))
+
     def jukebox_voice(self, data):
         """A cabinet said a line -- play it from that cabinet's position.
 
@@ -3672,6 +3713,8 @@ class EventHandeler:
             return
         jid = data["id"]
         line = data.get("line")
+        if self._jukebox_line_from_a_muted_cabinet(jid):
+            return
         if self._jukebox_line_from_a_dark_cabinet(jid, line):
             return
         position = None
@@ -3715,10 +3758,22 @@ class EventHandeler:
         box = boxes.get(jid) if isinstance(boxes, dict) else None
         return isinstance(box, dict) and box.get("powered") is False
 
+    def _jukebox_line_from_a_muted_cabinet(self, jid):
+        """True when the Server has muted this cabinet's voice for the room."""
+        state = getattr(self.gameplay, "jukebox_state", None)
+        boxes = state.get("jukeboxes") if isinstance(state, dict) else None
+        box = boxes.get(jid) if isinstance(boxes, dict) else None
+        return isinstance(box, dict) and box.get("voice_muted") is True
+
     def _speak_jukebox_voice(self, jid, position, line):
         """Main-thread half of :meth:`jukebox_voice`."""
         from .jukebox import voice
         voice.speak(self.game, jid, position, line)
+
+    def _release_jukebox_voice(self, jid):
+        """Main-thread half of :meth:`jukebox_voice_mute`."""
+        from .jukebox import voice
+        voice.release_cabinet(self.game, jid)
 
     def jukebox_power(self, data):
         """A cabinet got power, or lost it: its machinery starts or stops.

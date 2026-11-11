@@ -406,6 +406,27 @@ class LibraryMenus:
             self._bot.game, song_requests.queue_label(len(self._bot.next_up_queue)),
             parrent=gp)
         items = []
+        if self._bot.queue_mode:
+            def skip_next():
+                if self._bot.skip_track(1):
+                    if gp.substates and gp.substates[-1] is m:
+                        gp.pop_last_substate()
+                    self._open_queue_menu()
+
+            def skip_previous():
+                if self._bot.skip_track(-1):
+                    if gp.substates and gp.substates[-1] is m:
+                        gp.pop_last_substate()
+                    self._open_queue_menu()
+
+            items.extend([
+                ("Next song", skip_next, None,
+                 "Plays the first song waiting in the queue now, instead of "
+                 "waiting for this one to finish."),
+                ("Previous song", skip_previous, None,
+                 "Goes back one song in the playlist or the batch of local "
+                 "files that is playing."),
+            ])
         for line in song_requests.queue_lines(
                 song_requests.queue_share(self._bot.next_up_queue),
                 self._bot._now_playing_title()):

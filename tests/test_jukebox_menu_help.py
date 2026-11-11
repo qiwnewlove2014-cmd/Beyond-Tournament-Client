@@ -146,23 +146,24 @@ class EveryCabinetLineIsDescribedTests(unittest.TestCase):
                     opener(game, game.gameplay, "cab1")
                 self.assert_described(game.gameplay.substates[-1])
 
-    def test_the_vocal_line_explains_what_bleeds(self):
+    def test_the_cabinet_menu_no_longer_offers_a_vocal_focus_line(self):
         game = make_game()
-        with mock.patch("libs.menu.Menu", FakeMenu), \
-                mock.patch("libs.menus.set_default_sounds"), \
+        with (
+                mock.patch("libs.menu.Menu", FakeMenu),
+                mock.patch("libs.menus.set_default_sounds"),
                 mock.patch("libs.jukebox.menu._cabinet_title",
-                           return_value="Music Jukebox"), \
+                           return_value="Music Jukebox"),
                 mock.patch("libs.jukebox.menu._cabinet_cinema_reach",
-                           return_value=60.0), \
+                           return_value=60.0),
                 mock.patch("libs.jukebox.menu._scrub_spot",
-                           return_value=None), \
-                mock.patch("libs.jukebox.menu.speak"):
+                           return_value=None),
+                mock.patch("libs.jukebox.menu.speak"),
+        ):
             jukebox.open_jukebox_menu(game, game.gameplay)
-        line = next(item for item in game.gameplay.substates[-1].items
-                    if label_of(item).startswith("Set vocal focus"))
-        self.assertIn("not a stem separator", text_of(line))
-        self.assertIn("centre-panned", text_of(line))
-
+        labels = [label_of(item) for item in game.gameplay.substates[-1].items]
+        self.assertFalse(
+            [label for label in labels if label.startswith("Set vocal focus")],
+            labels)
 
 if __name__ == "__main__":
     unittest.main()

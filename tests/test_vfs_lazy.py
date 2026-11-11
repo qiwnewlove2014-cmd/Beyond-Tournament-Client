@@ -200,9 +200,22 @@ class PackVFSHookTests(unittest.TestCase):
     def setUp(self):
         self._orig = (os.path.exists, os.path.isfile, os.path.isdir,
                       os.path.getsize, os.listdir, os.scandir)
+        # The hooks and the sound prefix are process-wide.  A test that leaves
+        # SOUNDPREPEND pointing at its own closed fixture makes every module
+        # after it in the same interpreter look for samples in a temp folder
+        # that no longer exists (armor cloth and pack decodes both went quiet
+        # this way when modules shared one process), so both are restored.
+        import libs.consts as consts
+        self._prepend = consts.SOUNDPREPEND
+        self._sprepend = consts.SOUNDSPREPEND
+        self._instance = vfs._INSTANCE
 
     def tearDown(self):
         vfs.uninstall_hooks()
+        import libs.consts as consts
+        consts.SOUNDPREPEND = self._prepend
+        consts.SOUNDSPREPEND = self._sprepend
+        vfs._INSTANCE = self._instance
 
     def test_hooks_materialize_and_delegate(self):
         fixture = LazyPackFixture()
@@ -296,14 +309,22 @@ class PackVFSHookTests(unittest.TestCase):
                 calls.append(path)
                 return "decoded:" + path
 
-            # Replace the saved original AFTER install so the wrapper uses it.
+            # Replace the saved original AFTER install so the wrapper uses it,
+            # and put it back afterwards: `install_hooks` keeps `_ORIGINALS`
+            # for the life of the process, so a fake left behind is what the
+            # next test module -- and the next `uninstall_hooks` -- sees as the
+            # real decoder.
+            saved_decode = vfs._ORIGINALS["load_vorbis_pcm"]
             vfs._ORIGINALS["load_vorbis_pcm"] = fake_decode
-            from libs import safe_vorbis
-            result = safe_vorbis.load_vorbis_pcm(os.path.join(fixture.cache, "ui/warn.ogg"))
-            self.assertTrue(calls)
-            # The decoder received a real materialized file path.
-            self.assertTrue(os.path.isfile(calls[0]))
-            self.assertEqual(result, "decoded:" + calls[0])
+            try:
+                from libs import safe_vorbis
+                result = safe_vorbis.load_vorbis_pcm(os.path.join(fixture.cache, "ui/warn.ogg"))
+                self.assertTrue(calls)
+                # The decoder received a real materialized file path.
+                self.assertTrue(os.path.isfile(calls[0]))
+                self.assertEqual(result, "decoded:" + calls[0])
+            finally:
+                vfs._ORIGINALS["load_vorbis_pcm"] = saved_decode
         finally:
             vfs._INSTANCE = None
             fixture.close()

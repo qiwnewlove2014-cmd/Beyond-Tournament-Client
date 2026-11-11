@@ -156,12 +156,13 @@ class DrumAudio:
         # The Hong Kong set: a whole acoustic kit recorded as one folder, kept
         # under the name its files arrived in ("HongkongDrum Set") rather than
         # renamed to the default kit's scheme. It is a full kit except its
-        # cowbell, whose sample the owner deleted from the folder (2026-10-24):
-        # that one pad is silent on purpose -- None, the Salamander rule, never
+        # cowbell: the owner deleted the sample (2026-10-24) and then the pad
+        # itself (2026-11-02), so the slot is unnamed and unbound -- None, never
         # another kit's bell under this set's name -- and the other 17 pads
-        # sound. Its two snares are the two hits of the set: snare1 on the
-        # snare pad, snare2 on pad 2 (the diw kit's own answer to a second snare),
-        # and the dedicated rim on pad 17.
+        # sound. The slot stays because the order never shrinks. Its two snares
+        # are the two hits of the set: snare1 on the snare pad, snare2 on pad 2
+        # (the diw kit's own answer to a second snare), and the dedicated rim on
+        # pad 17.
         #
         # Every scale here is measured, not guessed: it puts the pad's attack at
         # full scale at ``volume 300`` (gain 3.0) -- the file's own true peak,
@@ -192,7 +193,7 @@ class DrumAudio:
             ("Splash", "drums/HongkongDrum Set/sp.ogg", 1.83, 3),
             ("Ride", "drums/HongkongDrum Set/ride.ogg", 1.23, 4),
             ("Ride Bell", "drums/HongkongDrum Set/bell.ogg", 1.22, 4),
-            ("Cowbell", None, 1.06, 6),
+            (None, None, 1.0, 1),
             ("Rim", "drums/HongkongDrum Set/rimm.ogg", 1.36, 6),
         ),
     }

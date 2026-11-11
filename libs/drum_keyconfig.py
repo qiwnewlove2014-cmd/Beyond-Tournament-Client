@@ -86,9 +86,21 @@ KIT_BINDINGS = {
 KIT_LABELS = {"per": "Per", "per_tuned": "Per tuned"}
 
 
+# Pads a kit does not ship at all. The 18-entry order never shrinks -- pad 17
+# is a contract with the Server and with MIDI -- so a kit without a piece keeps
+# the slot and loses the name and the key with it: no row in the key menu and
+# no key resolving to that pad. The Hong Kong set's cowbell sample was deleted
+# on 2026-10-24 and the owner removed the pad itself on 2026-11-02.
+KIT_MISSING_PADS = {"hongkong": frozenset({16})}
+
+
 def bindings(kit=None):
     """The key table one kit plays: its own if it has one, else the drum kit's."""
-    return KIT_BINDINGS.get(kit, DRUM_BINDINGS)
+    table = KIT_BINDINGS.get(kit, DRUM_BINDINGS)
+    missing = KIT_MISSING_PADS.get(kit, ())
+    if not missing:
+        return table
+    return tuple(binding for binding in table if binding.pad not in missing)
 
 
 def binding_groups():

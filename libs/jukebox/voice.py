@@ -59,6 +59,15 @@ SOURCE_ID = "cabinet_voice"
 REVERB_SEND = 0
 
 
+def cabinet_muted(game, cabinet_id):
+    """Whether the Server has muted this cabinet's voice for everyone."""
+    gameplay = getattr(game, "gameplay", None) if game is not None else None
+    state = getattr(gameplay, "jukebox_state", None)
+    boxes = state.get("jukeboxes") if isinstance(state, dict) else None
+    box = boxes.get(str(cabinet_id)) if isinstance(boxes, dict) else None
+    return isinstance(box, dict) and box.get("voice_muted") is True
+
+
 def voice_enabled():
     """Whether this listener hears the cabinets speak."""
     try:
@@ -196,6 +205,10 @@ class CabinetVoices:
         path = LINES.get(str(line or "").strip().lower())
         if path is None or position is None:
             return False
+        # The room's switch, not the listener's: a staff mute silences this box
+        # for everyone, including a line already on the wire.
+        if cabinet_muted(self.game, cabinet_id):
+            return False
         if not voice_enabled():
             return False
         audio = getattr(self.game, "audio_mngr", None)
@@ -267,6 +280,15 @@ class CabinetVoices:
             except Exception:
                 pass
 
+    def release_cabinet(self, cabinet_id):
+        """Stop the line this cabinet is saying, keeping the other cabinets."""
+        group = self.groups.pop(str(cabinet_id), None)
+        if group is not None:
+            try:
+                group.destroy()
+            except Exception:
+                pass
+
 
 def voices_for(game):
     """The client's cabinet voices, created on first use."""
@@ -299,3 +321,12 @@ def release(game):
     holder = getattr(getattr(game, "audio_mngr", None), "jukebox_voice", None)
     if isinstance(holder, CabinetVoices):
         holder.release()
+
+
+def release_cabinet(game, cabinet_id):
+    """Stop one cabinet's line -- a staff mute for the whole room."""
+    if game is None:
+        return
+    holder = getattr(getattr(game, "audio_mngr", None), "jukebox_voice", None)
+    if isinstance(holder, CabinetVoices):
+        holder.release_cabinet(cabinet_id)

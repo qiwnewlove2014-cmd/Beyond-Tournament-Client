@@ -25,12 +25,34 @@ and the subtitle wiring check in test_music_bot_subtitles.py.
 Rules and measured numbers: .agents/skills/music_bot_integration/.
 """
 
+import os
 import threading
 
 from ..speech import speak
 from .media import YouTubeSearcher
 from .music_downloader import is_supported_music_url
 from .streaming import AudioStreamer
+
+
+def local_tracks(paths):
+    """Build the local-file queue from the file dialog's selection.
+
+    A path becomes the same kind of track dict a playlist/favorites entry is
+    (`source` is "local"), so several chosen files can share the existing
+    `play_queue` and the Ctrl+[ / ] navigation. The title is the file's stem,
+    which is what the single-file dialog already used.
+    """
+    tracks = []
+    for path in paths or ():
+        path = str(path or "")
+        if not path:
+            continue
+        tracks.append({
+            "title": os.path.splitext(os.path.basename(path))[0],
+            "target": path,
+            "source": "local",
+        })
+    return tracks
 
 
 class TrackSourceHandler:
@@ -62,8 +84,8 @@ class TrackSourceHandler:
                     "*.flv *.ts *.m2ts *.mts *.3gp *.3g2 *.ogv *.vob *.rmvb "
                     "*.asf *.f4v *.aiff *.ape *.mid *.midi"
                 )
-                filepath = filedialog.askopenfilename(
-                    title="Select Audio or Video File",
+                filepaths = filedialog.askopenfilenames(
+                    title="Select Audio or Video File(s)",
                     filetypes=[
                         ("All Media Files", media_types),
                         ("Audio Files", "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.opus *.wma *.mka *.aiff *.ape *.mid *.midi"),
@@ -72,15 +94,24 @@ class TrackSourceHandler:
                     ]
                 )
                 root.destroy()
-                
-                if filepath:
-                    # Resolve base name as title
-                    import os
-                    title = os.path.splitext(os.path.basename(filepath))[0]
-                    # Put stream start callback on the main game thread queue
-                    self._bot.game.put(lambda: self._bot._start_local_file_stream(filepath, title))
-                else:
+
+                paths = ((filepaths,) if isinstance(filepaths, str)
+                         else tuple(filepaths or ()))
+                paths = tuple(path for path in paths if path)
+                if not paths:
                     self._bot.game.put(lambda: speak("No file selected."))
+                    return
+                tracks = local_tracks(paths)
+                # One file keeps the old single-track path; several become a
+                # local batch the existing play_queue (and Ctrl+[ / ]) can move
+                # through without starting a fresh dialog for every song.
+                if len(tracks) == 1:
+                    track = tracks[0]
+                    self._bot.game.put(lambda: self._bot._start_local_file_stream(
+                        track["target"], track["title"]))
+                else:
+                    self._bot.game.put(lambda: self._bot._start_track_queue(
+                        tracks, "Local files"))
             except Exception as ex:
                 print(f"[MusicBot] Error opening file dialog: {ex}")
                 self._bot.game.put(lambda: speak("Error opening file dialog."))

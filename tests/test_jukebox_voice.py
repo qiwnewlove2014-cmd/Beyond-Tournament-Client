@@ -329,6 +329,15 @@ class SwitchTests(unittest.TestCase):
         with mock.patch("libs.options.get", side_effect=OSError("no prefs")):
             self.assertTrue(voice.voice_enabled())
 
+    def test_a_room_mute_silences_the_cabinet_before_the_local_switch(self):
+        audio = FakeAudio()
+        game, holder = voices(audio)
+        game.gameplay.jukebox_state = {
+            "jukeboxes": {"jb1": {"id": "jb1", "voice_muted": True}},
+        }
+        self.assertFalse(holder.speak("jb1", (0.0, 0.0, 0.0), "power_on"))
+        self.assertEqual(audio.groups, [])
+
 
 class CabinetMenuTests(unittest.TestCase):
     """The line at the end of the cabinet menu, beside the cinema lock."""
@@ -343,13 +352,14 @@ class CabinetMenuTests(unittest.TestCase):
         def speak_current_item(self):
             pass
 
-    def make_game(self, options_saved=None, with_audio=True):
+    def make_game(self, options_saved=None, with_audio=True, is_staff=False):
         box = {"id": "cab1", "x": 0.0, "y": 0.0, "z": 0.0,
                "cinema_mode": "auto", "current": None, "queue": []}
         gp = SimpleNamespace(
             jukebox_state={"jukeboxes": {"cab1": box}},
             player=SimpleNamespace(name="Kanya", x=0.0, y=0.0, z=0.0),
             substates=[],
+            is_staff=is_staff,
             pop_last_substate=lambda: None,
         )
         gp.add_substate = gp.substates.append
@@ -409,6 +419,39 @@ class CabinetMenuTests(unittest.TestCase):
         saved.assert_called_once_with(voice.OPTION_ENABLED, True)
         spoken.assert_called_once_with("You hear the cabinet speak again.")
 
+    def test_staff_get_the_room_switch_read_from_server_state(self):
+        game = self.make_game(is_staff=True)
+        menu = self.open_menu(game)
+        self.assertIn("Cabinet voice: ON (everyone hears this cabinet)",
+                      self.labels(menu))
+        game.gameplay.jukebox_state["jukeboxes"]["cab1"]["voice_muted"] = True
+        self.assertIn("Cabinet voice: OFF (silent for everyone)",
+                      self.labels(menu))
+
+    def test_pressing_the_staff_switch_mutes_this_cabinet_for_everyone(self):
+        class Network:
+            def __init__(self):
+                self.sent = []
+
+            def send(self, channel, event, data):
+                self.sent.append((channel, event, data))
+
+        game = self.make_game(is_staff=True)
+        game.network = Network()
+        menu = self.open_menu(game)
+        holder = voice.voices_for(game)
+        holder.speak("cab1", (0.0, 0.0, 0.0), "power_on")
+        group = game.audio_mngr.groups[0]
+        with mock.patch("libs.jukebox.menu.speak") as spoken:
+            next(item[1] for item in menu.items
+                 if (item[0]() if callable(item[0]) else item[0])
+                 == "Cabinet voice: ON (everyone hears this cabinet)")()
+        self.assertEqual(game.network.sent[0][1], "jukebox_voice_mute")
+        self.assertEqual(game.network.sent[0][2], {"id": "cab1", "muted": True})
+        self.assertTrue(group.destroyed)
+        spoken.assert_called_once_with(
+            "This cabinet's voice is now silent for everyone.")
+
 
 class HandlerTests(unittest.TestCase):
     def _handler(self, game):
@@ -457,6 +500,20 @@ class HandlerTests(unittest.TestCase):
         handler.jukebox_voice({"line": "power_on"})
         handler.jukebox_voice(None)
         self.assertEqual(audio.groups, [])
+
+    def test_the_staff_mute_packet_is_cached_and_releases_the_line(self):
+        audio = FakeAudio()
+        game = FakeGame(audio)
+        game.gameplay.jukebox_state = {"jukeboxes": {"jb1": {"id": "jb1"}}}
+        handler = self._handler(game)
+        holder = voice.voices_for(game)
+        holder.speak("jb1", (0.0, 0.0, 0.0), "power_on")
+        group = audio.groups[0]
+        handler.jukebox_voice_mute({"id": "jb1", "muted": True})
+        self.assertTrue(game.gameplay.jukebox_state["jukeboxes"]["jb1"]["voice_muted"])
+        self.assertTrue(group.destroyed)
+        handler.jukebox_voice_mute({"id": "jb1", "muted": False})
+        self.assertFalse(game.gameplay.jukebox_state["jukeboxes"]["jb1"]["voice_muted"])
 
 
 class DarkCabinetTests(unittest.TestCase):

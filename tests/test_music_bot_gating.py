@@ -13,6 +13,7 @@ class FakeMusicBot:
         self.playing = False
         self.paused = False
         self.last_stop_clear_queue = True
+        self.feed_tracks = []
 
     def open_search(self):
         self.calls.append("open_search")
@@ -25,6 +26,9 @@ class FakeMusicBot:
 
     def next_feed_track(self):
         self.calls.append("next_feed_track")
+
+    def skip_track(self, direction=1):
+        self.calls.append(("skip_track", direction))
 
     def stop(self, clear_queue=True):
         self.calls.append("stop")
@@ -149,6 +153,7 @@ class TestMusicBotGating(unittest.TestCase):
 
     def test_staff_volume_and_feed_work(self):
         gp = make_gp(is_staff=True)
+        gp.music_bot.feed_tracks = [{"title": "A"}]
         with mock.patch("libs.gameplay.speak"):
             gp.music_bot_volume(10)
         gp.buffer_cycle_l(pygame.KMOD_CTRL)
@@ -156,6 +161,13 @@ class TestMusicBotGating(unittest.TestCase):
         self.assertIn(("set_volume", 60), gp.music_bot.calls)
         self.assertIn("previous_feed_track", gp.music_bot.calls)
         self.assertIn("next_feed_track", gp.music_bot.calls)
+
+    def test_staff_queue_skip_keys_when_no_feed_is_active(self):
+        gp = make_gp(is_staff=True)
+        gp.buffer_cycle_l(pygame.KMOD_CTRL)
+        gp.buffer_cycle_r(pygame.KMOD_CTRL)
+        self.assertEqual(gp.music_bot.calls,
+                         [("skip_track", -1), ("skip_track", 1)])
 
     def test_ctrl_m_stop_preserves_play_queue(self):
         gp = make_gp(is_staff=True)

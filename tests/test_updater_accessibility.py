@@ -132,5 +132,41 @@ class UpdaterAccessibilityTests(unittest.TestCase):
         self.assertFalse(state.downloading)
 
 
+class UpdaterTlsTests(unittest.TestCase):
+    def test_prepare_download_tls_installs_certifi_context(self):
+        context = object()
+        handler = object()
+        opener = object()
+        with mock.patch.object(updater.ssl, "create_default_context", return_value=context) as create, \
+                mock.patch.object(updater.requests.certs, "where", return_value="C:\\certs\\cacert.pem"), \
+                mock.patch.object(updater.urllib.request, "HTTPSHandler", return_value=handler) as https, \
+                mock.patch.object(updater.urllib.request, "build_opener", return_value=opener) as build, \
+                mock.patch.object(updater.urllib.request, "install_opener") as install:
+            result = updater._prepare_download_tls()
+        self.assertIs(result, context)
+        create.assert_called_once_with(cafile="C:\\certs\\cacert.pem")
+        https.assert_called_once_with(context=context)
+        build.assert_called_once_with(handler)
+        install.assert_called_once_with(opener)
+
+    def test_smartdl_gets_the_certifi_context_before_start(self):
+        context = object()
+        downloader = SimpleNamespace(context=None)
+        with mock.patch.object(updater, "_prepare_download_tls", return_value=context) as prepare, \
+                mock.patch.object(updater.dl, "SmartDL", return_value=downloader) as smart:
+            result = updater._smartdl("https://example.invalid/update.zip", "C:\\temp\\update.zip")
+        self.assertIs(result, downloader)
+        self.assertIs(downloader.context, context)
+        prepare.assert_called_once_with()
+        smart.assert_called_once_with(
+            "https://example.invalid/update.zip",
+            "C:\\temp\\update.zip",
+            threads=2,
+            progress_bar=False,
+            timeout=120,
+            verify=True,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

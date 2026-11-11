@@ -1211,6 +1211,102 @@ class SpeakerVoicingTests(unittest.TestCase):
         self.assertNotEqual(filt, occlusion_filter(game.audio_mngr, 2, {}))
 
 
+class NetworkDeliveryThroughTheRoomTests(unittest.TestCase):
+    """The packet's own path, not only the route call underneath it.
+
+    The other classes call ``play_note``/``play_hit`` directly. A real listener
+    starts one layer earlier: the packet is handed to the network-thread queue,
+    drained on the main thread, and only then becomes a speaker copy. This is
+    the seam that would let a note still sound at the instrument (or nowhere)
+    while every unit below it agrees the room is right.
+    """
+
+    def setUp(self):
+        LATER.clear()
+
+    def game(self, live=True):
+        game = make_game(live=live)
+        game.gameplay.player = SimpleNamespace(x=10.0, y=25.0, z=0.0)
+        game.gameplay.game = game
+        # The sample is already warm: this test is about delivery to the room,
+        # not about the decoder (covered by test_listener_note_delivery).
+        game.audio_mngr.instrument_samples = SimpleNamespace(
+            status=lambda path: "ready")
+        return game
+
+    @staticmethod
+    def played_by_x(game):
+        return {spot[0]: kwargs
+                for _path, spot, kwargs in game.audio_mngr.played}
+
+    def test_a_remote_piano_packet_is_heard_from_the_room(self):
+        game = self.game()
+        from libs.piano import PianoAudio
+        piano = PianoAudio(game.audio_mngr)
+        piano.gameplay = game.gameplay
+        piano.enqueue_remote_note({"peer_id": "peer", "piano_note": "C4",
+                                   "x": 10.0, "y": 25.0, "z": 0.0,
+                                   "volume": 300})
+        piano._process_pending_notes()
+        # The note is not also left at the instrument: the room replaced it.
+        self.assertEqual(game.audio_mngr.direct, [])
+        played = self.played_by_x(game)
+        self.assertEqual(set(played), {6.5, 13.5})
+        self.assertEqual(played[6.5]["channel"], "l")
+        self.assertEqual(played[13.5]["channel"], "r")
+        self.assertIn("cin-peer-C4", piano.active_piano_notes)
+
+    def test_a_remote_guitar_packet_is_heard_from_the_room(self):
+        game = self.game()
+        from libs.piano import PianoAudio
+        piano = PianoAudio(game.audio_mngr)
+        piano.gameplay = game.gameplay
+        piano.enqueue_remote_note({"peer_id": "peer", "guitar_note": "C4",
+                                   "x": 10.0, "y": 25.0, "z": 0.0,
+                                   "volume": 300})
+        piano._process_pending_notes()
+        self.assertEqual(game.audio_mngr.direct, [])
+        played = self.played_by_x(game)
+        self.assertEqual(set(played), {6.5, 13.5})
+        self.assertEqual(played[6.5]["channel"], "l")
+        self.assertEqual(played[13.5]["channel"], "r")
+        self.assertIn("cin-peer-C4", piano.active_piano_notes)
+
+    def test_a_remote_drum_packet_is_heard_from_the_room(self):
+        game = self.game()
+        from libs.drums import DrumAudio
+        drums = DrumAudio(game.audio_mngr)
+        drums.gameplay = game.gameplay
+        drums.enqueue_remote_hit({"peer_id": "peer", "pad": 0,
+                                  "x": 10.0, "y": 25.0, "z": 0.0,
+                                  "volume": 100, "kit": "default"})
+        drums.update()
+        self.assertEqual(game.audio_mngr.direct, [])
+        played = self.played_by_x(game)
+        self.assertEqual(set(played), {6.5, 13.5})
+        self.assertEqual(played[6.5]["channel"], "l")
+        self.assertEqual(played[13.5]["channel"], "r")
+
+    def test_the_same_packet_with_the_listeners_switch_off_stays_at_the_instrument(self):
+        """The one outcome that looks like a dead room: the listener's own line.
+
+        The performer still hears their own instrument in stereo; every other
+        client reads this switch for itself. A packet that resolves a room but
+        finds the switch off must fall back to the positional instrument, not
+        go silent.
+        """
+        game = self.game(live=False)
+        from libs.piano import PianoAudio
+        piano = PianoAudio(game.audio_mngr)
+        piano.gameplay = game.gameplay
+        piano.enqueue_remote_note({"peer_id": "peer", "piano_note": "C4",
+                                   "x": 10.0, "y": 25.0, "z": 0.0,
+                                   "volume": 300})
+        piano._process_pending_notes()
+        self.assertEqual(len(game.audio_mngr.direct), 1)
+        self.assertEqual(game.audio_mngr.played, [])
+
+
 class CrossedSpeakerNoteTests(unittest.TestCase):
     """A note at a crossed speaker is that speaker's own side of the split.
 
