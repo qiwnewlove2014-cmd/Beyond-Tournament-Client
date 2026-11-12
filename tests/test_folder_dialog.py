@@ -311,6 +311,7 @@ class FolderDialogChildTests(unittest.TestCase):
         filedialog = SimpleNamespace(
             askdirectory=record("askdirectory"),
             asksaveasfilename=record("asksaveasfilename"),
+            askopenfilenames=record("askopenfilenames"),
         )
         tkinter = SimpleNamespace(Tk=lambda: root, filedialog=filedialog)
         return tkinter, filedialog, root
@@ -326,6 +327,24 @@ class FolderDialogChildTests(unittest.TestCase):
         self.assertEqual(name, "askdirectory")
         self.assertTrue(options["mustexist"])
         self.assertNotIn("initialdir", options)
+        self.assertTrue(root.destroyed)
+
+    def test_the_file_prompt_returns_one_path_per_line(self):
+        """Several files at once: the caller splits the lines, so a name with a
+        space in it (\"my music\") is still one path."""
+        calls = []
+        chosen = ("C:\\my music\\A.mp3", "C:\\songs\\B.flac")
+        tkinter, filedialog, root = self._fake_tkinter(calls, answer=chosen)
+        with mock.patch.dict(sys.modules, {"tkinter": tkinter,
+                                           "tkinter.filedialog": filedialog}):
+            choice = folder_dialog._show(folder_dialog.FILES, "Pick songs",
+                                         "C:\\songs", "*.flac *.mp3")
+        self.assertEqual(choice, "C:\\my music\\A.mp3\nC:\\songs\\B.flac")
+        name, options = calls[-1]
+        self.assertEqual(name, "askopenfilenames")
+        # The caller owns what a media file is: the pattern is passed through.
+        self.assertEqual(options["filetypes"][0], ("Media files", "*.flac *.mp3"))
+        self.assertEqual(options["initialdir"], "C:\\songs")
         self.assertTrue(root.destroyed)
 
     def test_the_save_prompt_offers_a_wav_that_may_be_overwritten(self):
@@ -352,7 +371,9 @@ class NoGameModuleBuildsTkTests(unittest.TestCase):
 
     def test_the_game_never_builds_tk_for_a_folder_or_a_save_name(self):
         for relative in ("libs/game_audio_recorder.py",
-                         "libs/music_bot/music_downloader.py"):
+                         "libs/music_bot/music_downloader.py",
+                         "libs/music_bot/track_source.py",
+                         "libs/music_bot/menu_pages/converter.py"):
             source = _read(os.path.join(CLIENT_DIR, relative))
             self.assertNotIn("tkinter", source, relative)
             self.assertNotIn("askdirectory", source, relative)

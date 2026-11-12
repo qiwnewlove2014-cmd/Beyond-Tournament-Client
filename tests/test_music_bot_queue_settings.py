@@ -558,18 +558,16 @@ class TestLocalFileDialog(unittest.TestCase):
             lambda tracks, label: scheduled.append(("queue", tracks, label)))
 
         asked = []
-        root = SimpleNamespace(withdraw=lambda: None,
-                               attributes=lambda *args: None,
-                               destroy=lambda: None)
+        # The picker is the dialog helper's child process now (see
+        # libs/folder_dialog): this process never builds Tk for it, so the test
+        # stands in for the helper rather than for tkinter.
+        answer = ("\n".join(paths), "")
 
-        def askopenfilenames(**kwargs):
-            asked.append(kwargs)
-            return tuple(paths)
+        def ask_files(*args, **kwargs):
+            asked.append((args, kwargs))
+            return answer
 
-        filedialog = SimpleNamespace(askopenfilenames=askopenfilenames)
-        tkinter = SimpleNamespace(Tk=lambda: root, filedialog=filedialog)
-
-        with mock.patch.dict(sys.modules, {"tkinter": tkinter}), \
+        with mock.patch("libs.folder_dialog.ask_files", ask_files), \
                 mock.patch("libs.music_bot.track_source.threading.Thread",
                            _ImmediateThread), \
                 mock.patch("libs.music_bot.track_source.speak"):
@@ -584,8 +582,9 @@ class TestLocalFileDialog(unittest.TestCase):
             {"title": "A", "target": paths[0], "source": "local"},
             {"title": "B", "target": paths[1], "source": "local"},
         ], "Local files")])
-        self.assertEqual(asked[0]["title"], "Select Audio or Video File(s)")
-        self.assertIn("filetypes", asked[0])
+        args, kwargs = asked[0]
+        self.assertEqual(args[0], "Choose Local File")
+        self.assertIn("*.mp3", kwargs["pattern"])
 
     def test_one_file_keeps_the_single_file_path(self):
         paths = [os.path.join("songs", "A.mp3")]
@@ -756,7 +755,8 @@ class TestTheMenuModule(unittest.TestCase):
 
     #: The page modules beside menus.py; each one holds one group of menus.
     PAGES = ("settings.py", "autotune.py", "subtitles.py", "voice_effect.py",
-             "party.py", "recording.py", "library.py", "external.py")
+             "party.py", "picks.py", "recording.py", "library.py",
+             "external.py", "converter.py")
     #: Not menus: the constructor and the one speaker the pages share.
     NOT_MENUS = {"__init__", "_say"}
 

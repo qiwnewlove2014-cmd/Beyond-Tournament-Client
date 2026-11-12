@@ -55,6 +55,48 @@ def local_tracks(paths):
     return tracks
 
 
+#: What the picker offers and what a folder scan takes. One list, because the
+#: two ways of saying "a song on this computer" must agree; ffmpeg demuxes
+#: whatever is in it, video containers included.
+MEDIA_PATTERNS = (
+    "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.opus *.wma *.mka "
+    "*.mp4 *.mkv *.webm *.mov *.m4v *.avi *.mpg *.mpeg *.wmv "
+    "*.flv *.ts *.m2ts *.mts *.3gp *.3g2 *.ogv *.vob *.rmvb "
+    "*.asf *.f4v *.aiff *.ape *.mid *.midi"
+)
+SUPPORTED_MEDIA_EXTENSIONS = frozenset(
+    ".mp3 .wav .ogg .flac .m4a .aac .opus .wma .mka .mp4 .mkv .webm .mov "
+    ".m4v .avi .mpg .mpeg .wmv .flv .ts .m2ts .mts .3gp .3g2 .ogv .vob "
+    ".rmvb .asf .f4v .aiff .ape .mid .midi".split()
+)
+
+
+def music_files_in(folder):
+    """Every supported media file directly inside `folder`, in name order.
+
+    Not recursive: a folder of albums has one album per subfolder, and a scan
+    that walked into them would queue a whole library from one Enter. An
+    unreadable folder (permissions, a drive that went away) is an empty answer
+    rather than an exception, because the caller's only useful reply is "nothing
+    here" either way.
+    """
+    paths = []
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                name = os.path.splitext(entry.name)[1].lower()
+                if name in SUPPORTED_MEDIA_EXTENSIONS:
+                    paths.append(entry.path)
+    except OSError:
+        return []
+    return sorted(paths, key=lambda path: os.path.basename(path).lower())
+
+
 class TrackSourceHandler:
     """The Music Bot's track sources: a file, a search, a link (see the module docstring)."""
 
@@ -66,59 +108,69 @@ class TrackSourceHandler:
     # ------------------------------------------------------------------
 
     def _open_file_dialog(self):
-        """Open Windows file chooser dialog in a background thread to prevent game freezing"""
-        def select_file():
-            try:
-                import tkinter as tk
-                from tkinter import filedialog
-                
-                root = tk.Tk()
-                root.withdraw()  # Hide the main tk window
-                root.attributes("-topmost", True)  # Bring file dialog to front
-                
-                # Audio AND video containers: the music bot decodes whatever
-                # ffmpeg can demux (movies, music videos, podcasts...).
-                media_types = (
-                    "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.opus *.wma *.mka "
-                    "*.mp4 *.mkv *.webm *.mov *.m4v *.avi *.mpg *.mpeg *.wmv "
-                    "*.flv *.ts *.m2ts *.mts *.3gp *.3g2 *.ogv *.vob *.rmvb "
-                    "*.asf *.f4v *.aiff *.ape *.mid *.midi"
-                )
-                filepaths = filedialog.askopenfilenames(
-                    title="Select Audio or Video File(s)",
-                    filetypes=[
-                        ("All Media Files", media_types),
-                        ("Audio Files", "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.opus *.wma *.mka *.aiff *.ape *.mid *.midi"),
-                        ("Video Files", "*.mp4 *.mkv *.webm *.mov *.m4v *.avi *.mpg *.mpeg *.wmv *.flv *.ts *.m2ts *.mts *.3gp *.3g2 *.ogv *.vob *.rmvb *.asf *.f4v"),
-                        ("All Files", "*.*")
-                    ]
-                )
-                root.destroy()
+        """Open the file picker for one or several songs.
 
-                paths = ((filepaths,) if isinstance(filepaths, str)
-                         else tuple(filepaths or ()))
-                paths = tuple(path for path in paths if path)
-                if not paths:
-                    self._bot.game.put(lambda: speak("No file selected."))
-                    return
-                tracks = local_tracks(paths)
-                # One file keeps the old single-track path; several become a
-                # local batch the existing play_queue (and Ctrl+[ / ]) can move
-                # through without starting a fresh dialog for every song.
-                if len(tracks) == 1:
-                    track = tracks[0]
-                    self._bot.game.put(lambda: self._bot._start_local_file_stream(
-                        track["target"], track["title"]))
-                else:
-                    self._bot.game.put(lambda: self._bot._start_track_queue(
-                        tracks, "Local files"))
-            except Exception as ex:
-                print(f"[MusicBot] Error opening file dialog: {ex}")
+        The picker runs in the dialog's own process (`libs/folder_dialog`), not
+        a Tk built in a worker thread of this one: building Tk holds this
+        interpreter for about 80 ms, which is four 20 ms audio frames (the
+        measurement is in that module's docstring). One path is a song; several
+        become the local batch `play_queue`, which Ctrl+[ / ] move through.
+        """
+        from .. import folder_dialog
+
+        def choose():
+            answer, problem = folder_dialog.ask_files(
+                "Choose Local File", pattern=MEDIA_PATTERNS)
+            if problem:
+                print(f"[MusicBot] Error opening file dialog: {problem}")
                 self._bot.game.put(lambda: speak("Error opening file dialog."))
+                return
+            paths = tuple(path for path in answer.splitlines() if path.strip())
+            if not paths:
+                self._bot.game.put(lambda: speak("No file selected."))
+                return
+            tracks = local_tracks(paths)
+            # One file keeps the single-track path; several become a local batch
+            # the existing play_queue (and Ctrl+[ / ]) can move through without
+            # starting a fresh dialog for every song.
+            if len(tracks) == 1:
+                track = tracks[0]
+                self._bot.game.put(lambda: self._bot._start_local_file_stream(
+                    track["target"], track["title"]))
+            else:
+                self._bot.game.put(lambda: self._bot._start_track_queue(
+                    tracks, "Local files"))
 
-        t = threading.Thread(target=select_file, daemon=True)
-        t.start()
+        threading.Thread(target=choose, daemon=True).start()
         speak("Opening file explorer...")
+
+    def _choose_music_folder(self):
+        """Play every supported file in a folder the player picks, in name order.
+
+        `Choose Local File` lists files, and more than one of them is a
+        Ctrl+click -- the step a player who cannot see that list keeps missing.
+        A folder is one answer, and what it holds is the batch.
+        """
+        from .. import folder_dialog
+
+        def choose():
+            folder, problem = folder_dialog.ask_folder("Choose a folder of music")
+            if problem:
+                print(f"[MusicBot] Error opening the folder dialog: {problem}")
+                self._bot.game.put(lambda: speak("Error opening the folder dialog."))
+                return
+            if not folder:
+                self._bot.game.put(lambda: speak("No folder selected."))
+                return
+            tracks = local_tracks(music_files_in(folder))
+            if not tracks:
+                self._bot.game.put(lambda: speak("No music files in that folder."))
+                return
+            self._bot.game.put(lambda: self._bot._start_track_queue(
+                tracks, "Local files"))
+
+        threading.Thread(target=choose, daemon=True).start()
+        speak("Opening folder list...")
 
     def _start_local_file_stream(self, filepath, title, preserve_queue=False, preserve_feed=False,
                                  playback_generation=None):
@@ -144,11 +196,14 @@ class TrackSourceHandler:
         self._bot.last_track_source = "local"
         self._bot.is_loading_stream = True
 
-        # Stop any current playback
+        # Stop any current playback. Faded like any other track change: a local
+        # file needs no resolve, so the outgoing song and the new one really do
+        # overlap (Crossfade Between Songs sets that window).
         self._bot.stop(
             clear_queue=not preserve_queue,
             clear_feed=not preserve_feed,
             invalidate_pending=False,
+            fade=True,
         )
 
         # Start streaming local file via ffmpeg -> AudioStreamer

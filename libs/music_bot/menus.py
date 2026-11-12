@@ -6,7 +6,8 @@ pages and the help page. Every other page group lives in `menu_pages/` beside
 this file -- `settings.py` (the Settings hub, output device, equalizer and the
 Custom EQ slider, song key and speech key), `autotune.py` (Auto-Tune and
 Harmony), `subtitles.py`, `voice_effect.py` (the Voice Effect page and its two
-boards), `party.py`, `recording.py` and `library.py` -- and `MusicBotMenus`
+boards), `party.py`, `recording.py`, `converter.py` (the Audio File Converter)
+and `library.py` -- and `MusicBotMenus`
 inherits one class from each, so every method still answers on the bot.
 
 **The state stays on `MapMusicBot`; the behaviour moved here.** Every queue,
@@ -50,9 +51,11 @@ from ..speech import speak
 from ..string_utils import friendly_key_name
 from . import song_requests
 from .menu_pages.autotune import AutoTuneMenus
+from .menu_pages.converter import ConverterMenus
 from .menu_pages.external import ExternalAudioMenus
 from .menu_pages.library import LibraryMenus
 from .menu_pages.party import PartyMenus
+from .menu_pages.picks import PicksMenus
 from .menu_pages.recording import RecordingMenus
 from .menu_pages.settings import SettingsMenus, _MusicBotEqSlider
 from .menu_pages.subtitles import SubtitleMenus
@@ -64,8 +67,8 @@ __all__ = ["MusicBotMenus", "stand_on", "output_device", "_MusicBotEqSlider"]
 
 
 class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
-                    VoiceEffectMenus, PartyMenus, RecordingMenus, LibraryMenus,
-                    ExternalAudioMenus):
+                    VoiceEffectMenus, PartyMenus, PicksMenus, RecordingMenus,
+                    LibraryMenus, ExternalAudioMenus, ConverterMenus):
     """Builds and opens every Music Bot menu (see the module docstring)."""
 
     def __init__(self, bot):
@@ -105,6 +108,39 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
             gp.pop_last_substate()
             self._bot._open_file_dialog()
 
+        def go_folder():
+            gp.pop_last_substate()
+            self._bot._choose_music_folder()
+
+        def mark_key_name():
+            """The mark key as the player's own keyconfig spells it (F12)."""
+            kc = getattr(getattr(self._bot, "game", None), "keyconfig", None)
+            code = (kc.get("music_bot_mark_pick", pygame.K_F12)
+                    if kc else pygame.K_F12)
+            return friendly_key_name(code)
+
+        def report_the_mark_line():
+            # Enter here must not mark or unmark. A line that reads "1 picked"
+            # invites a press, and a press that toggled is how a mark vanished
+            # without the player seeing which line took it: the count belongs
+            # to the key, so this line only reports it and says where the key
+            # is instead of changing anything.
+            speak(
+                "This line only reports. Press Ctrl plus "
+                f"{mark_key_name()} to mark or unmark the song that is "
+                "playing."
+            )
+
+        def go_picks():
+            gp.pop_last_substate()
+            self._open_picks_menu()
+
+        def mark_label():
+            count = len(getattr(self._bot, "picks", ()) or ())
+            if not count:
+                return "Mark the Song That Is Playing"
+            return f"Mark the Song That Is Playing ({count} picked)"
+
         def go_playlists():
             gp.pop_last_substate()
             self._open_playlists_menu()
@@ -120,6 +156,10 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
         def go_record_audio():
             gp.pop_last_substate()
             self._open_recording_menu()
+
+        def go_converter():
+            gp.pop_last_substate()
+            self._open_converter_menu()
 
         def go_help():
             gp.pop_last_substate()
@@ -176,6 +216,18 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
              "the same speakers, key and equalizer this bot uses for YouTube. "
              "Pick several at once and the rest wait in a local batch you "
              "can skip through."),
+            ("search", "Choose a Folder of Music", go_folder,
+             "Plays every audio or video file in a folder you pick, in name "
+             "order, as one local batch. One Enter for the folder, with no "
+             "Ctrl+click and no list of files to read through."),
+            ("picks", mark_label, report_the_mark_line,
+             "Reports the local file that is playing and how many are picked. "
+             "Enter here changes nothing: marking and unmarking is the key "
+             "(Ctrl+F12 by default), because a press that toggled is how a "
+             "mark disappeared without anyone seeing which line took it."),
+            ("picks", self._bot.picks_label, go_picks,
+             "The local files you marked while listening: play them as a "
+             "batch, or copy them all into a folder you choose."),
             ("playlists", "My Playlists & Favorites", go_playlists,
              "Songs you saved and playlists you made: play them, save the song "
              "that is playing, or take one out again."),
@@ -188,6 +240,13 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
             ("recording", "Record Audio", go_record_audio,
              "Records what this machine plays, the game and the song together, "
              "to a file for a final mix."),
+            # One line, because the tool is a page of its own: a player who is
+            # collecting files needs the converter where the recorder is, not
+            # four lines of format switches in the middle of this menu.
+            ("converter", "Audio File Converter", go_converter,
+             "Converts files already on this computer into one format -- the "
+             "files you pick, a whole folder, or your Picks -- writing beside "
+             "each original and never over it."),
             ("party", "Party Sync (Listen Together)", go_party_sync,
              "Invites people on any map to hear your music privately in their "
              "own headphones, at the same moment you hear it."),
@@ -337,6 +396,9 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
         voice_key = friendly_key_name(
             self._bot.game.keyconfig.get("speak_zone", pygame.K_v)
         )
+        mark_key = friendly_key_name(
+            self._bot.game.keyconfig.get("music_bot_mark_pick", pygame.K_F12)
+        )
 
         def say_tab_help():
             speak("Tab reads what the line you are standing on does. It works "
@@ -384,6 +446,13 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
              "Skips forward: the Personal Music Feed when it is active, "
              "otherwise a song waiting in the play-next queue or the next "
              "track in the playlist/local batch."),
+            (f"Ctrl + {mark_key}: Mark / unmark the song that is playing",
+             lambda: None, None,
+             "Puts the local file that is playing on your Picks list, or takes "
+             "it off again, without opening a menu. The count on the Mark line "
+             "of the mode menu follows it, and the Picks page plays them "
+             "together or copies them into a folder. Only a file on this "
+             "computer can be picked: a song from YouTube has nothing to copy."),
             (f"{volume_down_key}: Decrease volume", lambda: None, None,
              "Turns the song down, without touching the game's own sounds."),
             (f"{volume_up_key}: Increase volume", lambda: None, None,

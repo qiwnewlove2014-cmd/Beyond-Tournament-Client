@@ -30,6 +30,10 @@ FILE_DIALOG_FLAG = "--bt-file-dialog"
 
 FOLDER = "folder"
 SAVE = "save"
+#: Several files at once. The Music Bot's "Choose Local File" is a multi-select
+#: picker by design, and its answer travels as one path per line -- a path with a
+#: space (or Thai) in it is still one line, and the caller does the splitting.
+FILES = "files"
 
 # The title of a game dialog; a longer one is a bug in the caller, not a reason
 # to hand the child an argument list of whatever size.
@@ -56,6 +60,18 @@ def ask_save_file(title, initial_dir="", initial_file="", *, timeout=None):
     """
     return _ask([SAVE, _normalized(title, "Save a file"), str(initial_dir or ""),
                  str(initial_file or "")], timeout)
+
+
+def ask_files(title, initial="", pattern="*.*", *, timeout=None):
+    """Let the player pick several files; ``(paths, problem)``.
+
+    The answer is the chosen paths joined by newlines (one per line); an empty
+    answer with an empty problem is a cancelled dialog, exactly as with
+    `ask_folder`. ``pattern`` is the dialog's own filter (``"*.mp3 *.flac"``),
+    so the caller -- not this module -- decides what a media file is.
+    """
+    return _ask([FILES, _normalized(title, "Select files"), str(initial or ""),
+                 str(pattern or "*.*")], timeout)
 
 
 def _normalized(title, fallback):
@@ -210,6 +226,15 @@ def _show(mode, title, initial_dir, initial_file):
             if initial_file:
                 options["initialfile"] = initial_file
             return filedialog.asksaveasfilename(**options) or ""
+        if mode == FILES:
+            options = {
+                "title": title,
+                "filetypes": [("Media files", initial_file or "*.*"),
+                              ("All files", "*.*")],
+            }
+            if initial_dir:
+                options["initialdir"] = initial_dir
+            return "\n".join(filedialog.askopenfilenames(**options) or "")
         options = {"title": title, "mustexist": True}
         if initial_dir:
             options["initialdir"] = initial_dir

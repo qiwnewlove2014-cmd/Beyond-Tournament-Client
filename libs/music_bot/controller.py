@@ -175,6 +175,10 @@ class MapMusicBot:
 
         # Music Bot settings (persisted in client options)
         self.queue_mode = options.get("music_bot_queue_mode", False)
+        # Picks: local files marked while listening, so a cull-by-ear pass ends
+        # in one folder (`_copy_picks`) instead of a second search.
+        self.picks = [dict(pick) for pick in options.get("music_bot_picks", [])
+                      if isinstance(pick, dict) and pick.get("target")]
         # Song requests (/p) in a Party Sync session: OFF until the host turns
         # them on, and the switch only exists while this client is the host
         # (see song_requests_switch_item). `song_requests` is the host's own
@@ -348,6 +352,10 @@ class MapMusicBot:
         self.current_duration = None       # seconds, when known (None = no crossfade)
         self._known_durations = {}         # youtube page URL -> duration seconds
         self._crossfade = None             # active roll/fade state (see _update_crossfade)
+        # The fade-in half of a track change the player asks for (Ctrl+[ / ], a
+        # queue line, a local batch): armed by _begin_track_change_fade, ramped
+        # by the frame loop, and cleared by a real crossfade, which ramps both.
+        self._incoming_fade = None
         # The machine that drives it lives in crossfade_handler.py;
         # the state above stays here for the callers that read it.
         self._crossfade_handler = CrossfadeHandler(self)
@@ -725,12 +733,20 @@ class MapMusicBot:
         def _fade_worker():
             try:
                 start_gain = float(getattr(source, 'gain', 1.0) or 0.0)
-                steps = 10
+                # Twenty steps a second: the half-second cut keeps its ten steps,
+                # and a three-second crossfade is not heard as ten stair-steps.
+                steps = max(10, int(round(float(duration) * 20)))
                 step_sleep = duration / steps
                 for i in range(steps):
                     fraction = (steps - 1 - i) / steps
+                    gain = max(0.0, start_gain * fraction)
                     try:
-                        source.gain = max(0.0, start_gain * fraction)
+                        if streamer is not None:
+                            # Reaches the player's own output device too, where
+                            # the song is a gain in the child, not a source.
+                            streamer.set_output_gain(gain)
+                        else:
+                            source.gain = gain
                     except Exception:
                         break
                     time.sleep(step_sleep)
@@ -756,6 +772,49 @@ class MapMusicBot:
                     pass
 
         threading.Thread(target=_fade_worker, daemon=True).start()
+
+    def _begin_track_change_fade(self):
+        """Set up the fade a track change takes, and return its window.
+
+                    Crossfade Between Songs owns a change the player asks for, exactly as it
+                    owns the crossfade between queued songs: the outgoing song ramps down
+                    over the same `CROSSFADE_SECONDS`, and the incoming one -- armed here and
+                    ramped by the frame loop -- comes up underneath it. A local file needs no
+                    resolve, so the two are audible together: a real crossfade. Off, or feeding
+                    a cabinet's room (which plays one stream at a time, the same rule the queue's
+                    pre-roll obeys), a change keeps the short half-second cut it always had.
+                    """
+        if (not getattr(self, "crossfade_enabled", True)
+                or self.cinema_active_target()
+                or not (self.playing or self.paused)
+                or self.streamer is None):
+            return 0.5
+        window = float(self.CROSSFADE_SECONDS)
+        # Armed, not started: the ramp begins with the new stream's first audible
+        # frame, because a YouTube change spends the resolve in between.
+        self._incoming_fade = {"seconds": window, "at": None}
+        return window
+
+    def _incoming_fade_gain(self, base_gain):
+        """The gain the song that replaced one plays at: ramped in, then `base_gain`."""
+        fade = getattr(self, "_incoming_fade", None)
+        if not fade:
+            return base_gain
+        seconds = float(fade.get("seconds") or 0.0)
+        at = fade.get("at")
+        if at is None:
+            # The new stream's first audible frame is where the ramp starts, so
+            # the fade is the same length whether the song is local or not.
+            fade["at"] = time.monotonic()
+            at = fade["at"]
+        if seconds <= 0.0:
+            self._incoming_fade = None
+            return base_gain
+        progress = (time.monotonic() - at) / seconds
+        if progress >= 1.0:
+            self._incoming_fade = None
+            return base_gain
+        return base_gain * max(0.0, progress)
 
     def _begin_playback_generation(self):
         """Invalidate pending starts and reserve a generation for new playback."""
@@ -1551,6 +1610,85 @@ class MapMusicBot:
     def _clear_next_up_queue(self):
         self.next_up_queue = []
 
+    # === Picks: local files marked while listening ===
+    def _save_picks(self):
+        options.set("music_bot_picks", [dict(pick) for pick in self.picks])
+
+    def picks_label(self):
+        # A bot built without __init__ (a test fixture, a restored session) has
+        # no list yet, so the label reads what is there rather than assuming.
+        count = len(getattr(self, "picks", ()) or ())
+        return "Picks" if not count else f"Picks ({count})"
+
+    def toggle_current_pick(self):
+        """Mark or unmark the local file that is playing, and say so.
+
+        Only a file on this computer can be copied into a folder afterwards, so
+        a YouTube song is refused with the reason instead of silently: a pick
+        that could never leave the game is worse than a refusal.
+        """
+        from ..speech import speak
+        if not hasattr(self, "picks"):
+            self.picks = []
+        target = getattr(self, "current_target", "") or ""
+        title = (getattr(self, "current_title", "") or
+                 os.path.basename(target) or "Unknown")
+        if getattr(self, "current_source", "") != "local" or not target:
+            if not self.playing:
+                speak("Nothing is playing.")
+            else:
+                speak("Only a file from this computer can be picked.")
+            return False
+        for index, pick in enumerate(self.picks):
+            if pick.get("target") == target:
+                self.picks.pop(index)
+                self._save_picks()
+                speak(f"Unpicked: {title}. {len(self.picks)} picked.")
+                return False
+        self.picks.append({"title": title, "target": target, "source": "local"})
+        self._save_picks()
+        speak(f"Picked: {title}. {len(self.picks)} picked.")
+        return True
+
+    def clear_picks(self):
+        from ..speech import speak
+        self.picks = []
+        self._save_picks()
+        speak("Picks cleared.")
+
+    def _copy_picks(self, folder):
+        """Copy every picked file into `folder`, leaving the originals alone.
+
+        A copy and not a move: a folder chosen by mistake must cost nothing, and
+        a song picked while listening is often the only copy on this machine.
+        Called from a worker thread by the menu, so it answers through
+        `game.put` rather than speaking from the thread.
+        """
+        from ..speech import speak
+        import shutil
+        copied = missing = failed = 0
+        for pick in list(getattr(self, "picks", ()) or ()):
+            source = pick.get("target", "")
+            if not os.path.isfile(source):
+                missing += 1
+                continue
+            destination = os.path.join(folder, os.path.basename(source))
+            if os.path.abspath(destination) == os.path.abspath(source):
+                continue
+            try:
+                shutil.copy2(source, destination)
+                copied += 1
+            except OSError:
+                failed += 1
+        parts = [f"Copied {copied} file" + ("" if copied == 1 else "s")]
+        if missing:
+            parts.append(f"{missing} missing")
+        if failed:
+            parts.append(f"{failed} could not be copied")
+        sentence = ", ".join(parts) + "."
+        self.game.put(lambda: speak(sentence))
+        return copied
+
     # === Crossfade between auto-advanced tracks ===
     # The pre-roll / fade state machine lives in crossfade_handler.py; the state
     # it drives stays here, because the tests read `crossfade_enabled`,
@@ -1601,6 +1739,27 @@ class MapMusicBot:
 
     def _open_queue_menu(self):
         return self._menus()._open_queue_menu()
+
+    def _open_picks_menu(self):
+        return self._menus()._open_picks_menu()
+
+    def _choose_picks_folder(self):
+        return self._menus()._choose_picks_folder()
+
+    def _open_converter_menu(self):
+        return self._menus()._open_converter_menu()
+
+    def _open_converter_settings_menu(self):
+        return self._menus()._open_converter_settings_menu()
+
+    def _choose_converter_files(self):
+        return self._menus()._choose_converter_files()
+
+    def _choose_converter_folder(self):
+        return self._menus()._choose_converter_folder()
+
+    def _set_converter_output_folder(self):
+        return self._menus()._set_converter_output_folder()
 
     def _open_settings_menu(self):
         return self._menus()._open_settings_menu()
@@ -2167,6 +2326,23 @@ class MapMusicBot:
     def _open_file_dialog(self):
         return self._track_source()._open_file_dialog()
 
+    def _converter(self):
+        """The batch converter, built on first use (see converter.py).
+
+        A bot built without `__init__` -- a test fixture, a restored session --
+        has none yet, so every caller asks here rather than holding a reference
+        that may never have been made.
+        """
+        converter = getattr(self, "converter", None)
+        if converter is None:
+            from .converter import AudioConverter
+            converter = AudioConverter(self.game)
+            self.converter = converter
+        return converter
+
+    def _choose_music_folder(self):
+        return self._track_source()._choose_music_folder()
+
     def _start_local_file_stream(self, filepath, title, preserve_queue=False,
                                  preserve_feed=False,
                                  playback_generation=None):
@@ -2436,13 +2612,20 @@ class MapMusicBot:
         # Cancel any ongoing search
         self.searching = False
         self.is_loading_stream = False
+        if not fade:
+            # A seek or a plain stop is not a track change: no fade-in is
+            # waiting for a song that is not coming.
+            self._incoming_fade = None
         # Stop YouTube streamer
         if fade and self.stream_source:
+            # A track change: Crossfade Between Songs sets how long the outgoing
+            # song takes to go quiet, and arms the incoming song's fade-in.
+            window = self._begin_track_change_fade()
             old_src = self.stream_source
             old_streamer = self.streamer
             self.stream_source = None
             self.streamer = None
-            self._fade_out_source(old_src, old_streamer, duration=0.5)
+            self._fade_out_source(old_src, old_streamer, duration=window)
         else:
             if self.streamer:
                 self.streamer.stop()
@@ -2632,6 +2815,14 @@ class MapMusicBot:
                 fade = getattr(self, "_crossfade", None)
                 if fade is not None and fade.get("phase") == "fading":
                     self._update_fade_gains(base_gain)
+                elif getattr(self, "_incoming_fade", None) is not None:
+                    # The song that replaced one ramps up under the old one's
+                    # fade-out; Crossfade Between Songs owns both halves.
+                    gain = self._incoming_fade_gain(base_gain)
+                    if self.streamer is not None:
+                        self.streamer.set_output_gain(gain)
+                    else:
+                        self.stream_source.gain = gain
                 else:
                     self.stream_source.gain = base_gain
             except Exception:

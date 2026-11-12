@@ -296,6 +296,11 @@ class Gameplay(state.State):
             kc.get("music_bot_toggle", pygame.K_m): self.music_bot_control,
             kc.get("music_bot_vol_down", pygame.K_F9): lambda mod: self.music_bot_volume_key(-1, mod),
             kc.get("music_bot_vol_up", pygame.K_F10): lambda mod: self.music_bot_volume_key(1, mod),
+            # Ctrl+F12: F12 is the last key on the board that answers to nothing
+            # else (every letter is taken -- all of M's chords belong to
+            # `music_bot_control` -- and F1-F11 have their own jobs), and the
+            # Ctrl is what makes it a chord instead of a bare press.
+            kc.get("music_bot_mark_pick", pygame.K_F12): self.music_bot_mark_pick,
             kc.get("guitar_play", pygame.K_u): self.toggle_guitar_mode,
             kc.get("raise_shield", pygame.K_s): self.start_raise_shield,
         }
@@ -2080,6 +2085,36 @@ class Gameplay(state.State):
             or getattr(self, "is_builder", False)
             or getattr(self, "is_technician", False)
         )
+
+    def music_bot_mark_pick(self, mod=0):
+        """Mark the local file that is playing, for the Music Bot's Picks.
+
+        **Ctrl + the configured key**, F12 by default -- F12 is the last key on
+        the board that answers to nothing else (plain M opens the Music Bot,
+        Shift pauses, Ctrl stops, Ctrl+Shift speaks its status and Alt mutes it
+        to others, so nothing on M is left, and F1-F11 already have jobs). The
+        Ctrl lives here rather than in the keyconfig file, the way Ctrl+[ / ]
+        and Ctrl+F8 are read: a keyconfig entry is one keycode, so a chord is
+        always "the modifier, then whatever key this action owns".
+
+        This decides only whether the press arrives: a menu or a text field owns
+        its own keys, a locked Music Bot stays silent, and the pick itself
+        refuses a song that is not a file on this computer with the reason
+        (`MapMusicBot.toggle_current_pick`).
+        """
+        if not mod & pygame.KMOD_CTRL:
+            # A bare press of the key is not the chord: it belongs to nothing,
+            # so it does nothing rather than marking by accident.
+            return
+        if self.substates:
+            return
+        if not getattr(self, "music_bot", None):
+            return
+        if not self._can_use_music_bot():
+            return
+        if music_bot_gate.blocked("picks"):
+            return
+        self.music_bot.toggle_current_pick()
 
     def music_bot_control(self, mod):
         # Music Bot controls on the configured key:

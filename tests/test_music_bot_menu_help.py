@@ -701,6 +701,76 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         self.assertGreaterEqual(len(menu.items[0]), 4)
 
 
+class TheMarkLineOnlyReportsTests(unittest.TestCase):
+    """The count is worth hearing; the line is not a button.
+
+    A player marks with Ctrl+F12, walks the mode menu and hears "1 picked" --
+    and presses Enter on it, because it reads like the mark button it sits
+    beside. When that press toggled, the mark vanished and the player blamed
+    the mark they had just made. So the line reports, and Enter says where the
+    key is instead of changing anything.
+    """
+
+    def setUp(self):
+        FakeMenu.built = []
+        self.addCleanup(mock.patch.stopall)
+        self.addCleanup(music_bot_gate.clear)
+        music_bot_gate.clear()
+        self.bot = make_bot()
+        # Only the mark key is answered for: a blanket return would make every
+        # line of the help page name F12.
+        self.bot.game.keyconfig.get.side_effect = (
+            lambda func, default: pygame.K_F12
+            if func == "music_bot_mark_pick" else default)
+        self.bot.picks = [{"title": "A", "target": "C:\songs\A.mp3",
+                          "source": "local"}]
+        self.handler = menus_module.MusicBotMenus(self.bot)
+        mock.patch("libs.menu.Menu", FakeMenu).start()
+        mock.patch("libs.menus.set_default_sounds").start()
+        self.speak = mock.patch("libs.music_bot.menus.speak").start()
+
+    def mark_line(self):
+        self.handler._show_mode_menu()
+        for item in FakeMenu.built[-1].items:
+            if label_of(item).startswith("Mark the Song That Is Playing"):
+                return item
+        self.fail("the mode menu lost its mark line")
+
+    def test_it_reports_how_many_are_picked(self):
+        self.assertEqual(label_of(self.mark_line()),
+                         "Mark the Song That Is Playing (1 picked)")
+
+    def test_enter_on_it_changes_nothing(self):
+        item = self.mark_line()
+        before = list(self.bot.picks)
+        item[1]()
+        self.assertEqual(self.bot.picks, before)
+        self.bot.toggle_current_pick.assert_not_called()
+
+    def test_enter_on_it_says_where_the_mark_key_is(self):
+        self.mark_line()[1]()
+        said = self.speak.call_args.args[0]
+        self.assertIn("only reports", said)
+        self.assertIn("Ctrl plus f12", said)
+
+    def test_the_help_page_lists_the_mark_key(self):
+        self.handler._show_help_menu()
+        labels = [label_of(item) for item in FakeMenu.built[-1].items]
+        self.assertTrue(
+            any(label.startswith("Ctrl + f12: Mark / unmark") for label in labels),
+            labels)
+
+    def test_the_help_page_says_what_the_mark_does_not_do(self):
+        self.handler._show_help_menu()
+        for item in FakeMenu.built[-1].items:
+            if label_of(item).startswith("Ctrl + f12"):
+                text = text_of(item)
+                self.assertIn("Picks", text)
+                self.assertIn("local file", text)
+                return
+        self.fail("the help page does not name the mark key")
+
+
 class ThePagesStayOpenTests(unittest.TestCase):
     """Choosing is not leaving, and the board is rebuilt on the way back.
 
