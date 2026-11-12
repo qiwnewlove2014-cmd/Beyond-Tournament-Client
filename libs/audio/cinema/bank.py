@@ -174,6 +174,12 @@ class CinemaSpeakerBank:
         # A delay trim is measured from there, so it survives the room's own
         # start rules changing once playback has begun.
         self._start_frame = None
+        # Per-speaker holds that began after the room was already playing: the
+        # frame count at which a trim raised mid-song (``reconfigure``) is fully
+        # built. Empty for the room's own start, where `_start_frame` counts: a
+        # hold and the frame depth a fill would give it are the same delay, and
+        # spending both made a restarted room play the trim twice.
+        self._hold_until = {}
         # A live note's clock: frames *fed* to a speaker (its own count, so a speaker that
         # rejoined late has its own instant) and the notes waiting on it -- the wait itself
         # being the shared rule a plain cabinet's stereo pair uses (libs/jukebox_clock.py).
@@ -1080,6 +1086,13 @@ class CinemaSpeakerBank:
                 # and the ones it is "missing" are the hold itself. Filling them would replay audio it is
                 # about to play, and starting it early is what the hold exists to prevent (see hold_frames).
                 continue
+            if self._start_frame is None and self.trim_target(slot) > 0:
+                # The room has not started yet, and this speaker's delay has not been spent: the hold
+                # (_held) builds it when the room begins. Filling its depth here as well pays the same
+                # trim twice -- measured on the harness, a room restarted mid-song came back a 20 ms
+                # trim as 1920 samples instead of 960. A speaker that ran dry *while the room plays* is
+                # a different case and is still filled, because its hold has long been spent.
+                continue
             if queued > 0:
                 # Frames are in front of it that cannot be taken back (a listener's pause, a buffer the
                 # backend will not unqueue). A speaker in step must not be touched, and a window spliced
@@ -1174,14 +1187,39 @@ class CinemaSpeakerBank:
         except Exception:
             return False
 
+    def _hold_baseline(self):
+        # The shallowest trim in the room. A trim is only ever a *difference* between speakers, so a
+        # room every one of whose speakers carries the same delay needs no depth of its own: each one
+        # measures against this floor and holds nothing (see ``trim_target``).
+        target = None
+        for slot in self.slot_sources:
+            hold = self.hold_frames(slot)
+            if target is None or hold < target:
+                target = hold
+        return 0 if target is None else target
+
+    def trim_target(self, slot):
+        # How many frames deeper than the room's shallowest speaker this speaker's trim puts it -- the
+        # whole-frame half of the delay, which a fill and a mid-song hold both aim at
+        # (``_frames_behind`` is the same figure read for the fill). Zero for an untrimmed speaker, and
+        # zero for a room where every speaker was dialled alike, because nothing there is out of step.
+        return max(0, self.hold_frames(slot) - self._hold_baseline())
+
     def _held(self, slot):
         # True while this speaker is deliberately waiting out its delay trim, counted in frames the
         # *room* has queued since playback began - a trimmed speaker's queue is short by construction,
         # and reading that as "not ready yet" is how the trim was swallowed. Every speaker waits its
         # OWN trim, the one that starts the room included (_play_ready): the room's clock starts once,
         # so letting the first speaker go straight away put two speakers dialled alike a trim apart.
+        #
+        # The room's clock is a *number of frames queued*, not a wall clock, because a queue is the
+        # only thing a re-form cannot take away: ``_hold_until`` carries a hold that began after the
+        # room was already playing (a trim the map raised mid-song, see ``reconfigure``), so a delay
+        # is built when it arrives rather than only in the frames after the song's own start.
         if self._start_frame is None:
             return False
+        if self.frames_queued < self._hold_until.get(slot, 0):
+            return True
         return (self.frames_queued - self._start_frame) < self.hold_frames(slot)
 
     def _ready_to_play(self, slot):
@@ -1347,6 +1385,34 @@ class CinemaSpeakerBank:
         # not stopped or re-filled here, it takes the new stream with the next frame it is handed
         # (see _follow_crossovers).
         self._follow_crossovers()
+        if self._start_frame is not None:
+            # A delay trim the map has just changed. A speaker that must sit DEEPER than it does
+            # cannot grow its queue while it plays, so it pauses where it is, keeps being fed, and
+            # is released the moment its new depth is queued (`_hold_until`) - the installer hears
+            # that one speaker hold for a few milliseconds and then carry the delay the map asks for.
+            # Without this a changed trim was simply ignored by the playing room: measured on the
+            # harness, an 0 -> 20 ms edit left the pair at 0 samples for the rest of the song. A trim
+            # that SHRANK is left alone - a queue cannot be un-queued, and the room re-forms at the
+            # next song - and so is a speaker already deeper than its target.
+            #
+            # The depth aimed at is ``_frames_behind`` (whole frames), not ``trim_target`` (frames
+            # rounded UP): a playing room already holds the history the sample-exact remainder is cut
+            # out of, so only the whole frames are still owed. Rounding up here paid a 5 ms trim as a
+            # frame plus its cut (1200 samples instead of 240).
+            queues = {slot: self._queued_of(slot) for slot in self.slot_sources}
+            shallow = min(queues.values()) if queues else 0
+            for slot, queued in queues.items():
+                short = self._frames_behind(slot) - max(0, queued - shallow)
+                if short <= 0:
+                    continue
+                deadline = self.frames_queued + short
+                if deadline <= self._hold_until.get(slot, 0):
+                    continue
+                self._hold_until[slot] = deadline
+                if not self._playing(slot):
+                    continue
+                with contextlib.suppress(Exception):
+                    self.slot_sources[slot].pause()
         if added:
             # A speaker that just appeared holds nothing, so it is filled with
             # the frames the room still holds and starts on the beat that is
@@ -1360,6 +1426,14 @@ class CinemaSpeakerBank:
 
     @_serialized
     def _reset_output(self, *, stamp=False):
+        # The frames the room still holds go with the queues: a speaker that is about to be fed the
+        # first frame of the NEXT song must not have its trim cut out of the last one. It also keeps
+        # every trim the map's own number: a stale history let the sample-exact part of a trim play
+        # on top of the hold that was about to build the whole-frame part of it, so a room restarted
+        # mid-song came back a frame deeper than the map asked (measured: 5, 10 and 30 ms trims at
+        # 1200, 1440 and 2400 samples after a stop and restart, against 240, 480 and 1440).
+        self._recent.clear()
+        self._crossover_streams.clear()
         for source in self.slot_sources.values():
             with contextlib.suppress(Exception):
                 source.stop()
@@ -1372,6 +1446,7 @@ class CinemaSpeakerBank:
             pass
         self._plays_started = False
         self._start_frame = None
+        self._hold_until.clear()
         self._refill_hold = False
         # The room's clock starts over with its queue: a note waiting on the
         # old one would be projected against frames that no longer exist.
