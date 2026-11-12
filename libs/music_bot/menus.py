@@ -211,12 +211,12 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
              "Plays a link you already have instead of searching for it: a "
              "YouTube or Facebook address (a video, a reel or a live), from a "
              "chat message or a browser. Every other site is refused."),
-            ("search", "Choose Local File", go_local,
+            ("local_file", "Choose Local File", go_local,
              "Plays a song or video file already on this computer, through "
              "the same speakers, key and equalizer this bot uses for YouTube. "
              "Pick several at once and the rest wait in a local batch you "
              "can skip through."),
-            ("search", "Choose a Folder of Music", go_folder,
+            ("local_folder", "Choose a Folder of Music", go_folder,
              "Plays every audio or video file in a folder you pick, in name "
              "order, as one local batch. One Enter for the folder, with no "
              "Ctrl+click and no list of files to read through."),

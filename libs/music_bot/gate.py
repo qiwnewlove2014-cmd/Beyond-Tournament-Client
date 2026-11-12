@@ -17,10 +17,12 @@ so the guard at a use site is one line::
     if gate.blocked("seek"):
         return
 
-**A lock is global.** It hides the feature from every player, the Developer who
-set it included: it is a kill switch for a broken or abusable feature, not a
-per-player permission (that is `can_use_music_bot` and the rest of the
-snapshot, and this sits on top of it without ever widening it).
+**A lock only ever narrows.** It hides a feature: the Server may lock it for
+everybody, or for one player alone, and it hands each connection the answer that
+applies to it. So this module needs no notion of who the player is -- whatever
+arrives here is already that player's answer, global locks and their own combined
+(that is `can_use_music_bot` and the rest of the snapshot underneath it, and
+this sits on top without ever widening it).
 
 **A missing key is not an unlock.** A mid-session `staff_permissions` refresh
 from a Server built before this gate carries no `music_bot_locked`; the last

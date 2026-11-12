@@ -14,6 +14,7 @@ never instead of it.
 import os
 import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -324,13 +325,18 @@ class MenuTests(GateStateTestCase):
         bot = self._bot()
         gate.apply_locked({
             "search": "Search and play",
+            # The two local-file doors are rows of their own, so a lock on
+            # Search alone leaves them (and only them) in place.
+            "local_file": "Choose Local File",
+            "local_folder": "Choose a Folder of Music",
             "broadcast": "Broadcast to others",
             "queue": "Queue",
             "subtitles": "Spoken subtitles",
         })
         labels = self._labels(bot, "_show_mode_menu")
         for gone in ("Search YouTube", "Play a YouTube or Facebook link",
-                     "Choose Local File", "Queue Mode: OFF",
+                     "Choose Local File", "Choose a Folder of Music",
+                     "Queue Mode: OFF",
                      "Subtitles: OFF", "Broadcast to Megaphone: OFF"):
             self.assertNotIn(gone, labels, labels)
         # The hub lines stay: Settings is where a Developer sees what is left.
@@ -371,6 +377,50 @@ class MenuTests(GateStateTestCase):
         self.assertTrue(any(label.startswith("Room Reverb")
                             for label in labels), labels)
         self.assertIn("Back", labels)
+
+
+class TheLocalFileDoorsHaveTheirOwnRowsTests(unittest.TestCase):
+    """Choose Local File and Choose a Folder of Music are lockable on their own.
+
+    Both used to ride on `search`, so a Developer who took Search away also took
+    the file picker and the folder batch, and no line in the form named them.
+    Each has its own catalogue row now, and each door says whose decision it was
+    instead of opening a picker that would be refused anyway.
+    """
+
+    def source(self, *parts):
+        root = Path(__file__).resolve().parents[1]
+        return root.joinpath(*parts).read_text(encoding="utf-8")
+
+    def test_the_menu_lines_name_their_own_features(self):
+        menu = self.source("libs", "music_bot", "menus.py")
+        self.assertIn('("local_file", "Choose Local File"', menu)
+        self.assertIn('("local_folder", "Choose a Folder of Music"', menu)
+
+    def test_both_doors_refuse_with_the_reason(self):
+        source = self.source("libs", "music_bot", "track_source.py")
+        self.assertIn('gate.blocked("local_file")', source)
+        self.assertIn('gate.blocked("local_folder")', source)
+
+    def test_the_catalogue_carries_both_rows(self):
+        catalogue = (Path(__file__).resolve().parents[2]
+                     / "server" / "libs" / "music_bot_gate.ts").read_text(
+                         encoding="utf-8")
+        self.assertIn('id: "local_file"', catalogue)
+        self.assertIn('id: "local_folder"', catalogue)
+
+    def test_a_locked_file_picker_is_never_opened(self):
+        """The page may already be open when the lock lands."""
+        from libs.music_bot.track_source import TrackSourceHandler
+
+        opened = []
+        with mock.patch("libs.folder_dialog.ask_files",
+                        lambda *args, **kwargs: opened.append(args) or ("", "")),                 mock.patch("libs.music_bot.gate.blocked",
+                           lambda feature_id: True):
+            handler = TrackSourceHandler.__new__(TrackSourceHandler)
+            handler.bot = mock.Mock()
+            handler._open_file_dialog()
+        self.assertEqual(opened, [])
 
 
 class SnapshotTests(GateStateTestCase):

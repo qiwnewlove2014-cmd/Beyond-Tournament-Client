@@ -117,6 +117,12 @@ class TrackSourceHandler:
         become the local batch `play_queue`, which Ctrl+[ / ] move through.
         """
         from .. import folder_dialog
+        from . import gate
+
+        if gate.blocked("local_file"):
+            # Its own catalogue row: a Developer who locks the file picker
+            # leaves Search working, and the door says whose decision it was.
+            return
 
         def choose():
             answer, problem = folder_dialog.ask_files(
@@ -152,6 +158,10 @@ class TrackSourceHandler:
         A folder is one answer, and what it holds is the batch.
         """
         from .. import folder_dialog
+        from . import gate
+
+        if gate.blocked("local_folder"):
+            return
 
         def choose():
             folder, problem = folder_dialog.ask_folder("Choose a folder of music")
