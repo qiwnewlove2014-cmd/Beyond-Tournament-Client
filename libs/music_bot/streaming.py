@@ -346,6 +346,11 @@ class AudioStreamer(threading.Thread):
         self.prebuffer_event = threading.Event()
         self.failure_reason = None
         self.completed_normally = False
+        # At EOF an output that has stopped taking the tail must not keep this
+        # thread alive (see _track_tail_progress).
+        self._tail_queued = None
+        self._tail_stall_at = None
+        self._tail_abandoned = False
         # The key shifter's own look-ahead, given back once at the end of the
         # song (only ever to the local output -- see _flush_transpose).
         self._tail_returned = False
@@ -2246,6 +2251,9 @@ class AudioStreamer(threading.Thread):
         _leftover = leftover  # Carry over any leftover bytes from pre-buffer
         while self.running:
             if self.paused:
+                # A pause is not a stalled output: the tail gets its whole
+                # window again once the song is resumed.
+                self._tail_stall_at = None
                 time.sleep(0.05)
                 continue
 
@@ -2326,8 +2334,18 @@ class AudioStreamer(threading.Thread):
                     # Restart if source stopped and we have buffers queued (only if new buffers are queued and not EOF)
                     if not eof and not self._all_playing() and self._buffers_queued() > 0:
                         self._start_output_playing()
+                    elif eof and not self._all_playing():
+                        # The decode ended with audio still queued and silent: a
+                        # room that ran low is holding its last frames for a refill
+                        # that can no longer arrive (see _release_held_room).
+                        self._release_held_room()
                 except Exception:
                     pass
+
+            if eof and self._track_tail_progress():
+                # The output has stopped taking the tail: finish here rather than
+                # leave a song the Music Bot can never call over.
+                break
 
             if (eof and not self._pause_buffer
                     and not self._timeline_delay
@@ -2341,8 +2359,11 @@ class AudioStreamer(threading.Thread):
             if not data:
                 time.sleep(0.02)
 
-        # Wait for remaining buffers to finish playing
-        if self.running:
+        # Wait for remaining buffers to finish playing. A tail this stream has
+        # already given up on is not waited for again here. A streamer built
+        # without `__init__` (a test fixture, a restored session) has no tail
+        # state yet, and "nothing abandoned" is the right answer for it.
+        if self.running and not getattr(self, "_tail_abandoned", False):
             try:
                 # Keep checking and unqueuing until all queued buffers are processed
                 while self._buffers_queued() > 0 and self.running:
@@ -2356,6 +2377,69 @@ class AudioStreamer(threading.Thread):
                     time.sleep(0.05)
             except Exception:
                 pass
+
+    #: How long an output may stay unchanged at EOF before the tail is abandoned.
+    #: A room drains its last frames in a couple of hundred milliseconds; an
+    #: output that has not moved a buffer in this long is not going to.
+    TAIL_STALL_SECONDS = 3.0
+
+    def _track_tail_progress(self):
+        """True when the output has stopped taking this stream's tail.
+
+        A stream's thread waits for its output to drain before it finishes, and
+        the Music Bot reads the end of a song from that thread: while the thread
+        waits, `is_alive()` is True and the play-next queue stays shut. A room
+        that ran low is released by `_release_held_room`; a room that was taken
+        away under the stream, went silent, or stopped consuming its buffers has
+        nothing to let go, and the loop then spun here for the rest of the
+        session. The report was the workaround rather than the bug -- "I turn the
+        routing off and on and then the queued song loads" -- because releasing
+        the room made `_buffers_queued()` fall to zero and the loop break.
+        Nothing can play those frames, so they are dropped and the thread ends.
+        """
+        queued = self._buffers_queued()
+        # A streamer built without `__init__` (a test fixture, a restored
+        # session) has none of the tail state yet; a missing count is "nothing
+        # seen before", not a crash in the drain loop.
+        if queued != getattr(self, "_tail_queued", None):
+            # The output is still working: any change is progress.
+            self._tail_queued = queued
+            self._tail_stall_at = None
+            return False
+        if queued == 0 and not self._pause_buffer:
+            return False
+        now = time.monotonic()
+        stall_at = getattr(self, "_tail_stall_at", None)
+        if stall_at is None:
+            self._tail_stall_at = now
+            return False
+        if now - stall_at < self.TAIL_STALL_SECONDS:
+            return False
+        self._pause_buffer.clear()
+        self._tail_abandoned = True
+        return True
+
+    def _release_held_room(self):
+        """Let a held room play out once this stream has reached its end.
+
+                            A room that ran low holds every speaker until more frames arrive
+                            (``CinemaSpeakerBank._begin_refill_hold``). A stream at EOF has no
+                            more frames to give it, so that hold could only ever be released by
+                            audio that will never come: the speakers stayed paused over the
+                            song's tail, the room never drained, and this thread -- which waits
+                            for it to drain before it finishes -- never ended. The Music Bot
+                            reads the end of a song from that thread, so the queue never
+                            advanced and the next queued track only started when somebody
+                            skipped to it by hand.
+                            """
+        if self.cinema is None:
+            return False
+        if not getattr(self.cinema, "awaiting_refill", False):
+            return False
+        try:
+            return bool(self.cinema.play_out())
+        except Exception:
+            return False
 
     def _classify_end(self):
         """A finished song or an early death, before this worker cleans up."""

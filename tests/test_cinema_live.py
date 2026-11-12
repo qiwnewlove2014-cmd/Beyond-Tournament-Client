@@ -1860,6 +1860,76 @@ class MusicBotLiveRoomTests(unittest.TestCase):
         bot._update_cinema_output()
         self.assertEqual(len(bank.sources), 2)
 
+    def test_the_end_of_the_song_lets_a_held_room_go(self):
+        """A hold no frame can release must not outlive the stream that fed it.
+
+        The streamer waits for the room to drain before its thread finishes, and
+        the Music Bot reads the end of a song from that thread: a room held over
+        the song's last frames froze the play-next queue until somebody skipped
+        to the next song by hand.
+        """
+        bot = self.routed()
+        bank = bot.cinema_bank
+        streamer = self.streamer_for(bank)
+        chunk = bytes(streamer.SAMPLES_PER_BUFFER * streamer.channels * 2)
+        for _ in range(bank.wanted_for_start()):
+            self.assertTrue(streamer._queue_local(chunk))
+        bank.start_playback()
+
+        # The room ran low and held its last frames; the song ends here, so the
+        # refill it is waiting for can never arrive.
+        bank._refill_hold = True
+        for source in bank.slot_sources.values():
+            source.pause()
+        self.assertTrue(bank.awaiting_refill)
+
+        self.assertTrue(streamer._release_held_room())
+        self.assertFalse(bank.awaiting_refill)
+        self.assertTrue(bank.playing(), "the room was left paused over its tail")
+
+    def test_a_room_that_is_not_holding_anything_is_left_alone(self):
+        """Mid-song the next frame releases the hold, never this stream's end."""
+        bot = self.routed()
+        streamer = self.streamer_for(bot.cinema_bank)
+        self.assertFalse(streamer._release_held_room())
+
+    def test_a_tail_the_output_never_finishes_does_not_hold_the_queue(self):
+        """An output that stops taking the tail must not keep the song alive.
+
+        The report was the workaround, not the bug: "I turn the routing off and
+        on again, then the queued song loads." Releasing the room made
+        `_buffers_queued()` fall to zero, which is exactly what this stream's
+        thread was waiting for -- so the thread finished, the Music Bot saw the
+        end of the song and advanced. Without that, a stream whose output goes
+        silent at EOF waits for it forever. Here the room starts and is handed
+        the tail, and then never processes a buffer (what a released, stopped or
+        wedged output looks like from inside the stream).
+        """
+        import io
+        bot = self.routed()
+        bank = bot.cinema_bank
+        streamer = self.streamer_for(bank)
+        streamer.TAIL_STALL_SECONDS = 0.05
+        streamer.running = True
+        streamer.paused = False
+        # One frame and then EOF: real frames, an output that never gives them back.
+        payload = bytes(streamer.BUFFER_SIZE)
+        streamer.process = SimpleNamespace(stdout=io.BytesIO(payload), poll=lambda: 0)
+
+        done = threading.Event()
+
+        def feed():
+            try:
+                streamer._feed_and_drain(b"")
+            finally:
+                done.set()
+
+        threading.Thread(target=feed, daemon=True).start()
+        self.assertTrue(done.wait(5.0),
+                        "the stream never finished: the queue would stay shut")
+        self.assertTrue(streamer._tail_abandoned)
+        self.assertEqual(len(streamer._pause_buffer), 0)
+
     def test_losing_the_room_while_playing_keeps_playing_it(self):
         bot = self.routed()
         bank = bot.cinema_bank

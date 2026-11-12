@@ -595,6 +595,24 @@ class CinemaSpeakerBank:
         self._refill_hold = False
         return True
 
+    @_serialized
+    def play_out(self):
+        """Let the room play out the frames it holds when its stream has ended.
+
+                    A refill hold waits for MORE frames (``_begin_refill_hold``), and the
+                    end of a song brings none: releasable only by audio that will never
+                    arrive, every speaker would sit paused over the song's last frames
+                    for ever -- and a transport that waits for the room to drain before
+                    it finishes (``AudioStreamer``'s end-of-run wait) would never finish
+                    either. Nothing is coming, and what is queued IS the end of the song,
+                    so the hold is dropped and every speaker plays what it already holds.
+                    Mid-song nothing here is used: there the next frame releases the hold.
+                    """
+        if not self._refill_hold:
+            return False
+        self._refill_hold = False
+        return self._play_ready()
+
     def _queued_of(self, slot):
         """Frames this speaker still holds, or 0 when it cannot say."""
         source = self.slot_sources.get(slot)

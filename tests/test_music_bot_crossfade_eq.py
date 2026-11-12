@@ -495,6 +495,27 @@ class TestCrossfadeStateMachine(unittest.TestCase):
         self.assertIsNone(bot._crossfade)
         self.assertAlmostEqual(bot.stream_source.gain, 0.8, places=6)
 
+    def test_a_real_crossfade_does_not_ramp_the_new_song_twice(self):
+        """A skip's pending fade-in is dropped when the machine fades instead.
+
+        Both halves would touch the same source gain: the machine ramps both
+        streams against each other, and a fade-in left over from a manual
+        change would ramp the incoming one a second time.
+        """
+        bot = self._playing_bot(position=4.0, duration=10.0)
+        bot.next_up_queue = [{"title": "Next", "target": "C:\\next.mp3",
+                              "source": "local"}]
+        bot._incoming_fade = {"seconds": 3.0, "at": None}
+        with mock.patch.object(crossfade_module, "AudioStreamer", FakeStreamer):
+            bot._update_crossfade()
+            bot._position[0] = 7.5
+            bot._update_crossfade()
+            bot._crossfade["candidate"].prebuffer_event.set()
+            bot._position[0] = 8.0
+            bot._update_crossfade()
+        self.assertEqual(bot._crossfade["phase"], "fading")
+        self.assertIsNone(bot._incoming_fade)
+
     def test_cancel_tears_down_candidate(self):
         bot = self._playing_bot(position=4.0, duration=10.0)
         bot.next_up_queue = [{"title": "Next", "target": "C:\\next.mp3",
@@ -523,6 +544,107 @@ class TestCrossfadeStateMachine(unittest.TestCase):
         self.assertIsNone(bot._crossfade)
         # The queue was never consumed: the normal advance still owns it.
         self.assertEqual(len(bot.next_up_queue), 1)
+
+
+class AManualTrackChangeFadesLikeTheQueue(unittest.TestCase):
+    """Ctrl+[ / ], the queue's own lines and a local batch fade too.
+
+    Crossfade Between Songs used to own only the end-of-song crossfade, so a
+    skip cut the old song off in half a second and the new one arrived at full
+    gain. A change the player asks for now takes the same window: the outgoing
+    song ramps down while the incoming one ramps up underneath it, and a local
+    file (which needs no resolve) is a real overlap.
+    """
+
+    def playing_bot(self, **overrides):
+        bot = make_bot(**overrides)
+        bot.game = SimpleNamespace(
+            put=lambda fn: None,
+            audio_mngr=SimpleNamespace(volume_categories={"music": [100]}),
+        )
+        bot.stream_source = FakeSrc(gain=0.5)
+        bot.streamer = FakeStreamer(SimpleNamespace(), "http://example.com/a.mp3",
+                                    bot.stream_source)
+        bot._incoming_fade = None
+        bot.cinema_target = None
+        bot._ensure_live_relay_streamer = lambda: None
+        bot._update_crossfade = lambda: None
+        bot._pump_subtitles = lambda: None
+        bot.announce_party_queue = lambda: None
+        return bot
+
+    def test_a_skip_takes_the_crossfade_window(self):
+        bot = self.playing_bot(crossfade_enabled=True)
+        self.assertEqual(bot._begin_track_change_fade(), bot.CROSSFADE_SECONDS)
+        self.assertEqual(bot._incoming_fade["seconds"], bot.CROSSFADE_SECONDS)
+        # Armed, not started: a YouTube change spends the resolve in between.
+        self.assertIsNone(bot._incoming_fade["at"])
+
+    def test_crossfade_off_keeps_the_half_second_cut(self):
+        bot = self.playing_bot(crossfade_enabled=False)
+        self.assertEqual(bot._begin_track_change_fade(), 0.5)
+        self.assertIsNone(bot._incoming_fade)
+
+    def test_a_room_is_not_crossfaded(self):
+        """A cabinet's room plays one stream at a time, so nothing to overlap."""
+        bot = self.playing_bot(crossfade_enabled=True)
+        bot.cinema_target = "j1"
+        bot._find_gameplay = lambda: SimpleNamespace(can_use_cinema_speakers=True)
+        self.assertEqual(bot._begin_track_change_fade(), 0.5)
+        self.assertIsNone(bot._incoming_fade)
+
+    def test_nothing_playing_has_nothing_to_fade(self):
+        bot = self.playing_bot(crossfade_enabled=True)
+        bot.playing = False
+        self.assertEqual(bot._begin_track_change_fade(), 0.5)
+        self.assertIsNone(bot._incoming_fade)
+
+    def test_stop_fades_the_old_song_over_that_window(self):
+        bot = self.playing_bot(crossfade_enabled=True)
+        windows = []
+        bot._fade_out_source = (
+            lambda src, streamer=None, duration=0.5: windows.append(duration))
+        bot.stop(clear_queue=False, fade=True, invalidate_pending=False)
+        self.assertEqual(windows, [bot.CROSSFADE_SECONDS])
+
+    def test_a_plain_stop_arms_nothing(self):
+        bot = self.playing_bot(crossfade_enabled=True)
+        bot._incoming_fade = {"seconds": 3.0, "at": None}
+        bot._fade_out_source = lambda *a, **k: None
+        bot.stop(clear_queue=False, invalidate_pending=False)
+        self.assertIsNone(bot._incoming_fade)
+
+    def test_the_new_song_ramps_up_and_then_plays_at_full_gain(self):
+        """The fade-in starts with the new stream's first audible frame."""
+        bot = self.playing_bot(crossfade_enabled=True)
+        bot._begin_track_change_fade()
+        source = bot.stream_source
+        clock = [100.0]
+        with mock.patch("libs.music_bot.controller.time.monotonic",
+                        lambda: clock[0]):
+            bot.loop()
+            self.assertAlmostEqual(source.gain, 0.0, places=6)
+            clock[0] += bot.CROSSFADE_SECONDS / 2.0
+            bot.loop()
+            # Half the window in: half of the base gain (50% volume).
+            self.assertAlmostEqual(source.gain, 0.25, places=3)
+            clock[0] += bot.CROSSFADE_SECONDS
+            bot.loop()
+            self.assertAlmostEqual(source.gain, 0.5, places=6)
+        self.assertIsNone(bot._incoming_fade)
+
+    def test_a_local_file_change_fades_too(self):
+        """Choose Local File and a local batch take the same path as a skip."""
+        bot = self.playing_bot(crossfade_enabled=True)
+        path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "libs", "music_bot", "controller.py"))
+        calls = []
+        bot.stop = lambda **kwargs: calls.append(kwargs)
+        with mock.patch.object(MapMusicBot, "_start_youtube_stream",
+                               lambda *a, **k: None), \
+                mock.patch("libs.music_bot.track_source.speak"):
+            bot._start_local_file_stream(path, "Track")
+        self.assertTrue(calls and calls[0].get("fade") is True)
 
 
 class TestWideLiveInputMix(unittest.TestCase):

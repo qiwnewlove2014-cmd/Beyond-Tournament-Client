@@ -240,7 +240,10 @@ class SettingsMenus:
              "a hall sounds like it is in the hall."),
             ("crossfade", get_crossfade_label, toggle_crossfade,
              "Starts the next song before this one ends and blends the two, "
-             "so there is no silence between songs."),
+             "so there is no silence between songs. It owns a change you ask "
+             "for too: skipping with the bracket keys, a queue line, or the "
+             "next file of a local batch fades the old song out under the new "
+             "one."),
             ("eq", get_eq_label, go_eq,
              "Shapes the song's bass, mid and treble. A profile is heard as "
              "soon as it is chosen; Custom opens the three bands as sliders."),

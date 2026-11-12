@@ -470,6 +470,31 @@ class TheRoomHoldsAsOneUnitWhenItRunsLow(unittest.TestCase):
         rig = RoomRig({"front_r": 60.0}).run(60)
         self.assertEqual(rig.bank.refill_holds, 0)
 
+    def test_the_hold_lets_go_when_the_stream_ends(self):
+        """The last frames are heard, not held for a refill that cannot come.
+
+        A hold waits for MORE frames, and the end of a song brings none: left
+        held, the room sat paused over its tail and the stream feeding it never
+        drained. The Music Bot reads the end of a song from that stream, so the
+        play-next queue froze and the next song only started when somebody
+        skipped to it by hand.
+        """
+        rig = RoomRig().run(80)
+        rig.run(3, queue=False)
+        rig.tick()
+        self.assertTrue(rig.bank.awaiting_refill)
+        held = {slot: len(rig.heard(slot)) for slot in rig.slots}
+
+        # This is the end of the song: no frame will ever refill the room.
+        self.assertTrue(rig.bank.play_out())
+        self.assertFalse(rig.bank.awaiting_refill)
+        rig.run(4, queue=False)
+
+        self.assertEqual(rig.silent_slots(), [])
+        for slot in rig.slots:
+            self.assertGreater(len(rig.heard(slot)), held[slot], slot)
+        self.assertEqual(rig.bank.queued_frames(), 0)
+
 
 class ADeadSpeakerDoesNotTakeTheRoom(unittest.TestCase):
     """A device that dies mid-frame, and the buffers it was holding."""

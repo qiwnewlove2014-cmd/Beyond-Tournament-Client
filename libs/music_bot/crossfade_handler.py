@@ -238,6 +238,9 @@ class CrossfadeHandler:
         self._bot.playing = True
         self._bot.paused = False
         self._bot._stream_announced = False
+        # This fade ramps both streams itself; a manual change's pending fade-in
+        # would ramp one of them a second time.
+        self._bot._incoming_fade = None
         self._bot._current_reverb_slot = None
         self._bot.streamer = cand
         self._bot.stream_source = cand_src
