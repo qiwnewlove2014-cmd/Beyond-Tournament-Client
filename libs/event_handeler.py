@@ -764,7 +764,29 @@ class EventHandeler:
         # === Reload Music Bot playlist for updated map ===
         if hasattr(self.gameplay, 'music_bot') and self.gameplay.music_bot:
             audio_probe.call("map.music_load", self.gameplay.music_bot.load_map_music, data["data"])
+        # A technician's speaker list was built before this reload -- the Server
+        # invites it to reopen as soon as it has rewritten the map, which is a
+        # tick before this queued reload runs -- so a deleted speaker was still
+        # on the lines and Enter on it only answered "already deleted". Rebuild
+        # the open list here, where the map is finally the new one.
+        self._refresh_cinema_speaker_list()
         self._finish_map_audio_reload()
+
+    def _refresh_cinema_speaker_list(self):
+        """Keep an open Alt + C list in step with the map the game is on.
+
+        Called after every map change that reaches this Client (a builder's
+        edit or delete, a rebuilt element), whether or not a list is open --
+        the menu itself decides that, and with none open this is a no-op.
+        """
+        from . import cinema_speaker_menu
+        from .logger import log
+        try:
+            cinema_speaker_menu.refresh_open(self.game, self.gameplay)
+        except Exception as error:
+            # A list that cannot be rebuilt must never take the map reload with
+            # it: the room is already playing the new map by the time this runs.
+            log(f"Could not refresh the cinema speaker list: {error}")
 
     def rebuild_elements(self, data):
         self._queue_map_audio_event(self._apply_rebuild_elements, data)
@@ -783,6 +805,9 @@ class EventHandeler:
                 has_reverb = True
             if hasattr(map, f"spawn_{type}"):
                 getattr(map, f"spawn_{type}")(**element["data"])
+        # A speaker that was just placed (or whose bounds were rebuilt) belongs
+        # on an open speaker list now, not after the reader reopens it.
+        self._refresh_cinema_speaker_list()
         if has_megaphone:
             self.gameplay.megaphone.setup_megaphone_speakers(force=True)
         if has_reverb:

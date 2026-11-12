@@ -218,6 +218,112 @@ class ListTests(unittest.TestCase):
         spoke.assert_called_once_with(cinema_speaker_menu.REFUSAL)
 
 
+class LiveRefreshTests(unittest.TestCase):
+    """A list that is open when the map changes, as Alt + C leaves it.
+
+    The Server rewrites the map and then sends it back; the Client applies that
+    reload a tick later, and the invitation to reopen this list arrives first.
+    So a list built at that moment still held the speaker that was just deleted,
+    and Enter on it only answered "this id has already been deleted" -- the
+    report this fix is for. `refresh_open` rebuilds it where it stands once the
+    new map is finally the one the game is on.
+    """
+
+    def setUp(self):
+        self.game = make_game([
+            speaker("cs_fl", "front_l", 21, 43),
+            speaker("cs_rl", "rear_l", 34, 51),
+        ])
+        self.gp = self.game.gameplay
+        self.captured = []
+        self.gp.add_substate = self.captured.append
+        self.gp.substates = self.captured
+        with mock.patch("libs.menu.Menu", FakeMenu), \
+                mock.patch("libs.menus.set_default_sounds"):
+            cinema_speaker_menu.open_menu(self.game, self.gp)
+        self.menu = self.captured[-1]
+
+    @staticmethod
+    def labels(menu):
+        return [label() if callable(label) else label
+                for label, _action, *_extra in menu.items]
+
+    def delete(self, speaker_id):
+        """What the Client's map looks like after the Server deleted one."""
+        self.gp.map.cinema_speaker_list = [
+            zone for zone in self.gp.map.cinema_speaker_list
+            if zone.id != speaker_id
+        ]
+
+    def test_a_deleted_speaker_leaves_the_open_list_and_the_count_is_said(self):
+        self.menu.pos = 1
+        self.delete("cs_fl")
+        with mock.patch("libs.cinema_speaker_menu.speak") as spoke:
+            refreshed = cinema_speaker_menu.refresh_open(self.game, self.gp)
+        self.assertTrue(refreshed)
+        self.assertEqual(self.labels(self.menu), [
+            "Speaker 1 of 1: rear_l at (34, 51, 2)",
+            "Back",
+        ])
+        self.assertEqual(self.menu.title, "Cinema Speakers Menu (1 on this map)")
+        said = spoke.call_args.args[0]
+        self.assertIn("Cinema Speakers Menu (1 on this map)", said)
+        self.assertIn("Speaker 1 of 1: rear_l", said)
+        self.assertNotIn("cs_rl", said)
+
+    def test_the_cursor_stays_on_the_same_speaker_not_the_same_line(self):
+        # The reader was on rear_l (line 2); the speaker before it goes away.
+        self.menu.pos = 1
+        self.delete("cs_fl")
+        with mock.patch("libs.cinema_speaker_menu.speak"):
+            cinema_speaker_menu.refresh_open(self.game, self.gp)
+        self.assertEqual(self.menu.pos, 0)
+        self.assertIn("rear_l", self.labels(self.menu)[self.menu.pos])
+
+    def test_deleting_the_speaker_under_the_cursor_never_lands_on_back(self):
+        self.menu.pos = 1
+        self.delete("cs_rl")
+        with mock.patch("libs.cinema_speaker_menu.speak"):
+            cinema_speaker_menu.refresh_open(self.game, self.gp)
+        self.assertEqual(len(self.menu.items), 2)
+        self.assertNotEqual(self.labels(self.menu)[self.menu.pos], "Back")
+        self.assertIn("front_l", self.labels(self.menu)[self.menu.pos])
+
+    def test_an_edit_to_a_speaker_that_is_still_there_is_updated_in_silence(self):
+        self.menu.pos = 0
+        self.gp.map.cinema_speaker_list[0].level = 55
+        with mock.patch("libs.cinema_speaker_menu.speak") as spoke:
+            cinema_speaker_menu.refresh_open(self.game, self.gp)
+        spoke.assert_not_called()
+        self.assertIn("Level 55 percent", self.menu.items[0][3])
+        self.assertEqual(self.menu.pos, 0)
+
+    def test_a_list_nobody_has_open_is_just_not_there(self):
+        self.gp.substates = []
+        with mock.patch("libs.cinema_speaker_menu.speak") as spoke:
+            refreshed = cinema_speaker_menu.refresh_open(self.game, self.gp)
+        self.assertFalse(refreshed)
+        spoke.assert_not_called()
+
+    def test_another_menu_on_the_stack_is_left_alone(self):
+        other = FakeMenu(self.game, "Something Else")
+        other.items = [("A line", lambda: None)]
+        self.gp.substates = [other, self.menu]
+        self.delete("cs_fl")
+        with mock.patch("libs.cinema_speaker_menu.speak"):
+            cinema_speaker_menu.refresh_open(self.game, self.gp)
+        self.assertEqual([line for line, *_ in other.items], ["A line"])
+        self.assertEqual(len(self.menu.items), 2)
+
+    def test_the_map_reload_and_a_rebuilt_element_both_refresh_the_list(self):
+        """The two paths a map change reaches this Client by."""
+        handler_source = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      "..", "libs", "event_handeler.py")
+        with open(handler_source, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertEqual(source.count("self._refresh_cinema_speaker_list()"), 2)
+
+
 class AltCTests(unittest.TestCase):
     def test_alt_c_opens_the_list_without_reading_the_location(self):
         opened = []

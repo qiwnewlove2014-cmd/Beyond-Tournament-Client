@@ -132,20 +132,106 @@ def open_menu(game, gameplay=None):
     from . import menu as menu_mod, menus
 
     m = menu_mod.Menu(game, title(total), parrent=gp)
+    items, ids = _items(game, gp, found)
+    m.add_items(items)
+    # A tag rather than a field on the shared Menu class: `refresh_open` below
+    # has to find this list again after the Server has rewritten the map, and
+    # only this menu is a speaker list.
+    m.cinema_speaker_list = True
+    m.cinema_speaker_ids = ids
+    menus.set_default_sounds(m)
+    gp.add_substate(m)
+
+
+def _items(game, gp, found):
+    """The list's lines for the map as it stands now, and the ids behind them.
+
+    Both are returned because a refresh needs both: the lines to show and, by
+    id, which speaker the reader was standing on before the map changed under
+    them -- a line's number changes when a speaker before it is deleted, so an
+    index is not a place to hold on to.
+    """
+    total = len(found)
     items = []
+    ids = []
     if found:
         for index, speaker in enumerate(found, 1):
             items.append((label(speaker, index, total),
                           _edit(game, gp, speaker), None,
                           detail(speaker, index, total)))
+            ids.append(str(speaker.get("id") or ""))
     else:
         items.append(("No cinema speakers on this map",
                       _reader("This map has no cinema speakers. Place one "
                               "from the Builder menu, then press Alt plus C again.")))
     items.append(("Back", lambda: gp.pop_last_substate()))
-    m.add_items(items)
-    menus.set_default_sounds(m)
-    gp.add_substate(m)
+    return items, ids
+
+
+def refresh_open(game, gameplay=None):
+    """Rebuild every open speaker list from the map as it stands now.
+
+    The Server's element menu writes the map and then sends the whole map back
+    (``update_map``), which this Client applies on the game thread a tick
+    later; the invitation to reopen this list arrives first, so a list built at
+    that moment still holds the speaker that was just deleted -- and pressing
+    Enter on it only produced "this id has already been deleted". Rather than
+    asking the reader to leave the list and open it again, the list is rebuilt
+    where it stands, on the speaker they were on.
+
+    Talk is for a change in the speakers themselves: a deleted or added one is
+    announced with the new count, because nothing else would tell them. An edit
+    to a speaker that is still there (a level, a trim, a position) leaves the
+    list as it was and says nothing -- Tab re-reads it, and a sentence about a
+    list nobody asked to change is noise over the room they are standing in.
+    """
+    gp = gameplay if gameplay is not None else getattr(game, "gameplay", None)
+    if game is None or gp is None:
+        return False
+    refreshed = False
+    for state in list(getattr(gp, "substates", ()) or ()):
+        if not getattr(state, "cinema_speaker_list", False):
+            continue
+        found = speakers(game)
+        total = len(found)
+        pos = getattr(state, "pos", -1)
+        old_ids = list(getattr(state, "cinema_speaker_ids", ()))
+        current = old_ids[pos] if 0 <= pos < len(old_ids) else ""
+        items, ids = _items(game, gp, found)
+        state.items = []
+        state.add_items(items)
+        # Follow the speaker, not the index: the cursor must not land on Back
+        # because the last speaker was the one deleted.
+        if pos < 0:
+            new_pos = -1
+        elif current and current in ids:
+            new_pos = ids.index(current)
+        elif ids:
+            new_pos = max(0, min(pos, len(ids) - 1))
+        else:
+            new_pos = 0
+        state.pos = max(-1, min(new_pos, len(items) - 1))
+        state.cinema_speaker_ids = ids
+        state.title = title(total)
+        if ids != old_ids:
+            _announce(state, total)
+        refreshed = True
+    return refreshed
+
+
+def _announce(state, total):
+    """Say the new count and the line the cursor is on, in one utterance.
+
+    Not interrupting on purpose: this runs a tick after the Server said
+    "Element deleted.", and cutting that off would swallow the answer to the
+    delete the technician just made.
+    """
+    pos = getattr(state, "pos", -1)
+    line = ""
+    if 0 <= pos < len(getattr(state, "items", ())):
+        first = state.items[pos][0]
+        line = first() if callable(first) else str(first)
+    speak(f"{title(total)}. {line}".strip(), False, id="menu_title")
 
 
 def _edit(game, gp, speaker):
