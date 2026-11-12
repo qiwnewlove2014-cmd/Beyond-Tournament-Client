@@ -28,7 +28,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # The crossfade machine lives in crossfade_handler.py (extracted from the
 # controller), and that is where its candidate streamer is built -- so the fake
 # below is patched there, not on the module the machine used to live in.
+from libs.music_bot import controller as controller_module
 from libs.music_bot import crossfade_handler as crossfade_module
+from libs.music_bot import menus as menus_module
 from libs.music_bot import subtitles
 from libs.music_bot import MapMusicBot
 from libs.music_bot import streaming as stream_mod
@@ -405,6 +407,367 @@ class TestPeekConsume(unittest.TestCase):
         bot.play_queue_index = 0
         self.assertIsNone(bot._peek_next_track())
         self.assertIsNone(bot._consume_next_track())
+
+
+
+class TheCustomHalvesTests(unittest.TestCase):
+    """Crossfade Fade In / Fade Out: the two halves, kept apart.
+
+    A blend used to be one window, symmetric by construction. The page lets a
+    player set the incoming half and the outgoing half separately -- a long tail
+    under a quick entrance, say -- and the overlap is whichever half is longer.
+    Equal halves are exactly the old window, which is what the defaults are.
+    """
+
+    def _bot(self, fades=None):
+        bot = make_bot()
+        store = dict(fades or {})
+        written = []
+        def set_value(key, value, *args, **kwargs):
+            store[key] = value
+            written.append((key, value))
+
+        stub = SimpleNamespace(
+            get=lambda key, default=None: store.get(key, default),
+            set=set_value,
+        )
+        patcher = mock.patch.object(controller_module, "options", stub)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store = store
+        self.written = written
+        return bot
+
+    def test_both_halves_default_to_the_single_window_this_had(self):
+        bot = self._bot()
+        self.assertEqual(bot.crossfade_fade_in(), MapMusicBot.CROSSFADE_SECONDS)
+        self.assertEqual(bot.crossfade_fade_out(), MapMusicBot.CROSSFADE_SECONDS)
+        self.assertEqual(bot.crossfade_overlap_seconds(),
+                         MapMusicBot.CROSSFADE_SECONDS)
+        self.assertEqual(bot.crossfade_fade_label("in"),
+                         "Crossfade Fade In: 3 seconds")
+        self.assertEqual(bot.crossfade_fade_label("out"),
+                         "Crossfade Fade Out: 3 seconds")
+
+    def test_each_half_is_kept_on_its_own_option(self):
+        bot = self._bot()
+        bot.set_crossfade_fade("in", 1)
+        bot.set_crossfade_fade("out", 5.5)
+        self.assertEqual(bot.crossfade_fade_in(), 1.0)
+        self.assertEqual(bot.crossfade_fade_out(), 5.5)
+        self.assertEqual(bot.crossfade_overlap_seconds(), 5.5)
+        self.assertEqual(bot.crossfade_fade_label("in"),
+                         "Crossfade Fade In: 1 second")
+        self.assertEqual(bot.crossfade_fade_label("out"),
+                         "Crossfade Fade Out: 5.5 seconds")
+        self.assertIn(("music_bot_crossfade_fade_in", 1.0), self.written)
+        self.assertIn(("music_bot_crossfade_fade_out", 5.5), self.written)
+
+    def test_a_value_out_of_range_or_garbage_is_clamped_not_stored(self):
+        bot = self._bot()
+        self.assertEqual(bot.set_crossfade_fade("out", 999),
+                         MapMusicBot.MAX_CROSSFADE_FADE_SECONDS)
+        self.assertEqual(bot.set_crossfade_fade("in", -4), 0.0)
+        self.assertEqual(bot.set_crossfade_fade("in", "not a number"), 0.0)
+        self.assertEqual(bot.set_crossfade_fade("in", None), 0.0)
+
+    def test_a_stored_value_this_build_cannot_read_reads_as_the_default(self):
+        bot = self._bot({"music_bot_crossfade_fade_in": "half"})
+        self.assertEqual(bot.crossfade_fade_in(), MapMusicBot.CROSSFADE_SECONDS)
+        bot = self._bot({"music_bot_crossfade_fade_out": 900})
+        self.assertEqual(bot.crossfade_fade_out(),
+                         MapMusicBot.MAX_CROSSFADE_FADE_SECONDS)
+
+    def test_restore_puts_both_halves_back_to_the_shipped_blend(self):
+        bot = self._bot({"music_bot_crossfade_fade_in": 1.0,
+                         "music_bot_crossfade_fade_out": 8.0})
+        self.assertEqual(bot.restore_crossfade_defaults(),
+                         (MapMusicBot.CROSSFADE_SECONDS,
+                          MapMusicBot.CROSSFADE_SECONDS))
+        self.assertEqual(bot.crossfade_fade_in(), MapMusicBot.CROSSFADE_SECONDS)
+        self.assertEqual(bot.crossfade_fade_out(), MapMusicBot.CROSSFADE_SECONDS)
+
+    def test_the_unknown_half_is_refused_rather_than_stored(self):
+        bot = self._bot()
+        with self.assertRaises(ValueError):
+            bot.set_crossfade_fade("sideways", 2)
+
+
+class TestTheCustomWindowInTheMachine(unittest.TestCase):
+    """The machine reads the two halves: overlap, commit point and both ramps."""
+
+    def _bot(self, fade_in, fade_out, position=5.0, duration=10.0):
+        bot = SimpleTestCase_bot(position=position, duration=duration)
+        store = {
+            "music_bot_crossfade_fade_in": fade_in,
+            "music_bot_crossfade_fade_out": fade_out,
+        }
+        stub = SimpleNamespace(
+            get=lambda key, default=None: store.get(key, default),
+            set=lambda key, value, *args, **kwargs: None,
+        )
+        patcher = mock.patch.object(controller_module, "options", stub)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return bot
+
+    def test_both_halves_off_starts_no_roll_at_all(self):
+        bot = self._bot(0.0, 0.0)
+        bot.next_up_queue = [{"title": "Next", "target": "C:\\next.mp3",
+                              "source": "local"}]
+        with mock.patch.object(crossfade_module, "AudioStreamer", FakeStreamer):
+            bot._update_crossfade()
+        self.assertIsNone(bot._crossfade)
+
+    def test_the_longer_half_decides_when_the_blend_begins(self):
+        # Fade In 1, Fade Out 4: both songs are together for four seconds, and
+        # the incoming one is already at full level after the first of them.
+        bot = self._bot(1.0, 4.0)
+        bot.next_up_queue = [{"title": "Next Song",
+                              "target": "C:\\next.mp3", "source": "local"}]
+        old_streamer = bot.streamer
+        with mock.patch.object(crossfade_module, "AudioStreamer",
+                               FakeStreamer) as streamer_cls:
+            bot._update_crossfade()
+            self.assertIsNotNone(bot._crossfade)
+            self.assertEqual(bot._crossfade["overlap"], 4.0)
+            # Remaining 4.5: the candidate is launched (inside overlap + launch)
+            # but the hand-over has not happened yet.
+            bot._position[0] = 5.5
+            bot._update_crossfade()
+            cand = bot._crossfade["candidate"]
+            self.assertIsNotNone(cand)
+            self.assertEqual(bot._crossfade["phase"], "waiting")
+            cand.prebuffer_event.set()
+            # Remaining 4.5 is still outside the window by half a second.
+            bot._update_crossfade()
+            self.assertEqual(bot._crossfade["phase"], "waiting")
+            # Remaining 4.0: the blend starts.
+            bot._position[0] = 6.0
+            bot._update_crossfade()
+        self.assertEqual(bot._crossfade["phase"], "fading")
+        self.assertEqual(bot._crossfade["fade_in"], 1.0)
+        self.assertEqual(bot._crossfade["fade_out"], 4.0)
+        self.assertEqual(bot._crossfade["overlap"], 4.0)
+        # The room gets the same window the performer hears.
+        self.assertEqual(old_streamer.crossfade_mix[1], 4.0)
+
+    def test_each_half_ramps_over_its_own_length(self):
+        bot = self._bot(1.0, 4.0, position=6.0)
+        bot.next_up_queue = [{"title": "Next Song",
+                              "target": "C:\\next.mp3", "source": "local"}]
+        old_streamer = bot.streamer
+        with mock.patch.object(crossfade_module, "AudioStreamer", FakeStreamer):
+            bot._update_crossfade()
+            cand = bot._crossfade["candidate"]
+            cand.prebuffer_event.set()
+            bot._update_crossfade()
+            self.assertEqual(bot._crossfade["phase"], "fading")
+            # One second in: the incoming half is done, the outgoing one is a
+            # quarter of the way down.
+            bot._crossfade["fade_started_at"] = time.monotonic() - 1.0
+            bot._update_fade_gains(0.8)
+            self.assertAlmostEqual(bot.stream_source.gain, 0.8, places=6)
+            self.assertAlmostEqual(old_streamer.output_gains[-1], 0.5 * 0.75, places=6)
+            self.assertIsNotNone(bot._crossfade)
+            # Three seconds in: still fading, and only the outgoing side moves.
+            bot._crossfade["fade_started_at"] = time.monotonic() - 3.0
+            bot._update_fade_gains(0.8)
+            self.assertAlmostEqual(bot.stream_source.gain, 0.8, places=6)
+            self.assertAlmostEqual(old_streamer.output_gains[-1], 0.5 * 0.25, places=6)
+            self.assertIsNotNone(bot._crossfade)
+            # Past the window: the blend is over and the old stream is stopped.
+            bot._crossfade["fade_started_at"] = time.monotonic() - 4.5
+            bot._update_fade_gains(0.8)
+            self.assertIsNone(bot._crossfade)
+            self.assertTrue(old_streamer.stopped)
+
+    def test_a_change_the_player_asks_for_uses_the_same_two_halves(self):
+        bot = self._bot(2.0, 5.0)
+        window = bot._begin_track_change_fade()
+        self.assertEqual(window, 5.0)
+        self.assertEqual(bot._incoming_fade["seconds"], 2.0)
+
+
+def SimpleTestCase_bot(position=5.0, duration=10.0):
+    """A playing bot with a known duration, as the machine tests build one."""
+    bot = make_bot(playing=True, paused=False, is_loading_stream=False)
+    bot.crossfade_enabled = True
+    bot.current_duration = duration
+    bot.streamer = FakeStreamer(None, "u", bot.stream_source, bot=bot)
+    pos = [position]
+    bot.track_position = lambda: pos[0]
+    bot._position = pos
+    bot._new_bot_source = lambda: FakeSrc()
+    return bot
+
+
+class FakeMenu:
+    """The menu builder's own record of the page it would have shown."""
+
+    built = []
+
+    def __init__(self, game, title, **kwargs):
+        self.game = game
+        self.title = title
+        self.items = []
+        self.pos = -1
+        FakeMenu.built.append(self)
+
+    def add_items(self, items):
+        self.items.extend(items)
+
+    def speak_current_item(self):
+        return None
+
+
+class TheCrossfadeFadePagesTests(unittest.TestCase):
+    """The Settings lines, the two fade pages and the restore confirmation."""
+
+    def _page_bot(self):
+        bot = make_bot()
+        store = {"music_bot_crossfade_fade_in": 3.0,
+                 "music_bot_crossfade_fade_out": 3.0}
+        written = []
+
+        def get(key, default=None):
+            return store.get(key, default)
+
+        def set_value(key, value, *args, **kwargs):
+            store[key] = value
+            written.append((key, value))
+
+        stub = SimpleNamespace(get=get, set=set_value)
+        patcher = mock.patch.object(controller_module, "options", stub)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        bot.game = FakeMenuGame()
+        self.store = store
+        self.written = written
+        return bot
+
+    def _press(self, bot, action):
+        """Press a line whose action reopens the Settings page it came from."""
+        with mock.patch("libs.menu.Menu", FakeMenu),                 mock.patch("libs.menus.set_default_sounds"),                 mock.patch.object(menus_module, "speak"):
+            action()
+
+    def _open(self, bot, method, *args):
+        built = []
+        gp = SimpleNamespace(substates=built, add_substate=built.append,
+                             pop_last_substate=lambda: built.pop())
+        bot._find_gameplay = lambda: gp
+        handler = menus_module.MusicBotMenus(bot)
+        with mock.patch("libs.menu.Menu", FakeMenu), \
+                mock.patch("libs.menus.set_default_sounds"), \
+                mock.patch.object(menus_module, "speak") as spoke:
+            getattr(handler, method)(*args)
+        return built[-1], spoke
+
+    def _labels(self, menu):
+        return [label() if callable(label) else label for label, *_rest in menu.items]
+
+    def test_settings_offers_both_halves_while_the_switch_is_on(self):
+        bot = self._page_bot()
+        bot.crossfade_enabled = True
+        menu, _spoke = self._open(bot, "_open_settings_menu")
+        labels = self._labels(menu)
+        self.assertIn("Crossfade Fade In: 3 seconds", labels)
+        self.assertIn("Crossfade Fade Out: 3 seconds", labels)
+        self.assertIn("Restore Crossfade Defaults", labels)
+        # Every one of the three carries its own description for Tab.
+        def resolved(item):
+            label = item[0]
+            return label() if callable(label) else label
+        described = [item for item in menu.items
+                     if isinstance(resolved(item), str)
+                     and resolved(item).startswith(
+                         ("Crossfade Fade", "Restore Crossfade"))]
+        self.assertEqual(len(described), 3)
+        for item in described:
+            self.assertTrue(len(item) >= 4 and item[3], item)
+
+    def test_both_fade_lines_are_hidden_while_the_switch_is_off(self):
+        bot = self._page_bot()
+        bot.crossfade_enabled = False
+        menu, _spoke = self._open(bot, "_open_settings_menu")
+        labels = self._labels(menu)
+        self.assertNotIn("Crossfade Fade In: 3 seconds", labels)
+        self.assertNotIn("Crossfade Fade Out: 3 seconds", labels)
+        # The switch itself and the way back to the defaults stay in reach: a
+        # player who turned it off must not need to turn it on to undo it.
+        self.assertIn("Crossfade Between Songs: OFF", labels)
+        self.assertIn("Restore Crossfade Defaults", labels)
+
+    def test_the_switch_brings_the_two_lines_back_and_keeps_their_values(self):
+        bot = self._page_bot()
+        bot.crossfade_enabled = False
+        self.store["music_bot_crossfade_fade_in"] = 5.0
+        self.store["music_bot_crossfade_fade_out"] = 5.0
+        menu, _spoke = self._open(bot, "_open_settings_menu")
+        toggle = [item for item in menu.items
+                  if isinstance(self._labels(menu)[menu.items.index(item)], str)
+                  and self._labels(menu)[menu.items.index(item)].startswith(
+                      "Crossfade Between Songs:")][0]
+        self._press(bot, toggle[1])
+        self.assertTrue(bot.crossfade_enabled)
+        rebuilt = FakeMenu.built[-1]
+        labels = self._labels(rebuilt)
+        self.assertIn("Crossfade Fade In: 5 seconds", labels)
+        self.assertIn("Crossfade Fade Out: 5 seconds", labels)
+        # The cursor is put back on the switch that was just pressed.
+        self.assertTrue(labels[rebuilt.pos].startswith("Crossfade Between Songs: ON"))
+
+    def test_the_fade_page_marks_the_time_in_force_and_offers_any_value(self):
+        bot = self._page_bot()
+        self.store["music_bot_crossfade_fade_in"] = 2.0
+        menu, _spoke = self._open(bot, "_open_crossfade_fade_menu", "in")
+        self.assertEqual(menu.title, "Crossfade Fade In: 2 seconds")
+        labels = [label() if callable(label) else label
+                  for label, *_rest in menu.items]
+        self.assertIn("3 seconds", labels)
+        self.assertIn("2 seconds (active)", labels)
+        self.assertIn("Custom Seconds", labels)
+        self.assertIn("Back", labels)
+        for item in menu.items:
+            self.assertTrue(len(item) >= 4 and item[3], item)
+
+    def test_picking_a_time_sets_that_half_only(self):
+        bot = self._page_bot()
+        menu, _spoke = self._open(bot, "_open_crossfade_fade_menu", "out")
+        items = [item for item in menu.items
+                 if callable(item[0]) and item[0]() == "5 seconds"]
+        self.assertEqual(len(items), 1)
+        self._press(bot, items[0][1])
+        self.assertEqual(self.store["music_bot_crossfade_fade_out"], 5.0)
+        self.assertEqual(self.store["music_bot_crossfade_fade_in"], 3.0)
+
+    def test_the_restore_page_puts_both_halves_back(self):
+        bot = self._page_bot()
+        self.store["music_bot_crossfade_fade_in"] = 1.0
+        self.store["music_bot_crossfade_fade_out"] = 8.0
+        menu, _spoke = self._open(bot, "_open_crossfade_reset_menu")
+        self.assertIn("Restore", menu.title)
+        self._press(bot, menu.items[0][1])
+        self.assertEqual(self.store["music_bot_crossfade_fade_in"], 3.0)
+        self.assertEqual(self.store["music_bot_crossfade_fade_out"], 3.0)
+
+    def test_cancel_leaves_both_halves_alone(self):
+        bot = self._page_bot()
+        self.store["music_bot_crossfade_fade_out"] = 8.0
+        menu, _spoke = self._open(bot, "_open_crossfade_reset_menu")
+        self._press(bot, menu.items[1][1])
+        self.assertEqual(self.store["music_bot_crossfade_fade_out"], 8.0)
+
+
+class FakeMenuGame:
+    """Enough of a game for the fade page: its open sound and its input field."""
+
+    def __init__(self):
+        self.soundgroup = SimpleNamespace(play=lambda *a, **k: None)
+        self.input = SimpleNamespace(
+            run=lambda prompt, **kwargs: SimpleNamespace(ck=lambda: False))
+
+
 
 
 class TestCrossfadeStateMachine(unittest.TestCase):

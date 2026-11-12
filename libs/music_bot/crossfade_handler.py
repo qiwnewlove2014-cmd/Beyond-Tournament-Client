@@ -111,10 +111,16 @@ class CrossfadeHandler:
             return
         if not self._bot.crossfade_enabled or self._bot.is_loading_stream:
             return
+        # The player's own halves decide the window: the longer one is the
+        # overlap, the shorter finishes early inside it. Both Off means there is
+        # no blend to pre-roll for.
+        overlap = self._bot.crossfade_overlap_seconds()
+        if overlap <= 0.0:
+            return
         remaining = self._remaining_seconds()
         if remaining is None or remaining <= 0.0:
             return
-        if remaining > self._bot.CROSSFADE_SECONDS + self._bot.CROSSFADE_PREP_SECONDS:
+        if remaining > overlap + self._bot.CROSSFADE_PREP_SECONDS:
             return
         streamer = self._bot.streamer
         if streamer is None or not streamer.is_alive():
@@ -125,6 +131,7 @@ class CrossfadeHandler:
         state = {
             "phase": "resolving",
             "track": dict(track),
+            "overlap": overlap,
             "old_streamer": streamer,
             "old_source": self._bot.stream_source,
             "stream_info": None,
@@ -253,6 +260,16 @@ class CrossfadeHandler:
         # network leg blends into the incoming one (old fades out, new fades
         # in) instead of hard-switching. The candidate stays network-muted
         # while the blend runs and only takes over the leg when the fade ends.
+        # Both halves are frozen here, with the window they have to fit in: a
+        # page turned during the blend would otherwise make a ramp jump.
+        fade_in = float(self._bot.crossfade_fade_in())
+        fade_out = float(self._bot.crossfade_fade_out())
+        overlap = max(fade_in, fade_out)
+        if overlap <= 0.0:
+            overlap = float(self._bot.CROSSFADE_SECONDS)
+        state["fade_in"] = fade_in
+        state["fade_out"] = fade_out
+        state["overlap"] = overlap
         if old_streamer is not None:
             # Drop any frames the candidate queued while pre-rolling so the
             # blend starts at the live position, not seconds behind.
@@ -262,8 +279,7 @@ class CrossfadeHandler:
             except Exception:
                 pass
             if hasattr(old_streamer, "begin_network_crossfade"):
-                old_streamer.begin_network_crossfade(
-                    cand, self._bot.CROSSFADE_SECONDS)
+                old_streamer.begin_network_crossfade(cand, overlap)
             else:
                 old_streamer.network_muted = True
         # Silent until the ramp starts, on the game's device or another one.
@@ -280,19 +296,31 @@ class CrossfadeHandler:
         if state is None or state.get("phase") != "fading":
             return
         elapsed = time.monotonic() - (state.get("fade_started_at") or time.monotonic())
-        progress = min(1.0, max(0.0, elapsed / self._bot.CROSSFADE_SECONDS))
+        default = float(self._bot.CROSSFADE_SECONDS)
+        fade_in = float(state.get("fade_in", default))
+        fade_out = float(state.get("fade_out", default))
+        overlap = float(state.get("overlap", default)) or default
+
+        def ramp(seconds):
+            """How far one half has got: its own length, not the window's."""
+            if seconds <= 0.0:
+                return 1.0
+            return min(1.0, max(0.0, elapsed / seconds))
+
+        in_progress = ramp(fade_in)
+        out_progress = ramp(fade_out)
         src = self._bot.stream_source
         old_source = state.get("old_source")
         incoming = self._bot.streamer
         outgoing = state.get("old_streamer")
         if src is not None and incoming is not None:
             with contextlib.suppress(Exception):
-                incoming.set_output_gain(base_gain * progress)
+                incoming.set_output_gain(base_gain * in_progress)
         if old_source is not None and outgoing is not None:
             with contextlib.suppress(Exception):
                 outgoing.set_output_gain(
-                    (state.get("old_gain0") or 0.0) * (1.0 - progress))
-        if progress >= 1.0:
+                    (state.get("old_gain0") or 0.0) * (1.0 - out_progress))
+        if elapsed >= overlap:
             if incoming is not None:
                 with contextlib.suppress(Exception):
                     incoming.set_output_gain(base_gain)
@@ -339,7 +367,7 @@ class CrossfadeHandler:
                 self._cancel_crossfade()
                 return
             if (state.get("candidate") is None
-                    and remaining <= self._bot.CROSSFADE_SECONDS + self._bot.CROSSFADE_LAUNCH_SECONDS):
+                    and remaining <= self._overlap_of(state) + self._bot.CROSSFADE_LAUNCH_SECONDS):
                 self._create_crossfade_candidate(state)
                 if state.get("candidate") is not None:
                     # Pre-roll launched: wait for its pre-buffer, then hand over.
@@ -353,9 +381,21 @@ class CrossfadeHandler:
             # end-of-song path so the next track still plays.
             self._cancel_crossfade()
             return
-        if cand.prebuffer_event.is_set() and remaining <= self._bot.CROSSFADE_SECONDS:
+        if cand.prebuffer_event.is_set() and remaining <= self._overlap_of(state):
             if not self._commit_crossfade(state):
                 self._cancel_crossfade()
+
+    def _overlap_of(self, state):
+        """The window this roll was started under, not the one set since.
+
+        A page turned while a pre-roll is already running must not move the
+        point the blend begins at half way through it: the roll keeps the
+        window it was started with, and the next one reads the new answer.
+        """
+        overlap = state.get("overlap")
+        if overlap is None:
+            return float(self._bot.crossfade_overlap_seconds())
+        return float(overlap)
 
     def _set_crossfade_enabled(self, enabled):
         """Persist the crossfade toggle; abort any roll started under it."""

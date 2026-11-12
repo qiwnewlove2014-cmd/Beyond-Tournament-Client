@@ -104,9 +104,27 @@ class SettingsMenus:
         def toggle_crossfade():
             enabled = not getattr(self._bot, "crossfade_enabled", False)
             self._bot._set_crossfade_enabled(enabled)
+            # The two fade lines exist only while it is on: off, they change
+            # nothing a player can hear, and a page that grows back has to be
+            # built again around this press (the way Auto-Tune's dials are).
             self._say("Crossfade between songs enabled. Tracks overlap smoothly."
-                  if enabled else "Crossfade between songs disabled.")
-            m.speak_current_item()
+                      " Fade In and Fade Out are on the page below."
+                      if enabled else "Crossfade between songs disabled."
+                      " Fade In and Fade Out are hidden until it is on again.")
+            gp.pop_last_substate()
+            stand_on(self._open_settings_menu(), "Crossfade Between Songs:")
+
+        def go_crossfade_in():
+            gp.pop_last_substate()
+            self._open_crossfade_fade_menu("in")
+
+        def go_crossfade_out():
+            gp.pop_last_substate()
+            self._open_crossfade_fade_menu("out")
+
+        def go_crossfade_reset():
+            gp.pop_last_substate()
+            self._open_crossfade_reset_menu()
 
         def get_eq_label():
             return f"Equalizer: {self._bot._eq_profile_label()}"
@@ -219,6 +237,21 @@ class SettingsMenus:
             ),
         ]
 
+        # Off, the two fade lines are not in the list at all (see the toggle).
+        crossfade_fades = [] if not getattr(self._bot, "crossfade_enabled", False) else [
+            (
+                "crossfade", lambda: self._bot.crossfade_fade_label("in"), go_crossfade_in,
+                "How long the incoming song takes to reach full level under the "
+                "one that is ending. The two songs stay together for whichever "
+                "half is longer; the shorter one finishes early inside it.",
+            ),
+            (
+                "crossfade", lambda: self._bot.crossfade_fade_label("out"), go_crossfade_out,
+                "How long the song that is ending takes to fall silent under the "
+                "new one. Off cuts it the moment the next song is handed over.",
+            ),
+        ]
+
         def get_output_label():
             return f"Music Output Device: {self._bot.output_device_label()}"
 
@@ -244,6 +277,17 @@ class SettingsMenus:
              "for too: skipping with the bracket keys, a queue line, or the "
              "next file of a local batch fades the old song out under the new "
              "one."),
+            # The two halves of that blend, set apart from each other: a long
+            # tail under a quick entrance, or the other way round. They are in
+            # the list only while the switch above them is on, exactly like
+            # Auto-Tune's dials: off, they change nothing a player can hear, and
+            # two silent lines between the switch and the rest of the page bury
+            # what does work. Their values are kept, so turning it back on puts
+            # them straight back. "Put these back" stays reachable either way.
+            *crossfade_fades,
+            ("crossfade", "Restore Crossfade Defaults", go_crossfade_reset,
+             "Puts both halves back to the three seconds this ships with, in "
+             "one press. It asks once more before doing it."),
             ("eq", get_eq_label, go_eq,
              "Shapes the song's bass, mid and treble. A profile is heard as "
              "soon as it is chosen; Custom opens the three bands as sliders."),
@@ -283,6 +327,161 @@ class SettingsMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
         return m
+
+    def _open_crossfade_fade_menu(self, kind="in"):
+        """How long one half of the blend takes: quick times, then any.
+
+        The two halves are the same shape as Record Audio's own fade pages (a
+        list of times people ask for, then a field for anything else), because
+        they answer the same question about a different seam: how long one
+        sound takes to give way. Here the awnings overlap, so the longer half is
+        also how long both songs are audible -- the shorter one finishes early
+        inside that window.
+
+        The quick rows are read live, so the mark follows the choice on the page
+        that is already open; `Custom Seconds` opens the Client's own text field
+        for any value up to the ceiling, because "seven and a half seconds" is
+        not worth arrowing past rows to find.
+        """
+        from ... import menu as menu_mod, menus
+
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        fade_in = kind != "out"
+        title = "Crossfade Fade In" if fade_in else "Crossfade Fade Out"
+        half = "in" if fade_in else "out"
+        maximum = int(self._bot.MAX_CROSSFADE_FADE_SECONDS)
+
+        def live_seconds():
+            return self._bot.crossfade_fade_seconds(half)
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def apply(seconds):
+            return self._bot.set_crossfade_fade(half, seconds)
+
+        def pick(seconds):
+            def chosen():
+                apply(seconds)
+                m.speak_current_item()
+            return chosen
+
+        def make_label(seconds):
+            def label_fn():
+                label = self._bot.crossfade_fade_text(seconds)
+                if abs(live_seconds() - seconds) < 1e-9:
+                    return f"{label} (active)"
+                return label
+            return label_fn
+
+        def submitted(text):
+            """Take what was typed, or say why nothing changed.
+
+            **The field is a substate and is taken off the stack on EVERY exit,**
+            Escape with nothing typed included: its `ck` answers True whenever
+            it is open, so a handler that forgets this leaves it holding every
+            key for good and the game looks frozen.
+            """
+            gp.pop_last_substate()
+            text = "" if text is None else str(text).strip()
+            before = live_seconds()
+            if not text:
+                self._say(f"{title} unchanged, "
+                          f"{self._bot.crossfade_fade_text(before)}.")
+                return
+            try:
+                value = float(text)
+            except ValueError:
+                self._say(f"'{text}' is not a number of seconds, so "
+                          f"{title.lower()} is still "
+                          f"{self._bot.crossfade_fade_text(before)}.")
+                return
+            if value < 0 or value > maximum:
+                self._say(f"A fade runs from 0 to {maximum} seconds, so "
+                          f"{title.lower()} is still "
+                          f"{self._bot.crossfade_fade_text(before)}.")
+                return
+            after = apply(value)
+            if after:
+                self._say(f"{title}: {self._bot.crossfade_fade_text(after)}.")
+            else:
+                self._say(f"{title} off.")
+
+        def go_custom():
+            gp.add_substate(self._bot.game.input.run(
+                f"Enter a fade of 0 to {maximum} seconds "
+                f"(currently {self._bot.crossfade_fade_text(live_seconds())}):",
+                handeler=submitted,
+                min_val=0, max_val=maximum,
+                msg_length=5, multiline=False,
+            ))
+
+        notes = {
+            0.0: "Off: this half is a hard cut. The other half still decides how "
+                 "long the two songs stay together.",
+            0.5: "Half a second: enough to hide a seam without losing the change.",
+            1.0: "One second: a short blend a listener does not notice.",
+            2.0: "Two seconds: a blend you can hear, still quick enough to keep the beat.",
+            3.0: "Three seconds: the blend this ships with.",
+            5.0: "Five seconds: a long overlap, for slow songs with long outros.",
+            8.0: "Eight seconds: both songs are heard together for a while; only "
+                 "use it on music that suits it.",
+        }
+        items = [(make_label(seconds), pick(seconds), None,
+                  notes.get(seconds, "A fade of this length. "))
+                 for seconds in self._bot.CROSSFADE_FADE_CHOICES]
+        items.append(("Custom Seconds", go_custom, None,
+                      f"Type the fade yourself, in seconds from 0 to {maximum}. "
+                      "Decimals are allowed (0.5, 2.5); 0 is a hard cut."))
+        items.append(("Back", go_back, None,
+                      "Returns to Music Bot Settings. The other half has its "
+                      "own line here."))
+        m = menu_mod.Menu(
+            self._bot.game,
+            f"{title}: {self._bot.crossfade_fade_text(live_seconds())}",
+            parrent=gp,
+        )
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_crossfade_reset_menu(self):
+        """Require an explicit second action before restoring both halves."""
+        from ... import menu as menu_mod, menus
+
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+        default = self._bot.crossfade_fade_text(self._bot.CROSSFADE_SECONDS)
+
+        def restore():
+            gp.pop_last_substate()
+            self._bot.restore_crossfade_defaults()
+            self._say(f"Crossfade fades restored: In and Out are {default}.")
+            self._open_settings_menu()
+
+        def cancel():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        m = menu_mod.Menu(
+            self._bot.game,
+            "Restore both crossfade fades to their defaults?",
+            parrent=gp,
+        )
+        m.add_items([
+            (f"Yes, Restore Both to {default}", restore, None,
+             "Puts Crossfade Fade In and Crossfade Fade Out back to the value "
+             "this ships with. The crossfade switch itself is not touched."),
+            ("Cancel and Keep Current Fades", cancel, None,
+             "Leaves both fades as they are and goes back to Settings."),
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
 
     def _open_output_device_menu(self):
         """Where this bot's own song is heard: the game's device, or another one.

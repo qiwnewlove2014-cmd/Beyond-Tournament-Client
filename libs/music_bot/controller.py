@@ -74,6 +74,19 @@ class MapMusicBot:
     # next track's intro fades up. Tuning this only shifts the overlap, never
     # the audio pipeline.
     CROSSFADE_SECONDS = 3.0
+    # The two halves of that window, when a player sets them separately: how
+    # long the incoming song takes to reach full level and how long the
+    # outgoing one takes to fall silent. Equal halves ARE the single window
+    # above, so a bot whose page was never opened blends exactly as before;
+    # the overlap is the longer of the two. Stored as client options, so they
+    # survive a restart the same way the switch does.
+    CROSSFADE_FADE_KEYS = {
+        "in": "music_bot_crossfade_fade_in",
+        "out": "music_bot_crossfade_fade_out",
+    }
+    # The quick times the page offers, then any value up to the ceiling.
+    CROSSFADE_FADE_CHOICES = (0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0)
+    MAX_CROSSFADE_FADE_SECONDS = 30.0
     # How long before the end of the current track we begin resolving the
     # NEXT track's fresh stream URL (the slow, variable part).
     CROSSFADE_PREP_SECONDS = 3.5
@@ -778,8 +791,8 @@ class MapMusicBot:
 
                     Crossfade Between Songs owns a change the player asks for, exactly as it
                     owns the crossfade between queued songs: the outgoing song ramps down
-                    over the same `CROSSFADE_SECONDS`, and the incoming one -- armed here and
-                    ramped by the frame loop -- comes up underneath it. A local file needs no
+                    over Crossfade Fade Out, and the incoming one -- armed here and
+                    ramped by the frame loop -- comes up underneath it over Fade In. A local file needs no
                     resolve, so the two are audible together: a real crossfade. Off, or feeding
                     a cabinet's room (which plays one stream at a time, the same rule the queue's
                     pre-roll obeys), a change keeps the short half-second cut it always had.
@@ -789,10 +802,11 @@ class MapMusicBot:
                 or not (self.playing or self.paused)
                 or self.streamer is None):
             return 0.5
-        window = float(self.CROSSFADE_SECONDS)
+        window = self.crossfade_fade_out()
         # Armed, not started: the ramp begins with the new stream's first audible
-        # frame, because a YouTube change spends the resolve in between.
-        self._incoming_fade = {"seconds": window, "at": None}
+        # frame, because a YouTube change spends the resolve in between. The two
+        # halves are the player's own from Crossfade Fade In / Fade Out.
+        self._incoming_fade = {"seconds": self.crossfade_fade_in(), "at": None}
         return window
 
     def _incoming_fade_gain(self, base_gain):
@@ -1737,6 +1751,78 @@ class MapMusicBot:
     def _set_crossfade_enabled(self, enabled):
         return self._crossfade_machine()._set_crossfade_enabled(enabled)
 
+    # --- the two halves of the blend, as the player set them -----------------
+
+    def crossfade_fade_seconds(self, kind="in"):
+        """How long one half of the blend takes, in seconds (0 is a hard cut).
+
+        `in` is the song coming up, `out` the one going quiet. Both default to
+        `CROSSFADE_SECONDS`, which is the symmetric window this had before
+        either half could be set, so an untouched install sounds identical.
+        Read every frame the blend runs, so a change is heard on the next one.
+        """
+        key = self.CROSSFADE_FADE_KEYS.get(kind)
+        if key is None:
+            key = self.CROSSFADE_FADE_KEYS["in"]
+        try:
+            value = float(options.get(key, self.CROSSFADE_SECONDS))
+        except (TypeError, ValueError):
+            value = float(self.CROSSFADE_SECONDS)
+        if value != value:  # NaN reads as the default, never as a broken gain
+            value = float(self.CROSSFADE_SECONDS)
+        return max(0.0, min(value, float(self.MAX_CROSSFADE_FADE_SECONDS)))
+
+    def crossfade_fade_in(self):
+        return self.crossfade_fade_seconds("in")
+
+    def crossfade_fade_out(self):
+        return self.crossfade_fade_seconds("out")
+
+    def crossfade_overlap_seconds(self):
+        """How long both songs are audible: whichever half is longer decides.
+
+        The other half finishes early inside that window, which is the whole
+        point of setting them apart: a long tail under a quick entrance, or a
+        quick cut under a slow rise.
+        """
+        return max(self.crossfade_fade_in(), self.crossfade_fade_out())
+
+    @staticmethod
+    def crossfade_fade_text(seconds):
+        """How a fade time reads: `Off`, `1 second`, `0.5 seconds`."""
+        if not seconds:
+            return "Off"
+        value = float(seconds)
+        if value.is_integer():
+            whole = int(value)
+            return f"{whole} second" if whole == 1 else f"{whole} seconds"
+        return f"{value:g} seconds"
+
+    def crossfade_fade_label(self, kind="in"):
+        name = "Fade In" if kind == "in" else "Fade Out"
+        return f"Crossfade {name}: {self.crossfade_fade_text(self.crossfade_fade_seconds(kind))}"
+
+    def set_crossfade_fade(self, kind, seconds):
+        """Persist one half of the blend. Returns the value now in force."""
+        key = self.CROSSFADE_FADE_KEYS.get(kind)
+        if key is None:
+            raise ValueError(f"Unknown crossfade half: {kind}")
+        try:
+            value = float(seconds or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value != value:
+            value = 0.0
+        value = max(0.0, min(value, float(self.MAX_CROSSFADE_FADE_SECONDS)))
+        options.set(key, value)
+        return value
+
+    def restore_crossfade_defaults(self):
+        """Put both halves back to `CROSSFADE_SECONDS` (the shipped blend)."""
+        for key in self.CROSSFADE_FADE_KEYS.values():
+            options.set(key, float(self.CROSSFADE_SECONDS))
+        return self.crossfade_fade_in(), self.crossfade_fade_out()
+
     def _open_queue_menu(self):
         return self._menus()._open_queue_menu()
 
@@ -1760,6 +1846,12 @@ class MapMusicBot:
 
     def _set_converter_output_folder(self):
         return self._menus()._set_converter_output_folder()
+
+    def _open_crossfade_fade_menu(self, kind="in"):
+        return self._menus()._open_crossfade_fade_menu(kind)
+
+    def _open_crossfade_reset_menu(self):
+        return self._menus()._open_crossfade_reset_menu()
 
     def _open_settings_menu(self):
         return self._menus()._open_settings_menu()

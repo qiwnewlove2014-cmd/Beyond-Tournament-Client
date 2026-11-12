@@ -81,6 +81,15 @@ def make_bot():
     bot.water_muffle_enabled = True
     bot.reverb_enabled = True
     bot.crossfade_enabled = False
+    # The crossfade's two halves and their restore line are on the page.
+    bot.crossfade_fade_label.side_effect = (
+        lambda kind="in": f"Crossfade Fade {'In' if kind == 'in' else 'Out'}: 3 seconds")
+    bot.crossfade_fade_seconds.return_value = 3.0
+    bot.crossfade_fade_text.side_effect = (
+        lambda seconds: "Off" if not seconds else f"{float(seconds):g} seconds")
+    bot.CROSSFADE_SECONDS = 3.0
+    bot.CROSSFADE_FADE_CHOICES = (0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0)
+    bot.MAX_CROSSFADE_FADE_SECONDS = 30.0
     bot.autotune_enabled = False
     bot.autotune_speed = autotune.DEFAULT_SPEED
     bot.autotune_mode = autotune.DEFAULT_MODE

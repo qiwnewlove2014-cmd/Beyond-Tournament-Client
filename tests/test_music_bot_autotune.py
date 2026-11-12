@@ -926,6 +926,13 @@ class MenuTests(unittest.TestCase):
         self.bot.water_muffle_enabled = True
         self.bot.reverb_enabled = True
         self.bot.crossfade_enabled = False
+        # The crossfade's two halves are real strings on the page (a MagicMock
+        # label is truthy for every startswith, which hides the count below).
+        self.bot.crossfade_fade_label.side_effect = (
+            lambda kind="in": f"Crossfade Fade {'In' if kind == 'in' else 'Out'}: 3 seconds")
+        self.bot.crossfade_fade_seconds.return_value = 3.0
+        self.bot.crossfade_fade_text.side_effect = (
+            lambda seconds: "Off" if not seconds else f"{float(seconds):g} seconds")
         self.bot.autotune_enabled = False
         self.bot.autotune_speed = autotune.DEFAULT_SPEED
         self.bot.autotune_amount = autotune.DEFAULT_AMOUNT
