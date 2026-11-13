@@ -504,8 +504,12 @@ class TheCabinetsAroundACabinetTests(unittest.TestCase):
         labels = self.labels(menu_game)
         self.assertEqual([line for line in labels
                           if line.startswith("Another cabinet at ")], [])
-        # ...and the cabinet's own voice switch, which a player keeps, is not it.
-        self.assertIn("Cabinet voice: ON (you hear the cabinet speak)", labels)
+        # ...and the cabinet's own voice switch, which a player keeps, is not it. Staff read the
+        # room-wide wording because the switch is theirs to move for everyone; a listener reads
+        # their own ear as the same line. Both are the cabinet's voice, neither is a neighbour.
+        self.assertIn("Cabinet voice: ON (everyone hears this cabinet)", labels)
+        self.assertIn("Cabinet voice: ON (you hear the cabinet speak)",
+                      self.labels(self.menu_game(speakers=pair(10.0, 26.0))))
 
     def test_a_distant_neighbour_is_named_with_its_distance(self):
         game, _map = build(cabinets=((10.0, 20.0), (150.0, 20.0)))

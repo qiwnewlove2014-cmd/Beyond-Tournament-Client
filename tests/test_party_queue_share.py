@@ -389,6 +389,9 @@ def make_bot(host=True, playing=True, title="Now", queue=()):
     bot.paused = False
     bot.current_title = title
     bot.next_up_queue = [dict(track) for track in queue]
+    # The real controller reads this switch out of the options on construction
+    # (libs/music_bot/controller.py), and the Play Queue page asks the bot for it.
+    bot.queue_mode = False
     ps = PartySyncState()
     ps.role = "host" if host else "guest"
     ps.session_id = "s1"

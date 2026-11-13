@@ -51,6 +51,22 @@ def has_encoding(node):
     return any(keyword.arg == "encoding" for keyword in node.keywords)
 
 
+PATH_CONSTRUCTORS = {"Path", "PurePath", "PosixPath", "WindowsPath"}
+
+
+def path_like(receiver):
+    """True for an expression that is a path, so its `.open()` reads a file."""
+    if isinstance(receiver, ast.Name):
+        return receiver.id.lower().endswith(("path", "file", "dir"))
+    if isinstance(receiver, ast.Call):
+        function = receiver.func
+        name = function.attr if isinstance(function, ast.Attribute) else getattr(function, "id", "")
+        return name in PATH_CONSTRUCTORS
+    if isinstance(receiver, ast.Attribute):
+        return receiver.attr in PATH_CONSTRUCTORS or receiver.attr.lower().endswith("path")
+    return False
+
+
 def opens_a_file(node):
     """True when this call reads a file, rather than a test helper named open()."""
     function = node.func
@@ -61,7 +77,11 @@ def opens_a_file(node):
     receiver = function.value
     if isinstance(receiver, ast.Name) and receiver.id in {"self", "cls"} and len(node.args) >= 2:
         return False
-    return True
+    # `Path(...).open()`, or any `.open(mode, ...)`: a file. A bare `.open()` on an object is that
+    # object's own method (`InputDeviceBackend(...).open()` opens a device), so the encoding rule
+    # does not apply to it -- the builtin and the path forms above stay flagged.
+    takes_arguments = bool(node.args) or any(keyword.arg == "mode" for keyword in node.keywords)
+    return takes_arguments or path_like(receiver)
 
 
 def text_io_without_encoding(source):
