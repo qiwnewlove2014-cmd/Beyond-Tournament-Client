@@ -2346,6 +2346,29 @@ class Gameplay(state.State):
                     if bot is not None else None)
             if item is not None:
                 items.append(item)
+            # The host's room link is the Party Sync page's line in the Music
+            # Bot menu; Ctrl+F8 is the session's own door, so the same choice is
+            # offered here rather than making a host walk that menu mid-song.
+            # One builder (`MapMusicBot._open_party_cinema_menu`), one event
+            # (`party_sync_cinema`), and the quick menu stays underneath, so the
+            # chooser's Back returns to this roster. No rank is asked, on this
+            # line or on the Server's handler: the party's room is the host's
+            # own stream, and the Developer/Contributor rule belongs to the
+            # Music Bot's routing line, which takes a cabinet over for the bot.
+            bot_cinema = getattr(gp, "music_bot", None)
+            cinema_opener = getattr(bot_cinema, "_open_party_cinema_menu", None)
+            if callable(cinema_opener):
+                linked = str(getattr(ps, "cinema_cabinet", "") or "")
+                items.append((
+                    (f"Party cinema room: jukebox {linked}" if linked
+                     else "Party cinema room: OFF"),
+                    lambda: cinema_opener(ps), None,
+                    "Sends the mixed audio of everyone jamming in this party "
+                    "through one cinema cabinet's speakers. People outside "
+                    "the party on this map hear it; a guest can choose the "
+                    "room's speakers in their own Party Sync menu and is then "
+                    "taken off the direct feed, so the two never play "
+                    "together."))
             items.append((
                 "End Party Sync session",
                 lambda: confirm_then_leave(
