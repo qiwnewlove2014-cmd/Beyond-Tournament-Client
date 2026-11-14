@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import voice_chat  # noqa: E402
 from libs.music_bot import MapMusicBot  # noqa: E402
+from libs.music_bot import harmony as harmony_module  # noqa: E402
 from libs.music_bot.voice_effects import builder  # noqa: E402
 from libs.music_bot.voice_effects import dsp  # noqa: E402
 from libs.music_bot.voice_effects import catalogue  # noqa: E402
@@ -1878,12 +1879,77 @@ class TheVoicePathTests(unittest.TestCase):
     def press(self):
         return SimpleNamespace(_speech_line=None)
 
-    def test_only_the_broadcast_leg_is_shaped(self):
+    def test_proximity_voice_is_still_unshaped(self):
         with mock.patch.object(dsp, "effect_id",
                                return_value="amp"):
             self.assertIsNone(
                 voice_chat.VoiceChatRecord._speech_line_for(self.press(),
                                                             mega=False))
+
+    def test_a_press_inside_a_party_session_carries_the_pedal(self):
+        # The session is the second shaped leg: the Server delivers a member's voice only
+        # to the party, so the pedal is heard by the people being talked to and by nobody
+        # else on the map.
+        with mock.patch.object(dsp, "effect_id", return_value="amp"):
+            line = voice_chat.VoiceChatRecord._speech_line_for(
+                self.press(), mega=False, party=True)
+        self.assertIsInstance(line, voice_effects.VoiceEffectLine)
+        self.assertIsNone(line.inner)
+
+    def test_a_party_press_with_the_effect_off_is_plain(self):
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
+            self.assertIsNone(voice_chat.VoiceChatRecord._speech_line_for(
+                self.press(), mega=False, party=True))
+
+    def test_the_party_leg_carries_autotune(self):
+        mock.patch.object(voice_chat, "autotune_enabled",
+                          return_value=True).start()
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
+            line = voice_chat.VoiceChatRecord._speech_line_for(
+                self.press(), mega=False, party=True)
+        self.assertIsInstance(line, voice_chat.AutoTuneLine)
+
+    def test_the_party_leg_carries_the_harmony_copies(self):
+        # Harmony is a mode of its own: it sings with the tuner off, so the
+        # party press gets the fast copies line exactly as the PA does.
+        mock.patch.object(voice_chat, "harmony_enabled",
+                          return_value=True).start()
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
+            line = voice_chat.VoiceChatRecord._speech_line_for(
+                self.press(), mega=False, party=True)
+        self.assertIsInstance(line, harmony_module.FastHarmonyLine)
+
+    def test_the_party_leg_wraps_the_tuner_in_the_pedal(self):
+        mock.patch.object(voice_chat, "autotune_enabled",
+                          return_value=True).start()
+        with mock.patch.object(dsp, "effect_id", return_value="amp"):
+            line = voice_chat.VoiceChatRecord._speech_line_for(
+                self.press(), mega=False, party=True)
+        self.assertIsInstance(line, voice_effects.VoiceEffectLine)
+        self.assertIsInstance(line.inner, voice_chat.AutoTuneLine)
+
+    def test_the_speech_key_stays_on_the_broadcast_leg(self):
+        # The key is the song's transposer; a party member is not moving a
+        # song, so a key and nothing else builds no line at all.
+        mock.patch.object(voice_chat, "speech_key_semitones",
+                          return_value=3).start()
+        with mock.patch.object(dsp, "effect_id", return_value="off"):
+            self.assertIsNone(voice_chat.VoiceChatRecord._speech_line_for(
+                self.press(), mega=False, party=True))
+
+    def test_leaving_the_session_hands_the_next_press_back_plain(self):
+        record = self.press()
+        with mock.patch.object(dsp, "effect_id", return_value="amp"):
+            self.assertIsInstance(
+                voice_chat.VoiceChatRecord._speech_line_for(
+                    record, mega=False, party=True),
+                voice_effects.VoiceEffectLine)
+            # The press ends and drops the line with it, so the first press after
+            # leaving the session is ordinary voice chat.
+            record._speech_line = None
+            self.assertIsNone(voice_chat.VoiceChatRecord._speech_line_for(
+                record, mega=False, party=False))
+
 
     def test_an_effect_with_no_other_line_is_the_whole_line(self):
         with mock.patch.object(dsp, "effect_id",
@@ -1924,6 +1990,28 @@ class TheVoicePathTests(unittest.TestCase):
         self.assertIs(wrapped.inner, key_line)
         self.assertIs(record._speech_line, wrapped)
 
+
+class ThePartyGateTests(unittest.TestCase):
+    def record(self, state, gameplay=None):
+        stack = (SimpleNamespace(party_sync=state),)
+        return SimpleNamespace(game=SimpleNamespace(stack=stack)), gameplay
+
+    def test_an_active_session_opens_the_party_leg(self):
+        record, _gp = self.record(SimpleNamespace(session_id="session-1"))
+        self.assertTrue(
+            voice_chat.VoiceChatRecord._party_session_active(record, None))
+
+    def test_no_session_keeps_the_voice_plain(self):
+        for state in (None, SimpleNamespace(session_id="")):
+            record, _gp = self.record(state)
+            self.assertFalse(
+                voice_chat.VoiceChatRecord._party_session_active(record, None))
+
+    def test_gameplay_in_hand_is_asked_first(self):
+        record, _gp = self.record(None)
+        gameplay = SimpleNamespace(party_sync=SimpleNamespace(session_id="s"))
+        self.assertTrue(
+            voice_chat.VoiceChatRecord._party_session_active(record, gameplay))
 
 class TheRecordingStudioTests(unittest.TestCase):
     """The one shelf pedal a recording may wear without a broadcast."""

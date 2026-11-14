@@ -1860,25 +1860,47 @@ class Gameplay(state.State):
         from . import cinema_speaker_menu
         cinema_speaker_menu.open_menu(self.game, self)
 
+    def _party_voice_allowed(self):
+        """Whether this player may shape their voice because they are in a party.
+
+        The session is the Server's, and this reads the client's own mirror of
+        it (`party_sync.session_member`). The Developer's lock on the Music Bot
+        itself closes the visit too, exactly as it closes the M key: the gate
+        is never widened by where a player happens to be standing.
+        """
+        from . import party_sync
+        if music_bot_gate.is_locked("bot"):
+            return False
+        return party_sync.session_member(getattr(self, "party_sync", None))
+
     def open_voice_effect_menu(self, mod=None):
-        """Open the Voice Effect page from the world, without the Music Bot hub.
+        """Open the voice pages from the world, without the Music Bot hub.
 
-        The page is the Music Bot's own -- the pedals, Pan Delay, Custom Voice
-        and the tone strip (`voice_effects/tone.py`) -- but Back closes it
-        to the game, because this visit never came through Music Bot Settings.
+        A Music Bot player gets the pedal page itself -- the pedals, Pan Delay,
+        Custom Voice and the tone strip (`voice_effects/tone.py`) -- and Back
+        closes it to the game, because this visit never came through Music Bot
+        Settings. The two checks are the ones the M key makes: the Server's
+        rank answer (`can_use_music_bot`) and the Developer's Voice Effect lock.
+        A regular player is silent, exactly as M is, because the Jukebox is
+        their music; a lock says so in the Server's own words (`gate.blocked`).
 
-        The two checks are the ones the M key makes: the Server's rank answer
-        (`can_use_music_bot`) and the Developer's Voice Effect lock. A regular
-        player is silent, exactly as M is, because the Jukebox is their music;
-        a lock says so in the Server's own words (`gate.blocked`).
+        A party member who is NOT a Music Bot player gets `Party Voice`
+        instead: the three shapers the session's voice leg carries (the pedal,
+        Auto-Tune and Harmony -- `libs/voice_chat._speech_line_for`) and
+        nothing that belongs to a song they are not playing. The host can use
+        these because the host runs the Music Bot; a guest uses them because
+        the session is the place they are heard, and the page closes again the
+        moment the session ends (`_party_voice_allowed`).
         """
         if not getattr(self, "music_bot", None):
             return
-        if not self._can_use_music_bot():
+        if self._can_use_music_bot():
+            if music_bot_gate.blocked("voice_fx"):
+                return
+            self.music_bot._open_voice_effect_menu(standalone=True)
             return
-        if music_bot_gate.blocked("voice_fx"):
-            return
-        self.music_bot._open_voice_effect_menu(standalone=True)
+        if self._party_voice_allowed():
+            self.music_bot._open_party_voice_menu()
 
     def speak_fps(self, mod):
         speak(f"{self.game.last_fps} FPS")
@@ -2372,6 +2394,30 @@ class Gameplay(state.State):
                     do_leave,
                 ),
             ))
+        # Ctrl+F8 is the session's own door, so the talker's own monitor is
+        # offered here as well as on the Party Sync page: walking the Music
+        # Bot menu to hear yourself is the one trip this menu exists to save.
+        # One builder (`MapMusicBot.party_sync_monitor_voice_item`), and this
+        # menu is rebuilt to change the label -- it has no in-place refresh,
+        # and a pop-and-reopen leaves the same menu on the same stack.
+        monitor_item = getattr(
+            getattr(gp, "music_bot", None),
+            "party_sync_monitor_voice_item", None)
+        if callable(monitor_item):
+            # The rebuild pushes a menu, and a pushed menu announces itself:
+            # the confirmation is held here and spoken after it, or the new
+            # title is the line that gets cut off.
+            waiting = []
+
+            def do_monitor_toggle():
+                close_top()
+                gp._open_party_sync_quick_menu(ps)
+                for line in waiting:
+                    speak(line)
+                del waiting[:]
+
+            items.append(monitor_item(waiting.append, do_monitor_toggle))
+
         # The quick menu is the session's own door, so the host (or a
         # granted guest) must not have to leave it and walk the Music Bot
         # menu just to reach the captured program. Keep the quick menu

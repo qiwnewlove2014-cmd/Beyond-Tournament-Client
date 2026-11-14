@@ -20,7 +20,7 @@ references/autotune.md.
 class AutoTuneMenus:
     """The Auto-Tune dials and the Harmony pages."""
 
-    def _open_autotune_speed_menu(self):
+    def _open_autotune_speed_menu(self, back=None):
         """How fast Auto-Tune walks the voice to a note.
 
         One list, fastest first: Instant is the effect (the voice snaps, and a
@@ -36,8 +36,7 @@ class AutoTuneMenus:
             return
 
         def go_back():
-            gp.pop_last_substate()
-            self._open_settings_menu()
+            self._voice_page_back(gp, back)
 
         def pick(index):
             def apply():
@@ -71,7 +70,7 @@ class AutoTuneMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _open_autotune_scale_menu(self):
+    def _open_autotune_scale_menu(self, back=None):
         """Which notes the voice may be moved to: a scale, and its key.
 
         The Settings list gains ONE line for all of this (`Auto-Tune Scale:`),
@@ -91,8 +90,7 @@ class AutoTuneMenus:
             return
 
         def go_back():
-            gp.pop_last_substate()
-            self._open_settings_menu()
+            self._voice_page_back(gp, back)
 
         def pick(mode_id, says):
             def apply():
@@ -107,7 +105,7 @@ class AutoTuneMenus:
                 # cursor on the new `Root Note:` line, and choosing Chromatic
                 # takes it away again rather than leaving a dead row behind.
                 gp.pop_last_substate()
-                self._open_autotune_scale_menu()
+                self._open_autotune_scale_menu(back=back)
             return apply
 
         items = []
@@ -115,7 +113,7 @@ class AutoTuneMenus:
         if not autotune.is_chromatic(mode):
             def go_root():
                 gp.pop_last_substate()
-                self._open_autotune_root_menu()
+                self._open_autotune_root_menu(back=back)
 
             root = getattr(self._bot, "autotune_root", autotune.DEFAULT_ROOT)
             items.append((f"Root Note: {autotune.root_name(root)}", go_root,
@@ -168,8 +166,7 @@ class AutoTuneMenus:
                   "key, the retune speed and the tune amount are back at their "
                   "defaults: Chromatic in C, Normal speed, 100%. Your harmony "
                   "voices are left as they were.")
-            gp.pop_last_substate()
-            self._open_settings_menu()
+            self._voice_page_back(gp, back)
 
         items.append(("Clear Auto-Tune Tuning", clear_tuning, None,
                       "Puts everything Auto-Tune was set to back the way it "
@@ -187,7 +184,7 @@ class AutoTuneMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _open_autotune_root_menu(self):
+    def _open_autotune_root_menu(self, back=None):
         """The twelve keys, in note order, the current one marked."""
         from ... import menu as menu_mod, menus
         from .. import autotune
@@ -197,7 +194,7 @@ class AutoTuneMenus:
 
         def go_back():
             gp.pop_last_substate()
-            self._open_autotune_scale_menu()
+            self._open_autotune_scale_menu(back=back)
 
         def pick(index):
             def apply():
@@ -234,7 +231,7 @@ class AutoTuneMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _open_autotune_amount_menu(self):
+    def _open_autotune_amount_menu(self, back=None):
         """How much of the correction is used: five steps of percent.
 
         The one Auto-Tune choice that is taste rather than physics. The scale
@@ -257,8 +254,7 @@ class AutoTuneMenus:
             return
 
         def go_back():
-            gp.pop_last_substate()
-            self._open_settings_menu()
+            self._voice_page_back(gp, back)
 
         def pick(percent):
             def apply():
@@ -345,7 +341,7 @@ class AutoTuneMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _open_harmony_menu(self):
+    def _open_harmony_menu(self, back=None):
         """The Harmony page: the two copies, and which interval each sings.
 
         Two lines used to sit in Music Bot Settings (`Harmony 1:` and `Harmony
@@ -365,16 +361,15 @@ class AutoTuneMenus:
             return
 
         def go_back():
-            gp.pop_last_substate()
-            self._open_settings_menu()
+            self._voice_page_back(gp, back)
 
         def go_first():
             gp.pop_last_substate()
-            self._open_autotune_harmony_menu()
+            self._open_autotune_harmony_menu(back=back)
 
         def go_second():
             gp.pop_last_substate()
-            self._open_autotune_harmony_menu(second=True)
+            self._open_autotune_harmony_menu(second=True, back=back)
 
         m = menu_mod.Menu(
             self._bot.game,
@@ -403,7 +398,7 @@ class AutoTuneMenus:
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
-    def _open_autotune_harmony_menu(self, second=False):
+    def _open_autotune_harmony_menu(self, second=False, back=None):
         """Which interval one harmony copy sings: a third, a fifth, an octave.
 
         Two copies, so two of these pages (`Harmony 1:` and `Harmony 2:` on the
@@ -432,7 +427,7 @@ class AutoTuneMenus:
 
         def go_back():
             gp.pop_last_substate()
-            self._open_harmony_menu()
+            self._open_harmony_menu(back=back)
 
         def pick(interval_id):
             def apply():

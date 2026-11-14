@@ -20,6 +20,7 @@ from libs.party_sync import (
     set_voice_direct_mode,
     stereo_upload_eligible,
     upload_should_send,
+    session_member,
 )
 
 
@@ -400,6 +401,15 @@ class TestStereoUpload(unittest.TestCase):
         self.assertTrue(
             stereo_upload_eligible(self.bot(party=True), channels=2)
         )
+
+
+class TestSessionMember(unittest.TestCase):
+    def test_an_active_session_is_a_membership(self):
+        self.assertTrue(session_member(SimpleNamespace(session_id="session-1")))
+
+    def test_no_state_and_no_session_are_not(self):
+        self.assertFalse(session_member(None))
+        self.assertFalse(session_member(SimpleNamespace(session_id="")))
 
 
 class TestSessionRoster(unittest.TestCase):

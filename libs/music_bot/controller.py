@@ -300,6 +300,13 @@ class MapMusicBot:
         # stays private even when the public broadcast toggle is off. It never
         # flips the user's own broadcast toggles.
         self.party_sync_force_upload = False
+        # Party Sync page -> "Hear my own voice". A session's voice leg is
+        # everybody else's voice (the local player is never sent their own
+        # channel), and the PA monitor plays through the map's speakers, so a
+        # talker hears nothing of themselves in a session unless this is on.
+        # Off by default: a monitor on speakers is a loop. See
+        # `libs/party_sync_audio.PartyVoiceMonitor`.
+        self.party_sync_monitor_voice = False
         # Line-in guitar raw PCM queue: the instrument input appends 20 ms
         # mono16 frames while guitar mode is on and this broadcast is enabled;
         # AudioStreamer mixes them into the outgoing stream.
@@ -1218,14 +1225,63 @@ class MapMusicBot:
     def open_party_queue_view(self):
         return self._menus().open_party_queue_view()
 
+    def set_party_sync_monitor_voice(self, enabled):
+        """Turn the talker's own-voice monitor on or off for this client.
+
+        A listening preference, not a session setting: it never reaches the
+        server and never changes what anybody else hears. It stays as it was
+        across sessions, because a singer sets it once.
+        """
+        self.party_sync_monitor_voice = bool(enabled)
+        return self.party_sync_monitor_voice
+
+    def party_sync_monitor_voice_label(self):
+        """The Party Sync page's line for the monitor, in its own words."""
+        # `getattr` rather than the bare attribute: this line is read by the
+        # Party Sync page of a bot a test (or an older saved object) built
+        # without `__init__`, and a menu label must never be the thing that
+        # raises.
+        return "Hear my own voice: %s" % (
+            "ON" if getattr(self, "party_sync_monitor_voice", False) else "OFF")
+
+    def party_sync_monitor_voice_item(self, say, refresh=None):
+        """The `Hear my own voice` line, for both party menus.
+
+        One builder, because the Party Sync page and the Ctrl+F8 quick menu are
+        the same door and must not answer differently -- the same rule the /p
+        switch and the queue line already follow. `say` is the caller's own
+        speech call (the page speaks through `menus.speak`, the quick menu
+        through `speech.speak`), and `refresh` redraws whichever menu this was
+        built for, because the label IS the state.
+        """
+        enabled = bool(getattr(self, "party_sync_monitor_voice", False))
+
+        def toggle():
+            self.set_party_sync_monitor_voice(not enabled)
+            say("Your own voice: you will hear it in this session."
+                if not enabled else "Your own voice: silent again.")
+            if callable(refresh):
+                refresh()
+
+        return (
+            self.party_sync_monitor_voice_label(), toggle, None,
+            "Plays the voice you are sending into your own ears only, so you "
+            "can hear your own key, Auto-Tune, harmony and effects. Nobody "
+            "else hears this copy and it never goes to the map's speakers or "
+            "a cabinet.",
+        )
+
     def _clear_party_sync_direct(self):
         """Restore any entity left in Party Sync direct-to-ear audio mode
-        (host-music feed AND party team-talk voice)."""
+        (host-music feed AND party team-talk voice), and stop the talker's own
+        voice monitor -- it belongs to the session that just ended."""
         from ..party_sync import clear_all_party_direct
+        from .. import party_sync_audio
         gp, _ = self._party_sync_pair()
         if gp is None:
             return
         clear_all_party_direct(gp)
+        party_sync_audio.close_voice_monitor(gp)
 
     # ------------------------------------------------ external audio source
     def start_external_audio(self, kind="app", target="", label="",
@@ -2008,6 +2064,12 @@ class MapMusicBot:
 
     def _open_voice_effect_menu(self, standalone=False):
         return self._menus()._open_voice_effect_menu(standalone=standalone)
+
+    def _open_party_voice_menu(self, back=None):
+        return self._menus()._open_party_voice_menu(back=back)
+
+    def _voice_page_back(self, gp, back=None):
+        return self._menus()._voice_page_back(gp, back)
 
     def _open_voice_tone_menu(self):
         return self._menus()._open_voice_tone_menu()

@@ -1,3 +1,4 @@
+import array
 import random
 import threading
 import time
@@ -106,6 +107,72 @@ def mix_audio_frames(frames, threshold=0.85, ratio=8.0, state_key=None):
         return b""
 
 
+def set_opus_bitrate(encoder, bitrate):
+    """Ask libopus for an explicit bitrate on one encoder.
+
+    pyogg wraps the encoder but not this ctl (see its own `TODO: Use
+    OPUS_SET_BITRATE`), so the call goes to the wrapper's encoder pointer.
+    Returns whether libopus accepted it; a pyogg of another shape, or an opus
+    without the ctl, leaves the encoder on its default rather than raising -- a
+    codec setting must never be the thing that stops a microphone.
+    """
+    try:
+        from pyogg import opus as opus_lib
+        pointer = getattr(encoder, "_encoder", None)
+        ctl = getattr(opus_lib, "opus_encoder_ctl", None)
+        request = getattr(opus_lib, "OPUS_SET_BITRATE_REQUEST", None)
+        if pointer is None or ctl is None or request is None:
+            return False
+        return int(ctl(pointer, request,
+                       opus_lib.opus_int32(int(bitrate)))) == 0
+    except Exception:
+        return False
+
+
+def stereo_to_mono(chunk, capture=None):
+    """Mono from one two-channel capture chunk, without letting the sides cancel.
+
+    A capture device that refuses MONO16 is opened as stereo, and its two
+    channels are not always two ears: often one capsule is copied into both,
+    and sometimes an interface, adapter or cable hands the same signal over in
+    opposite polarity. Averaging the pair is right for the first case and
+    erases the low end in the second -- the "thin microphone" an external
+    condenser's owner hears and blames on the game.
+
+    So the polarity is decided once, from a short window of real signal, and
+    the average is taken with the right side flipped when the pair is genuinely
+    out of phase. It is a wiring property rather than a per-frame one, which is
+    exactly why it is not re-decided on every chunk: a per-chunk decision would
+    chatter at every zero crossing. `capture` is the `VoiceChatRecord` whose
+    `_mono_inverted` holds the answer; without one, the plain average is used.
+    """
+    try:
+        import numpy as np
+        usable = len(chunk) - (len(chunk) % 4)
+        if usable <= 0:
+            return bytes(chunk)
+        frames = np.frombuffer(bytes(chunk[:usable]), dtype=np.int16)
+        frames = frames.reshape(-1, 2)
+        left = frames[:, 0].astype(np.int32)
+        right = frames[:, 1].astype(np.int32)
+        inverted = (getattr(capture, "_mono_inverted", None)
+                    if capture is not None else False)
+        if inverted is None and left.size:
+            energy_left = float(np.dot(left, left))
+            energy_right = float(np.dot(right, right))
+            if energy_left > 1e6 and energy_right > 1e6:
+                correlation = float(np.dot(left, right)) / (
+                    (energy_left * energy_right) ** 0.5)
+                inverted = correlation < -0.5
+                capture._mono_inverted = inverted
+        if inverted:
+            right = -right
+        mono = (left + right) // 2
+        return mono.astype(np.int16).tobytes()
+    except Exception:
+        return bytes(chunk)
+
+
 def soft_limit_audio(audio_bytes, threshold=0.85, ratio=8.0, state_key=None):
     """Soft limiter with a smoothed per-stream gain.
 
@@ -195,6 +262,16 @@ def _tail_sample(packet):
 # periods on this project's machines (measured, tools/instrument_monitor_latency_sim.py),
 # which is why the capture trigger is one such period and not a smaller number.
 # One home for the numbers the latency budget is made of (tools/voice_latency_sim.py).
+# One Opus bitrate per voice worker, because pyogg exposes no setter and
+# libopus otherwise picks whatever its own default is for the mode (pyogg's
+# own source says "TODO: Use OPUS_SET_BITRATE"). A plain speech press is mono
+# 48 kHz `voip` at 48 kbps; a shaped press (Speech Key, Auto-Tune, harmony, a
+# pedal) is `audio` mode and is the same signal the music bot sends, so it gets
+# the music bot's own 64 kbps -- a thin, bit-starved frame is exactly what the
+# pedal then makes more obvious.
+VOICE_OPUS_BITRATE = 48000
+SHAPED_OPUS_BITRATE = 64000
+
 VOICE_FRAME_BYTES = 1920                # 20 ms mono16 at 48 kHz
 VOICE_FRAME_MS = 20.0
 VOICE_CAPTURE_TRIGGER_SAMPLES = 480     # one 10 ms device delivery period
@@ -1306,6 +1383,18 @@ class voice_chat_compression(threading.Thread):
             self.encoder.set_application(application)
             self.encoder.set_channels(1)
             self.encoder.set_sampling_frequency(48000)
+            self.bitrate = (SHAPED_OPUS_BITRATE if application == "audio"
+                            else VOICE_OPUS_BITRATE)
+            # pyogg builds the encoder lazily: `_encoder` is None until a frame
+            # is handed to `encode()`, and the ctl needs that pointer. One
+            # silent 20 ms frame initialises it here (its output is thrown
+            # away), so the bitrate covers every real frame -- a first press
+            # must not be the thin one.
+            try:
+                self.encoder.encode(array.array("h", bytes(VOICE_FRAME_BYTES)))
+            except Exception as exc:
+                logger.log_exception(exc, "voice_chat encoder prime")
+            set_opus_bitrate(self.encoder, self.bitrate)
             self.decoder = OpusDecoder()
             self.decoder.set_channels(1)
             self.decoder.set_sampling_frequency(48000)
@@ -1326,7 +1415,7 @@ class voice_chat_compression(threading.Thread):
             self.running = True
             self.start()
             logger.log(f"VoiceChatCompression initialized for channel {self.channel} "
-                       f"(opus {self.application})")
+                       f"(opus {self.application}, {self.bitrate} bps)")
         except Exception as e:
             logger.log_exception(e, "voice_chat_compression.__init__")
             
@@ -1838,6 +1927,47 @@ class voice_chat_compression(threading.Thread):
 
 
 
+def party_voice_monitor_wanted(session_active, gameplay, pa_monitor,
+                               route_to_bot, music_bot):
+    """Whether the talker's own voice should play in their own ears.
+
+    The same facts the PA monitor is decided from, plus the Party Sync page's
+    `Hear my own voice` switch. Read-only and answered once per capture chunk,
+    so the loop and its test ask one question rather than two:
+
+    * no session -> nothing to monitor: on a map every voice is positional and
+      the talker's own body is already where they are standing;
+    * the PA monitor already plays this voice through the speakers, and a
+      broadcast through the bot's mix already contains the microphone -- a
+      second copy would double it;
+    * otherwise the Party Sync button decides.
+    """
+    if not session_active or gameplay is None:
+        return False
+    if pa_monitor or route_to_bot:
+        return False
+    return bool(music_bot is not None
+                and getattr(music_bot, "party_sync_monitor_voice", False))
+
+
+def _feed_party_voice_monitor(monitor, module, raw_buf):
+    """Limit and hand one local mic frame to the talker's own monitor.
+
+    The limiter is the one the PA monitor puts on a producer frame, so the
+    talker hears the same take at the level the session is actually sent.
+    """
+    if monitor is None or module is None or not raw_buf:
+        return
+    try:
+        frame = soft_limit_audio(
+            bytes(raw_buf), threshold=0.85, ratio=8.0,
+            state_key="party_monitor",
+        )
+        module.feed_voice_monitor(monitor, frame)
+    except Exception:
+        pass
+
+
 def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
     """Hand local mic/music/instrument PCM to the main-thread PA path.
 
@@ -1955,6 +2085,9 @@ class VoiceChatRecord(threading.Thread):
         if device == 'system default': device = self.capture_ext.default_device.decode('utf-8')
         self.stereo = False
         self.audio_input = None
+        # None until the first chunk with real signal decides it; see
+        # `stereo_to_mono` for why the answer is not re-decided per chunk.
+        self._mono_inverted = None
         device_encoded = device.encode()
         for fmt, is_stereo in ((cyal.BufferFormat.MONO16, False), (cyal.BufferFormat.STEREO16, True)):
             try:
@@ -2045,13 +2178,39 @@ class VoiceChatRecord(threading.Thread):
         self._shaped_compression = worker
         return worker
 
-    def _speech_line_for(self, mega):
+    def _party_session_active(self, gameplay):
+        """Whether this client is in an active Party Sync session right now.
+
+        The client only mirrors the Server's state (`gameplay.party_sync`), and that mirror is
+        the honest answer for a local decision like this one: the Server owns membership, and
+        the player's own DSP does not need a vote on it.
+        """
+        from . import party_sync
+        candidate = gameplay
+        if candidate is None and hasattr(self.game, "stack"):
+            try:
+                stack_snapshot = tuple(self.game.stack)
+            except Exception:
+                stack_snapshot = ()
+            for state in reversed(stack_snapshot):
+                if hasattr(state, "party_sync"):
+                    candidate = state
+                    break
+        if candidate is None:
+            return False
+        return party_sync.session_member(getattr(candidate, "party_sync", None))
+
+    def _speech_line_for(self, mega, party=False):
         """This press's line, or None when the voice is not going to the PA.
 
-        Only the broadcast leg is shaped (PA Test Mode, the megaphone weapon, or
-        a mic joined to the Music Bot's broadcast): proximity voice is left
-        alone, and a microphone with a key that has not moved, no Auto-Tune and
-        no harmony copy has no line at all, so its frames are byte-for-byte what
+        Two legs are shaped: the broadcast (PA Test Mode, the megaphone weapon,
+        or a mic joined to the Music Bot's broadcast) and a press made inside a
+        Party Sync session -- `party` is that session, and the Voice Effect,
+        Auto-Tune and the harmony copies all ride it, because the Server
+        delivers a member's voice to the session alone. Proximity voice is left
+        alone, and a microphone with a key that
+        has not moved, no Auto-Tune, no harmony copy and no preset has no line
+        at all, so its frames are byte-for-byte what
         they were. A line that
         is already open stays open until the press ends even if the dial goes
         back to the original key -- it holds the delay it was built with,
@@ -2085,9 +2244,18 @@ class VoiceChatRecord(threading.Thread):
         release -- and it is why turning the effect on mid-sentence needs no new
         press: the wrapper reads the preset every frame, like the tuner's switch.
         """
-        if not mega:
-            return None
         from .music_bot import harmony, voice_effects
+        effect = voice_effects.enabled()
+        # Two legs are shaped: the broadcast (PA Test Mode, the megaphone weapon, a mic joined
+        # to the Music Bot) and, since Party Sync, a press made inside a session. The second is
+        # not a way round the first -- `party_sync.ts` narrows a member's voice to the session,
+        # so nobody on the map hears any of this, and a player who leaves the session talks
+        # plainly again from their next press. Proximity voice stays unshaped, as it always was.
+        # A party press is offered the line even with every shaper off, because any of the three
+        # can be the reason it has one; the `inner is None and not effect` check below is what
+        # keeps a press with nothing chosen from paying for a line it does not need.
+        if not mega and not party:
+            return None
         effect = voice_effects.enabled()
         line = getattr(self, "_speech_line", None)
         if (line is not None and effect
@@ -2100,7 +2268,11 @@ class VoiceChatRecord(threading.Thread):
                 else line)
         if isinstance(base, (AutoTuneLine, harmony.FastHarmonyLine)):
             return line
-        key = speech_key_semitones()
+        # The shapers follow the press into a session: Auto-Tune, the harmony copies and the
+        # pedal are exactly as available to a party press as to a broadcast one, and the
+        # session is where they are heard (`party`). The Speech Key is the one that stays
+        # behind -- it is the SONG's transposer, and a party member is not moving a song.
+        key = speech_key_semitones() if mega else 0
         if line is None:
             inner = None
             if autotune_enabled():
@@ -2121,7 +2293,7 @@ class VoiceChatRecord(threading.Thread):
             else:
                 line = inner
             self._speech_line = line
-        elif base is not None and key != base.semitones:
+        elif mega and base is not None and key != base.semitones:
             # The dial moved mid-sentence: the line glides into the new key
             # the way the song's does, instead of jumping. Through the line's
             # own lock -- the release may be flushing this object right now.
@@ -2158,9 +2330,9 @@ class VoiceChatRecord(threading.Thread):
                     continue
                 
                 if is_stereo:
-                    import numpy as np
-                    mono_arr = np.frombuffer(chunk, dtype=np.int16).reshape(-1, 2).mean(axis=1).astype(np.int16)
-                    chunk = bytearray(mono_arr.tobytes())
+                    # Phase-safe downmix: a plain average cancels the low end
+                    # when the device hands the pair over inverted.
+                    chunk = bytearray(stereo_to_mono(chunk, self))
                 
                 # Resolve gameplay directly
                 gp = getattr(self.player, 'gameplay', None)
@@ -2213,8 +2385,24 @@ class VoiceChatRecord(threading.Thread):
                 # The speech key (Music Bot Settings -> Speech Key). Only the
                 # broadcast leg is tuned, and only while the dial is off the
                 # original key.
-                speech_line = self._speech_line_for(voice_using_mega)
+                # Whether this press carries the pedal is decided when the press starts, like
+                # every other line: a sentence begun in the session finishes shaped, and the
+                # first press after leaving it is plain voice chat again.
+                party_active = self._party_session_active(gp)
+                speech_line = self._speech_line_for(
+                    voice_using_mega, party_active)
                 monitor = bool(voice_using_mega and gp and not route_to_bot)
+                # Your own voice in your own ears while a session holds the
+                # microphone (`Party Sync -> Hear my own voice`). Not the PA
+                # monitor below: that one is heard from the map's speakers, so
+                # on a map with no PA near the talker it plays nothing.
+                party_monitor = None
+                party_monitor_mod = None
+                if party_voice_monitor_wanted(
+                        party_active, gp, monitor, route_to_bot, music_bot):
+                    from . import party_sync_audio as party_monitor_mod
+                    party_monitor = party_monitor_mod.voice_monitor_for(
+                        gp, self.game)
 
                 # Feed local sidechain immediately with 10ms chunk for zero-latency response.
                 # A tuned voice hands the monitor the SHAPED frame instead (below),
@@ -2222,6 +2410,11 @@ class VoiceChatRecord(threading.Thread):
                 # untuned voice.
                 if monitor and speech_line is None:
                     _feed_local_megaphone_direct(gp, chunk, producer='mic')
+                elif party_monitor is not None and speech_line is None:
+                    # The bare 10 ms chunk, the same cut the PA monitor gets:
+                    # a monitor's whole value is how soon it arrives.
+                    _feed_party_voice_monitor(
+                        party_monitor, party_monitor_mod, chunk)
 
                 # Accumulate for the Opus encoder (a frame is exactly VOICE_FRAME_BYTES)
                 accumulated_bytes.extend(chunk)
@@ -2241,6 +2434,11 @@ class VoiceChatRecord(threading.Thread):
                             self.vc_compression.pending_motion = read_motion()
                         if monitor:
                             _feed_local_megaphone_direct(gp, chunk_bytes, producer='mic')
+                        elif party_monitor is not None:
+                            # The SHAPED frame, so the talker hears the voice
+                            # with their key, harmony and effects on it.
+                            _feed_party_voice_monitor(
+                                party_monitor, party_monitor_mod, chunk_bytes)
                     if audio_recorder is not None and not recorded_studio:
                         audio_recorder.feed_transmitted_microphone(
                             chunk_bytes,

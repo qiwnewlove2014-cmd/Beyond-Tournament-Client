@@ -396,6 +396,18 @@ def parse_player_list(data):
     return [entry["name"] for entry in parse_player_list_entries(data)]
 
 
+def session_member(state):
+    """Whether this client is a member (host or a guest) of an active session.
+
+    One home for "am I in the party". The voice path asks here before it shapes a press,
+    because the answer decides who hears the pedal: the Server delivers a member's voice only
+    to the session, and a player outside it is talking to the map. A pending invitee has no
+    session in its state yet (the Server does not put them in `sessionOf` until they accept),
+    so their voice stays normal -- which is the same rule their chat already follows.
+    """
+    return bool(state is not None and getattr(state, "session_id", ""))
+
+
 def upload_should_send(bot):
     # Whether the music bot stream must be uploaded right now: public broadcast OR routing
     # to the megaphone OR hosting an active Party Sync session (the server then narrows the

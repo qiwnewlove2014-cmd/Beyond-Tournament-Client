@@ -19,7 +19,11 @@ The rules, the two seams and the pitfalls are recorded in
 .agents/skills/party-sync-system/.
 """
 
+import collections
 import contextlib
+import threading
+
+import cyal
 
 from . import voice_chat
 from .party_sync import party_member_channels
@@ -63,6 +67,191 @@ def state_members(state):
         except (TypeError, ValueError):
             continue
     return members
+
+
+class PartyVoiceMonitor:
+    """Your own party voice, in your own ears, while a session holds the mic.
+
+    Every receive leg in a session plays SOMEBODY ELSE's voice: the local
+    player's own channel is never sent to them, so a talker hears the party and
+    not themselves. On a map that is right. In a session -- where the point is
+    singing and playing to each other -- it leaves the talker unable to hear
+    their own key, Auto-Tune or effect, which is exactly what they are adjusting.
+
+    The musically honest answer is a monitor, and there are two already: the
+    PA monitor (`voice_chat._feed_local_megaphone_direct`) plays through the
+    map's speakers, and `GuitarLocalMonitor` plays the instrument's own input.
+    Neither covers a party member standing anywhere on a map with no PA near
+    them, so this is one source of its own: centred, direct-to-ear, no panning
+    and no distance, exactly the flag set the session's voice leg uses.
+
+    It is fed the frame the session is actually given -- after
+    `speech_line.shape`, so a talker hears the voice with their speech key,
+    harmony, Auto-Tune and effects on it rather than their bare microphone.
+
+    MAIN THREAD ONLY for `feed` (it queues OpenAL buffers); the capture worker
+    hands frames over through `feed_voice_monitor`, which defers them. The wait
+    is bounded the way a monitor must be: audio handed over but not yet played
+    can only grow while the main thread stalls, and hearing yourself late for
+    the rest of the session is worse than a skip heard once.
+    """
+
+    # How far behind the mouth the monitor may fall before the backlog is let go.
+    QUEUE_LIMIT_MS = 120
+
+    def __init__(self, game, audio_mngr=None):
+        self.game = game
+        self.audio_mngr = (audio_mngr if audio_mngr is not None
+                           else getattr(game, "audio_mngr", None))
+        self.source = None
+        self.queue_limit_samples = int(self.QUEUE_LIMIT_MS * 48000 // 1000)
+        self._waiting = collections.deque()
+        self._waiting_samples = 0
+        self.skips = 0
+
+    def _ensure_source(self):
+        """Create the source, one property at a time. MAIN THREAD ONLY.
+
+        Each flag is applied in its own try: an OpenAL build without
+        `direct_channels` must still get the other four, or the monitor plays
+        as a body in front of the listener instead of in their ears.
+        """
+        if self.source is not None:
+            return True
+        context = getattr(self.audio_mngr, "context", None)
+        if context is None:
+            return False
+        try:
+            source = context.gen_source()
+        except Exception:
+            return False
+        for apply_ in (
+            lambda: setattr(source, "spatialize", False),
+            lambda: setattr(source, "relative", True),
+            lambda: setattr(source, "position", (0.0, 0.0, 0.0)),
+            lambda: setattr(source, "direct_channels", True),
+            lambda: setattr(source, "rolloff_factor", 0.0),
+            lambda: setattr(source, "gain", 1.0),
+        ):
+            with contextlib.suppress(Exception):
+                apply_()
+        self.source = source
+        return True
+
+    def feed(self, pcm):
+        """Queue one mono16 48 kHz chunk. MAIN THREAD ONLY."""
+        if not pcm or self.audio_mngr is None:
+            return
+        try:
+            if not self._ensure_source():
+                return
+            self._release_played()
+            samples = len(pcm) // 2
+            if samples <= 0:
+                return
+            if self._waiting_samples + samples > self.queue_limit_samples:
+                self._let_backlog_go()
+            context = self.audio_mngr.context
+            buf = context.gen_buffer()
+            buf.set_data(bytes(pcm), sample_rate=48000,
+                         format=cyal.BufferFormat.MONO16)
+            self.source.queue_buffers(buf)
+            self._waiting.append(samples)
+            self._waiting_samples += samples
+            if self.source.state in (cyal.SourceState.STOPPED,
+                                     cyal.SourceState.INITIAL):
+                self.source.play()
+        except Exception:
+            pass
+
+    def _release_played(self):
+        """Let go of the chunks the ear has already been given."""
+        played = self.source.buffers_processed
+        if played:
+            self.source.unqueue_buffers()
+        for _ in range(played):
+            if self._waiting:
+                self._waiting_samples -= self._waiting.popleft()
+        if self._waiting_samples < 0:
+            self._waiting_samples = 0
+
+    def _let_backlog_go(self):
+        """Play the newest audio instead of trailing behind the talker.
+
+        A queued buffer that has not played cannot be released
+        (`InvalidOperation`), so the queue is emptied by stopping the source
+        first: a stopped source has played everything in it.
+        """
+        waiting = len(self._waiting)
+        self._waiting.clear()
+        self._waiting_samples = 0
+        self.skips += 1
+        if not waiting:
+            return
+        with contextlib.suppress(Exception):
+            self.source.stop()
+            for _ in range(waiting):
+                if self.source.buffers_queued <= 0:
+                    break
+                self.source.unqueue_buffers()
+
+    def close(self):
+        """Stop and forget the source (every session exit path)."""
+        if self.source is not None:
+            with contextlib.suppress(Exception):
+                self.source.stop()
+            self.source = None
+        self._waiting.clear()
+        self._waiting_samples = 0
+
+
+def voice_monitor_for(gameplay, game=None):
+    # The talker's own-voice monitor of this map view, created on first use.
+    # It holds no position, no soundgroup and no EFX send, so a map load cannot
+    # invalidate it -- and keeping it on `gameplay` is what lets the capture
+    # worker's deferred frame find the same object the menu turned on.
+    if gameplay is None:
+        return None
+    monitor = getattr(gameplay, "_party_voice_monitor", None)
+    if monitor is None:
+        if game is None:
+            game = getattr(gameplay, "game", None)
+        monitor = PartyVoiceMonitor(game)
+        gameplay._party_voice_monitor = monitor
+    return monitor
+
+
+def feed_voice_monitor(monitor, frame):
+    """Hand one local mic frame to the monitor, from any thread.
+
+    The capture worker is not the main thread, and the OpenAL queue is only
+    safe there: the frame is copied before the deferral, so the producer can
+    reuse its buffer, exactly as the PA monitor does.
+    """
+    if monitor is None or not frame:
+        return
+    try:
+        if threading.current_thread() is threading.main_thread():
+            monitor.feed(frame)
+        else:
+            audio_mngr = monitor.audio_mngr
+            if audio_mngr is None:
+                return
+            audio_mngr.defer_audio(
+                lambda pcm=bytes(frame): monitor.feed(pcm)
+            )
+    except Exception:
+        pass
+
+
+def close_voice_monitor(gameplay):
+    # Free the monitor's source. Called on every session exit path with the
+    # rest of the party's direct-to-ear state.
+    if gameplay is None:
+        return
+    monitor = getattr(gameplay, "_party_voice_monitor", None)
+    if monitor is not None:
+        monitor.close()
 
 
 class PartyMemberSink:

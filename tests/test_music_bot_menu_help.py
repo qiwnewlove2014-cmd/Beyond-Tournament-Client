@@ -90,6 +90,16 @@ def make_bot():
     bot.CROSSFADE_SECONDS = 3.0
     bot.CROSSFADE_FADE_CHOICES = (0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0)
     bot.MAX_CROSSFADE_FADE_SECONDS = 30.0
+    # The Party Sync page's own-voice monitor. The page builds the line from
+    # the bot's one builder (`party_sync_monitor_voice_item`), so the fake bot
+    # answers with the same four fields that builder returns -- a label and the
+    # description Tab reads.
+    bot.party_sync_monitor_voice = False
+    bot.party_sync_monitor_voice_item.return_value = (
+        "Hear my own voice: OFF", lambda: None, None,
+        "Plays the voice you are sending into your own ears only, so you can "
+        "hear your own key, Auto-Tune, harmony and effects. Nobody else hears "
+        "this copy and it never goes to the map's speakers or a cabinet.")
     bot.autotune_enabled = False
     bot.autotune_speed = autotune.DEFAULT_SPEED
     bot.autotune_mode = autotune.DEFAULT_MODE

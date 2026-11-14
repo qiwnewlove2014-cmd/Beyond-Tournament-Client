@@ -700,6 +700,151 @@ class SettingsMenus:
         gp.add_substate(_MusicBotEqSlider(self._bot.game, self._bot))
 
 
+    def _voice_page_back(self, gp, back=None):
+        """Leave a voice sub-page: to the page that opened it, or to Settings.
+
+        The Music Bot's own chain (Settings -> Auto-Tune -> Scale) is the
+        default, because that is where these pages were born. A party member
+        opens them from the world's `Party Voice` page instead, and Back there
+        has to come back to it: landing on Music Bot Settings would show a
+        page that player is not allowed to open.
+        """
+        gp.pop_last_substate()
+        if back is not None:
+            back()
+            return
+        self._open_settings_menu()
+
+    def _open_party_voice_menu(self, back=None):
+        """The voice a party member shapes, without the Music Bot around it.
+
+        Inside a Party Sync session the voice line carries three shapers -- the
+        Voice Effect pedal, Auto-Tune and Harmony (`libs/voice_chat.
+        _speech_line_for`, `party=True`) -- and the only people who hear them are
+        the session, because the Server delivers a member's voice to the party
+        and nowhere else. So a member who is not allowed the Music Bot gets
+        exactly those three rows here, and nothing that belongs to a song they
+        are not playing: no output device, no reverb, no queue, no broadcast.
+
+        The Developer's locks still decide -- `gate.filter_items` drops a locked
+        line, and the Voice Effect page refuses on its own -- and the switch
+        rebuilds the page the way Settings does, because the Auto-Tune dials
+        only exist while it is on. `back` is the page a dial's Back returns to
+        (`_voice_page_back`), so this page is a loop rather than a one-way trip.
+        """
+        from ... import menu as menu_mod, menus
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        def close():
+            gp.pop_last_substate()
+            if back is not None:
+                back()
+
+        def again():
+            return self._open_party_voice_menu(back=back)
+
+        def get_voice_effect_label():
+            return f"Voice Effect: {self._bot.voice_effect_label()}"
+
+        def go_voice_effect():
+            gp.pop_last_substate()
+            # Standalone: this visit never came through Music Bot Settings, so
+            # Back from the pedals closes to the game rather than a staff page.
+            self._open_voice_effect_menu(standalone=True)
+
+        def get_autotune_label():
+            return f"Auto-Tune: {self._bot.autotune_label()}"
+
+        def toggle_autotune():
+            enabled = self._bot.toggle_autotune()
+            self._say("Auto-Tune on. The party hears the voice snapped to the "
+                      "nearest note; Retune Speed sets how fast it slides."
+                      if enabled else
+                      "Auto-Tune off. Your own voice again; the harmony "
+                      "voices keep singing.")
+            # The dials exist only while it is on, so the page is rebuilt around
+            # this press and the cursor is put back on the switch (as Settings
+            # does it) instead of jumping to the top of the list.
+            gp.pop_last_substate()
+            stand_on(again(), "Auto-Tune:")
+
+        def get_autotune_speed_label():
+            return f"Retune Speed: {self._bot.autotune_speed_label()}"
+
+        def go_autotune_speed():
+            gp.pop_last_substate()
+            self._open_autotune_speed_menu(back=again)
+
+        def get_autotune_scale_label():
+            return f"Auto-Tune Scale: {self._bot.autotune_scale_label()}"
+
+        def go_autotune_scale():
+            gp.pop_last_substate()
+            self._open_autotune_scale_menu(back=again)
+
+        def get_autotune_amount_label():
+            return f"Tune Amount: {self._bot.autotune_amount_label()}"
+
+        def go_autotune_amount():
+            gp.pop_last_substate()
+            self._open_autotune_amount_menu(back=again)
+
+        def get_harmony_label():
+            return f"Harmony: {self._bot.autotune_harmony_summary()}"
+
+        def go_harmony():
+            gp.pop_last_substate()
+            self._open_harmony_menu(back=again)
+
+        # The same rule Settings follows: off, the three dials change nothing a
+        # player can hear, so they are not in the list at all.
+        dials = [] if not getattr(self._bot, "autotune_enabled", False) else [
+            (
+                "auto_tune", get_autotune_speed_label, go_autotune_speed,
+                "How fast Auto-Tune walks the voice to a note: from Instant, "
+                "which is the effect, to Very slow, which is a correction you "
+                "only notice when the note lands.",
+            ),
+            (
+                "auto_tune", get_autotune_scale_label, go_autotune_scale,
+                "Which notes the voice may be moved to: every semitone, a "
+                "major key, a natural, harmonic or melodic minor key, or a "
+                "pentatonic, in the key you pick.",
+            ),
+            (
+                "auto_tune", get_autotune_amount_label, go_autotune_amount,
+                "How much of the correction is used: 100% puts the voice on "
+                "the notes of the scale, 0% is your own voice with Auto-Tune "
+                "still switched on.",
+            ),
+        ]
+
+        m = menu_mod.Menu(self._bot.game, "Party Voice", parrent=gp)
+        m.add_items(gate.filter_items([
+            ("voice_fx", get_voice_effect_label, go_voice_effect,
+             "Turns the voice the party hears into an instrument: an amp, a "
+             "fuzz, a small radio, a bitcrusher. Your words are still words, "
+             "and Auto-Tune and Harmony keep working underneath it."),
+            ("auto_tune", get_autotune_label, toggle_autotune,
+             "Snaps the voice the party hears to the nearest note. Retune "
+             "Speed sets how fast it slides and Auto-Tune Scale sets which "
+             "notes count; it costs about a tenth of a second of delay."),
+            *dials,
+            ("auto_tune", get_harmony_label, go_harmony,
+             "Up to two extra voices above or below yours, sung in the same "
+             "frame the party receives. It sings with Auto-Tune on or off -- "
+             "off, each copy is its plain interval from your own voice."),
+            (None, "Back", close,
+             "Closes Party Voice and returns to the game. The settings are "
+             "kept for the next press."),
+        ]))
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+        return m
+
+
 class _MusicBotEqSlider(state.State):
     """Accessible Bass/Mid/Treble sliders for the personal Music Bot EQ.
 

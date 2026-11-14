@@ -275,6 +275,21 @@ class PartyMenus:
         # for a screen reader already. A guest may capture only with the
         # host's grant -- the server drops the frames without it, so offering
         # the page would capture into silence.
+        # Your own ears, and the first line here that is about hearing rather
+        # than sending. A session's voice leg is the other members' voices, so
+        # without this a talker cannot hear their own key, Auto-Tune or effect
+        # at all. It sits above the capture page on purpose: monitoring
+        # yourself is a press away while singing, choosing a program is not,
+        # and `External audio from a music program` stays the last line of the
+        # menu. One builder, shared with the Ctrl+F8 quick menu.
+        if ps is not None and ps.role is not None and callable(
+                getattr(self._bot, "party_sync_monitor_voice_item", None)):
+            items.append(self._bot.party_sync_monitor_voice_item(
+                self._say,
+                lambda: self._open_party_sync_menu(standalone=standalone,
+                                                   menu=m),
+            ))
+
         may_stream = getattr(ps, "may_stream", None)
         may_send = (ps is None or ps.role != "guest"
                     or bool(may_stream and may_stream(
