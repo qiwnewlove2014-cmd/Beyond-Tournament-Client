@@ -571,6 +571,10 @@ def options_menu(game, func_call, replace_call=None, parent=None, in_game=False)
         # ever matters on a map that gave a cabinet a room.
         (game.toggle_item("Wall proximity tone", "wall_tone", False)),
         (game.toggle_item("Compass turn cue", "compass_turn_cue", True)),
+        # The picture of the open menu (`libs/ui/menu_view.py`). Listed here
+        # rather than in a visual-only menu because it is the one switch a
+        # player who cannot see never needs and a player who can may want off.
+        (game.toggle_item("Visual menus", "visual_menus", True)),
         turning_sensitivity_item,
         turning_mode_item,
         (game.toggle_item("play intro at start up", "play_intro_at_start")),

@@ -18,6 +18,10 @@ prefs = {
     "stream_ambience": True,
     "turning_sensitivity": 1,
     "turn_mode": "degrees",
+    # The picture of the open menu (`libs/ui/menu_view.py`). On by default so a
+    # player who can see gets it without asking; off is for exactly what it
+    # sounds like -- somebody who does not want a picture on their screen.
+    "visual_menus": True,
 }
 
 TURNING_SENSITIVITY_DEFAULT = 1

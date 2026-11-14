@@ -69,8 +69,31 @@ class Menu(state.State):
         # Menu context for builder copy/paste shortcuts (set by make_menu).
         self.menu_event = ""
         self.menu_values = []
+        # The picture of this menu (`libs/ui/menu_view.py`): None until the
+        # first frame needs it, and False once it has been built and failed.
+        self._visual_view = None
         self.in_history_mode = False
         self.history_pos = 0
+
+    def visual_view(self):
+        """The picture of this menu, built on first use (`libs/ui/menu_view.py`).
+
+        Lazily, and tolerant: a client whose pygame build cannot draw a font is
+        still a working menu, so a failure here shelves the picture for the life
+        of this state instead of raising into the menu's own update. Returns
+        None when there is no picture to be had, which every caller checks.
+        """
+        view = getattr(self, "_visual_view", None)
+        if view is None:
+            try:
+                from .ui.menu_view import MenuView
+                view = MenuView()
+            except Exception as exc:
+                from .logger import log_exception
+                log_exception(exc, "menu visual view")
+                view = False
+            self._visual_view = view
+        return view or None
 
     def speak_history_item(self):
         history_items = getattr(self.game, "match_history", [])
@@ -455,6 +478,8 @@ class Menu(state.State):
         # Drain any decoded preview so it can play this frame (non-blocking).
         self._poll_preview_result()
         self._sync_preview_reverb()
+        # Built once per menu state; None when the visual layer is unavailable.
+        view = self.visual_view()
 
         # Stop a stuck Push-to-Talk recording when a menu opens over it (the
         # menu swallows the key release, so the mic would stay hot). Toggle-mode
@@ -470,6 +495,13 @@ class Menu(state.State):
 
         for event in events:
             if event.type == pg.KEYUP:
+                continue
+
+            # The picture of this menu (`libs/ui/menu_view.py`): a mouse event
+            # becomes the same call the keys below make, so the two ways of
+            # using a menu cannot drift apart.
+            if view is not None and view.handles(event):
+                view.handle_event(self, event)
                 continue
 
             if event.type == pg.KEYDOWN:
@@ -688,6 +720,10 @@ class Menu(state.State):
                             self.direct_soundgroup.play(self.click, cat="ui")
                         self.speak_current_item()
             # Consume all events when in menu - don't pass them to gameplay
+        if view is not None:
+            # One picture per frame, after this frame's keys have moved the
+            # focus, so the highlight is never a frame behind the speech.
+            view.draw(self)
         return True
 
     def select_current_item(self):
