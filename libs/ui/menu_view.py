@@ -51,19 +51,126 @@ SCROLLBAR_WIDTH = 8
 MIN_WIDTH = 240
 MIN_HEIGHT = 160
 
-# Colours. High contrast on purpose (the point is a player who can see at all,
-# on whatever monitor): near-black paper, light text, and a focus bar that
-# differs from the row colour by lightness, not only by hue.
-COLOR_BACKGROUND = (12, 12, 16)
-COLOR_ROW = (28, 28, 36)
-COLOR_ROW_FOCUS = (58, 92, 150)
-COLOR_BORDER = (74, 74, 90)
-COLOR_TEXT = (232, 232, 240)
-COLOR_TEXT_FOCUS = (255, 255, 255)
-COLOR_TEXT_DIM = (138, 146, 160)
-COLOR_HELP = (176, 184, 198)
-COLOR_SCROLL = (96, 96, 116)
-COLOR_HOVER = (120, 132, 152)
+class Theme:
+    """One menu family's palette: a page, a header band, rows, a footer.
+
+    Colour is doing the work that icons would do in another game: two menus
+    from different families must be tellable apart at a glance, from across a
+    room, by somebody who has just looked up from their keyboard. Each palette
+    keeps the parts that matter for reading -- a light-on-dark contrast the rows
+    can be read against, a focused row clearly lighter than the others, and a
+    description panel quieter than both -- and differs from its siblings in hue.
+    """
+
+    __slots__ = ("name", "background", "header", "panel", "row", "row_alt",
+                 "row_focus", "accent", "border", "text", "text_focus",
+                 "text_dim", "help", "hover", "scroll")
+
+    def __init__(self, name, background, header, panel, row, row_alt, row_focus,
+                 accent, border, text, text_focus, text_dim, help_text, hover,
+                 scroll):
+        self.name = name
+        self.background = background
+        self.header = header
+        self.panel = panel
+        self.row = row
+        self.row_alt = row_alt
+        self.row_focus = row_focus
+        self.accent = accent
+        self.border = border
+        self.text = text
+        self.text_focus = text_focus
+        self.text_dim = text_dim
+        self.help = help_text
+        self.hover = hover
+        self.scroll = scroll
+
+
+# One palette per family of menus. `default` is the slate blue the layer
+# shipped with; every other family is a different hue, so "which menu am I in"
+# is answered by the colour of the whole window before a single word is read.
+THEMES = {
+    "default": Theme(
+        "default", background=(14, 16, 22), header=(22, 26, 38), panel=(10, 12, 18),
+        row=(30, 32, 42), row_alt=(26, 28, 37), row_focus=(58, 92, 150),
+        accent=(98, 150, 220), border=(74, 78, 96), text=(232, 232, 240),
+        text_focus=(255, 255, 255), text_dim=(138, 146, 160),
+        help_text=(176, 184, 198), hover=(120, 132, 152), scroll=(96, 100, 120)),
+    "main": Theme(
+        "main", background=(8, 14, 32), header=(22, 44, 92), panel=(6, 11, 26),
+        row=(26, 38, 68), row_alt=(22, 33, 60), row_focus=(46, 104, 206),
+        accent=(86, 158, 255), border=(58, 86, 148), text=(226, 236, 255),
+        text_focus=(255, 255, 255), text_dim=(140, 160, 200),
+        help_text=(176, 196, 235), hover=(120, 160, 225), scroll=(70, 110, 180)),
+    "settings": Theme(
+        "settings", background=(6, 20, 20), header=(16, 52, 54), panel=(4, 16, 16),
+        row=(22, 44, 46), row_alt=(19, 39, 41), row_focus=(26, 124, 124),
+        accent=(72, 200, 196), border=(44, 90, 92), text=(222, 244, 244),
+        text_focus=(255, 255, 255), text_dim=(130, 170, 170),
+        help_text=(168, 214, 210), hover=(100, 180, 176), scroll=(56, 120, 120)),
+    "music": Theme(
+        "music", background=(16, 10, 28), header=(44, 24, 72), panel=(13, 8, 24),
+        row=(38, 28, 58), row_alt=(33, 24, 52), row_focus=(112, 64, 180),
+        accent=(176, 120, 255), border=(76, 52, 116), text=(238, 230, 255),
+        text_focus=(255, 255, 255), text_dim=(160, 144, 190),
+        help_text=(200, 184, 235), hover=(150, 120, 210), scroll=(92, 64, 150)),
+    "party": Theme(
+        "party", background=(8, 22, 14), header=(20, 58, 34), panel=(6, 18, 11),
+        row=(24, 48, 32), row_alt=(21, 43, 29), row_focus=(36, 132, 72),
+        accent=(86, 214, 132), border=(42, 96, 60), text=(226, 248, 232),
+        text_focus=(255, 255, 255), text_dim=(140, 180, 150),
+        help_text=(178, 222, 190), hover=(104, 180, 134), scroll=(52, 120, 74)),
+    "media": Theme(
+        "media", background=(24, 16, 6), header=(62, 40, 10), panel=(20, 13, 5),
+        row=(50, 36, 12), row_alt=(44, 32, 11), row_focus=(168, 112, 26),
+        accent=(240, 178, 64), border=(108, 80, 28), text=(255, 242, 220),
+        text_focus=(255, 255, 255), text_dim=(190, 166, 128),
+        help_text=(232, 206, 158), hover=(198, 152, 72), scroll=(132, 96, 36)),
+    "builder": Theme(
+        "builder", background=(24, 12, 12), header=(66, 24, 24), panel=(20, 10, 10),
+        row=(52, 26, 26), row_alt=(46, 23, 23), row_focus=(166, 52, 52),
+        accent=(240, 118, 110), border=(110, 52, 52), text=(255, 230, 228),
+        text_focus=(255, 255, 255), text_dim=(188, 148, 146),
+        help_text=(232, 196, 192), hover=(196, 104, 98), scroll=(128, 56, 54)),
+    "cinema": Theme(
+        "cinema", background=(12, 12, 30), header=(36, 34, 80), panel=(10, 10, 26),
+        row=(30, 30, 58), row_alt=(26, 26, 52), row_focus=(74, 66, 168),
+        accent=(140, 132, 240), border=(60, 58, 110), text=(232, 230, 255),
+        text_focus=(255, 255, 255), text_dim=(150, 148, 190),
+        help_text=(186, 184, 232), hover=(120, 116, 200), scroll=(78, 74, 140)),
+    "instrument": Theme(
+        "instrument", background=(22, 10, 20), header=(64, 22, 54), panel=(18, 8, 16),
+        row=(50, 24, 44), row_alt=(44, 21, 39), row_focus=(160, 54, 124),
+        accent=(240, 120, 196), border=(108, 46, 88), text=(255, 230, 246),
+        text_focus=(255, 255, 255), text_dim=(188, 146, 174),
+        help_text=(232, 190, 216), hover=(196, 100, 156), scroll=(128, 50, 100)),
+}
+
+# Which family a menu belongs to, read from what the menu itself already says:
+# its title (and, for the Server-driven builder menus, the event that built
+# it). First match wins, so the order below is the specificity order.
+_THEME_RULES = (
+    (("main menu", "agreement", "no account", "account", "login"), "main"),
+    (("builder", "technician", "element", "map "), "builder"),
+    (("music bot", "playback", "queue", "voice effect", "auto-tune", "autotune",
+      "speech key", "harmony", "recording", "converter", "download", "subtitle"),
+     "music"),
+    (("party", "session", "jam", "team talk"), "party"),
+    (("jukebox", "cabinet", "library", "playlist", "song", "track"), "media"),
+    (("cinema", "speaker", "room", "pan", "mixer", "console"), "cinema"),
+    (("piano", "guitar", "drum", "instrument", "chord", "metronome"), "instrument"),
+    (("option", "setting", "device", "key", "hrtf", "buffer", "audio"), "settings"),
+)
+
+
+def theme_for(menu):
+    """The palette for this menu, from its title and the event that built it."""
+    haystack = " ".join(str(part or "") for part in (
+        getattr(menu, "title", ""), getattr(menu, "menu_event", ""))).lower()
+    for keys, name in _THEME_RULES:
+        if any(key in haystack for key in keys):
+            return THEMES[name]
+    return THEMES["default"]
 
 TEXT_SIZE = 20
 TITLE_SIZE = 25
@@ -487,71 +594,89 @@ class MenuView:
         import pygame
         width, height = screen.get_size()
         layout = self.layout_for(menu, (width, height))
-        screen.fill(COLOR_BACKGROUND)
+        theme = theme_for(menu)
+
+        # The whole window belongs to the menu while it is open: the family's
+        # page, a band of its own colour behind the title, and a footer for the
+        # description. Colour is what an icon would be in another game -- two
+        # families must be tellable apart before a word is read.
+        screen.fill(theme.background)
+        pygame.draw.rect(screen, theme.header, pygame.Rect(0, 0, width, TITLE_HEIGHT))
+        pygame.draw.rect(screen, theme.accent,
+                         pygame.Rect(0, TITLE_HEIGHT - 3, width, 3))
 
         title = self._surface(getattr(menu, "title", "") or "", TITLE_SIZE,
-                              COLOR_TEXT, bold=True, width=width - PAD * 2)
-        screen.blit(title, (PAD, 12))
-        self._rule(screen, TITLE_HEIGHT - 6, width)
+                              theme.text_focus, bold=True, width=width - PAD * 2)
+        screen.blit(title, (PAD, 10))
 
         items = menu.items
         hovered = self.hover_of(menu)
         for index, (rx, ry, rw, rh) in layout.rows:
             item = items[index] if index < len(items) else None
             focused = index == int(getattr(menu, "pos", -1))
+            # A zebra: two nearly equal shades give a long list something to
+            # follow with the eye, without making any row look chosen.
             pygame.draw.rect(
                 screen,
-                COLOR_ROW_FOCUS if focused else COLOR_ROW,
+                theme.row_focus if focused else (theme.row if index % 2 == 0 else theme.row_alt),
                 pygame.Rect(rx, ry, rw, rh),
                 border_radius=5,
             )
             if focused:
-                pygame.draw.rect(screen, COLOR_BORDER,
+                pygame.draw.rect(screen, theme.border,
                                  pygame.Rect(rx, ry, rw, rh), 1, border_radius=5)
+                # The chosen line also carries the family's colour down its left
+                # edge, so it reads as chosen even in a still picture.
+                pygame.draw.rect(screen, theme.accent,
+                                 pygame.Rect(rx, ry + 2, 4, rh - 4), border_radius=2)
             elif index == hovered:
                 # The pointer's own mark: an outline, not the focus bar, so a
                 # player can tell what they are pointing at from what the keys
                 # are on.
-                pygame.draw.rect(screen, COLOR_HOVER,
+                pygame.draw.rect(screen, theme.hover,
                                  pygame.Rect(rx, ry, rw, rh), 1, border_radius=5)
             marker = ">" if focused else " "
-            counter = f"{index + 1}."
-            prefix = f"{marker} {counter} "
+            prefix = f"{marker} {index + 1}. "
             arrow = has_arrow(item)
             text_width = rw - PAD - (ARROW_WIDTH if arrow else 0)
             label = self._surface(
                 f"{prefix}{label_of(item)}", TEXT_SIZE,
-                COLOR_TEXT_FOCUS if focused else COLOR_TEXT,
+                theme.text_focus if focused else theme.text,
                 width=text_width,
             )
             screen.blit(label, (rx + 10, ry + (rh - label.get_height()) // 2))
             if has_preview(item):
-                dot = self._surface("*", TEXT_SIZE, COLOR_TEXT_DIM)
+                dot = self._surface("*", TEXT_SIZE, theme.accent)
                 screen.blit(dot, (rx + rw - (ARROW_WIDTH if arrow else 0) - 18,
                                   ry + (rh - dot.get_height()) // 2))
             if arrow:
-                left = self._surface("<", TEXT_SIZE, COLOR_TEXT_FOCUS if focused else COLOR_TEXT)
-                right = self._surface(">", TEXT_SIZE, COLOR_TEXT_FOCUS if focused else COLOR_TEXT)
+                arrow_colour = theme.text_focus if focused else theme.accent
+                left = self._surface("<", TEXT_SIZE, arrow_colour)
+                right = self._surface(">", TEXT_SIZE, arrow_colour)
                 cy = ry + (rh - left.get_height()) // 2
                 screen.blit(left, (rx + rw - ARROW_WIDTH + 4, cy))
                 screen.blit(right, (rx + rw - 14, cy))
 
         if layout.scrollable:
-            self._scrollbar(screen, layout)
+            self._scrollbar(screen, layout, theme)
 
-        self._draw_help(screen, menu, layout, width, height)
+        self._draw_help(screen, menu, layout, width, height, theme)
         self.draws += 1
         with contextlib.suppress(Exception):
             pygame.display.update()
         return True
 
-    def _draw_help(self, screen, menu, layout, width, height):
+    def _draw_help(self, screen, menu, layout, width, height, theme):
         rect = layout.help_rect
         if not rect:
             return
         import pygame
         hx, hy, hw, hh = rect
-        pygame.draw.line(screen, COLOR_BORDER, (PAD, hy), (width - PAD, hy))
+        # The footer is its own surface, darker than the page and divided from
+        # the list by the family's colour: which part is a line and which part
+        # is a sentence about it must never be in doubt.
+        pygame.draw.rect(screen, theme.panel, pygame.Rect(hx, hy, hw, hh))
+        pygame.draw.line(screen, theme.accent, (PAD, hy), (width - PAD, hy))
         answered = self.help_index_for(menu)
         items = menu.items
         item = items[answered] if 0 <= answered < len(items) else None
@@ -562,17 +687,12 @@ class MenuView:
         lines = wrap_text(text, chars)[:3]
         y = hy + 8
         for line in lines:
-            surface = self._surface(line, HELP_SIZE, COLOR_HELP, width=width - PAD * 2)
+            surface = self._surface(line, HELP_SIZE, theme.help, width=width - PAD * 2)
             screen.blit(surface, (PAD, y))
             y += surface.get_height() + 2
 
     @staticmethod
-    def _rule(screen, y, width):
-        import pygame
-        pygame.draw.line(screen, COLOR_BORDER, (PAD, y), (width - PAD, y))
-
-    @staticmethod
-    def _scrollbar(screen, layout):
+    def _scrollbar(screen, layout, theme=None):
         import pygame
         total = max(1, layout.count)
         visible = min(layout.max_rows, total)
@@ -583,8 +703,9 @@ class MenuView:
         travel = max(0, track_height - thumb_height)
         offset = int(travel * layout.scroll / max(1, total - visible)) if total > visible else 0
         x = layout.width - PAD - SCROLLBAR_WIDTH + 4
-        pygame.draw.rect(screen, COLOR_ROW, pygame.Rect(x, track_top, SCROLLBAR_WIDTH, track_height),
+        theme = theme or THEMES["default"]
+        pygame.draw.rect(screen, theme.row, pygame.Rect(x, track_top, SCROLLBAR_WIDTH, track_height),
                          border_radius=4)
-        pygame.draw.rect(screen, COLOR_SCROLL,
+        pygame.draw.rect(screen, theme.scroll,
                          pygame.Rect(x, track_top + offset, SCROLLBAR_WIDTH, thumb_height),
                          border_radius=4)

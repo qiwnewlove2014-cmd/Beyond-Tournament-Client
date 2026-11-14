@@ -618,6 +618,79 @@ class SimulatedSightedSessionTests(unittest.TestCase):
         self.assertGreaterEqual(wide.max_rows, narrow.max_rows)
 
 
+class ThemeTests(unittest.TestCase):
+    """Which palette a menu gets, and that every palette is usable."""
+
+    def pick(self, title, event=""):
+        return menu_view.theme_for(types.SimpleNamespace(title=title, menu_event=event))
+
+    def test_the_main_menu_is_its_own_blue(self):
+        self.assertEqual(self.pick("Main menu.").name, "main")
+
+    def test_options_is_the_settings_family(self):
+        self.assertEqual(self.pick("Options menu").name, "settings")
+
+    def test_the_music_bot_is_its_own_family(self):
+        self.assertEqual(self.pick("Music Bot Mode").name, "music")
+
+    def test_a_party_page_is_the_party_family(self):
+        self.assertEqual(self.pick("Party Sync").name, "party")
+
+    def test_a_session_page_is_the_party_family_too(self):
+        self.assertEqual(self.pick("Session jam").name, "party")
+
+    def test_the_builder_menu_is_the_builder_family(self):
+        self.assertEqual(self.pick("Builder Menu", "builder_menu_select").name, "builder")
+
+    def test_the_technician_menu_shares_the_builder_family(self):
+        self.assertEqual(self.pick("Technician Menu", "builder_menu_select").name,
+                         "builder")
+
+    def test_an_element_list_is_the_builder_family_from_its_event(self):
+        self.assertEqual(self.pick("Select Element to Edit", "edit_element_select").name,
+                         "builder")
+
+    def test_a_jukebox_page_is_the_media_family(self):
+        self.assertEqual(self.pick("Jukebox cabinet").name, "media")
+
+    def test_a_cinema_page_is_the_cinema_family(self):
+        self.assertEqual(self.pick("Cinema room 2").name, "cinema")
+
+    def test_an_instrument_page_is_the_instrument_family(self):
+        self.assertEqual(self.pick("Piano settings").name, "instrument")
+
+    def test_an_unknown_title_falls_back_to_the_default_palette(self):
+        self.assertEqual(self.pick("Something else").name, "default")
+
+    def test_a_menu_without_a_title_still_gets_a_palette(self):
+        self.assertEqual(menu_view.theme_for(types.SimpleNamespace()).name, "default")
+        self.assertEqual(menu_view.theme_for(object()).name, "default")
+
+    def test_every_family_has_a_different_page_and_a_different_focus(self):
+        backgrounds = {theme.background for theme in menu_view.THEMES.values()}
+        focuses = {theme.row_focus for theme in menu_view.THEMES.values()}
+        self.assertEqual(len(backgrounds), len(menu_view.THEMES))
+        self.assertEqual(len(focuses), len(menu_view.THEMES))
+
+    def test_every_family_is_readable_and_its_focus_stands_out(self):
+        def lightness(colour):
+            return 0.299 * colour[0] + 0.587 * colour[1] + 0.114 * colour[2]
+        for theme in menu_view.THEMES.values():
+            self.assertGreater(lightness(theme.text) - lightness(theme.background), 90,
+                               f"{theme.name}: text on page")
+            self.assertGreater(lightness(theme.row_focus) - lightness(theme.row), 25,
+                               f"{theme.name}: focused row over a plain row")
+            self.assertGreater(lightness(theme.help) - lightness(theme.panel), 60,
+                               f"{theme.name}: description on its footer")
+
+    def test_a_themed_menu_draws(self):
+        for name, theme in menu_view.THEMES.items():
+            menu = FakeMenu([("Line", lambda: None, None, "Described.")],
+                            title=name + " menu")
+            view = menu_view.MenuView()
+            self.assertTrue(view.draw(menu, pygame.Surface((900, 500))), name)
+
+
 class RealMenuIntegrationTests(unittest.TestCase):
     """The picture on the real `Menu`, including that the keys still work."""
 
