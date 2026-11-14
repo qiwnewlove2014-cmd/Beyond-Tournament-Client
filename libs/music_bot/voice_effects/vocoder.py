@@ -382,6 +382,24 @@ def values():
     return board
 
 
+def set_values(board):
+    """Write the whole board at once -- a favourite recalled, one revision.
+
+    The same rule as `set_value` for the mode and waveform: a locked note and
+    a noise carrier cannot both be true, so the snapshot is corrected once
+    here rather than saved into a board that would have to lie about it. A
+    partial board is filled from the table, so a row added to the board since
+    the snapshot was saved takes its default.
+    """
+    global _revision
+    full = boards.read(PARAMS, board)
+    if full["mode"] != "current" and full["wave"] == "noise":
+        full["wave"] = "saw"
+    options.set(_OPTION, full)
+    _revision += 1
+    return full
+
+
 def row_visible(param_id, board):
     """Whether a row is shown for the mode the board is in.
 

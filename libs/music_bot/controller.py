@@ -2074,6 +2074,9 @@ class MapMusicBot:
     def _open_voice_tone_menu(self):
         return self._menus()._open_voice_tone_menu()
 
+    def _open_voice_favourites_menu(self):
+        return self._menus()._open_voice_favourites_menu()
+
     def _open_builder_recipes_menu(self, family_id=None, from_board=False):
         return self._menus()._open_builder_recipes_menu(family_id, from_board)
 

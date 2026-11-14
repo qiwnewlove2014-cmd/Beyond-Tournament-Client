@@ -343,6 +343,22 @@ def set_value(param_id, value):
     return chosen
 
 
+def set_values(board):
+    """Write the whole board at once -- a favourite recalled, one revision.
+
+    Ten `set_value` calls would be ten rebuilds of a processor the player
+    hears between them, and a click at every knob; one write is one
+    crossfade, the same thing a single knob change gives them. `boards.read`
+    fills a partial board from the table, so a snapshot saved before a knob
+    moved still recalls something complete.
+    """
+    global _revision
+    full = boards.read(PARAMS, board)
+    options.set(_OPTION, full)
+    _revision += 1
+    return full
+
+
 def default_label(param_id):
     """What this knob's own default is called in the menu's words."""
     return boards.default_label(PARAMS, param_id)

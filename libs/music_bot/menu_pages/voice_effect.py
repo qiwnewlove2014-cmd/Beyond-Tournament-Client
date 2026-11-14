@@ -31,6 +31,44 @@ from ... import state
 from .settings import _speak
 
 #: What Tab says about the `Tone:` line, on every page that offers it.
+#: What Tab says about the `Favorites` line on the Voice Effect page.
+_FAVOURITES_NOTE = (
+    "Your own shortlist: the pedals you actually use, and any sound you "
+    "designed on one of the boards, saved as it was set. A line here is one "
+    "press from being your voice effect again, and a saved board writes its "
+    "settings back rather than just choosing the board. You can save a sound "
+    "from the page it is chosen on, and the list holds twenty."
+)
+
+#: What every board page's save line says under Tab.
+_SAVE_NOTE = (
+    "Saves this board as it is set now into Favorites, under its own name, so "
+    "you can come back to this exact sound. It is a snapshot: a knob you turn "
+    "afterwards changes the board, not the favourite."
+)
+
+
+def _favourite_message(outcome, entry):
+    """One spoken sentence for what saving an entry came to.
+
+    Four answers (`favourites.add`) and four sentences. In one place because
+    two pages save -- the Favorites page and each board's own line -- and a
+    player who hears "already saved" once should hear the same words twice.
+    """
+    from ..voice_effects import favourites
+    if outcome == "added":
+        saved = favourites.count()
+        return (f"Saved to Favorites: {favourites.label(entry)}. "
+                f"{saved} of {favourites.MAX} saved.")
+    if outcome == "exists":
+        return "That sound is already in your favorites."
+    if outcome == "full":
+        return (f"Your favorites hold {favourites.MAX} sounds already. "
+                f"Remove one on the Favorites page to make room.")
+    return ("That cannot be saved to favorites. Off is the absence of an "
+            "effect rather than a sound.")
+
+
 _TONE_NOTE = (
     "The channel strip for this one effect: Low Cut takes the rumble under "
     "the voice, then four tone bands -- Low for the chest and the room, "
@@ -100,6 +138,7 @@ class VoiceEffectMenus:
         from .. import gate as music_bot_gate
         from ..voice_effects import builder
         from ..voice_effects import custom
+        from ..voice_effects import favourites
         from ..voice_effects import pan
         from ..voice_effects import tone
         from ..voice_effects import vocoder
@@ -285,6 +324,18 @@ class VoiceEffectMenus:
         def open_tone():
             self._open_voice_tone_menu(current())
 
+        def make_favourites_label():
+            # The count is live: saving a sound from a family or a board and
+            # coming back shows the new number on the page already built.
+            def label_fn():
+                saved = favourites.count()
+                return ("Favorites: empty" if not saved
+                        else f"Favorites ({saved})")
+            return label_fn
+
+        def go_favourites():
+            self._open_voice_favourites_menu()
+
         if standalone_mode:
             title = (f"Voice Effect: {self._bot.voice_effect_label()}"
                      if group is None else
@@ -300,6 +351,11 @@ class VoiceEffectMenus:
             items = [(make_label(voice_effects.DEFAULT_EFFECT),
                       pick(voice_effects.DEFAULT_EFFECT), None,
                       note_for(voice_effects.DEFAULT_EFFECT))]
+            # Directly under Off, so the first two lines are "no effect" and
+            # "the effects I use": a player with a shortlist never arrows
+            # through eleven families to reach the four sounds they like.
+            items.append((make_favourites_label(), go_favourites, None,
+                          _FAVOURITES_NOTE))
             for group_id, name, note, members in (
                     voice_effects.VOICE_EFFECT_GROUPS):
                 items.append((make_group_label(group_id, name, members),
@@ -345,6 +401,189 @@ class VoiceEffectMenus:
                               note_for(voice_effects.VOX_LAB_EFFECT)))
             items.append(("Back", go_to_groups, None,
                           "Returns to the list of voice effect families."))
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_voice_favourites_menu(self):
+        """The player's shortlist: their own sounds, and the ways to keep one.
+
+        One page, three verbs, and no new keys. A line at the top applies a
+        saved sound (a preset is chosen; a board snapshot has its settings
+        written back first, so recalling a design is the design, not the
+        board it was made on), a line adds whatever is chosen *now*, and two
+        lines take things out. That is deliberately the whole feature: the
+        flexibility lives in what an entry can BE (`voice_effects/
+        favourites.py`: a preset id, or a board and every value it had), not
+        in more page furniture, and the entry keeps working when a board grows
+        a knob.
+
+        **Adding is also on the page the sound is on.** Every board ends with
+        `Add this ... to Favorites`, because the moment a player has just made
+        the sound is the moment they know they want it back; making them walk
+        to this page and remember to come back is how a shortlist goes unused.
+
+        The page is rebuilt after a save or a removal rather than patched in
+        place -- the rows ARE the entries -- and the sentence about what
+        happened is spoken after the rebuilt page's title, so the last thing
+        heard is what the press did.
+        """
+        from ... import menu as menu_mod, menus
+        from .. import gate as music_bot_gate
+        from ..voice_effects import favourites
+        from .. import voice_effects
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+        if music_bot_gate.blocked("voice_fx"):
+            return
+
+        def current():
+            return voice_effects.clamp_effect(
+                getattr(self._bot, "voice_effect",
+                        voice_effects.DEFAULT_EFFECT))
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_voice_effect_menu()
+
+        def reopen():
+            # One page, rebuilt: the list on screen and the saved list are the
+            # same object, so a row that just went must not be left arrowable.
+            gp.pop_last_substate()
+            self._open_voice_favourites_menu()
+
+        def is_active(entry):
+            effect_id = favourites.effect_of(entry)
+            if effect_id is None or effect_id != current():
+                return False
+            return entry.get("kind") != "board" or favourites.matches(entry)
+
+        def make_label(entry):
+            def label_fn():
+                line = favourites.label(entry)
+                return f"{line} (active)" if is_active(entry) else line
+            return label_fn
+
+        def pick(entry):
+            def apply():
+                effect_id = favourites.restore(entry)
+                if effect_id is None:
+                    self._say("That favourite is a preset this build no longer "
+                              "has. Remove it to tidy the list.")
+                    return
+                self._bot.set_voice_effect(effect_id)
+                self._say(f"Voice effect: {favourites.label(entry)}. "
+                          f"{voice_effects.effect_note(effect_id)}")
+                m.speak_current_item()
+            return apply
+
+        def make_add_label():
+            # Live, because the chosen effect moves while this page is open
+            # (a preset is one line away): the line names what it would save.
+            def label_fn():
+                now = current()
+                if now == voice_effects.DEFAULT_EFFECT:
+                    return "Add the effect in use: nothing is chosen"
+                return ("Add the effect in use: "
+                        f"{voice_effects.effect_label(now)}")
+            return label_fn
+
+        def add_in_use():
+            now = current()
+            if now == voice_effects.DEFAULT_EFFECT:
+                self._say("Pick a voice effect first: Off is the absence of an "
+                          "effect, not a sound to save.")
+                return
+            entry = favourites.snapshot(now)
+            outcome = favourites.add(entry)
+            reopen()
+            self._say(_favourite_message(outcome, entry))
+
+        def open_remove():
+            rows = favourites.entries()
+            if not rows:
+                self._say("There is nothing in your favorites to remove.")
+                return
+
+            def make_row(entry):
+                def press():
+                    removed = favourites.key(entry)
+                    name = favourites.label(entry)
+                    if favourites.remove(removed):
+                        reopen()
+                        self._say(f"Removed from favorites: {name}.")
+                return press
+
+            page = menu_mod.Menu(
+                self._bot.game, "Music Bot Voice Effect: Remove a favorite",
+                parrent=gp)
+            page.add_items(
+                [(favourites.label(entry), make_row(entry), None,
+                  "Removes this sound from your favorites. The sound itself "
+                  "is untouched: a preset stays on its family's page, and a "
+                  "saved board setting stays on the board.")
+                 for entry in rows]
+                + [("Back", lambda: gp.pop_last_substate(), None,
+                    "Returns to the favorites list with everything kept.")])
+            menus.set_default_sounds(page)
+            gp.add_substate(page)
+
+        def open_clear():
+            if not favourites.count():
+                self._say("Your favorites are already empty.")
+                return
+
+            def keep():
+                gp.pop_last_substate()
+
+            def do_clear():
+                gone = favourites.clear()
+                reopen()
+                self._say(f"Favorites cleared: {gone} "
+                          f"{'sound' if gone == 1 else 'sounds'} removed.")
+
+            page = menu_mod.Menu(
+                self._bot.game,
+                "Music Bot Voice Effect: Clear all favorites?", parrent=gp)
+            page.add_items([
+                ("Yes, clear the list", do_clear, None,
+                 "Forgets every favorite. The presets stay where they are and "
+                 "the boards keep their settings; only the shortlist goes."),
+                ("No, keep it", keep, None,
+                 "Returns to the favorites list with everything kept."),
+            ])
+            menus.set_default_sounds(page)
+            gp.add_substate(page)
+
+        if self._voice_effect_standalone:
+            title = f"Voice Effect: Favorites ({favourites.count()})"
+        else:
+            title = (f"Music Bot Voice Effect: Favorites "
+                     f"({favourites.count()})")
+        items = [(make_label(entry), pick(entry), None,
+                  favourites.describe(entry))
+                 for entry in favourites.entries()]
+        if not items:
+            items.append(("Nothing saved yet", lambda: None, None,
+                          "This list is empty. Choose a sound on any page, "
+                          "then press Add the effect in use below it -- or use "
+                          "the Add this ... to Favorites line on a board."))
+        items.append((make_add_label(), add_in_use, None,
+                      "Saves whatever your voice effect is set to now. A "
+                      "preset is saved by name, and a sound you built on a "
+                      "board is saved with every setting, so it comes back "
+                      "exactly as you made it."))
+        items.append(("Remove a favorite...", open_remove, None,
+                      "A list of what is saved; pressing one takes it out "
+                      "and leaves the sound itself alone."))
+        items.append(("Clear all favorites", open_clear, None,
+                      f"Empties the whole list (up to {favourites.MAX} "
+                      "sounds), after asking. Presets and boards are not "
+                      "touched."))
+        items.append(("Back", go_back, None,
+                      "Returns to the Voice Effect page."))
+        m = menu_mod.Menu(self._bot.game, title, parrent=gp)
         m.add_items(items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
@@ -409,6 +648,7 @@ class VoiceEffectMenus:
         """
         from ... import menu as menu_mod, menus
         from .. import gate as music_bot_gate
+        from ..voice_effects import favourites
         from ..voice_effects import pan
         from ..voice_effects import tone
         from .. import voice_effects
@@ -536,6 +776,14 @@ class VoiceEffectMenus:
         def open_tone():
             self._open_voice_tone_menu(voice_effects.PAN_EFFECT)
 
+        def save_favourite():
+            # The page's two settings are the sound: the snapshot keeps both,
+            # so recalling the favorite writes the delay back as well as the
+            # movement (`_open_voice_favourites_menu`).
+            entry = favourites.snapshot(voice_effects.PAN_EFFECT)
+            outcome = favourites.add(entry)
+            self._say(_favourite_message(outcome, entry))
+
         choose()
         page = menu_mod.Menu(
             self._bot.game,
@@ -559,6 +807,8 @@ class VoiceEffectMenus:
              "preset chosen here can be played by a voice built there, and "
              "Custom (this page) follows the two lines above."),
             (make_tone_label(), open_tone, None, _TONE_NOTE),
+            ("Add this Pan Delay to Favorites", save_favourite, None,
+             _SAVE_NOTE),
             ("Reset to 300 ms, Stereo", reset, None,
              "Puts both settings back to what the page opens with, and the "
              "preset mark back to Custom. Pan Delay stays chosen."),
@@ -776,6 +1026,7 @@ class VoiceEffectMenus:
         from ... import menu as menu_mod, menus
         from .. import gate as music_bot_gate
         from ..voice_effects import custom
+        from ..voice_effects import favourites
         from ..voice_effects import recipes
         from ..voice_effects import tone
         from .. import voice_effects
@@ -847,6 +1098,20 @@ class VoiceEffectMenus:
         # The tone goes above the board's own Clear line, which is the last
         # thing above Back on the board that has one.
         items.append((make_tone_label(), open_tone, None, _TONE_NOTE))
+
+        def save_favourite():
+            entry = favourites.snapshot(board.EFFECT_ID)
+            outcome = favourites.add(entry)
+            self._say(_favourite_message(outcome, entry))
+
+        # Above the board's Clear, where the destructive line stays last: a
+        # player saving the sound they just made is the last thing they do
+        # before leaving, and Clear is the one press that undoes all of it.
+        items.append(
+            ((lambda: f"Add this "
+                      f"{voice_effects.effect_label(board.EFFECT_ID)} to "
+                      f"Favorites"),
+             save_favourite, None, _SAVE_NOTE))
         if board.EFFECT_ID == voice_effects.BUILDER_EFFECT:
             # The whole-voice board's first line is where to start, above the
             # eleven slots it fills: eleven lines reading their defaults is not

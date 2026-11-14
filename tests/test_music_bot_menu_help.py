@@ -35,6 +35,7 @@ from libs.music_bot import menus as menus_module  # noqa: E402
 from libs.music_bot.menu_pages import library as library_pages  # noqa: E402
 from libs.music_bot.voice_effects import builder  # noqa: E402
 from libs.music_bot.voice_effects import custom  # noqa: E402
+from libs.music_bot.voice_effects import favourites  # noqa: E402
 from libs.music_bot.voice_effects import pan  # noqa: E402
 from libs.music_bot.voice_effects import recipes  # noqa: E402
 from libs.music_bot.voice_effects import vocoder  # noqa: E402
@@ -355,9 +356,9 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         # Current owns no note: those rows are hidden, not shown doing nothing.
         self.assertNotIn("Root", names)
         self.assertNotIn("Scale", names)
-        # The board's rows, its Tone line, and Back.
+        # The board's rows, its Tone line, its Favorites line, and Back.
         self.assertEqual(len(board.items),
-                         len(vocoder.rows()) + 2)
+                         len(vocoder.rows()) + 3)
         for item in board.items:
             self.assertGreaterEqual(len(item), 4)
             self.assertTrue(text_of(item).strip())
@@ -475,9 +476,9 @@ class EveryLineIsDescribedTests(unittest.TestCase):
         for _param_id, name, _note, _choices, _default in (
                 builder.PARAMS):
             self.assertIn(name, names)
-        # The ten slots, the starting line above them, the Tone line, Clear
-        # below it, Back.
-        self.assertEqual(len(board.items), len(builder.PARAMS) + 4)
+        # The ten slots, the starting line above them, the Tone line, the
+        # Favorites line, Clear below it, Back.
+        self.assertEqual(len(board.items), len(builder.PARAMS) + 5)
         for item in board.items:
             self.assertGreaterEqual(len(item), 4)
             self.assertTrue(text_of(item).strip())
@@ -1510,6 +1511,145 @@ class TheGateKeepsTheDescriptionTests(unittest.TestCase):
     def test_a_line_with_no_description_is_still_two_fields(self):
         lines = music_bot_gate.filter_items([("search", "Search", lambda: None)])
         self.assertEqual(len(lines[0]), 2)
+
+
+class TheFavoritesPageTests(unittest.TestCase):
+    """The shortlist: one line under Off, and a board's own save line.
+
+    The store's own rules are pinned in `test_voice_effect_favourites.py`; what
+    this class holds is the page -- that the row is where a player can reach it
+    without arrowing through eleven families, that the count is live, and that
+    the two ways in (the effect in use, and a board's own line) both come back
+    through the same page and actually put the sound back.
+    """
+
+    def setUp(self):
+        FakeMenu.built = []
+        self.addCleanup(mock.patch.stopall)
+        self.addCleanup(music_bot_gate.clear)
+        music_bot_gate.clear()
+        self.bot = make_bot()
+        self.handler = menus_module.MusicBotMenus(self.bot)
+        mock.patch("libs.menu.Menu", FakeMenu).start()
+        mock.patch("libs.menus.set_default_sounds").start()
+        mock.patch("libs.music_bot.menus.speak").start()
+        # The feature's own seam: one in-memory options file, so a test never
+        # writes the developer's saved favourites (or their boards, which the
+        # snapshots read through the same module).
+        self.prefs = {}
+        mock.patch.object(favourites.options, "get",
+                          side_effect=self.prefs.get).start()
+        mock.patch.object(
+            favourites.options, "set",
+            side_effect=lambda key, value, autosave=True:
+            self.prefs.__setitem__(key, value)).start()
+
+    def last_menu(self):
+        return FakeMenu.built[-1]
+
+    def line(self, prefix):
+        for item in self.last_menu().items:
+            if label_of(item).startswith(prefix):
+                return item
+        self.fail(f"no line starting {prefix!r} in "
+                  f"{[label_of(row) for row in self.last_menu().items]}")
+
+    def test_the_voice_effect_page_offers_favorites_directly_under_off(self):
+        self.handler._open_voice_effect_menu()
+        labels = [label_of(item) for item in self.last_menu().items]
+        self.assertEqual(labels[0], "Off (active)")
+        self.assertEqual(labels[1], "Favorites: empty")
+        self.assertTrue(text_of(self.last_menu().items[1]).strip())
+
+    def test_the_count_on_that_line_follows_what_is_saved(self):
+        self.handler._open_voice_effect_menu()
+        menu = self.last_menu()
+        favourites.add({"kind": "preset", "id": "amp"})
+        self.assertEqual(label_of(menu.items[1]), "Favorites (1)")
+
+    def test_the_effect_in_use_saves_and_comes_back(self):
+        self.bot.voice_effect = "amp"
+        self.handler._open_voice_effect_menu()
+        self.line("Favorites")[1]()
+        self.assertEqual(favourites.count(), 0)
+        self.line("Add the effect in use: Guitar Amp")[1]()
+        self.assertEqual(favourites.count(), 1)
+        # The rebuilt page carries the row, and the row applies it.
+        self.line("Guitar Amp")[1]()
+        self.bot.set_voice_effect.assert_called_with("amp")
+
+    def test_nothing_chosen_says_so_instead_of_saving_off(self):
+        self.handler._open_voice_effect_menu()
+        self.line("Favorites")[1]()
+        self.line("Add the effect in use: nothing is chosen")[1]()
+        self.assertEqual(favourites.count(), 0)
+
+    def test_a_board_saves_its_settings_from_its_own_page(self):
+        custom.set_value("drive", custom.choices("drive")[2][1])
+        made = custom.values()
+        self.handler._open_custom_effect_menu()
+        self.line("Add this Custom Amp to Favorites")[1]()
+        self.assertEqual(favourites.count(), 1)
+        saved = favourites.entries()[0]
+        self.assertEqual(saved["values"], made)
+        # Change the board, then recall: the knobs come back as they were.
+        custom.set_value("drive", custom.choices("drive")[5][1])
+        self.handler._open_voice_favourites_menu()
+        self.line("Custom Amp")
+        for item in self.last_menu().items:
+            if label_of(item).startswith("Custom Amp"):
+                item[1]()
+                break
+        self.assertEqual(custom.values(), made)
+        self.bot.set_voice_effect.assert_called_with("custom")
+
+    def test_remove_takes_one_and_clear_asks_first(self):
+        favourites.add({"kind": "preset", "id": "amp"})
+        favourites.add({"kind": "preset", "id": "fuzz"})
+        self.handler._open_voice_effect_menu()
+        self.line("Favorites")[1]()
+        self.line("Remove a favorite")[1]()
+        for item in self.last_menu().items:
+            if label_of(item) == "Guitar Amp":
+                item[1]()
+                break
+        self.assertEqual([row["id"] for row in favourites.entries()],
+                         ["fuzz"])
+        # Clear is a question, and `No` is the safe answer.
+        self.handler._open_voice_favourites_menu()
+        self.line("Clear all favorites")[1]()
+        for item in self.last_menu().items:
+            if label_of(item).startswith("No, keep"):
+                item[1]()
+                break
+        self.assertEqual(favourites.count(), 1)
+        self.handler._open_voice_favourites_menu()
+        self.line("Clear all favorites")[1]()
+        for item in self.last_menu().items:
+            if label_of(item).startswith("Yes"):
+                item[1]()
+                break
+        self.assertEqual(favourites.count(), 0)
+
+    def test_every_line_of_the_favorites_page_is_described(self):
+        self.handler._open_voice_favourites_menu()
+        for item in self.last_menu().items:
+            with self.subTest(line=label_of(item)):
+                self.assertGreaterEqual(len(item), 4)
+                self.assertTrue(text_of(item).strip())
+        favourites.add({"kind": "preset", "id": "amp"})
+        favourites.add(favourites.snapshot("custom"))
+        self.handler._open_voice_favourites_menu()
+        for item in self.last_menu().items:
+            with self.subTest(line=label_of(item)):
+                self.assertGreaterEqual(len(item), 4)
+                self.assertTrue(text_of(item).strip())
+
+    def test_the_world_door_titles_its_own_page(self):
+        self.handler._voice_effect_standalone = True
+        self.handler._open_voice_favourites_menu()
+        self.assertTrue(self.last_menu().title.startswith(
+            "Voice Effect: Favorites"), self.last_menu().title)
 
 
 if __name__ == "__main__":
