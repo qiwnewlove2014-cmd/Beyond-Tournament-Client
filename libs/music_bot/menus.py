@@ -285,7 +285,9 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
                           "Sends the song, an instrument and your voice "
                           "through the map's PA speakers, so everyone in "
                           "earshot hears it. The song's own room routing is a "
-                          "different line."))
+                          "different line. While this is on, the song is not "
+                          "played in your own ears: the cabinets are where "
+                          "you hear it."))
 
         # Cinema speaker routing is Developer/Contributor only (see
         # cinema_routing_allowed): everyone else gets a plain Music Bot menu

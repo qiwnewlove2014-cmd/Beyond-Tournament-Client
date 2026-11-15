@@ -1263,5 +1263,121 @@ class TestBroadcastMixSenderLoop(unittest.TestCase):
         self.assertTrue(old.network_muted)
 
 
+class TestRetiringTrackLeavesTheNetwork(unittest.TestCase):
+    """A track change hands the broadcast/PA leg over at once.
+
+    The fade is the player's own ear. The network leg is not: every frame a
+    retiring streamer keeps sending is queued beside the new song's at the
+    same 50 fps, and a listener keys the stream by sender id -- so the PA's
+    single queue fell behind by a frame per frame for the whole fade window,
+    and both songs' epochs interleaved into one jitter buffer. Skipping a few
+    tracks (Ctrl+[ / Ctrl+]) left the cabinets seconds behind with two songs
+    mixed, and only a restart cleared it. The mute must therefore be set
+    BEFORE the fade worker's first sleep, not after the ramp.
+    """
+
+    def test_the_retiring_streamer_is_muted_before_its_fade_ends(self):
+        bot = MapMusicBot.__new__(MapMusicBot)
+        src = FakeSrc()
+        calls = []
+        streamer = SimpleNamespace(
+            network_muted=False,
+            set_output_gain=lambda g: calls.append(("gain", g)),
+            stop=lambda: calls.append(("stop", None)),
+        )
+
+        bot._fade_out_source(src, streamer, duration=0.02)
+
+        # Immediately, while the ear still has the whole ramp to run.
+        self.assertTrue(streamer.network_muted)
+        self.assertEqual([name for name, _ in calls if name == "stop"], [])
+
+    def test_a_retiring_stream_with_no_fade_window_still_goes_quiet(self):
+        # duration=0: the worker stops it on its first pass; the mute is still
+        # the synchronous one, so no frame of the old song can be sent after
+        # the new stream starts.
+        bot = MapMusicBot.__new__(MapMusicBot)
+        streamer = SimpleNamespace(network_muted=False,
+                                   set_output_gain=lambda g: None,
+                                   stop=lambda: None)
+
+        bot._fade_out_source(FakeSrc(), streamer, duration=0.0)
+
+        self.assertTrue(streamer.network_muted)
+
+
+class TestTheEarGoesQuietOnThePa(unittest.TestCase):
+    """Broadcast to Megaphone: the cabinets are the output, not the ears.
+
+    The PA monitor is fed from this machine anyway, so the song playing in the
+    player's own ears as well was a second copy of the same frames -- louder in
+    the mix and never exactly in step with the cabinets. Only the LOCAL gain
+    goes to zero; the upload and the monitor are untouched, and turning the
+    line off restores the ear copy.
+    """
+
+    def make_bot(self, source, on_pa):
+        bot = MapMusicBot.__new__(MapMusicBot)
+        bot.enabled = True
+        bot.playing = True
+        bot.paused = False
+        bot.mode = "idle"
+        bot.volume = 80
+        bot.duck_multiplier = 1.0
+        bot.broadcast_to_megaphone = on_pa
+        bot.stream_source = source
+        bot.streamer = None
+        bot.current_local_sound = None
+        bot._crossfade = None
+        bot._incoming_fade = None
+        bot.cinema_bank = None
+        bot.game = SimpleNamespace(audio_mngr=SimpleNamespace(
+            volume_categories={"music": [100]}))
+        bot._find_gameplay = lambda: None
+        bot._ensure_live_relay_streamer = lambda: None
+        bot._sync_map_reverb = lambda: None
+        bot.announce_party_queue = lambda: None
+        bot._update_crossfade = lambda: None
+        bot._pump_subtitles = lambda: None
+        return bot
+
+    def test_the_pa_silences_the_ear_copy_of_the_song(self):
+        src = FakeSrc(gain=0.8)
+        self.make_bot(src, on_pa=True).loop()
+        self.assertEqual(src.gain, 0.0)
+
+    def test_turning_the_line_off_brings_the_song_back(self):
+        src = FakeSrc(gain=0.8)
+        self.make_bot(src, on_pa=False).loop()
+        self.assertAlmostEqual(src.gain, 0.8, places=6)
+
+    def test_the_volume_writer_follows_the_same_rule(self):
+        src = FakeSrc(gain=0.8)
+        bot = self.make_bot(src, on_pa=True)
+        with mock.patch.object(controller_module.options, "set"):
+            bot.set_volume(80)
+            self.assertEqual(src.gain, 0.0)
+            bot.broadcast_to_megaphone = False
+            bot.set_volume(80)
+        self.assertAlmostEqual(src.gain, 0.8, places=6)
+
+    def test_a_party_session_keeps_the_song_in_the_hosts_ears(self):
+        # The session's private leg replaces the PA on purpose, so there is no
+        # cabinet copy for the host to hear: muting the ear would be silence.
+        src = FakeSrc(gain=0.8)
+        bot = self.make_bot(src, on_pa=True)
+        bot.party_sync_force_upload = True
+        bot.loop()
+        self.assertAlmostEqual(src.gain, 0.8, places=6)
+
+    def test_a_playlist_sound_in_the_ears_is_silenced_the_same_way(self):
+        src = FakeSrc(gain=0.9)
+        bot = self.make_bot(None, on_pa=True)
+        bot.mode = "local"
+        bot.current_local_sound = SimpleNamespace(source=src, volume=80)
+        bot.loop()
+        self.assertEqual(src.gain, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

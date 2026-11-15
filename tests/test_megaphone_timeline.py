@@ -214,6 +214,78 @@ class PaSequenceGapTests(unittest.TestCase):
         self.assertEqual(state["next_seq"], 1)
 
 
+class PaEpochSwitchTests(unittest.TestCase):
+    """A new broadcast on the same sender id starts on a clean buffer.
+
+    A song skipped while the PA is on arrives as a new epoch under the same
+    sender id. Whatever the previous song still had queued is its tail: paying
+    it out first is what buried a cabinet behind the music after a skip (and
+    kept it there, one 20 ms frame at a time). The queue is dropped instead, so
+    the new stream also starts through the normal start gate rather than one
+    frame at a time.
+    """
+
+    def setUp(self):
+        vc._megaphone_sequenced_senders.discard(SENDER)
+        self.worker = voice_chat_compression.__new__(voice_chat_compression)
+        self.worker.game = SimpleNamespace()
+        self.worker._megaphone_decoders = {}
+        self.worker._megaphone_timeline = {}
+        self.worker._megaphone_playouts = {}
+        self.worker._megaphone_decoder = (
+            lambda _sid: SimpleNamespace(decode=lambda _d: b"\x00" * 1920))
+        self.jb = SimpleNamespace(reset=mock.Mock(), add_packet=mock.Mock())
+        self.jb_patch = mock.patch.object(vc, "get_jitter_buffer",
+                                          return_value=self.jb)
+        self.jb_patch.start()
+        self.addCleanup(self.jb_patch.stop)
+        self.limit_patch = mock.patch.object(vc, "soft_limit_audio",
+                                             side_effect=lambda data, **_: data)
+        self.limit_patch.start()
+        self.addCleanup(self.limit_patch.stop)
+        self.gameplay = SimpleNamespace(
+            player=SimpleNamespace(dead=False, name="listener", id=1),
+            megaphone=SimpleNamespace(player_sources={}),
+        )
+
+    def tearDown(self):
+        vc._megaphone_sequenced_senders.discard(SENDER)
+        vc._last_packet_times.pop(SENDER, None)
+        vc._megaphone_playouts.pop(SENDER, None) if hasattr(vc, "_megaphone_playouts") else None
+
+    def send(self, epoch, frame_seq):
+        self.worker.recieve2(
+            b"OPUS", [object()], None, consts.CHANNEL_MEGAPHONE,
+            self.gameplay, sender_id=SENDER, epoch=epoch, frame_seq=frame_seq,
+        )
+
+    def test_one_song_never_resets_its_own_buffer(self):
+        for seq in range(3):
+            self.send(5, seq)
+        self.jb.reset.assert_not_called()
+        self.assertEqual(self.jb.add_packet.call_count, 3)
+
+    def test_the_next_epoch_drops_the_previous_songs_tail(self):
+        self.send(5, 0)
+        self.send(5, 1)
+        self.assertFalse(self.jb.reset.called)
+        self.send(6, 0)                 # the skipped-to song's first frame
+        self.jb.reset.assert_called_once_with()
+        # And the frames that follow stay on the new stream, no second reset.
+        self.send(6, 1)
+        self.send(6, 2)
+        self.jb.reset.assert_called_once_with()
+        self.assertEqual(self.jb.add_packet.call_count, 5)
+
+    def test_a_legacy_payload_is_never_treated_as_a_new_epoch(self):
+        self.send(5, 0)
+        self.worker.recieve2(
+            b"OPUS", [object()], None, consts.CHANNEL_MEGAPHONE,
+            self.gameplay, sender_id=SENDER,
+        )
+        self.jb.reset.assert_not_called()
+
+
 class PaConcealmentTests(unittest.TestCase):
     """What the playout does with a hole, and what it must never do."""
 

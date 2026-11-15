@@ -1522,6 +1522,23 @@ class voice_chat_compression(threading.Thread):
             return None
         return soft_limit_audio(bytes(pcm), threshold=0.85, ratio=8.0, state_key=sender_id)
 
+    def _epoch_breaks_the_stream(self, sender_id, epoch):
+        """Whether this arrival is a DIFFERENT broadcast than the last one.
+
+        An epoch is drawn once per sender session, so a change under the same
+        sender id means a new transmission: the music bot's next song (its
+        streamer is new, so its epoch is), or a talker starting another press.
+        A frame from an epoch already superseded is not worth queueing either,
+        which is why this is asked before the sequence bookkeeping.
+        """
+        state = self._megaphone_timeline.get(sender_id)
+        if state is None or state.get('epoch') is None or epoch is None:
+            return False
+        try:
+            return state['epoch'] != (int(epoch) & 0xFFFFFFFF)
+        except (TypeError, ValueError):
+            return False
+
     def _sequenced_pa_gap(self, sender_id, epoch, frame_seq):
         """Return ``(accept, conceal_frames)`` for one sequenced PA arrival."""
         state = self._megaphone_timeline.get(sender_id)
@@ -1825,6 +1842,14 @@ class voice_chat_compression(threading.Thread):
             # Single jitter buffer per sender — ensures all speakers play the same frame simultaneously
             buffer_key = sender_id if sender_id is not None else "megaphone_shared"
             jb = get_jitter_buffer(self.game, buffer_key)
+            if frame_seq is not None and self._epoch_breaks_the_stream(sender_id, epoch):
+                # A new broadcast on this sender id (the music bot replacing its
+                # song, a new press): what is still queued is the tail of the one
+                # before it, and playing it first is what left a cabinet behind
+                # the song after a skipped track. Dropping it also re-arms the
+                # start gate, so the new stream begins whole instead of one
+                # frame at a time.
+                jb.reset()
             if frame_seq is None:
                 jb.add_packet(limited_data)
             else:
@@ -3536,6 +3561,114 @@ def _queue_packet_to_source(gameplay, idx, src, play_packet,
             pass
 
 
+# ── Cabinet alignment: one wavefront, many speakers ──────────────────
+# A map's PA speakers are ONE system, not one source each: the installer hangs
+# twenty cabinets for the whole hall, and a talker is heard through all of them
+# at once. Until 2026-11-14 every speaker was delayed by its own distance to the
+# LISTENER (distance / 343 m/s, on top of the installer's trim), which is the
+# delay that would align one speaker with a listener standing *at* it -- the
+# wrong origin for a system heard across a map:
+#
+#   * two cabinets 30 m apart arrived 87 ms apart, which is a slap-back/comb
+#     between them (the "many cabinets, always delayed" report);
+#   * the nearest cabinet was still paid its own distance, so a 50 m hall put
+#     145 ms of pure start latency in front of the PA before any stagger;
+#   * the stagger was measured from the listener, so it changed as they walked,
+#     and two listeners never heard the same PA.
+# ...and the second half of the same mistake: the delay was DOUBLE counting.
+# A frame queued d/343 late is then played out of a speaker that is d/343 away
+# from the listener, so it ARRIVES 2d/343 late. Two cabinets 30 m apart were
+# 174 ms apart at the ear, not 87 ms, and the further the installer spread a
+# map's cabinets the worse the flam got -- which is the report, exactly.
+#
+# A real PA does not do this. Air already propagates: feed every cabinet the
+# same frame and let the room's own geometry be the only spread (the precedence
+# effect then places the sound at the nearest cabinet by itself, because that is
+# where it arrives first and loudest). So the shipped spread is ZERO: cabinets
+# fire together, and the frames of a talker are not held back by how far away
+# they happen to be standing.
+#
+# MEGAPHONE_SPREAD_SECONDS is kept as a ceiling rather than a constant of nature
+# because the maths is the same if a map ever wants a deliberate, bounded
+# decorrelation (a stadium ring). 0 s is what ships. The installer's per-speaker
+# `delay` (0-0.5 s) is added on top and is deliberately NOT capped: that is the
+# builder's own alignment trim (delay towers, a far corner, a speaker that must
+# follow one further back) and it must stay exactly what they typed.
+SPEED_OF_SOUND = 343.0
+MEGAPHONE_SPREAD_SECONDS = 0.0
+MEGAPHONE_FRAME_SECONDS = 0.02
+
+
+def speaker_path_distances(speaker_data, listener_pos, ground_z=0.0):
+    """The acoustic path from one listener to every source of a PA.
+
+    Two entries per speaker, exactly as the OpenAL sources are built: index
+    ``2*i`` is the direct line and ``2*i+1`` is the floor reflection (down to
+    the floor, then along it to the listener) -- the bounce the room's reverb
+    filter is shaped for. Unusable positions read as the map origin rather
+    than raising, because a menu rebuild can hand this a half-built list.
+    """
+    import math
+    try:
+        px, py, pz = (float(value) for value in listener_pos[:3])
+    except Exception:
+        px, py, pz = 0.0, 0.0, 0.0
+    try:
+        floor = float(ground_z)
+    except Exception:
+        floor = 0.0
+    distances = []
+    for speaker in speaker_data or ():
+        try:
+            sx, sy, sz = (float(value) for value in
+                          (speaker or {}).get('position', (0.0, 0.0, 0.0))[:3])
+        except Exception:
+            sx, sy, sz = 0.0, 0.0, 0.0
+        dx, dy = px - sx, py - sy
+        distances.append(math.sqrt(dx * dx + dy * dy + (pz - sz) ** 2))
+        distances.append(abs(sz - floor)
+                         + math.sqrt(dx * dx + dy * dy + (pz - floor) ** 2))
+    return distances
+
+
+def aligned_stagger_seconds(distances, max_spread=MEGAPHONE_SPREAD_SECONDS):
+    """Per-source delay for a set of speakers that must fire together.
+
+    The nearest source is the reference (0 s) and every other source waits for
+    its own extra path, capped at ``max_spread``. ``None`` entries (a source
+    whose speaker data is missing) are 0 s, so an index always lines up with
+    the source list the caller is holding.
+    """
+    usable = [float(d) for d in distances if d is not None]
+    if not usable:
+        return [0.0 for _ in distances]
+    nearest = min(usable)
+    delays = []
+    for distance in distances:
+        if distance is None:
+            delays.append(0.0)
+            continue
+        extra = (float(distance) - nearest) / SPEED_OF_SOUND
+        delays.append(min(max(0.0, extra), max_spread))
+    return delays
+
+
+def speaker_frames_delay(static_seconds, stagger_seconds,
+                         frame_seconds=MEGAPHONE_FRAME_SECONDS):
+    """The source's silence delay in 20 ms frames, trim included.
+
+    ``static_seconds`` is the installer's per-speaker ``delay`` (0-0.5 s, the
+    builder's own alignment trim) and is NOT capped; ``stagger_seconds`` is the
+    capped wavefront offset from :func:`aligned_stagger_seconds`. The two are
+    summed before the frame conversion, exactly as the queue pads them.
+    """
+    try:
+        total = max(0.0, float(static_seconds or 0.0)) + max(0.0, float(stagger_seconds or 0.0))
+        return int(total / frame_seconds)
+    except Exception:
+        return 0
+
+
 def _pad_frames_for_resync(target_active, current_active, needs_initial_delay, any_starved):
     """How many silence frames to pad for one speaker this packet.
 
@@ -3630,53 +3763,47 @@ def queue_and_delay_frame(gameplay, sender_id, sources, packet, margin_frames=No
         _speaker_current_delays[sender_id] = []
         if needs_initial_delay:
             _speaker_initial_delays[sender_id] = {}
-        
+            # ONE wavefront for the whole system (see the block above
+            # ``_pad_frames_for_resync``): the stagger vector is computed once,
+            # from the whole speaker set, so the nearest cabinet defines the
+            # reference and no speaker pays its own distance to the listener.
+            # Seeded per source index, so the per-idx bookkeeping below (and the
+            # frozen baseline a pause/resume keeps) is unchanged.
+            ground_level = (gameplay.map.minz
+                            if hasattr(gameplay, 'map')
+                            and hasattr(gameplay.map, 'minz') else 0.0)
+            speaker_data = (getattr(getattr(gameplay, 'megaphone', None),
+                                   'speaker_data', None))
+            stagger = aligned_stagger_seconds(
+                speaker_path_distances(speaker_data, player_pos, ground_level))
+            for idx in range(len(sources)):
+                _speaker_initial_delays[sender_id][idx] = (
+                    stagger[idx] if idx < len(stagger) else 0.0)
+
         for idx, src in enumerate(sources):
             if src is None:
                 _speaker_current_delays[sender_id].append(0)
                 continue
                 
             spk_idx = idx // 2
-            is_reflection = (idx % 2 == 1)
             
             static_delay = 0.0
-            speaker_pos = (0.0, 0.0, 0.0)
             
             if hasattr(gameplay, 'megaphone') and hasattr(gameplay.megaphone, 'speaker_data') and spk_idx < len(gameplay.megaphone.speaker_data):
                 spk_data = gameplay.megaphone.speaker_data[spk_idx]
                 static_delay = 0.0 if ignore_speaker_delay else spk_data.get('delay', 0.0)
-                speaker_pos = spk_data.get('position', (0.0, 0.0, 0.0))
                 
             if getattr(gameplay, 'concert_spectator_mode', False):
                 _speaker_initial_delays[sender_id][idx] = 0.0
                 propagation_delay = 0.0
                 static_delay = 0.0
-            elif needs_initial_delay or idx not in _speaker_initial_delays[sender_id]:
-                # Recalculate propagation delay from the stream's ORIGIN position
-                # (speed of sound = 343 m/s). Computed once for a fresh source;
-                # pause/resume and listener movement intentionally retain it so
-                # the spatial stagger never jumps on its own.
-                if not is_reflection:
-                    dx = player_pos[0] - speaker_pos[0]
-                    dy = player_pos[1] - speaker_pos[1]
-                    dz = player_pos[2] - speaker_pos[2]
-                    distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-                    propagation_delay = distance / 343.0
-                else:
-                    ground_level = gameplay.map.minz if hasattr(gameplay, 'map') and hasattr(gameplay.map, 'minz') else 0.0
-                    dist_spk_to_ground = abs(speaker_pos[2] - ground_level)
-                    dx = player_pos[0] - speaker_pos[0]
-                    dy = player_pos[1] - speaker_pos[1]
-                    dz = player_pos[2] - ground_level
-                    dist_ground_to_player = math.sqrt(dx*dx + dy*dy + dz*dz)
-                    distance = dist_spk_to_ground + dist_ground_to_player
-                    propagation_delay = distance / 343.0
-                _speaker_initial_delays[sender_id][idx] = propagation_delay
             else:
-                propagation_delay = _speaker_initial_delays[sender_id][idx]
+                # Frozen at the stream's origin (the vector above, computed
+                # once): pause/resume and listener movement intentionally keep
+                # it, so the PA image never flips between merged and separated.
+                propagation_delay = _speaker_initial_delays[sender_id].get(idx, 0.0)
                 
-            total_delay = static_delay + propagation_delay
-            frames_delay = int(total_delay / 0.02)  # Convert to 20ms frames
+            frames_delay = speaker_frames_delay(static_delay, propagation_delay)
             _speaker_current_delays[sender_id].append(frames_delay)
             
             # The PA's reserve for remote listeners, whose reliable leg can pause

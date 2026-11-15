@@ -306,11 +306,15 @@ class TestLocalMegaphoneResume(unittest.TestCase):
 
 
 class TestMegaphoneStaggerPadding(unittest.TestCase):
-    """queue_and_delay_frame must stagger per-speaker propagation delays for
-    remote listeners while keeping a zero-margin, low-latency monitor for
-    local producers. The silence pads are what spread the image across the
-    cabinets; without them every speaker starts in sync and the precedence
-    effect fuses the broadcast into one phantom speaker."""
+    """How much silence `queue_and_delay_frame` pads ahead of a PA frame.
+
+    Since 2026-11-14 the answer is: the installer's trim only. Distance used
+    to be padded too (listener->speaker / 343), which paid every cabinet
+    twice for the same metre and turned a map's PA into an echo -- so a
+    cabinet in this file's geometry now starts on arrival, and the only
+    number that staggers a room is the builder's per-speaker `delay`. See
+    `.agents/skills/megaphone_system/references/cabinet-alignment.md`.
+    """
 
     def setUp(self):
         voice_chat._speaker_last_calc_time = {}
@@ -382,9 +386,10 @@ class TestMegaphoneStaggerPadding(unittest.TestCase):
         self.assertEqual(real, 1)
         self.assertEqual(src.play_calls, 1)
 
-    def test_local_monitor_staggers_by_propagation_distance(self):
+    def test_local_monitor_does_not_stagger_by_distance(self):
         src = _FakeSource()
-        # 6.86m at 343 m/s = exactly one 20ms frame of propagation delay.
+        # 6.86 m is exactly one 20 ms frame of travel time -- and it is the air
+        # that pays it, not the source's silence padding.
         gameplay = self.make_gameplay((6.86, 0.0, 0.0))
 
         with mock.patch.object(voice_chat, "_reclaim_source_buffers"), \
@@ -394,18 +399,16 @@ class TestMegaphoneStaggerPadding(unittest.TestCase):
                 gameplay, "local:mic", [src], self.frame, margin_frames=0
             )
 
-        # One silence frame of stagger before the real audio — the same
-        # inter-cabinet offset remote listeners hear, so the owner's own
-        # broadcast no longer collapses into a single fused speaker.
+        # The legacy cushion and nothing else: no propagation stagger is
+        # padded, so the owner hears their own line on the frame it arrives.
         silence, real = self.count_frames(src)
-        self.assertEqual(silence, 2)  # 1 propagation stagger + 1 legacy cushion
+        self.assertEqual(silence, 1)  # 1 legacy cushion, 0 propagation
         self.assertEqual(real, 1)
         self.assertEqual(src.play_calls, 1)
 
-    def test_owner_monitor_drops_the_installer_delay_but_keeps_geometry(self):
+    def test_owner_monitor_drops_the_installer_delay(self):
         src = _FakeSource()
-        # 30 m = 87 ms of propagation (4 frames of 20 ms) and half a second of
-        # installer trim on the same speaker.
+        # Half a second of installer trim on a speaker 30 m away.
         gameplay = self.make_gameplay((30.0, 0.0, 0.0), delay=0.5)
 
         with mock.patch.object(voice_chat, "_reclaim_source_buffers"), \
@@ -416,11 +419,10 @@ class TestMegaphoneStaggerPadding(unittest.TestCase):
                 margin_frames=0, ignore_speaker_delay=True,
             )
 
-        # 4 propagation frames + the legacy cushion, and NONE of the 25 trim
-        # frames: the owner hears their own line 500 ms earlier than before
-        # while the room still gets the installer's offset.
+        # NONE of the 25 trim frames (and no propagation): the owner hears
+        # their own line immediately while the room still gets the offset.
         silence, real = self.count_frames(src)
-        self.assertEqual(silence, 5)
+        self.assertEqual(silence, 1)
         self.assertEqual(real, 1)
         self.assertEqual(src.play_calls, 1)
 
@@ -433,10 +435,10 @@ class TestMegaphoneStaggerPadding(unittest.TestCase):
                 mock.patch.object(voice_chat, "_fade_out_from_tail", side_effect=lambda data, _tail: data):
             voice_chat.queue_and_delay_frame(gameplay, "remote-1", [src], self.frame)
 
-        # 25 trim frames + 4 propagation + 6 jitter reserve + 1 legacy cushion:
-        # only the owner's own monitor skips the installer's offset.
+        # 25 trim frames + 6 jitter reserve + 1 legacy cushion, and no
+        # propagation: only the owner's own monitor skips the offset.
         silence, real = self.count_frames(src)
-        self.assertEqual(silence, 36)
+        self.assertEqual(silence, 32)
         self.assertEqual(real, 1)
 
 

@@ -742,6 +742,24 @@ class MapMusicBot:
 
     def _fade_out_source(self, source, streamer=None, duration=0.5):
         """Fade an active OpenAL stream source to 0 gain in background and delete."""
+        # A RETIRING SONG STOPS BEING A SENDER NOW, not when its fade ends.
+        # The fade is the player's own ear: the source ramps down over the
+        # window and is deleted. Its network leg is a different thing -- every
+        # 20 ms it kept sending was one more frame the PA queued *beside* the
+        # new song's, from the same player and at the same 50 fps. The cabinet
+        # is fed by one queue, so it fell behind by a frame per frame for the
+        # whole window, and a listener keys the stream by sender id, so both
+        # songs' epochs were interleaved into one jitter buffer that grew twice
+        # as fast as it drained. Skipping a few tracks in a row (Ctrl+[ / ])
+        # then left the PA seconds behind the song with two of them mixed --
+        # heard as a cabinet that cannot keep up and finally freezes, and only
+        # a restart cleared the queue. Muted here, the old leg stops after its
+        # current frame and the new stream owns the PA on its first frame.
+        if streamer is not None:
+            try:
+                streamer.network_muted = True
+            except Exception:
+                pass
         if source is None:
             if streamer is not None:
                 try:
@@ -2910,7 +2928,7 @@ class MapMusicBot:
             except Exception:
                 pass
         music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
-        gain = (self.volume / 100) * music_vol
+        gain = (self.volume / 100) * music_vol * self._ear_gain_factor()
         if self.stream_source:
             try:
                 self.stream_source.gain = gain
@@ -2922,6 +2940,27 @@ class MapMusicBot:
                 self.current_local_sound.volume = self.volume
             except Exception:
                 pass
+
+    def _ear_gain_factor(self):
+        """1.0 normally, 0.0 while the map's PA is carrying this song.
+
+        "Broadcast to Megaphone" replaces the ear copy of the song with the
+        map's own cabinets, exactly as a cinema room replaces it with the
+        room's speakers: this machine feeds the PA monitor
+        (`voice_chat._feed_local_megaphone_direct`), so the same song was also
+        playing in the player's own ears -- a second copy nobody asked for,
+        never quite in step with the cabinets. Only the LOCAL output goes
+        quiet; the upload, the PA monitor and a Party Sync's private leg are
+        untouched, so turning the line off brings the song back to the ears.
+        """
+        if not getattr(self, "broadcast_to_megaphone", False):
+            return 1.0
+        # A Party Sync session sends the song on its own private leg and takes
+        # the PA out of it on purpose (see streaming.py): the host is then the
+        # one listener with nothing else to hear the song from.
+        if getattr(self, "party_sync_force_upload", False):
+            return 1.0
+        return 0.0
 
     def loop(self):
         """Called every frame — check if track ended + sync reverb"""
@@ -2968,7 +3007,10 @@ class MapMusicBot:
         if self.stream_source and (self.playing or self.paused):
             try:
                 music_vol = self.game.audio_mngr.volume_categories.get("music", [100])[0] / 100
-                base_gain = (self.volume / 100) * music_vol * self.duck_multiplier
+                # `_ear_gain_factor()` is 0 while the PA carries the song: the
+                # cabinets are the output, and the player's ears are not.
+                base_gain = ((self.volume / 100) * music_vol
+                             * self.duck_multiplier * self._ear_gain_factor())
                 fade = getattr(self, "_crossfade", None)
                 if fade is not None and fade.get("phase") == "fading":
                     self._update_fade_gains(base_gain)
@@ -3025,6 +3067,16 @@ class MapMusicBot:
             speak(f"Now playing: {self.current_title}")
 
         if self.mode == "local" and self.current_local_sound:
+            try:
+                # A playlist/local file has no streamer to carry the gain, so
+                # the PA rule is applied to its own source here (see
+                # `_ear_gain_factor`).
+                music_vol = (self.game.audio_mngr.volume_categories
+                             .get("music", [100])[0] / 100)
+                self.current_local_sound.source.gain = (
+                    (self.volume / 100) * music_vol * self._ear_gain_factor())
+            except Exception:
+                pass
             try:
                 if self.current_local_sound.source.state == cyal.SourceState.STOPPED:
                     self.playlist_index = (self.playlist_index + 1) % len(self.playlist)
