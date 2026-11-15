@@ -367,7 +367,11 @@ class TestStereoUpload(unittest.TestCase):
         # Public-only or megaphone uploads stay mono.
         self.assertFalse(stereo_upload_eligible(self.bot(broadcast=True)))
         self.assertFalse(stereo_upload_eligible(self.bot(mega=True)))
-        self.assertFalse(stereo_upload_eligible(self.bot(party=True, mega=True)))
+        # A session's private leg is NOT the PA: the megaphone line left ON must
+        # not take the captured program's sides away from the guests (2026-11-15
+        # report -- the capture arrived fine but mono). The upload stays on the
+        # private Music Bot channel, which the PA never sees.
+        self.assertTrue(stereo_upload_eligible(self.bot(party=True, mega=True)))
         self.assertFalse(stereo_upload_eligible(None))
 
     def test_a_song_routed_into_a_room_carries_both_sides(self):

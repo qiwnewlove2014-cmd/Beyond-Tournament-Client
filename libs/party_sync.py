@@ -441,13 +441,20 @@ def stereo_upload_eligible(bot, channels=2):
     # leaves the song's two sides exactly where they were.
     if bot is None:
         return False
+    party_private = bool(getattr(bot, "party_sync_force_upload", False))
     stereo_leg = bool(
-        getattr(bot, "party_sync_force_upload", False)
+        party_private
         or getattr(bot, "cinema_force_upload", False)
     )
+    # "Broadcast to Megaphone" makes the UPLOAD mono only while that upload is
+    # the PA's -- the PA is one channel by design. A session's private leg is
+    # not the PA: `streaming._send_to_network_actual` picks the private Music
+    # Bot channel for it whatever the toggle says, so the toggle must not take a
+    # captured program's two sides away from the guests (2026-11-15 report: a
+    # stereo capture arrived fine but mono, with the megaphone line left on).
     return bool(
         stereo_leg
-        and not getattr(bot, "broadcast_to_megaphone", False)
+        and (party_private or not getattr(bot, "broadcast_to_megaphone", False))
         and channels == 2
     )
 
