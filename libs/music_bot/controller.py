@@ -1973,6 +1973,9 @@ class MapMusicBot:
     def _open_settings_menu(self):
         return self._menus()._open_settings_menu()
 
+    def _open_hidden_lines_menu(self):
+        return self._menus()._open_hidden_lines_menu()
+
     def _open_eq_menu(self):
         return self._menus()._open_eq_menu()
 

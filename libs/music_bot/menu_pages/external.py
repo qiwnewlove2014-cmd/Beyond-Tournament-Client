@@ -35,6 +35,8 @@ test_music_bot_queue_settings.py (a shim per menu), test_party_sync.py (the
 Party Sync page builds).
 """
 
+from .. import menu_prefs
+
 
 class ExternalAudioMenus:
     """Capture another program (or the computer) as this bot's live source."""
@@ -127,14 +129,15 @@ class ExternalAudioMenus:
             self._say(self._bot.external_audio_signal_report())
 
         items.append((
-            self._bot.external_audio_status, say_status, None,
+            "external_status", self._bot.external_audio_status, say_status,
             "What is being captured right now, in which channel mode, and "
             "where it is being sent. Enter repeats the description; nothing "
             "changes on this line.",
         ))
 
         items.append((
-            self._bot.external_audio_signal_label, say_signal, None,
+            "external_signal", self._bot.external_audio_signal_label,
+            say_signal,
             "Whether sound is actually arriving from the program right now: "
             "silent, very quiet, quiet, good, loud or clipping, with the peak "
             "level. Enter repeats the verdict and says what to check when it "
@@ -142,14 +145,14 @@ class ExternalAudioMenus:
         ))
 
         items.append((
-            "Choose a program", go_pick, None,
+            "external_program", "Choose a program", go_pick,
             f"Opens a list of up to {self.PAGE_MATCHES} programs playing sound "
             "on this computer, with a search box above it. Choosing one "
             "captures only that program.",
         ))
 
         items.append((
-            "Choose a device or input", go_sources, None,
+            "external_source", "Choose a device or input", go_sources,
             "Opens a short page that separates the two hardware routes: a "
             "playback device for a program Windows cannot see, or a recording "
             "input such as a line-in, USB interface or microphone.",
@@ -158,13 +161,13 @@ class ExternalAudioMenus:
         source = getattr(self._bot, "external_audio", None)
         if source is not None:
             items.append((
-                "Stop capturing", use_off, None,
+                "external_stop", "Stop capturing", use_off,
                 "Stops the capture at once. The song you were playing, your "
                 "instruments, your party and your broadcast all keep working.",
             ))
 
         items.append((
-            "Capture this whole computer", use_system, None,
+            "external_system", "Capture this whole computer", use_system,
             "Captures everything this computer plays, not just one program. "
             "Use it when your music program does not appear in the list; "
             "while it runs, the game's own sounds are captured too, so keep "
@@ -177,7 +180,7 @@ class ExternalAudioMenus:
             else "Channel: Mono (one centred sound)"
         )
         items.append((
-            mode_label, toggle_mode, None,
+            "external_channel", mode_label, toggle_mode,
             "Stereo keeps the program's left and right apart, which is what a "
             "song or a stereo mix wants. Mono puts one centred signal on both "
             "sides, which is what a single instrument wants. Enter switches.",
@@ -185,18 +188,18 @@ class ExternalAudioMenus:
 
         level = int(round(self._bot.external_audio_gain * 100))
         items.append((
-            f"Level: {level} percent", cycle_level, None,
+            "external_level", f"Level: {level} percent", cycle_level,
             "How loud the captured program is sent compared with your song. "
             "Enter cycles 40, 60, 85 and 100 percent; the change is heard "
             "immediately by everyone listening.",
         ))
 
         items.append((
-            "Back", back_to_party_menu, None,
+            None, "Back", back_to_party_menu,
             "Returns to the Party Sync menu. A running capture keeps running.",
         ))
 
-        m.add_items(items)
+        menu_prefs.build(m, items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
 

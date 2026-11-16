@@ -16,6 +16,7 @@ Rules: .agents/skills/music_bot_integration/.
 """
 
 from ... import options
+from .. import menu_prefs
 from .. import subtitles
 
 
@@ -49,20 +50,21 @@ class SubtitleMenus:
                   "song are rarely a caption track.")
 
         m = menu_mod.Menu(self._bot.game, "Subtitles", parrent=gp)
-        m.add_items([
-            (self._bot.subtitle_label, self._bot.toggle_subtitles, None,
+        menu_prefs.build(m, [
+            ("subtitles", self._bot.subtitle_label, self._bot.toggle_subtitles,
              "Turns the spoken subtitles on or off: the song's own words, "
              "read out as the song reaches them."),
-            (self._bot.subtitle_language_label, go_language, None,
+            ("subtitle_language", self._bot.subtitle_language_label, go_language,
              "Which language YouTube is asked for a caption track in. The "
              "first language with a track is the one spoken."),
-            (self._bot.subtitle_timing_label, go_timing, None,
+            ("subtitle_timing", self._bot.subtitle_timing_label, go_timing,
              "Moves the spoken line earlier or later against the song, if "
              "the screen reader falls behind or runs ahead."),
-            (lambda: self._bot.subtitle_reader.status(), read_status, None,
+            ("subtitle_status", lambda: self._bot.subtitle_reader.status(),
+             read_status,
              "How far the reader has got, and where the words come from: "
              "the uploader's own caption track, or YouTube's automatic one."),
-            ("Back", go_back, None,
+            (None, "Back", go_back,
              "Returns to the Music Bot menu."),
         ])
         menus.set_default_sounds(m)

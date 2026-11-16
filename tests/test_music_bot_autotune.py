@@ -1041,7 +1041,11 @@ class MenuTests(unittest.TestCase):
         amount = labels.index("Tune Amount: 100%")
         self.assertEqual(labels[amount + 1], "Harmony: Off")
         self.assertEqual(labels[amount + 2], "Voice Effect: Off")
-        self.assertEqual(labels[amount + 3], "Underwater Muffle: ON")
+        # `Lines I hide` is not a sound of the bot: it is the page that finds
+        # what the player put away (menu_prefs), and it sits below the features
+        # and above the muffle, which stays last.
+        self.assertEqual(labels[amount + 3], "Lines I hide")
+        self.assertEqual(labels[amount + 4], "Underwater Muffle: ON")
 
     def test_every_autotune_line_says_what_it_does(self):
         self.bot.autotune_enabled = True

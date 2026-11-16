@@ -123,8 +123,12 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
         self.assertIn("(\"recording\", \"Record Audio\", go_record_audio,", source)
         self.assertIn("def _open_recording_menu(self):", source)
         self.assertIn("self._bot.audio_recorder.choose_folder", source)
-        self.assertIn("(self._bot.audio_recorder.menu_label, start_or_stop,", source)
-        self.assertIn("(\"Recording Settings\", go_settings,", source)
+        # The page builds through `menu_prefs.build`, so every line opens with
+        # its hideable id: `(id, label, action, description)`.
+        self.assertIn("(\"recording_toggle\", self._bot.audio_recorder.menu_label,",
+                      source)
+        self.assertIn("(\"recording_settings\", \"Recording Settings\", go_settings,",
+                      source)
         self.assertIn("def _open_recording_settings_menu(self):", source)
         self.assertIn("self._bot.audio_recorder.capture_scope_label", source)
         self.assertIn("self._bot.audio_recorder.computer_audio_setting_label", source)
@@ -136,6 +140,7 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
         self.assertIn("self._bot.audio_recorder.announce_setting_label", source)
         self.assertIn("def _open_recording_reset_confirmation(self):", source)
         self.assertIn("(\"Cancel and Keep Current Settings\", cancel,", source)
+        self.assertIn("(None, \"Back\", go_back,", source)
         self.assertIn("self._bot.audio_recorder.open_folder", source)
         self.assertIn("self._bot.audio_recorder.menu_action()", source)
         # The recorder is closed by the bot's own shutdown, not by a menu.

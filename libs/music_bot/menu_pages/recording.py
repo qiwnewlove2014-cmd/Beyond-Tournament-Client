@@ -15,6 +15,8 @@ test_music_bot_menu_help.py. Rules and the fade writer:
 .agents/skills/music_bot_integration/references/recording.md.
 """
 
+from .. import menu_prefs
+
 
 class RecordingMenus:
     """The Record Audio page and its settings."""
@@ -43,31 +45,32 @@ class RecordingMenus:
 
         m = menu_mod.Menu(self._bot.game, "Record Audio", parrent=gp)
         items = [
-            (self._bot.audio_recorder.folder_menu_label,
-             self._bot.audio_recorder.speak_folder, None,
+            ("recording_folder", self._bot.audio_recorder.folder_menu_label,
+             self._bot.audio_recorder.speak_folder,
              "The folder recordings are saved to. Enter reads it out again."),
-            ("Set Recording Folder", self._bot.audio_recorder.choose_folder,
-             None,
+            ("recording_folder_set", "Set Recording Folder",
+             self._bot.audio_recorder.choose_folder,
              "Chooses where recordings are saved. The dialog opens outside "
              "the game, so the audio keeps running."),
-            (self._bot.audio_recorder.menu_label, start_or_stop, None,
+            ("recording_toggle", self._bot.audio_recorder.menu_label,
+             start_or_stop,
              "Starts a recording after a countdown, or stops the one that is "
              "running. A recording cannot be started during a match."),
-            (self._bot.audio_recorder.status_menu_label,
-             self._bot.audio_recorder.speak_status, None,
+            ("recording_status", self._bot.audio_recorder.status_menu_label,
+             self._bot.audio_recorder.speak_status,
              "The current state: what is being captured, how long it has run, "
              "and where the file is going."),
-            ("Recording Settings", go_settings, None,
+            ("recording_settings", "Recording Settings", go_settings,
              "What goes into the recording, and how long it runs before it "
              "splits into another file."),
-            ("Open Recording Folder", self._bot.audio_recorder.open_folder,
-             None,
+            ("recording_open_folder", "Open Recording Folder",
+             self._bot.audio_recorder.open_folder,
              "Opens the recording folder on this computer, to listen to or "
              "edit what was captured."),
         ]
-        items.append(("Back", go_back, None,
+        items.append((None, "Back", go_back,
                       "Returns to the Music Bot menu."))
-        m.add_items(items)
+        menu_prefs.build(m, items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
@@ -96,53 +99,58 @@ class RecordingMenus:
             self._open_recording_fade_menu("out")
 
         m = menu_mod.Menu(self._bot.game, "Audio Recording Settings", parrent=gp)
-        m.add_items([
-            (self._bot.audio_recorder.capture_scope_label,
-             self._bot.audio_recorder.speak_capture_scope, None,
+        menu_prefs.build(m, [
+            ("recording_capture_scope",
+             self._bot.audio_recorder.capture_scope_label,
+             self._bot.audio_recorder.speak_capture_scope,
              "What a recording captures: this computer's game audio, the "
              "microphone, or both."),
-            (self._bot.audio_recorder.computer_audio_setting_label,
-             self._bot.audio_recorder.toggle_computer_audio, None,
+            ("recording_computer_audio",
+             self._bot.audio_recorder.computer_audio_setting_label,
+             self._bot.audio_recorder.toggle_computer_audio,
              "Whether the game's own audio -- the song, the instruments, the "
              "room -- is in the recording."),
-            (self._bot.audio_recorder.microphone_setting_label,
-             self._bot.audio_recorder.toggle_microphone, None,
+            ("recording_microphone",
+             self._bot.audio_recorder.microphone_setting_label,
+             self._bot.audio_recorder.toggle_microphone,
              "Whether this computer's microphone is in the recording, for a "
              "mix with the voice in it."),
-            (self._bot.audio_recorder.recorded_voice_label,
-             self._bot.audio_recorder.cycle_recorded_voice, None,
+            ("recording_voice", self._bot.audio_recorder.recorded_voice_label,
+             self._bot.audio_recorder.cycle_recorded_voice,
              "What your own voice sounds like in the file: the voice as it "
              "was transmitted, with your Voice Effect, Auto-Tune and "
              "Harmony, or your microphone through the Studio Condenser. "
              "The second is for a microphone that needs help; other "
              "players still hear your live voice. It is used only while "
              "Include My Transmitted Voice is On."),
-            (self._bot.audio_recorder.countdown_setting_label,
-             self._bot.audio_recorder.cycle_countdown, None,
+            ("recording_countdown",
+             self._bot.audio_recorder.countdown_setting_label,
+             self._bot.audio_recorder.cycle_countdown,
              "How long the countdown is before a recording starts, so there "
              "is time to get ready."),
-            (self._bot.audio_recorder.fade_in_setting_label,
-             go_fade_in, None,
+            ("recording_fade_in",
+             self._bot.audio_recorder.fade_in_setting_label, go_fade_in,
              "How long the recording takes to come up at its start, so the "
              "file opens on a fade instead of a cut. The fade is written "
              "into the file itself."),
-            (self._bot.audio_recorder.fade_out_setting_label,
-             go_fade_out, None,
+            ("recording_fade_out",
+             self._bot.audio_recorder.fade_out_setting_label, go_fade_out,
              "How long the recording falls away at its end, so the file "
              "closes on a fade instead of a cut. Written into the file, and "
              "nothing extra happens at Stop."),
-            (self._bot.audio_recorder.split_setting_label,
-             self._bot.audio_recorder.cycle_split_minutes, None,
+            ("recording_split", self._bot.audio_recorder.split_setting_label,
+             self._bot.audio_recorder.cycle_split_minutes,
              "How long one file runs before the next one starts: a long mix "
              "is easier to edit in pieces."),
-            (self._bot.audio_recorder.announce_setting_label,
-             self._bot.audio_recorder.toggle_announce_details, None,
+            ("recording_announce",
+             self._bot.audio_recorder.announce_setting_label,
+             self._bot.audio_recorder.toggle_announce_details,
              "Whether each finished file, and its size, is spoken -- for a "
              "player who cannot see the folder."),
-            ("Restore Recording Defaults", confirm_restore, None,
+            ("recording_defaults", "Restore Recording Defaults", confirm_restore,
              "Puts every recording setting back to the value it ships with. "
              "It asks once more before doing it."),
-            ("Back", go_back, None,
+            (None, "Back", go_back,
              "Returns to the Record Audio menu."),
         ])
         menus.set_default_sounds(m)

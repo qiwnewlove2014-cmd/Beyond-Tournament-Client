@@ -20,6 +20,8 @@ Rules: .agents/skills/music_bot_integration/references/audio-converter.md
 
 import os
 
+from .. import menu_prefs
+
 
 class ConverterMenus:
     """The Audio File Converter: choose files, format and destination."""
@@ -77,53 +79,55 @@ class ConverterMenus:
                   "where it is.",
         )
         items = [
-            (converter.output_menu_label(), converter.speak_output, None,
+            ("converter_output", converter.output_menu_label(),
+             converter.speak_output,
              "Where converted files are written. Next to the Original puts "
              "each one beside the file it came from, and never touches that "
              "file."),
-            ("Set Output Folder...",
-             lambda: leave_then(self._set_converter_output_folder), None,
+            ("converter_output_set", "Set Output Folder...",
+             lambda: leave_then(self._set_converter_output_folder),
              "Chooses one folder for every converted file. The dialog opens "
              "outside the game, so the song keeps playing."),
         ]
         if converter.has_saved_folder():
             items.append((
-                "Save Next to the Original", converter.clear_folder, None,
+                "converter_output_clear", "Save Next to the Original",
+                converter.clear_folder,
                 "Forgets the chosen folder. Files already converted are left "
                 "where they are; the next file is written beside its "
                 "original."))
         items.extend([
-            (converter.format_menu_label(), go_settings, None,
+            ("converter_format", converter.format_menu_label(), go_settings,
              "What every converted file becomes: MP3 at three bitrates, OGG, "
              "WAV or FLAC."),
-            ("Convert Files I Choose...",
-             lambda: leave_then(self._choose_converter_files), None,
+            ("converter_files", "Convert Files I Choose...",
+             lambda: leave_then(self._choose_converter_files),
              "Converts files that are already on this computer: pick as many "
              "as you like at once. The originals stay exactly where they are."),
-            ("Convert a Folder of Files...",
-             lambda: leave_then(self._choose_converter_folder), None,
+            ("converter_folder", "Convert a Folder of Files...",
+             lambda: leave_then(self._choose_converter_folder),
              "Converts every audio file directly inside a folder you pick, in "
              "name order. Subfolders are left alone, the same as Choose a "
              "Folder of Music."),
         ])
         if picks:
-            items.append((f"Convert Picks ({len(picks)})...",
-                          lambda: leave_then(convert_picks), None,
+            items.append(("converter_picks", f"Convert Picks ({len(picks)})...",
+                          lambda: leave_then(convert_picks),
                           "Converts the files you marked while listening, in "
                           "the order you marked them."))
-        items.append((converter.progress_menu_label(), converter.speak_status,
-                      None,
+        items.append(("converter_progress", converter.progress_menu_label(),
+                      converter.speak_status,
                       "How the batch is going: how many files are done, the "
                       "percentage, and which file is converting now."))
         if converter.is_active():
             items.append((
-                "Cancel Conversion", converter.cancel, None,
+                "converter_cancel", "Cancel Conversion", converter.cancel,
                 "Stops the batch. Files already converted are kept, and the "
                 "original that was being read is left alone."))
-        items.append(("Back", go_back, None,
+        items.append((None, "Back", go_back,
                       "Returns to the Music Bot menu. A running conversion "
                       "keeps running."))
-        m.add_items(items)
+        menu_prefs.build(m, items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
 

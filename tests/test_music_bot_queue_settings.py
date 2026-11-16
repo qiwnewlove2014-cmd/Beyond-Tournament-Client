@@ -808,6 +808,11 @@ class TestTheMenuModule(unittest.TestCase):
         string: "'str' object is not callable" in `Menu.select_current_item`.
         Nothing in the source reads wrong -- the tuple is well formed, only
         the meaning of its slots is -- so the slots are read here.
+
+        A page that hands its lines to `menu_prefs.build` writes the other
+        shape, `(id, label, action, description)`, with the id lowercase and
+        snake_case (or None for a row that is never hidden), so the action is
+        the third slot there. Both shapes are checked.
         """
         root = (Path(__file__).resolve().parents[1]
                 / "libs" / "music_bot" / "menu_pages")
@@ -821,11 +826,28 @@ class TestTheMenuModule(unittest.TestCase):
                         and isinstance(node.args[0], ast.Tuple)
                         and len(node.args[0].elts) == 4):
                     continue
-                action = node.args[0].elts[1]
+                elts = node.args[0].elts
+                if self._is_line_id(elts[0]):
+                    action = elts[2]
+                else:
+                    action = elts[1]
                 self.assertFalse(
                     isinstance(action, ast.Constant)
                     and isinstance(action.value, str),
                     f"{name}:{node.lineno} puts its label in the action slot")
+
+    @staticmethod
+    def _is_line_id(node):
+        """The first slot of a `menu_prefs.build` line: an id, or None."""
+        if not isinstance(node, ast.Constant):
+            return False
+        if node.value is None:
+            return True
+        return (isinstance(node.value, str)
+                and node.value == node.value.lower()
+                and node.value.replace("_", "").isalnum()
+                and node.value[:1].isalpha())
+
 
     def test_the_voice_effect_shim_hands_the_world_mode_to_the_page(self):
         """Alt+V reaches the page through the bot's own one-line shim."""

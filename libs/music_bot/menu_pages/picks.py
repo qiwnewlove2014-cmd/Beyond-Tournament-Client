@@ -14,6 +14,8 @@ Pins: client/tests/test_music_bot_picks.py.
 Rules: .agents/skills/music_bot_integration/references/queue-and-local-files.md.
 """
 
+from .. import menu_prefs
+
 
 class PicksMenus:
     """The Picks page: what was marked, played as a batch, and copied out."""
@@ -61,22 +63,24 @@ class PicksMenus:
                 gp.pop_last_substate()
                 self._bot._start_track_queue(tracks, "Picks")
 
-            items.append((f"{index + 1}. {pick.get('title', 'Unknown')}", play,
-                          None,
+            # A row per pick has no feature of its own and is never hidden on
+            # its own; the lines worth hiding are the two actions below.
+            items.append((None, f"{index + 1}. {pick.get('title', 'Unknown')}",
+                          play,
                           "Plays this file now, with every pick below it queued "
                           "behind it."))
         if not items:
-            items.append(("Nothing picked yet", say_empty, None,
+            items.append((None, "Nothing picked yet", say_empty,
                           "Mark a local file while it plays, and it appears "
                           "here to be copied out."))
-        items.append(("Copy Picks to a Folder...", go_copy, None,
+        items.append(("picks_copy", "Copy Picks to a Folder...", go_copy,
                       "Copies every picked file into a folder you choose. The "
                       "originals stay where they are."))
-        items.append(("Clear Picks", clear_all, None,
+        items.append(("picks_clear", "Clear Picks", clear_all,
                       "Forgets every pick. The files themselves are untouched."))
-        items.append(("Back", go_back, None,
+        items.append((None, "Back", go_back,
                       "Returns to the Music Bot menu."))
-        m.add_items(items)
+        menu_prefs.build(m, items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
 

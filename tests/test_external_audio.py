@@ -636,7 +636,10 @@ class TestAnyProgramByDevice(unittest.TestCase):
         from pathlib import Path
         source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot"
                   / "menu_pages" / "external.py").read_text(encoding="utf-8")
-        self.assertIn('"Choose a device or input", go_sources, None,', source)
+        # The root page builds through `menu_prefs.build`, so each line opens
+        # with its hideable id: (id, label, action, description).
+        self.assertIn('"external_source", "Choose a device or input", go_sources,',
+                      source)
         self.assertIn('"Capture a playback device", go_playback, None,', source)
         self.assertIn("def _open_external_source_menu(self):", source)
         self.assertIn("def _open_external_device_menu(self):", source)

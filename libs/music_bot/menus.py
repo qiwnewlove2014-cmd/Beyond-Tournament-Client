@@ -44,6 +44,7 @@ Rules: .agents/skills/music_bot_integration/.
 import pygame
 
 from . import gate
+from . import menu_prefs
 from .. import options
 # Re-exported: the output-device tests patch `menus.output_device` here.
 from . import output_device
@@ -389,7 +390,10 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
                  "files that is playing. A play-next song is removed once it "
                  "starts, so the queue itself has nothing to go back to."),
             ]
-        m.add_items(gate.filter_items(items))
+        # The gate, then this player's own hidden lines, and Ctrl+H on a line
+        # they do not want (see menu_prefs): one call, so a line added here is
+        # hideable the day it exists.
+        menu_prefs.build(m, items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
 
@@ -428,6 +432,15 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
                   "changes, what you will hear, and what it costs. Pressing "
                   "Tab never chooses a line or closes the menu.")
 
+        def say_hide_help():
+            speak("Ctrl plus H takes the line you are standing on out of the "
+                  "Music Bot's menus, on this machine only, on the pages that "
+                  "offer it. Nothing is switched off: the feature keeps every "
+                  "key it has and only stops being listed. Music Bot Settings, "
+                  "Lines I hide, lists what you hid and puts any line back. "
+                  "Back, Help, the Settings hub and that list cannot be "
+                  "hidden, so a menu is never left without a way out.")
+
         # The Tab line leads, because it is the one thing a first visitor does
         # not know: every other line here is a key to memorise, and this one is
         # how the rest of the bot explains itself.
@@ -441,6 +454,10 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
              "and its properties: which scale a key has, what a Retune Speed "
              "does, what a listening switch changes. Arrow to a line and "
              "press Tab to hear it."),
+            ("Ctrl + H: Hide the line you are on", say_hide_help, None,
+             "Takes the line you are standing on out of the Music Bot's menus "
+             "on this machine. The feature keeps its keys and only stops being "
+             "listed, and Music Bot Settings -> Lines I hide puts it back."),
             (f"{toggle_key}: Open mode menu", lambda: None, None,
              "Opens the Music Bot menu: search, local files, playlists, "
              "downloads, recording, Party Sync, the queue and Settings."),

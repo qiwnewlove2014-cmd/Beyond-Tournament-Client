@@ -531,6 +531,15 @@ class Menu(state.State):
                         target_gp.buffer_cycle_r(event.mod)
                         continue
 
+                # A menu may offer to put the line the player is on away
+                # (Music Bot: Ctrl+H). It is the menu's own handler, not this
+                # class's rule -- a menu built without one keeps the key silent,
+                # exactly like Tab on a menu that describes nothing.
+                if (key == pg.K_h and (event.mod & pg.KMOD_CTRL)
+                        and callable(getattr(self, "hide_current_line", None))):
+                    self.hide_current_line()
+                    continue
+
                 # Tab: help for the focused line. It is the key a Technician
                 # Menu (and Edit Map Elements) answers with a spoken
                 # description, and it can be that key here because Tab is

@@ -17,6 +17,7 @@ queue's wording belongs to `song_requests`) and test_music_bot_menu_help.py.
 Rules: .agents/skills/music_bot_integration/.
 """
 
+from .. import menu_prefs
 from .. import song_requests
 from ..music_downloader import is_supported_music_url
 
@@ -71,7 +72,8 @@ class LibraryMenus:
                 gp.pop_last_substate()
                 self._bot._save_current_to_favorites()
             items.append((
-                "Save Current Song to Favorites", fav_current, None,
+                "library_save_current", "Save Current Song to Favorites",
+                fav_current,
                 "Saves the song that is playing to your Favorites, so you can "
                 "find it again without searching for it."))
 
@@ -83,10 +85,11 @@ class LibraryMenus:
             gp.pop_last_substate()
             self._bot._prompt_create_playlist()
 
-        items.append(("All Favorites", go_favorites, None,
+        items.append(("library_favorites", "All Favorites", go_favorites,
                       "Every song you have saved. Enter opens the list to "
                       "play one, remove one, or play them all."))
-        items.append(("Create New Playlist", go_create_playlist, None,
+        items.append(("library_new_playlist", "Create New Playlist",
+                      go_create_playlist,
                       "Makes an empty playlist with a name you choose, then "
                       "fills it from the song that is playing or from search "
                       "results."))
@@ -96,14 +99,15 @@ class LibraryMenus:
         for p_name in playlist_names:
             def make_p_cb(name):
                 return lambda: (gp.pop_last_substate(), self._show_custom_playlist_menu(name))
-            items.append((f"Playlist: {p_name}", make_p_cb(p_name), None,
+            # One row per playlist the player owns: a name, not a feature.
+            items.append((None, f"Playlist: {p_name}", make_p_cb(p_name),
                           "Opens this playlist: play every song in it, play "
                           "one, or remove one."))
 
-        items.append(("Back", lambda: (gp.pop_last_substate(),
-                                       self._show_mode_menu()), None,
+        items.append((None, "Back", lambda: (gp.pop_last_substate(),
+                                             self._show_mode_menu()),
                       "Returns to the Music Bot menu."))
-        m.add_items(items)
+        menu_prefs.build(m, items)
         menus.set_default_sounds(m)
         gp.add_substate(m)
 

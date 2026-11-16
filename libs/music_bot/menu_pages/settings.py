@@ -25,6 +25,7 @@ import functools
 import pygame
 
 from .. import gate
+from .. import menu_prefs
 from ... import options
 from .. import output_device
 from ... import state
@@ -259,11 +260,28 @@ class SettingsMenus:
             gp.pop_last_substate()
             self._open_output_device_menu()
 
+        def hidden_label():
+            """How many lines this player has put away, so the page is findable.
+
+            Read live rather than remembered: hiding one with Ctrl+H on another
+            page changes this number, and a label that was built when the menu
+            opened would go stale the moment it mattered.
+            """
+            count = menu_prefs.count()
+            return "Lines I hide" if not count else f"Lines I hide ({count})"
+
+        def go_hidden():
+            gp.pop_last_substate()
+            self._open_hidden_lines_menu()
+
         m = menu_mod.Menu(self._bot.game, "Music Bot Settings", parrent=gp)
         # One line per feature, and every line says what it does when Tab is
         # pressed on it: the labels have to stay short enough to arrow past, so
         # the explanation rides beside the line instead of inside it.
-        m.add_items(gate.filter_items([
+        # `menu_prefs.build` is the gate plus this player's own hidden lines, and
+        # it is what makes Ctrl+H work on every line here -- including the ones
+        # a later release adds, which need no edit to this page at all.
+        menu_prefs.build(m, [
             ("output_device", get_output_label, go_output,
              "Where the song comes out: this game's device, or another pair of "
              "speakers or a headset. The equalizer and the room reverb stay on "
@@ -318,12 +336,127 @@ class SettingsMenus:
              "radio or a bitcrusher. Your words are still words -- it is the "
              "voice through the pedal, not a guitar -- and Auto-Tune and "
              "Harmony keep working underneath it. Off is your own voice."),
+            # Not a feature of the bot: the page that finds what you put away.
+            # It sits below every sound line and above the muffle, because the
+            # two ends of this page are pinned (the output line leads, the
+            # muffle sits last) and managing lines is neither end.
+            (None, hidden_label, go_hidden,
+             "Every line you have hidden with Control H, with one press to put "
+             "each of them back. A line that is not on this list is showing. "
+             "New features appear here by themselves: hiding is keyed on the "
+             "line's own id, not on a list somebody has to keep up to date."),
             ("muffle", get_water_label, toggle_water,
              "Muffles the song the way being underwater does, for a player "
              "who dives while it plays."),
             (None, "Back", go_back,
              "Returns to the Music Bot menu. Nothing on this page is lost."),
-        ]))
+        ])
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+        return m
+
+    def _open_hidden_lines_menu(self, focus=None, intro=""):
+        """The lines this player put away, and one press each to bring one back.
+
+        Built from what is STORED, never from a catalogue of features: there is
+        nothing here to add when the Music Bot grows a line (a line is only ever
+        hidden by the player, with Ctrl+H, where the line already is), and an id
+        that a later release no longer answers simply stops hiding anything.
+        The words each line had are the words it was reading out when it was put
+        away, so a hidden line can still name itself here.
+
+        `focus` and `intro` are how coming back here keeps the player oriented.
+        Restoring a line rebuilds the page (the row that was restored must not
+        stay under the cursor as though it were still hidden), so the row that
+        takes its place would otherwise be silent while the cursor reappears at
+        the top. The caller says where the focus lands in `intro`, which the
+        Menu reads out *with* the title in one utterance -- a second `speak`
+        here would be cut off by the new page's own title, which is exactly how
+        the old version lost its "Shown again" sentence.
+        """
+        from ... import menu as menu_mod, menus
+
+        gp = self._bot._find_gameplay()
+        if not gp:
+            return
+
+        stored = menu_prefs.hidden()
+
+        def go_back():
+            gp.pop_last_substate()
+            self._open_settings_menu()
+
+        def make_show(feature_id, label, index):
+            def restore():
+                menu_prefs.show(feature_id)
+                # The page is rebuilt rather than edited: the line that was just
+                # restored must not stay under the cursor as though it were
+                # still hidden, and the count in the label above has moved.
+                gp.pop_last_substate()
+                names = [
+                    words for words in
+                    (pair[1] for pair in sorted(
+                        menu_prefs.hidden().items(),
+                        key=lambda pair: str(pair[1]).lower()))
+                ]
+                if not names:
+                    self._open_hidden_lines_menu(
+                        intro=f"Shown again: {label}. Nothing is hidden now.")
+                    return
+                at = max(0, min(int(index), len(names) - 1))
+                self._open_hidden_lines_menu(
+                    focus=at,
+                    intro=(f"Shown again: {label}. {len(names)} line"
+                           f"{'s' if len(names) != 1 else ''} still hidden. "
+                           f"Now on line {at + 1} of {len(names)}: "
+                           f"Show {names[at]}."))
+            return restore
+
+        def restore_all():
+            count = menu_prefs.show_everything()
+            gp.pop_last_substate()
+            # Stay on this page rather than dropping the player back on Settings
+            # at the top: the press was made here, so the answer is heard here.
+            self._open_hidden_lines_menu(
+                intro="Nothing was hidden." if not count else
+                      f"Every line is back: {count} line"
+                      f"{'s' if count != 1 else ''} shown again. "
+                      "Nothing is hidden now.")
+
+        m = menu_mod.Menu(self._bot.game, "Lines I hide", parrent=gp,
+                          intro=intro)
+        items = []
+        if stored:
+            for feature_id, label in sorted(
+                    stored.items(), key=lambda pair: str(pair[1]).lower()):
+                items.append((
+                    f"Show {label}",
+                    make_show(feature_id, label, len(items)), None,
+                    "Puts this line back where it belongs, exactly as it was. "
+                    "Nothing else about it changes, and no setting of yours "
+                    "moves."))
+            items.append((
+                "Show every line again", restore_all, None,
+                "Puts back every line you have hidden, all at once. It asks "
+                "nothing and touches no other setting."))
+        else:
+            def say_nothing_hidden():
+                self._say("Every Music Bot line is showing. Press Control H on "
+                          "a line you do not use to hide it.")
+
+            items.append((
+                "Nothing is hidden", say_nothing_hidden, None,
+                "Every line of the Music Bot is showing. Press Control H on a "
+                "line you do not use to hide it, and it appears here to be "
+                "brought back."))
+        items.append(("Back", go_back, None,
+                      "Returns to Music Bot Settings."))
+        m.add_items(items)
+        # The row the caller names in `intro` is the row the player lands on, so
+        # the sentence they just heard and the line they are standing on are the
+        # same line.
+        if focus is not None and items:
+            m.pos = max(0, min(int(focus), len(items) - 1))
         menus.set_default_sounds(m)
         gp.add_substate(m)
         return m
@@ -822,7 +955,7 @@ class SettingsMenus:
         ]
 
         m = menu_mod.Menu(self._bot.game, "Party Voice", parrent=gp)
-        m.add_items(gate.filter_items([
+        menu_prefs.build(m, [
             ("voice_fx", get_voice_effect_label, go_voice_effect,
              "Turns the voice the party hears into an instrument: an amp, a "
              "fuzz, a small radio, a bitcrusher. Your words are still words, "
@@ -839,7 +972,7 @@ class SettingsMenus:
             (None, "Back", close,
              "Closes Party Voice and returns to the game. The settings are "
              "kept for the next press."),
-        ]))
+        ])
         menus.set_default_sounds(m)
         gp.add_substate(m)
         return m
