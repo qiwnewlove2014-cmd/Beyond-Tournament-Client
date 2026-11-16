@@ -321,6 +321,25 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
                           self._bot.toggle_speech_cinema,
                           "Whether a voice talking over the map is heard "
                           "through a cinema room's speakers as well."))
+            # Right under the speech line, because the two answer the same
+            # question about a voice and a room -- this one is your own voice,
+            # and the only copy of it the Server never sends back (a broadcast
+            # is never echoed to its sender), so the cabinets are where a
+            # performer meets themselves.
+            items.append((
+                "own_voice", self._bot.own_voice_from_cabinets_label,
+                self._bot.toggle_own_voice_from_cabinets,
+                "Whether your own voice, as the PA speakers or a cinema room "
+                "play it, comes back into your own ears. Off silences only that "
+                "copy: everyone else still hears you exactly as before, and "
+                "Record Audio still records you. Useful if hearing yourself a "
+                "moment late makes you sing or speak slower. One exception: a "
+                "take you are recording in PA Test Mode plays this copy anyway, "
+                "because a recording can only hold what the speakers played -- "
+                "you hear the cabinets for that take, the file holds their "
+                "sound, and this line says so while it is happening. Pressing PA "
+                "Test Mode off or stopping the take brings the silence straight "
+                "back."))
             # The three lines above choose how *you* hear a room; this one is the other
             # direction and is not a switch at all - it answers "where do other players hear me
             # from", which is decided by staff. It reads rather than toggles: pressing it says

@@ -842,11 +842,16 @@ class OwnSoundLineTests(unittest.TestCase):
         self.assertEqual(
             next(text for text in labels if text.startswith("Your sound:")),
             "Your sound: where you stand (no staff pan)")
-        # The reading line sits directly under the three listening switches:
-        # they are choices and it is an answer, so it must not look like one.
+        # Your own voice sits directly under the speech switch -- both answer
+        # "does a room put a voice into my ears", and this one is your own -- and
+        # the reading line follows it: they are choices and it is an answer, so
+        # it must not look like one.
+        own_voice = next(index for index, text, *_extra in enumerate(labels)
+                         if text.startswith("My own voice from the cabinets"))
+        self.assertEqual(own_voice, speech + 1)
         sound = next(index for index, text, *_extra in enumerate(labels)
                      if text.startswith("Your sound:"))
-        self.assertEqual(sound, speech + 1)
+        self.assertEqual(sound, own_voice + 1)
         self.assertEqual(labels[sound].split(":")[0], "Your sound",
                          "the reading line belongs under the listening ones")
 

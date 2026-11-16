@@ -5,7 +5,10 @@ from unittest import mock
 
 import cyal
 
+import pathlib
+
 from libs import music_bot, voice_chat
+from libs.music_bot import streaming
 
 
 class _FakeBuffer:
@@ -187,6 +190,183 @@ class TestLocalMegaphoneMonitor(unittest.TestCase):
         self.assertEqual(src.play_calls, 1)
         self.assertEqual(src.queued[0].data, frame)
         self.assertEqual(src.queued[1].data, bytes(len(frame)))
+
+
+class TestTheOwnersVoiceFromTheCabinets(unittest.TestCase):
+    """The switch a singer asked for: the cabinets' copy of their own voice.
+
+    The one copy of a broadcast that reaches its sender is the local monitor --
+    the Server never echoes a frame back -- so this is the switch that decides
+    whether a talker hears themselves out of the walls while they sing.
+    """
+
+    def monitor(self, producer, enabled):
+        gameplay = SimpleNamespace(game=SimpleNamespace(audio_mngr=object()))
+        with mock.patch.object(voice_chat.options, "get", return_value=enabled), \
+                mock.patch.object(voice_chat, "soft_limit_audio",
+                                  side_effect=lambda data, **_kw: data), \
+                mock.patch.object(voice_chat, "_feed_local_megaphone_main") as feed_main:
+            voice_chat._feed_local_megaphone_direct(
+                gameplay, b"\x01\x00" * 480, producer=producer
+            )
+        return feed_main
+
+    def test_the_voice_is_not_played_by_the_cabinets_when_it_is_off(self):
+        feed_main = self.monitor("mic", False)
+        feed_main.assert_not_called()
+
+    def test_the_song_and_a_guitar_keep_their_own_monitor(self):
+        for producer in ("music", "guitar"):
+            feed_main = self.monitor(producer, False)
+            self.assertEqual(feed_main.call_count, 1, producer)
+
+    def test_on_still_plays_the_voice(self):
+        feed_main = self.monitor("mic", True)
+        self.assertEqual(feed_main.call_count, 1)
+
+    def test_the_choice_is_saved_on_this_machine(self):
+        with mock.patch.object(voice_chat.options, "set") as setter:
+            voice_chat.set_own_voice_from_cabinets(False)
+        setter.assert_called_once_with(voice_chat.OWN_VOICE_CABINET_OPTION, False)
+
+    def test_the_switch_defaults_to_on(self):
+        with mock.patch.object(voice_chat.options, "get",
+                               side_effect=lambda key, default=None: default):
+            self.assertTrue(voice_chat.own_voice_from_cabinets())
+
+    def test_an_unreadable_preference_fails_open(self):
+        # A preference that cannot be read must never silence a real player's
+        # own voice out of nowhere.
+        with mock.patch.object(voice_chat.options, "get",
+                               side_effect=RuntimeError("unreadable")):
+            self.assertTrue(voice_chat.own_voice_from_cabinets())
+
+    def test_the_recording_keeps_the_voice_when_the_cabinets_are_silenced(self):
+        # The game recorder captures what this Client renders, so a voice the
+        # PA monitor played is already in the take. With the monitor silenced
+        # nothing rendered it, and the recorder must add the transmitted
+        # frames itself -- otherwise the switch would empty the file.
+        with mock.patch.object(voice_chat, "own_voice_from_cabinets",
+                               return_value=True):
+            self.assertTrue(voice_chat.voice_is_rendered_locally(True))
+        with mock.patch.object(voice_chat, "own_voice_from_cabinets",
+                               return_value=False):
+            self.assertFalse(voice_chat.voice_is_rendered_locally(True))
+        with mock.patch.object(voice_chat, "own_voice_from_cabinets",
+                               return_value=True):
+            self.assertFalse(voice_chat.voice_is_rendered_locally(False))
+
+    def test_a_running_take_in_pa_test_mode_is_the_one_exception(self):
+        # A recording is this game's own output (process loopback), so the file
+        # can only hold the voice the speakers played: an audition take in PA
+        # Test Mode plays the silenced copy, and nothing else does.
+        recorder = mock.Mock()
+        recorder.state.return_value = "recording"
+        gp = SimpleNamespace(pa_test_mode=True,
+                             music_bot=SimpleNamespace(audio_recorder=recorder))
+        self.assertTrue(voice_chat.cabinets_render_for_recording(gp))
+        # Found through the bot already in hand when the caller has it.
+        self.assertTrue(voice_chat.cabinets_render_for_recording(
+            SimpleNamespace(pa_test_mode=True), gp.music_bot))
+        recorder.state.return_value = "idle"
+        self.assertFalse(voice_chat.cabinets_render_for_recording(gp))
+        recorder.state.return_value = "recording"
+        gp.pa_test_mode = False
+        self.assertFalse(voice_chat.cabinets_render_for_recording(gp))
+        self.assertFalse(voice_chat.cabinets_render_for_recording(None))
+        self.assertFalse(voice_chat.cabinets_render_for_recording(
+            SimpleNamespace(pa_test_mode=True)))
+
+    def test_and_the_recorder_is_told_the_take_already_has_it(self):
+        # Played again means played once: the loopback holds it.
+        with mock.patch.object(voice_chat, "own_voice_from_cabinets",
+                               return_value=False):
+            self.assertTrue(voice_chat.voice_is_rendered_locally(True, forced=True))
+            self.assertFalse(voice_chat.voice_is_rendered_locally(False, forced=True))
+
+    def test_a_forced_take_plays_the_voice_the_switch_silenced(self):
+        recorder = mock.Mock()
+        recorder.state.return_value = "recording"
+        gameplay = SimpleNamespace(
+            game=SimpleNamespace(audio_mngr=object()),
+            pa_test_mode=True,
+            music_bot=SimpleNamespace(audio_recorder=recorder),
+        )
+        with mock.patch.object(voice_chat.options, "get", return_value=False), \
+                mock.patch.object(voice_chat, "soft_limit_audio",
+                                  side_effect=lambda data, **_kw: data), \
+                mock.patch.object(voice_chat, "_feed_local_megaphone_main") as feed_main:
+            voice_chat._feed_local_megaphone_direct(
+                gameplay, b"\x01\x00" * 480, producer="mic")
+        self.assertEqual(feed_main.call_count, 1)
+
+    def test_the_menu_line_says_why_the_cabinets_are_playing(self):
+        # The one place a player would look: a voice rising under a switch that
+        # says OFF needs an answer on the line itself.
+        from libs.music_bot.controller import MapMusicBot
+        recorder = mock.Mock()
+        recorder.state.return_value = "recording"
+        gp = SimpleNamespace(pa_test_mode=True,
+                             music_bot=SimpleNamespace(audio_recorder=recorder))
+        with mock.patch.object(voice_chat, "own_voice_from_cabinets",
+                               return_value=False):
+            bot = SimpleNamespace(_find_gameplay=lambda: gp,
+                                  audio_recorder=recorder)
+            label = MapMusicBot.own_voice_from_cabinets_label(bot)
+            recorder.state.return_value = "idle"
+            idle = MapMusicBot.own_voice_from_cabinets_label(bot)
+        self.assertEqual(
+            label,
+            "My own voice from the cabinets: OFF "
+            "(this take plays it from the cabinets)")
+        self.assertEqual(idle, "My own voice from the cabinets: OFF")
+
+    def test_a_silenced_press_is_the_one_the_take_writes_itself(self):
+        # Recording never plays the silenced copy again -- a voice starting up
+        # under a player who just muted it reads as a bug (the owner's call,
+        # 2026-11-16). The switch is the ears'; the file gets the voice from the
+        # microphone, so the recorder marks this press as one it must write.
+        with mock.patch.object(voice_chat, "own_voice_from_cabinets",
+                               return_value=False):
+            self.assertTrue(voice_chat.voice_is_silenced_from_cabinets(True))
+            # A plain voice-chat press has no cabinet copy to stand in for.
+            self.assertFalse(voice_chat.voice_is_silenced_from_cabinets(False))
+        with mock.patch.object(voice_chat, "own_voice_from_cabinets",
+                               return_value=True):
+            self.assertFalse(voice_chat.voice_is_silenced_from_cabinets(True))
+
+    def test_the_music_bot_line_flips_this_clients_switch(self):
+        # The line lives in the Music Bot menu and the whole decision is the
+        # Client's: no packet, no map attribute, no Server state.
+        from libs.music_bot.controller import MapMusicBot
+        with mock.patch.object(voice_chat, "own_voice_from_cabinets",
+                               return_value=True), \
+                mock.patch.object(voice_chat, "set_own_voice_from_cabinets",
+                                  side_effect=lambda value: value) as setter, \
+                mock.patch("libs.speech.speak") as said:
+            MapMusicBot.toggle_own_voice_from_cabinets(object())
+        setter.assert_called_once_with(False)
+        self.assertIn("silent from the cabinets", said.call_args[0][0])
+
+    def test_a_press_when_it_is_off_turns_it_back_on(self):
+        from libs.music_bot.controller import MapMusicBot
+        with mock.patch.object(voice_chat, "own_voice_from_cabinets",
+                               return_value=False), \
+                mock.patch.object(voice_chat, "set_own_voice_from_cabinets",
+                                  side_effect=lambda value: value) as setter, \
+                mock.patch("libs.speech.speak") as said:
+            MapMusicBot.toggle_own_voice_from_cabinets(object())
+        setter.assert_called_once_with(True)
+        self.assertIn("comes from the cabinets again", said.call_args[0][0])
+
+    def test_both_pa_feeds_ask_the_switch(self):
+        # The song's own monitor carries a mic it mixed in (a bot broadcasting
+        # to the megaphone), so it has to offer the owner a mix without that
+        # voice; the live relay leg has the same shape.
+        source = pathlib.Path(streaming.__file__).read_text(encoding="utf-8")
+        self.assertEqual(
+            source.count("not voice_chat.own_voice_from_cabinets()"), 2)
+        self.assertEqual(source.count("if part is not mic_part"), 2)
 
 
 class TestLocalMegaphoneResume(unittest.TestCase):

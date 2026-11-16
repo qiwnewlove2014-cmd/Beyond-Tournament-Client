@@ -146,7 +146,27 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("audio_recorder.feed_transmitted_microphone(", voice_source)
         self.assertIn("audio_recorder.recorded_voice_is_studio()", voice_source)
-        self.assertIn("locally_rendered=bool(voice_using_mega)", voice_source)
+        # Whether the take already holds the voice is one question with two
+        # halves: was it a megaphone press, and did this Client render it (the
+        # PA monitor)? A singer can silence that monitor, and the file must keep
+        # the voice either way -- hence one helper rather than a bare flag.
+        self.assertIn("locally_rendered=voice_is_rendered_locally(", voice_source)
+        self.assertIn(
+            "def voice_is_rendered_locally(voice_using_mega, forced=False):",
+            voice_source)
+        # A take in PA Test Mode plays the silenced copy so the file can hold
+        # the cabinet's sound; every feed must say so rather than write it twice.
+        self.assertEqual(
+            voice_source.count("forced=cabinets_render_for_recording("), 3)
+        # The switch silences the ears, never the file: a megaphone press whose
+        # cabinets are muted is written into the take by the overlay even when
+        # `Include microphone` is off, and every feed says so.
+        self.assertEqual(
+            voice_source.count("cabinets_silenced=voice_is_silenced_from_cabinets("),
+            2)
+        # The release drain answers the same question once, for its tail frames.
+        self.assertIn("cabinets_silenced = voice_is_silenced_from_cabinets(mega_press)",
+                      voice_source)
         self.assertIn("music_bot = self._find_music_bot(gp)", voice_source)
 
     def test_saved_folder_starts_immediately_with_timestamped_filename(self):
@@ -306,6 +326,38 @@ class GameAudioRecorderManagerTests(unittest.TestCase):
             backend = _FakeBackend.instances[0]
             self.assertEqual(backend.kwargs["fade_in_seconds"], 2.0)
             self.assertEqual(backend.kwargs["fade_out_seconds"], 3.0)
+            self.manager.stop()
+            self.assertTrue(_wait_for(lambda: self.manager.state() == "idle"))
+
+    def test_a_silenced_cabinet_press_still_reaches_the_take(self):
+        """The own-voice switch is the ears' setting, never the file's.
+
+        With it off nothing renders the voice, so the loopback holds silence and
+        this overlay is the only copy there is. Making the speakers play it
+        instead (so the loopback could hold it) would start a voice the player
+        had just silenced -- the owner's call, 2026-11-16 -- so the take is fed
+        here even though `Include microphone` is off.
+        """
+        values = {
+            "music_bot_recording_include_microphone": False,
+            "music_bot_recording_countdown_seconds": 0,
+        }
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch(
+                    "libs.game_audio_recorder.options.get",
+                    side_effect=lambda key, default=None: values.get(key, default),
+                ):
+            output = Path(temp) / "take.wav"
+            self.assertTrue(self.manager.start_to_path(output))
+            self.assertTrue(_wait_for(lambda: self.manager.state() == "recording"))
+            # A plain voice-chat press is still the setting's to include.
+            self.assertFalse(self.manager.feed_transmitted_microphone(b"\x01\x00" * 4))
+            # A megaphone press whose cabinets are muted is not.
+            self.assertTrue(self.manager.feed_transmitted_microphone(
+                b"\x01\x00" * 4, cabinets_silenced=True))
+            # Nothing renders it, so it is still the overlay's to write.
+            self.assertFalse(self.manager.feed_transmitted_microphone(
+                b"\x01\x00" * 4, cabinets_silenced=True, locally_rendered=True))
             self.manager.stop()
             self.assertTrue(_wait_for(lambda: self.manager.state() == "idle"))
 

@@ -1243,6 +1243,49 @@ class MapMusicBot:
     def open_party_queue_view(self):
         return self._menus().open_party_queue_view()
 
+    def own_voice_from_cabinets_label(self):
+        """Menu text for hearing your own voice out of the PA / a cinema room.
+
+                    Read live from the one home (`voice_chat`), because the capture
+                    path asks the same question: a label held on the bot could
+                    disagree with what is actually playing.
+                    """
+        from .. import voice_chat
+        state = "ON" if voice_chat.own_voice_from_cabinets() else "OFF"
+        # A take being recorded in PA Test Mode plays the silenced copy so the
+        # file can hold the cabinet's sound (a recording is the game's own
+        # output). Say it here rather than starting a voice with no explanation:
+        # the line is the one place this player would look.
+        if not voice_chat.own_voice_from_cabinets() and \
+                voice_chat.cabinets_render_for_recording(self._find_gameplay(), self):
+            state += " (this take plays it from the cabinets)"
+        return "My own voice from the cabinets: %s" % state
+
+    def toggle_own_voice_from_cabinets(self):
+        """Silence (or restore) the copy of your own voice the cabinets play.
+
+                    Nothing is stopped and no stream is rebuilt: the next captured
+                    frame simply is (not) handed to the local monitor. Everyone else
+                    hears the player exactly as before, and a recording is its own
+                    file.
+                    """
+        from .. import voice_chat
+        from ..speech import speak
+        from . import gate
+        # A Developer can take this line away (`/musicbotgate own_voice`); the
+        # menu already hides it, and this is the guard where the feature is
+        # used, so a stale open menu cannot still flip it.
+        if gate.blocked("own_voice"):
+            return None
+        enabled = voice_chat.set_own_voice_from_cabinets(
+            not voice_chat.own_voice_from_cabinets())
+        if enabled:
+            speak("Your own voice comes from the cabinets again.")
+        else:
+            speak("Your own voice is silent from the cabinets. Everyone else "
+                  "still hears you, and a recording is unchanged.")
+        return enabled
+
     def set_party_sync_monitor_voice(self, enabled):
         """Turn the talker's own-voice monitor on or off for this client.
 

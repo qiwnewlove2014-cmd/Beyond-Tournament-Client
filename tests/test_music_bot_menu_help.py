@@ -121,6 +121,7 @@ def make_bot():
     bot.instruments_cinema_label = "Instruments in Rooms: ON"
     bot.speech_cinema_label = "Voice in Rooms: ON"
     bot.own_sound_label = "Your Sound: your body"
+    bot.own_voice_from_cabinets_label = "My own voice from the cabinets: ON"
     bot._find_gameplay.return_value = SimpleNamespace(
         add_substate=lambda item: None,
         pop_last_substate=lambda: None,

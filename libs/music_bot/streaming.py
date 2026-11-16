@@ -1088,6 +1088,11 @@ class AudioStreamer(threading.Thread):
             # mono_data: the stereo branch needs to place it in the centre
             # without downmixing the song with it (see _mix_live_into_stereo).
             live_frames = []
+            # What the cabinets play into the owner's own ears, when it is not
+            # simply `mono_data`: a singer who silenced their own voice from the
+            # cabinets hears the same mix without their microphone
+            # (`voice_chat.own_voice_from_cabinets`). The send is untouched.
+            owner_local_pcm = None
             if (mic_data is not None or guitar_data is not None
                     or external_frames):
                 try:
@@ -1098,8 +1103,10 @@ class AudioStreamer(threading.Thread):
                             return frame + b'\x00' * (len(mono_data) - len(frame))
                         return frame
 
+                    mic_part = None
                     if mic_data is not None:
-                        live_frames.append((_align(mic_data), 0.85))
+                        mic_part = (_align(mic_data), 0.85)
+                        live_frames.append(mic_part)
                     if guitar_data is not None:
                         live_frames.append((_align(guitar_data), 0.85))
                     # The mono legs (public broadcast, PA) have one channel by
@@ -1126,11 +1133,26 @@ class AudioStreamer(threading.Thread):
                     # Sum music and live inputs in wide precision, then apply
                     # one limiter. audioop.add saturates at each intermediate
                     # addition, so limiting its result cannot repair clipping.
+                    parts = [(mono_data, 0.75)] + mono_live_frames
                     mixed = voice_chat.mix_audio_frames(
-                        [(mono_data, 0.75)] + mono_live_frames,
+                        parts,
                         state_key=mix_limiter_key,
                     )
                     if mixed:
+                        # The owner's own ear: the same mix minus their voice,
+                        # built only when they have turned that copy off. The
+                        # room still gets every part of it.
+                        if mic_part is not None \
+                                and not voice_chat.own_voice_from_cabinets() \
+                                and not voice_chat.cabinets_render_for_recording(
+                                    self.bot._find_gameplay(), self.bot):
+                            owner_mix = voice_chat.mix_audio_frames(
+                                [part for part in parts if part is not mic_part],
+                                state_key=voice_chat.audio_limiter_key(
+                                    "own-ear-mix", self),
+                            )
+                            if owner_mix:
+                                owner_local_pcm = bytes(owner_mix)
                         mono_data = mixed
                 except Exception:
                     live_frames = []
@@ -1144,7 +1166,9 @@ class AudioStreamer(threading.Thread):
                     gp = self.bot._find_gameplay()
                     if gp is not None:
                         if hasattr(voice_chat, '_feed_local_megaphone_direct'):
-                            local_pcm = bytes(mono_data)
+                            local_pcm = (owner_local_pcm
+                                         if owner_local_pcm is not None
+                                         else bytes(mono_data))
                             voice_chat._feed_local_megaphone_direct(
                                 gp, local_pcm, producer='music'
                             )
@@ -2738,6 +2762,9 @@ class LiveRelayStreamer(threading.Thread):
             frame_bytes = 1920 if live_10 else 3840
             mono_len = frame_bytes // 2
             mono_data = b'\x00' * mono_len
+            # What the cabinets play into the owner's own ears when the singer
+            # has silenced their own voice (`own_voice_from_cabinets`).
+            owner_local_pcm = None
             try:
                 def _align(frame, length=mono_len):
                     if len(frame) > length:
@@ -2749,8 +2776,10 @@ class LiveRelayStreamer(threading.Thread):
                 mix = []
                 if guitar_data is not None:
                     mix.append((_align(guitar_data), 0.85))
+                mic_part = None
                 if mic_data is not None:
-                    mix.append((_align(mic_data), 0.85))
+                    mic_part = (_align(mic_data), 0.85)
+                    mix.append(mic_part)
                 for frame in external_frames:
                     mono_ext = downmix_to_mono(frame)
                     if mono_ext:
@@ -2799,6 +2828,28 @@ class LiveRelayStreamer(threading.Thread):
                     if stereo_data:
                         stereo_data = audioop.mul(stereo_data, 2, current_volume_scale)
 
+                # This leg is a guitar, a voice and a captured program with no
+                # song, so the singer's switch takes only the microphone out of
+                # what the cabinets play back to them; the send keeps it.
+                if mic_part is not None \
+                        and not voice_chat.own_voice_from_cabinets() \
+                        and not voice_chat.cabinets_render_for_recording(
+                            self.bot._find_gameplay(), self.bot):
+                    owner_mix = voice_chat.mix_audio_frames(
+                        [part for part in mix if part is not mic_part],
+                        state_key=voice_chat.audio_limiter_key(
+                            "own-ear-live", self),
+                    )
+                    if owner_mix:
+                        owner_local_pcm = bytes(owner_mix)
+                        if current_volume_scale != 1.0:
+                            owner_local_pcm = audioop.mul(
+                                owner_local_pcm, 2, current_volume_scale)
+                    else:
+                        # Nothing but the voice was on this leg, so silence is
+                        # the whole of what is left for the owner's ear.
+                        owner_local_pcm = bytes(len(mono_data))
+
                 party_private = bool(getattr(self.bot, 'party_sync_force_upload', False))
                 # The live leg was chosen at the top of the loop (it also
                 # decides the frame size); a Server that has not advertised
@@ -2820,7 +2871,9 @@ class LiveRelayStreamer(threading.Thread):
                         gp = self.bot._find_gameplay()
                         if gp is not None:
                             if hasattr(voice_chat, '_feed_local_megaphone_direct'):
-                                local_pcm = bytes(mono_data)
+                                local_pcm = (owner_local_pcm
+                                             if owner_local_pcm is not None
+                                             else bytes(mono_data))
                                 voice_chat._feed_local_megaphone_direct(gp, local_pcm, producer='music')
                     except Exception:
                         pass

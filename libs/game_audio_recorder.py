@@ -1354,12 +1354,23 @@ class GameAudioRecorderManager:
         with self._lock:
             return self._session_recorded_voice == RECORDED_VOICE_STUDIO
 
-    def feed_transmitted_microphone(self, pcm, *, locally_rendered=False):
-        """Non-blocking Voice Chat hook for the microphone PCM this take needs."""
+    def feed_transmitted_microphone(self, pcm, *, locally_rendered=False,
+                                    cabinets_silenced=False):
+        """Non-blocking Voice Chat hook for the microphone PCM this take needs.
+
+        `Include microphone` is what puts a voice the game did not render into
+        the take -- except for one case that must not depend on it: a megaphone
+        press whose owner silenced their own voice from the cabinets (to stop
+        hearing themselves late while singing) is played by no speaker at all,
+        so the loopback holds nothing and this overlay is the only copy there is.
+        Writing it there (`cabinets_silenced`) keeps the switch from being the
+        one setting that empties a recording of the voice that made it, while the
+        ears stay silent exactly as the switch says.
+        """
         with self._lock:
             accepted = (
                 self._state == "recording"
-                and self._session_include_microphone
+                and (self._session_include_microphone or cabinets_silenced)
                 and not locally_rendered
                 and not self._closed
             )

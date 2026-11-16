@@ -164,6 +164,24 @@ class GateModuleTests(GateStateTestCase):
         self.assertEqual(lines, [("Help", 2), ("Seek", 3)])
 
 
+    def test_my_own_voice_line_and_its_toggle_answer_the_gate(self):
+        # One catalogue row (`own_voice`), guarded twice: the Music Bot line is
+        # filtered out of the menu, and the toggle refuses on its own if a menu
+        # built before the lock is still open (a lock only ever narrows).
+        from libs.music_bot.controller import MapMusicBot
+        gate.apply_locked({"own_voice": "My own voice from the cabinets"})
+        lines = gate.filter_items([
+            ("own_voice", "My own voice from the cabinets: ON", 1),
+            (None, "Help", 2),
+        ])
+        self.assertEqual(lines, [("Help", 2)])
+        with mock.patch("libs.voice_chat.set_own_voice_from_cabinets") as setter, \
+                mock.patch("libs.music_bot.gate.speak") as speak:
+            self.assertIsNone(MapMusicBot.toggle_own_voice_from_cabinets(object()))
+        setter.assert_not_called()
+        self.assertIn("locked by staff", speak.call_args[0][0])
+
+
 class KeyBindingTests(GateStateTestCase):
     """A locked feature's key stops, and the key says why."""
 

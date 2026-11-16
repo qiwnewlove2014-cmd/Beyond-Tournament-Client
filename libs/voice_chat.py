@@ -1993,6 +1993,102 @@ def _feed_party_voice_monitor(monitor, module, raw_buf):
         pass
 
 
+# The one listening choice about a player's OWN voice, saved on this machine
+# and never sent: whether the cabinets that play it may also put it into the
+# ears of the person it came from.
+OWN_VOICE_CABINET_OPTION = "own_voice_from_cabinets"
+
+
+def own_voice_from_cabinets():
+    """Whether the map's speakers may play your own voice into your own ears.
+
+    The Server never echoes a broadcast to its sender, so the cabinets are the
+    only place a performer hears themselves while they sing or talk. That local
+    monitor has no network leg, but it is still behind their mouth by the PA's
+    start cushion, and a singer who hears it drifts and drags (reported
+    2026-11-16). Off silences that copy alone: the send, every listener and a
+    recording of the take are untouched, so a player keeps the ear they trust
+    (a headphone monitor, Record Audio's own file) and drops the one that
+    answers them late from the walls.
+    """
+    try:
+        return bool(options.get(OWN_VOICE_CABINET_OPTION, True))
+    except Exception:
+        # Fail OPEN: a preference that cannot be read must never silence a
+        # player's own voice out of nowhere.
+        return True
+
+
+def cabinets_render_for_recording(gameplay, music_bot=None):
+    """Whether a take running now needs the cabinet copy played, switch or not.
+
+    Record Audio is Windows process loopback of this game's own output, so the
+    file can only ever hold the voice AS THE SPEAKERS PLAYED IT: there is no
+    second, silent copy to write. The owner wants the cabinet's sound in an
+    audition take (2026-11-16) and accepts hearing it for that take, so while a
+    take is recording in PA Test Mode the OFF switch is overridden -- the
+    performer hears the cabinets until the take stops or PA Test Mode is left,
+    and `own_voice_from_cabinets_label()` says so on the line while it happens.
+    Both halves are read live on the capture thread, never remembered.
+
+    Scoped to PA Test Mode on purpose: a megaphone broadcast in a real match is
+    not a take the owner is auditioning, and the switch keeps working there.
+    """
+    if not getattr(gameplay, 'pa_test_mode', False):
+        return False
+    bot = music_bot if music_bot is not None else getattr(gameplay, 'music_bot', None)
+    recorder = getattr(bot, 'audio_recorder', None) if bot is not None else None
+    if recorder is None:
+        return False
+    try:
+        return recorder.state() == "recording"
+    except Exception:
+        # An unreadable recorder must never start playing a silenced voice.
+        return False
+
+
+def voice_is_rendered_locally(voice_using_mega, forced=False):
+    """Whether the PA monitor put this voice into what this machine renders.
+
+    The game recorder captures this Client's own output, so a voice the PA
+    monitor played is already in the take and must not be added twice. A
+    singer who silenced their own voice from the cabinets (or a voice that
+    never used the megaphone) rendered nothing, and the recorder puts the
+    transmitted frames in itself -- the file keeps the voice either way,
+    which is the half of the switch a singer must not lose.
+
+    `forced` is a take in PA Test Mode that played the copy regardless of the
+    switch (`cabinets_render_for_recording`): it played, so the loopback already
+    holds it and writing the microphone too would double the voice.
+    """
+    return bool(voice_using_mega) and (bool(forced) or own_voice_from_cabinets())
+
+
+def voice_is_silenced_from_cabinets(voice_using_mega):
+    """Whether this press's cabinets are muted, so a running take carries it.
+
+    The switch is the singer's and the file is not: with the switch off nothing
+    plays the voice, so the recorder writes the transmitted frames itself -- and
+    it must write them even when the separate `Include microphone` setting is
+    off (the owner's call, 2026-11-16: making the cabinets play for a take would
+    start a voice the player had just silenced, which reads as a bug). Otherwise
+    the switch would be the one setting that empties a take of its own voice.
+    Never a plain voice-chat press: only a megaphone broadcast has a cabinet copy
+    to stand in for.
+    """
+    return bool(voice_using_mega) and not own_voice_from_cabinets()
+
+
+def set_own_voice_from_cabinets(enabled):
+    """Record the choice for this machine (no packet, no Server state)."""
+    enabled = bool(enabled)
+    try:
+        options.set(OWN_VOICE_CABINET_OPTION, enabled)
+    except Exception:
+        pass
+    return enabled
+
+
 def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
     """Hand local mic/music/instrument PCM to the main-thread PA path.
 
@@ -2001,6 +2097,15 @@ def _feed_local_megaphone_direct(gameplay, raw_buf, producer='producer'):
                     """
     try:
         if not gameplay or not getattr(gameplay, 'game', None):
+            return
+        # The owner's own voice, and only the voice: a singer who wants their
+        # mouth and their ears to agree turns this off, and everything that is
+        # not their own ear copy keeps working (see own_voice_from_cabinets).
+        # A take running in PA Test Mode is the one exception: the file can only
+        # hold what the speakers played, so the copy is played for that take
+        # (see cabinets_render_for_recording) and the menu line says so.
+        if (producer == 'mic' and not own_voice_from_cabinets()
+                and not cabinets_render_for_recording(gameplay)):
             return
         audio_mngr = getattr(gameplay.game, 'audio_mngr', None)
         if audio_mngr is None:
@@ -2404,7 +2509,12 @@ class VoiceChatRecord(threading.Thread):
                     # exactly the frame Opus was handed.
                     audio_recorder.feed_transmitted_microphone(
                         chunk,
-                        locally_rendered=bool(voice_using_mega),
+                        locally_rendered=voice_is_rendered_locally(
+                            voice_using_mega,
+                            forced=cabinets_render_for_recording(
+                                gp, music_bot)),
+                        cabinets_silenced=voice_is_silenced_from_cabinets(
+                            voice_using_mega),
                     )
 
                 # The speech key (Music Bot Settings -> Speech Key). Only the
@@ -2467,7 +2577,12 @@ class VoiceChatRecord(threading.Thread):
                     if audio_recorder is not None and not recorded_studio:
                         audio_recorder.feed_transmitted_microphone(
                             chunk_bytes,
-                            locally_rendered=bool(voice_using_mega),
+                            locally_rendered=voice_is_rendered_locally(
+                                voice_using_mega,
+                                forced=cabinets_render_for_recording(
+                                    gp, music_bot)),
+                            cabinets_silenced=voice_is_silenced_from_cabinets(
+                                voice_using_mega),
                         )
 
                     if route_to_bot:
@@ -2530,13 +2645,18 @@ class VoiceChatRecord(threading.Thread):
             audio_recorder is not None
             and audio_recorder.recorded_voice_is_studio()
         )
-        locally_rendered = (
-            getattr(sender, 'channel', None) == consts.CHANNEL_MEGAPHONE
+        mega_press = getattr(sender, 'channel', None) == consts.CHANNEL_MEGAPHONE
+        locally_rendered = voice_is_rendered_locally(
+            mega_press,
+            forced=cabinets_render_for_recording(
+                getattr(self.player, 'gameplay', None), music_bot),
         )
+        cabinets_silenced = voice_is_silenced_from_cabinets(mega_press)
         if audio_recorder is not None and recorded_studio:
             audio_recorder.feed_transmitted_microphone(
                 buf,
                 locally_rendered=locally_rendered,
+                cabinets_silenced=cabinets_silenced,
             )
 
         # Everything this press still owes: its last frame, then whatever the
@@ -2552,6 +2672,7 @@ class VoiceChatRecord(threading.Thread):
                 audio_recorder.feed_transmitted_microphone(
                     frame,
                     locally_rendered=locally_rendered,
+                    cabinets_silenced=cabinets_silenced,
                 )
 
         if route_to_bot:

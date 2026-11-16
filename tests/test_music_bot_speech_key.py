@@ -418,7 +418,8 @@ class ReleaseTests(unittest.TestCase):
             def recorded_voice_is_studio(self):
                 return False
 
-            def feed_transmitted_microphone(self, pcm, *, locally_rendered=False):
+            def feed_transmitted_microphone(self, pcm, *, locally_rendered=False,
+                                            cabinets_silenced=False):
                 self.fed.append(bytes(pcm))
                 return True
 
@@ -450,7 +451,8 @@ class ReleaseTests(unittest.TestCase):
             def recorded_voice_is_studio(self):
                 return True
 
-            def feed_transmitted_microphone(self, pcm, *, locally_rendered=False):
+            def feed_transmitted_microphone(self, pcm, *, locally_rendered=False,
+                                            cabinets_silenced=False):
                 self.fed.append(bytes(pcm))
                 return True
 
