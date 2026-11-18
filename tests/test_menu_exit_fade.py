@@ -13,15 +13,24 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import menus
 from libs.automation import Automation_Task
+from libs.menu import Menu
 
 
 class FakeListener:
     def __init__(self):
         self.gain = 0.0
+        # What the output gain was when the last sound started: the logout
+        # test uses it to prove the menu music began only after the world died.
+        self.last_play_gain = None
 
 
 class FakeSoundGroup:
+    def __init__(self, listener=None):
+        self.listener = listener
+
     def play(self, *args, **kwargs):
+        if self.listener is not None:
+            self.listener.last_play_gain = self.listener.gain
         return None
 
 
@@ -31,7 +40,7 @@ class FakeAudioMngr:
         self.listener = FakeListener()
 
     def create_soundgroup(self, direct=False):
-        return FakeSoundGroup()
+        return FakeSoundGroup(self.listener)
 
 
 class FakeGame:
@@ -49,6 +58,35 @@ class FakeGame:
 
     def replace(self, m):
         self.replaced = m
+
+
+class FakeGameplay:
+    """The world state on its way out; records the gain it exited under."""
+
+    def __init__(self, game):
+        self.game = game
+        self.gain_at_exit = None
+
+    def exit(self):
+        self.gain_at_exit = self.game.audio_mngr.listener.gain
+
+
+class FakeGameLeavingWorld(FakeGame):
+    """A game whose gameplay state is what main_menu is about to leave."""
+
+    def __init__(self):
+        super().__init__()
+        self.gameplay = FakeGameplay(self)
+        self.stack = [self.gameplay]
+
+    def pop(self):
+        prev = self.stack.pop()
+        prev.exit()
+        return prev
+
+    def append(self, st):
+        self.stack.append(st)
+        return st
 
 
 class TestMainMenuExitFade(unittest.TestCase):
@@ -80,6 +118,30 @@ class TestMainMenuExitFade(unittest.TestCase):
         game.audio_mngr.listener.gain = 0.0  # left at silence by the fade
         menus.main_menu(game)
         self.assertEqual(game.audio_mngr.listener.gain, 0.7)  # 70 / 100
+
+    def test_logout_keeps_the_world_silent_until_it_has_exited(self):
+        """The logout fade's silence must outlast the map teardown.
+
+        Raising the gain while main_menu is still building (which decodes the
+        menu music) played the old map's music and ambience at full volume for
+        that instant: the burst of game sound heard just before the menu.
+        """
+        game = FakeGameLeavingWorld()
+        game.audio_mngr.listener.gain = 0.0  # left at silence by the fade
+
+        menus.main_menu(game)
+
+        self.assertEqual(
+            game.gameplay.gain_at_exit, 0.0,
+            "the world must be destroyed while the output is still silent",
+        )
+        self.assertEqual(len(game.stack), 1)
+        self.assertIsInstance(game.stack[-1], Menu)
+        self.assertEqual(game.audio_mngr.listener.gain, 0.7)
+        self.assertEqual(
+            game.audio_mngr.listener.last_play_gain, 0.7,
+            "the menu music must start only after the gain is restored",
+        )
 
 
 class FakeTimer:

@@ -314,11 +314,21 @@ def main_menu(game):
     """replace the current game state with the main menu."""
     if hasattr(game, 'instance_mngr'):
         game.instance_mngr.set_character(None)
-    # An in-game logout fade drops the listener gain to silence; restore it
-    # so the menu (and its music) is audible again.
+    # An in-game logout fade leaves the listener gain at silence. Raising it
+    # here, before the world is torn down, put the map's music and ambience
+    # back at full volume for as long as opening the menu took (the music
+    # stream is decoded right here), so a logout leaked a burst of game sound
+    # into the menu. Keep the fade's silence until the gameplay state has
+    # exited, then restore the gain for the menu and its music.
+    playing = getattr(game, "gameplay", None)
+    stack = getattr(game, "stack", ())
+    # The world is what replace() would pop, so it must be the top state: a
+    # gameplay buried under something else is not this transition's to remove.
+    leaving_world = bool(stack) and stack[-1] is playing
+    master = None
     try:
         master = game.audio_mngr.volume_categories["master"][0]
-        game.audio_mngr.listener.gain = master / 100
+        game.audio_mngr.listener.gain = 0.0 if leaving_world else master / 100
     except Exception:
         pass
     m = menu.Menu(
@@ -344,8 +354,20 @@ def main_menu(game):
             ("Exit", game.fade_out_and_exit),
         )
     )
-    m.set_music("music/10.ogg")
-    game.replace(m)
+    if leaving_world:
+        # The map's sources die while the output is still silent; only then
+        # does the menu open and its music start.
+        game.pop()
+        try:
+            if master is not None:
+                game.audio_mngr.listener.gain = master / 100
+        except Exception:
+            pass
+        m.set_music("music/10.ogg")
+        game.append(m)
+    else:
+        m.set_music("music/10.ogg")
+        game.replace(m)
 
 
 def no_account(game):
