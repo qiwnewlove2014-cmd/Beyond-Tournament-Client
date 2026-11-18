@@ -73,6 +73,34 @@ def split_channel_buffer(provider, path, channel):
     return buffer or None
 
 
+def preload_instrument_samples(audio):
+    """Warm the keyboard and kit while the client is still on its menus.
+
+    A new player joins and reaches an instrument within seconds, and that was
+    also when the map's 4 s backfill started: ~2 s of one core (and, in a
+    packed build, the first decrypt of every file) landed exactly while they
+    stood at the piano, which is the stall they report as the instrument
+    hanging. The login and main menus are idle, so the one decoder thread does
+    that work there instead and both the map join and the first press only see
+    cache hits. Errors stay per instrument: a piano that cannot warm must not
+    keep the drums cold.
+    """
+    piano = getattr(audio, "piano", None)
+    if piano is not None:
+        try:
+            piano.warm_shipped_range()
+            from .deferred_log import log_deferred
+            log_deferred("[Instruments] piano: full shipped range warming at startup, off the map path")
+        except Exception:
+            pass
+    drums = getattr(audio, "drums", None)
+    if drums is not None:
+        try:
+            drums.preload(drums.DEFAULT_KIT)
+        except Exception:
+            pass
+
+
 class AudioManager():
     @staticmethod
     def _open_context(cyal_device):
@@ -183,6 +211,7 @@ class AudioManager():
         self._light_unbound_occlusion_filter = None
         self.piano = PianoAudio(self)
         self.drums = DrumAudio(self)
+        preload_instrument_samples(self)
         
         # Initialize volumes
         for cat, val in self.volume_categories.items():

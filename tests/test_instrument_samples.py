@@ -20,6 +20,60 @@ class FakeBuffer:
         self.data, self.channels, self.rate = data, channels, rate
 
 
+class FakeWarmPiano:
+    def __init__(self, fail=False):
+        self.calls = 0
+        self.fail = fail
+
+    def warm_shipped_range(self):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("no piano samples")
+
+
+class FakeWarmDrums:
+    DEFAULT_KIT = "default"
+
+    def __init__(self, fail=False):
+        self.kits = []
+        self.fail = fail
+
+    def preload(self, kit=None):
+        self.kits.append(kit)
+        if self.fail:
+            raise RuntimeError("no drum samples")
+
+
+class InstrumentPreloadTests(unittest.TestCase):
+    """The startup warm is what keeps the first instrument press off the disk."""
+
+    def call(self, piano, drums):
+        from libs.audio_manager import preload_instrument_samples
+        preload_instrument_samples(SimpleNamespace(piano=piano, drums=drums))
+
+    def test_startup_warms_the_whole_piano_range_and_the_default_kit(self):
+        piano, drums = FakeWarmPiano(), FakeWarmDrums()
+        self.call(piano, drums)
+        self.assertEqual(piano.calls, 1)
+        self.assertEqual(drums.kits, [drums.DEFAULT_KIT])
+
+    def test_a_cold_piano_does_not_leave_the_drums_cold(self):
+        piano, drums = FakeWarmPiano(fail=True), FakeWarmDrums()
+        self.call(piano, drums)
+        self.assertEqual(piano.calls, 1)
+        self.assertEqual(drums.kits, [drums.DEFAULT_KIT])
+
+    def test_a_cold_drum_kit_does_not_raise_out_of_audio_startup(self):
+        piano, drums = FakeWarmPiano(), FakeWarmDrums(fail=True)
+        self.call(piano, drums)
+        self.assertEqual(piano.calls, 1)
+        self.assertEqual(drums.kits, [drums.DEFAULT_KIT])
+
+    def test_an_audio_manager_without_instruments_still_starts(self):
+        from libs.audio_manager import preload_instrument_samples
+        preload_instrument_samples(SimpleNamespace())
+
+
 class InstrumentSampleCacheTests(unittest.TestCase):
     def setUp(self):
         self.owner = threading.get_ident()
