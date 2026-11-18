@@ -363,7 +363,12 @@ class TestTheOwnersVoiceFromTheCabinets(unittest.TestCase):
         # The song's own monitor carries a mic it mixed in (a bot broadcasting
         # to the megaphone), so it has to offer the owner a mix without that
         # voice; the live relay leg has the same shape.
-        source = pathlib.Path(streaming.__file__).read_text(encoding="utf-8")
+        source = "".join(
+            pathlib.Path(name).read_text(encoding="utf-8")
+            for name in (streaming.__file__,
+                         pathlib.Path(streaming.__file__).with_name("network.py"),
+                         pathlib.Path(streaming.__file__).with_name("live_relay.py"))
+        )
         self.assertEqual(
             source.count("not voice_chat.own_voice_from_cabinets()"), 2)
         self.assertEqual(source.count("if part is not mic_part"), 2)

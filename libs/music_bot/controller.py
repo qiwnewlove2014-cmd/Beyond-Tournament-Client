@@ -48,7 +48,7 @@ from . import subtitles
 from .media import (FFMPEG_PATH, DEFAULT_MAP_MUSIC, FALLBACK_PLAYLIST,
                     clamp_seek_position, format_track_position, YouTubeSearcher)
 from .menus import MusicBotMenus
-from .streaming import LiveRelayStreamer, live_relay_has_input, live_relay_needed
+from .live_relay import LiveRelayStreamer, live_relay_has_input, live_relay_needed
 
 
 def _key_label(semitones):

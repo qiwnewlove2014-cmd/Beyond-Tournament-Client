@@ -1,18 +1,18 @@
-"""Music Bot streaming layer - the ffmpeg decode + OpenAL playback thread
-(AudioStreamer, including the paced 20 ms Opus network sender and direct/jam
-alignment) plus the live-instrument relay (LiveRelayStreamer)."""
+"""Music Bot streaming layer - the ffmpeg decode + OpenAL playback thread.
 
-import contextlib
+``AudioStreamer`` owns the song path, including the paced 20 ms Opus network
+sender and direct/jam alignment. The live-instrument relay lives in
+``live_relay.py`` and is re-exported here so existing imports keep working.
+"""
+
 import queue
 import random
-import struct
 import subprocess
 import threading
 import time
 from collections import deque
 
 import cyal
-import cyal.exceptions
 
 from .. import consts
 from .. import logger
@@ -20,110 +20,18 @@ from .. import voice_chat
 from .. import audio_trace
 from ..audio_diagnostics import probe
 from ..jukebox_clock import PAIR_KEY, SpotClock, mono_ms
-from ..party_sync import stereo_upload_eligible
 from ..speech import speak
-from .media import FFMPEG_PATH, YouTubeSearcher
+from .media import FFMPEG_PATH
+from . import transport
+from . import output
+from . import spatial
+from . import network
 from .transpose import ChromaticTransposer
-from ..external_audio import downmix_to_mono
 
-
-def live_relay_needed(bot):
-    """Whether live input has a leg to leave on: public, PA, Party or a room.
-
-    A song routed into a cabinet's room is uploaded even while the Broadcast
-    switch is off (``cinema_force_upload``), and a Party Sync session is a
-    private upload for its guests. The live relay has to follow the same legs
-    or a line-in is left on the positional voice channel while the song reaches
-    the room without it.
-    """
-    if bot is None:
-        return False
-    return bool(
-        getattr(bot, "broadcast_enabled", False)
-        or getattr(bot, "broadcast_to_megaphone", False)
-        or getattr(bot, "party_sync_force_upload", False)
-        or getattr(bot, "cinema_force_upload", False)
-    )
-
-
-def live_relay_has_input(bot):
-    """True when a live queue holds a frame the relay should send.
-
-    One answer for both senders: the relay used to start on the guitar and the
-    microphone only, so a captured program with no song playing had frames in
-    its queue and no thread sending them -- the party heard silence while the
-    Signal row said good.
-    """
-    for name in ("guitar_pcm_queue", "mic_pcm_queue", "external_pcm_queue",
-                 "external_live_queue"):
-        try:
-            queue = getattr(bot, name, None)
-            if queue and len(queue) > 0:
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def mix_live_stereo(external_frames, centre_frames, state_key, frame_bytes=3840):
-    """One stereo frame: captured sides kept, live centres placed.
-
-    ``frame_bytes`` is the leg's own shape: 3840 for the 20 ms song path and
-    1920 for the 10 ms live jam, which is the whole point of the smaller cut.
-    A centre source is half as wide, so it is padded to ``frame_bytes // 2``.
-
-    The party leg carries two sides when it is a Party Sync or a room. A
-    captured program is the case this exists for -- a stereo mix folded into
-    one channel loses its picture -- while a guitar or a voice is a centre
-    source by nature and goes to both sides at the same level.
-    """
-    import audioop
-
-    def as_frame(pcm, size):
-        data = bytes(pcm or b"")[:size]
-        if len(data) < size:
-            data += b"\x00" * (size - len(data))
-        return data
-
-    frame_bytes = max(2, int(frame_bytes))
-    centre_bytes = max(2, frame_bytes // 2)
-    parts = [(as_frame(frame, frame_bytes), 0.85)
-             for frame in external_frames if frame]
-    centred = [(as_frame(frame, centre_bytes), 0.85)
-               for frame in centre_frames if frame]
-    if centred:
-        mono = voice_chat.mix_audio_frames(
-            centred, state_key="%s:centre" % state_key)
-        if mono:
-            parts.append((audioop.tostereo(bytes(mono), 2, 1.0, 1.0), 0.85))
-    if not parts:
-        return b""
-    mixed = voice_chat.mix_audio_frames(parts, state_key=state_key)
-    return as_frame(mixed, frame_bytes) if mixed else b""
-
-
-def sequence_pa_frame(sender, channel, encoded):
-    """Return ``(channel, payload)`` for one outgoing PA frame of ``sender``.
-
-    The PA's listener leg can only conceal a MISSING frame if the frame says
-    where it sits in the stream, so a broadcast aimed at the megaphone is
-    re-framed for channel 31 (version + epoch + frameSeq in front of the same
-    Opus frame) and ``sender`` remembers the sequence in ``_pa_epoch`` /
-    ``_pa_seq``. Both network senders in this module hand their frame here -
-    the streamer's paced loop and the live relay - so the music bot's PA audio
-    travels the same wire as a player's own (voice_chat.pa_timeline_upload).
-
-    A Server that has not advertised ``pa_timeline_v1``, and every channel that
-    is not the megaphone, keep the legacy payload on their own channel.
-    """
-    if (channel != consts.CHANNEL_MEGAPHONE
-            or not getattr(sender.game, 'pa_timeline_supported', False)):
-        return channel, encoded
-    sender._pa_epoch = voice_chat.pa_timeline_epoch(sender._pa_epoch)
-    payload = voice_chat.pa_timeline_upload(
-        encoded, sender._pa_epoch, sender._pa_seq)
-    sender._pa_seq = (sender._pa_seq + 1) & 0xFFFFFFFF
-    return consts.CHANNEL_MEGAPHONE_TIMELINE, payload
+from .live_relay import (
+    LiveRelayStreamer, live_relay_has_input, live_relay_needed,
+    mix_live_stereo, sequence_pa_frame,
+)
 
 
 class AudioStreamer(threading.Thread):
@@ -414,253 +322,44 @@ class AudioStreamer(threading.Thread):
         self._timeline_delay = deque()
 
     def _all_sources(self):
-        """All OpenAL sources this stream feeds (1 normal, 2 spatial, N cinema)."""
-        if self.cinema is not None:
-            return self.cinema.sources
-        if self.spatial_pair:
-            return (self.spatial_src_l, self.spatial_src_r)
-        return (self.source,)
+        """All OpenAL sources this stream feeds (see output.py)."""
+        return output.all_sources(self)
 
     def _play_all(self):
-        for src in self._all_sources():
-            try:
-                src.play()
-            except Exception:
-                pass
+        output.play_all(self)
 
     def _all_playing(self):
-        if self.remote is not None:
-            # The child starts its own source when it has frames queued; a
-            # silent slot here is not a stalled output.
-            return True
-        for src in self._all_sources():
-            try:
-                if src.state != cyal.SourceState.PLAYING:
-                    return False
-            except Exception:
-                return False
-        return True
+        return output.all_playing(self)
 
     def _start_output_playing(self):
-        """Start whichever sources are not playing yet, as one output.
-
-                                In a cinema room the bank owns that decision, because starting a speaker on its own
-                                is what makes one of them permanently miss the room's beat: the bank puts a speaker
-                                that fell behind back on the room's content instant first
-                                (``CinemaSpeakerBank.realign``) and then starts the room together.
-                                """
-        if self.cinema is not None:
-            try:
-                self.cinema.start_playback()
-                return
-            except Exception:
-                pass
-        self._play_all()
+        """Start whichever sources are not playing yet (see output.py)."""
+        output.start_output_playing(self)
 
     def _buffers_queued(self):
-        if self.remote is not None:
-            return self.remote.pending_frames()
-        total = 0
-        for src in self._all_sources():
-            try:
-                total += src.buffers_queued
-            except Exception:
-                pass
-        return total
+        return output.buffers_queued(self)
 
     @staticmethod
     def _split_stereo_16(data):
         """Split interleaved s16le stereo bytes into (left, right) mono bytes."""
-        import array
-        samples = array.array('h')
-        samples.frombytes(data)
-        return samples[0::2].tobytes(), samples[1::2].tobytes()
+        return output.split_stereo_16(data)
 
     @staticmethod
     def _mix_live_into_stereo(payload, live_frames, state_key):
-        """Add the mono mic/line-in mix to BOTH sides of a stereo frame.
-
-        A mic or a guitar is one source with no sides of its own, so it belongs
-        in the centre -- mixed into the left and the right alike -- while the
-        song keeps the two sides it was uploaded with. Downmixing the song to
-        carry the solo (what this path did before) left a room with no side to
-        spread, and every speaker of the cabinet played the same thing for as
-        long as somebody played: the report was that a solo arrives from the
-        whole cabinet at once. The music keeps its own 0.75 weight and each
-        live source its 0.85, exactly as the mono mix balances them, and each
-        side is limited on its own so a loud solo cannot pull the image down.
-        """
-        if not payload or not live_frames:
-            return bytes(payload) if payload else b""
-        try:
-            import audioop
-            left, right = AudioStreamer._split_stereo_16(bytes(payload))
-            sides = []
-            for side, suffix in ((left, ":l"), (right, ":r")):
-                mixed = voice_chat.mix_audio_frames(
-                    [(side, 0.75)] + list(live_frames),
-                    state_key=f"{state_key}{suffix}",
-                )
-                sides.append(mixed or side)
-            return audioop.add(
-                audioop.tostereo(sides[0], 2, 1.0, 0.0),
-                audioop.tostereo(sides[1], 2, 0.0, 1.0),
-                2,
-            )
-        except Exception:
-            return bytes(payload)
+        """Add the mono mic/line-in mix to both sides (see spatial.py)."""
+        return spatial.mix_live_into_stereo(payload, live_frames, state_key)
 
     @staticmethod
     def _mix_external_into_stereo(payload, external_frames, state_key):
-        """Add a captured program's own left and right to the pair.
-
-        The line-in and mic path places one mono source in the centre on
-        purpose -- a guitar has no sides. An external program does: a song, a
-        stereo synth or a DAW mix was captured as two channels and the listener
-        asked for them, so each side is summed with its own side of the capture
-        while the song keeps its 0.75 weight per side. Nothing here decides
-        that left equals right; a source set to MONO arrives with identical
-        sides (``external_audio.shape_frame``) and lands in the centre by
-        construction rather than by a second rule.
-        """
-        if not payload or not external_frames:
-            return bytes(payload) if payload else b""
-        try:
-            import audioop
-            # Sum the capture first, in its own image, so one noisy frame
-            # cannot pull a side harder than the other.
-            ext = voice_chat.mix_audio_frames(
-                [(frame, 0.85) for frame in external_frames if frame],
-                state_key=f"{state_key}:ext",
-            )
-            if not ext:
-                return bytes(payload)
-            payload = bytes(payload)
-            ext = bytes(ext[:len(payload)])
-            if len(ext) < len(payload):
-                ext += b"\x00" * (len(payload) - len(ext))
-            length = len(payload) // 4 * 4
-            if length <= 0:
-                return payload
-            left, right = AudioStreamer._split_stereo_16(bytes(payload)[:length])
-            ext_left, ext_right = AudioStreamer._split_stereo_16(bytes(ext)[:length])
-            sides = []
-            for side, ext_side, suffix in (
-                (left, ext_left, ":l"),
-                (right, ext_right, ":r"),
-            ):
-                mixed = voice_chat.mix_audio_frames(
-                    [(side, 0.75), (ext_side, 1.0)],
-                    state_key=f"{state_key}{suffix}",
-                )
-                sides.append(mixed or side)
-            return audioop.add(
-                audioop.tostereo(sides[0], 2, 1.0, 0.0),
-                audioop.tostereo(sides[1], 2, 0.0, 1.0),
-                2,
-            )
-        except Exception:
-            return bytes(payload)
+        """Add a captured program's own sides (see spatial.py)."""
+        return spatial.mix_external_into_stereo(payload, external_frames, state_key)
 
     def set_cabinet_volume(self, volume):
-        self.cabinet_gain = max(0.0, min(1.0, float(volume) / 100.0))
-        if self.cinema is not None:
-            self.cinema.set_cabinet_volume(volume)
-        self._update_spatial_gain()
+        """Set the cabinet's own level and re-apply the fade (see spatial.py)."""
+        spatial.set_cabinet_volume(self, volume)
 
     def _update_spatial_gain(self):
-        """Linear distance fade for spatial pairs (same behavior as drums' 3D
-        stereo): full volume inside the reference distance, linearly down to
-        true silence at max_distance, computed from the listener's position."""
-        if self.cinema is not None:
-            # Per-speaker distance, occlusion and environment for the room.
-            self.cinema.update_output()
-            return
-        try:
-            audio = getattr(self.game, "audio_mngr", None)
-            pos = getattr(audio, "position", None)
-            if pos is None:
-                return
-            span = max(0.0001, self.spatial_max - self.spatial_ref)
-            audible = False
-            for src in (self.spatial_src_l, self.spatial_src_r):
-                p = src.position
-                dx = pos[0] - p[0]
-                dy = pos[1] - p[1]
-                dz = pos[2] - p[2]
-                dist = (dx * dx + dy * dy + dz * dz) ** 0.5
-                if dist <= self.spatial_ref:
-                    g = 1.0
-                elif dist >= self.spatial_max:
-                    g = 0.0
-                else:
-                    g = 1.0 - (dist - self.spatial_ref) / span
-                audible = audible or g > 0.0
-                # Jukebox songs use their own mixer category ("jukebox"), so
-                # lowering the music-bot/map-music slider does not silence them.
-                music_gain = audio.volume_categories.get("jukebox", [100])[0] / 100.0
-                src.gain = self.spatial_base_gain * music_gain * getattr(self, "cabinet_gain", 1.0) * g
-
-            if not audible:
-                return  # Keep timeline playing, but do not raycast silent cabinets.
-            # Wall occlusion check for spatial pair (Jukebox direct mode):
-            if self.spatial_src_l is not None and self.spatial_src_r is not None:
-                box_pos = (
-                    (self.spatial_src_l.position[0] + self.spatial_src_r.position[0]) / 2.0,
-                    self.spatial_src_l.position[1],
-                    self.spatial_src_l.position[2],
-                )
-                gp = getattr(self.game, "gameplay", None)
-                cur_map = getattr(gp, "map", None) if gp is not None else None
-                if cur_map is not None and hasattr(cur_map, "valid_straight_path"):
-                    # Wall-thickness tiers (same 0/1/2 scale as jukebox/player.py):
-                    # a lone pillar tile only slightly dulls the song, while
-                    # thick walls keep the full standard muffle.
-                    tier = 0
-                    tfn = getattr(cur_map, "occlusion_tier", None)
-                    jukebox_player = getattr(self, "jukebox_player", None)
-                    if jukebox_player is not None:
-                        tier = jukebox_player.occlusion_tier(box_pos, pos, self.spatial_max)
-                    elif tfn is not None:
-                        with contextlib.suppress(Exception):
-                            tier = int(tfn(box_pos, pos))
-                    else:
-                        with contextlib.suppress(Exception):
-                            tier = 2 if cur_map.valid_straight_path(box_pos, pos) is False else 0
-                    if tier != getattr(self, "_last_occluded", None):
-                        self._last_occluded = tier
-                        filt = None
-                        if tier >= 2 and hasattr(audio, "gen_filter"):
-                            if not hasattr(self, "_occlusion_filter") or self._occlusion_filter is None:
-                                self._occlusion_filter = audio.gen_filter("LOWPASS", ("GAINHF", 0.05), ("GAIN", 0.22))
-                            filt = self._occlusion_filter
-                        elif tier == 1 and hasattr(audio, "gen_filter"):
-                            if not hasattr(self, "_light_occlusion_filter") or self._light_occlusion_filter is None:
-                                self._light_occlusion_filter = audio.gen_filter("LOWPASS", ("GAINHF", 0.45), ("GAIN", 0.75))
-                            filt = self._light_occlusion_filter
-                        for s in (self.spatial_src_l, self.spatial_src_r):
-                            try:
-                                if filt is not None:
-                                    s.direct_filter = filt
-                                else:
-                                    # A wall clearing must not strip an active
-                                    # global filter (the underwater muffle):
-                                    # restore it instead of deleting it.
-                                    active = getattr(audio, "filter", None)
-                                    if active and active[-1] is not None:
-                                        s.direct_filter = active[-1]
-                                    else:
-                                        with contextlib.suppress(Exception):
-                                            del s.direct_filter
-                                if getattr(audio, "efx", None) is not None:
-                                    if hasattr(self, "reverb_slot") and self.reverb_slot is not None:
-                                        audio.efx.send(s, 0, self.reverb_slot, filter=filt)
-                                    if hasattr(self, "eq_slot") and self.eq_slot is not None:
-                                        audio.efx.send(s, 1, self.eq_slot, filter=filt)
-                            except Exception:
-                                pass
-        except Exception:
-            pass
+        """Distance fade / occlusion for the spatial pair (see spatial.py)."""
+        spatial.update_spatial_gain(self)
 
     def set_output_gain(self, gain):
         """One absolute gain for this stream's output, wherever it plays.
@@ -704,109 +403,21 @@ class AudioStreamer(threading.Thread):
                 pass
 
     def _init_buffer_pool(self):
-        """Pre-allocate OpenAL buffers for reuse"""
-        if self.remote is not None:
-            # The other device's process owns its own buffers.
-            return
-        if self.cinema is not None:
-            # A cinema room allocates its own per-speaker pools: a single
-            # shared pool could never hold N frames the pre-buffer needs.
-            return
-        for _ in range(self.NUM_BUFFERS):
-            try:
-                buf = self.game.audio_mngr.context.gen_buffer()
-                self._buffer_pool.append(buf)
-            except cyal.exceptions.InvalidOperationError:
-                # The project audio backend can surface one stale OpenAL error
-                # before succeeding; other buffer loaders use the same retry.
-                try:
-                    buf = self.game.audio_mngr.context.gen_buffer()
-                    self._buffer_pool.append(buf)
-                except Exception as ex:
-                    logger.log_exception(ex, "AudioStreamer._init_buffer_pool retry")
-                    break
-            except Exception:
-                break
+        """Pre-allocate OpenAL buffers for reuse (see output.py)."""
+        output.init_buffer_pool(self)
 
     @staticmethod
     def _ffmpeg_header_block(headers):
         """Build an injection-safe CRLF header block for ffmpeg's input."""
-        lines = []
-        token_chars = "!#$%&'*+-.^_`|~"
-        for raw_name, raw_value in (headers or {}).items():
-            name = str(raw_name).strip()
-            value = str(raw_value).strip()
-            if not name or not value:
-                continue
-            if any(ch in name or ch in value for ch in ('\r', '\n')):
-                continue
-            if not all(ch.isalnum() or ch in token_chars for ch in name):
-                continue
-            lines.append(f"{name}: {value}\r\n")
-        return "".join(lines)
+        return transport.ffmpeg_header_block(headers)
 
     def _get_buffer(self):
-        """Get a reclaimed buffer without growing the OpenAL pool.
-
-                                Streaming must apply backpressure when every pre-allocated buffer is in flight;
-                                allocating another hardware buffer here lets a fast decoder queue an entire song
-                                and can exhaust the shared audio device.
-                                """
-        self._reclaim_processed()
-
-        if not self._buffer_pool and self._pool_swap_armed:
-            # A stream handed from a room to the plain pair never built a pool of its own (a room allocates
-            # per speaker), and it is being fed again before the pair's queued frames have recycled a
-            # buffer. Build the pool here, on the thread that already owns this stream's buffers.
-            self._pool_swap_armed = False
-            self._init_buffer_pool()
-        if self._buffer_pool:
-            return self._buffer_pool.pop(0)
-        return None
+        """Get a reclaimed buffer without growing the pool (see output.py)."""
+        return output.get_buffer(self)
 
     def _reclaim_processed(self):
-        """Return processed buffers to pool for reuse.
-
-                    CRITICAL: cyal's unqueue_buffers() returns a SINGLE Buffer object by default, not a list -
-                    handle both cases robustly. Spatial pairs drain both sources.
-                    """
-        if self.remote is not None:
-            # This stream owns no buffers here: the child's process recycles its
-            # own, and the parent only counts what it has not written yet.
-            return
-        if self.cinema is not None:
-            # The speaker bank owns its per-speaker pools, so it owns the
-            # reclamation too -- but the watchdog's audible-progress stamp is
-            # this stream's contract, so it is still stamped here.
-            reclaimed = False
-            try:
-                reclaimed = self.cinema.reclaim()
-            except Exception:
-                reclaimed = False
-            if reclaimed and getattr(self, "jukebox_player", None) is not None:
-                self.last_output_at = time.monotonic()
-            return
-        reclaimed = False
-        try:
-            for src in self._all_sources():
-                while src.buffers_processed > 0:
-                    result = src.unqueue_buffers()
-                    if result is not None:
-                        reclaimed = True
-                        try:
-                            for buf in result:
-                                self._buffer_pool.append(buf)
-                        except TypeError:
-                            # Not iterable — single buffer object (cyal default)
-                            self._buffer_pool.append(result)
-        except Exception:
-            pass
-        if reclaimed and getattr(self, "jukebox_player", None) is not None:
-            # A buffer finished on the speaker: audible progress. Only
-            # jukebox direct streams feed the jukebox watchdog (jukebox/player.py
-            # reads this stamp); personal Music Bot streams never set
-            # jukebox_player, so their output is not watched here.
-            self.last_output_at = time.monotonic()
+        """Return processed buffers to the pool (see output.py)."""
+        output.reclaim_processed(self)
 
     def _claim_timeline_marker(self):
         with self._timeline_lock:
@@ -829,412 +440,28 @@ class AudioStreamer(threading.Thread):
             }
 
     def _send_to_network(self, data, timeline_epoch=None, timeline_seq=None):
-        """Queue raw PCM chunk to be sent to the network by the sender thread."""
-        item = (data, timeline_epoch, timeline_seq)
-        try:
-            self.network_queue.put_nowait(item)
-        except queue.Full:
-            try:
-                self.network_queue.get_nowait()
-                self.network_queue.put_nowait(item)
-            except queue.Empty:
-                pass
+        """Queue a PCM chunk for the sender thread (see network.py)."""
+        network.send_to_network(self, data, timeline_epoch, timeline_seq)
 
     def _route_aligned_network_frame(self, decoded_frame=None):
-        """Advance the normal-broadcast delay line by one media frame.
-
-                                Normal Music Broadcast sends the oldest pre-buffered frame, matching the
-                                performer's OpenAL playhead; megaphone keeps sending the current decoded frame so
-                                the verified PA transport stays untouched.
-                                """
-        if not self.bot:
-            return
-        if decoded_frame is not None:
-            self._timeline_delay.append(bytes(decoded_frame))
-        aligned = self._timeline_delay.popleft() if self._timeline_delay else None
-        if getattr(self.bot, 'broadcast_to_megaphone', False):
-            if decoded_frame is not None:
-                self._send_to_network(decoded_frame)
-            return
-        if aligned is not None:
-            epoch, seq = self._claim_timeline_marker()
-            self._send_to_network(aligned, epoch, seq)
+        """Advance the broadcast delay line (see network.py)."""
+        network.route_aligned_network_frame(self, decoded_frame)
 
     def begin_network_crossfade(self, partner, seconds):
-        """Blend this stream's network leg with `partner`'s for `seconds`.
-
-                                Each outgoing frame is mixed with the partner's (this stream fading out, the partner
-                                in) so broadcast/PA listeners hear the same crossfade the performer hears; when the
-                                window elapses this leg retires and the partner's takes over.
-                                """
-        self._network_mix = (partner, time.monotonic(), max(0.1, float(seconds)))
+        """Blend two network legs (see network.py)."""
+        network.begin_network_crossfade(self, partner, seconds)
 
     def _mix_network_frames(self, own, partner, own_gain, partner_gain):
-        """Convex blend of two stereo int16 PCM frames (gains sum to ~1).
-
-                    A convex combination can never exceed the loudest input sample, so the blend cannot clip;
-                    audioop clips to int16 anyway as a backstop.
-                    """
-        try:
-            import audioop
-            own_gain = max(0.0, min(1.0, own_gain))
-            partner_gain = max(0.0, min(1.0, partner_gain))
-            if own is None:
-                return audioop.mul(partner, 2, partner_gain)
-            if partner is None:
-                return audioop.mul(own, 2, own_gain)
-            n = min(len(own), len(partner))
-            out = audioop.add(
-                audioop.mul(own[:n], 2, own_gain),
-                audioop.mul(partner[:n], 2, partner_gain),
-                2,
-            )
-            if len(partner) > n:
-                out += audioop.mul(partner[n:], 2, partner_gain)
-            return out
-        except Exception:
-            return own if own is not None else partner
+        """Convex blend of two frames (see network.py)."""
+        return network.mix_network_frames(own, partner, own_gain, partner_gain)
 
     def _network_sender_loop(self):
-        """Paced network sending loop running in a separate thread.
-        Decouples network scheduling sleeps from local OpenAL playback.
-        """
-        while self.running:
-            if getattr(self, "network_muted", False):
-                # Retired during a crossfade: drop everything (music, live
-                # guitar/mic mix, PA monitor) so listeners never hear the old
-                # song under the new one. Poll slowly to keep the thread alive
-                # in case it is ever unmuted before being stopped.
-                time.sleep(0.05)
-                continue
-
-            data = None
-            timeline_epoch = timeline_seq = None
-            mix = getattr(self, "_network_mix", None)
-            if mix is not None:
-                partner, mix_started, mix_seconds = mix
-                progress = (time.monotonic() - mix_started) / mix_seconds
-                if progress >= 1.0:
-                    # The overlap is over: retire this network leg; the
-                    # incoming stream takes over the broadcast on its own now.
-                    self._network_mix = None
-                    self.network_muted = True
-                    continue
-                try:
-                    item = self.network_queue.get(timeout=0.1)
-                    if isinstance(item, tuple) and len(item) == 3:
-                        data = item[0]
-                    else:
-                        data = item
-                except queue.Empty:
-                    data = None
-                partner_data = None
-                partner_queue = getattr(partner, "network_queue", None)
-                if partner_queue is not None:
-                    try:
-                        partner_item = partner_queue.get_nowait()
-                        if isinstance(partner_item, tuple) and len(partner_item) == 3:
-                            partner_data = partner_item[0]
-                        else:
-                            partner_data = partner_item
-                    except Exception:
-                        partner_data = None
-                if data is not None or partner_data is not None:
-                    data = self._mix_network_frames(
-                        data, partner_data, 1.0 - progress, progress)
-                    # The outgoing track still owns the room timeline until
-                    # the hand-over; the blend keeps its markers.
-                    timeline_epoch, timeline_seq = self._claim_timeline_marker()
-            else:
-                try:
-                    # Wait for a packet, with timeout so we check self.running regularly
-                    item = self.network_queue.get(timeout=0.1)
-                    if isinstance(item, tuple) and len(item) == 3:
-                        data, timeline_epoch, timeline_seq = item
-                    else:
-                        data, timeline_epoch, timeline_seq = item, None, None
-                except queue.Empty:
-                    data = None
-                    timeline_epoch = timeline_seq = None
-
-            # Do not leak pre-pause PCM into the next broadcast segment unless live input is present.
-            if self.paused:
-                data = None
-
-            # Single music slot: when "Broadcast to Megaphone" is ON but another
-            # performer holds the music-bot PA slot, keep the MP3 private - only
-            # this performer's live instruments (guitar/mic) continue into the
-            # PA mix, so two people's music never overlaps on the speakers.
-            if (data is not None and self.bot
-                    and getattr(self.bot, 'broadcast_to_megaphone', False)
-                    and not self.bot._is_music_owner()):
-                data = None
-
-            if data is None:
-                # Keep the live mix flowing on every leg that carries it -- a
-                # public broadcast, the megaphone, a Party Sync session or a
-                # cinema room routed without the Broadcast switch.
-                if self.bot and live_relay_needed(self.bot):
-                    if live_relay_has_input(self.bot):
-                        data = b'\x00' * 3840
-                        if not getattr(self.bot, 'broadcast_to_megaphone', False):
-                            timeline_epoch, timeline_seq = self._claim_timeline_marker()
-
-            if data is None:
-                continue
-
-            # High-resolution, deadline-based pacing. Advancing the ideal deadline by exactly 20 ms prevents
-            # normal scheduler overshoot (typically 0.2-0.8 ms/frame on Windows) from accumulating into a
-            # steadily growing network queue; a large stall starts a fresh cadence rather than bursting.
-            now = time.perf_counter()
-            target_interval = 0.020  # 20ms per buffer
-            if self.last_send_time is None or now - self.last_send_time > 0.100:
-                deadline = now
-            else:
-                deadline = self.last_send_time + target_interval
-                if now < deadline:
-                    # Sleep most of the way (subtracting 1ms margin for Windows scheduler inaccuracy)
-                    sleep_time = deadline - now
-                    if sleep_time > 0.001:
-                        time.sleep(sleep_time - 0.001)
-                    # Spin lock for the remaining fraction of a millisecond
-                    while time.perf_counter() < deadline:
-                        pass
-                elif now - deadline > 0.040:
-                    # Do not emit a catch-up burst after a suspended/stalled worker.
-                    deadline = now
-            # Keep the IDEAL deadline, not the overshot wall-clock time, so small
-            # scheduling errors are corrected by the next interval instead of
-            # becoming permanent drift.
-            self.last_send_time = deadline
-
-            self._send_to_network_actual(data, timeline_epoch, timeline_seq)
+        """Paced network sender thread (see network.py)."""
+        network.network_sender_loop(self)
 
     def _send_to_network_actual(self, data, timeline_epoch=None, timeline_seq=None):
-        """Downmix Stereo to Mono, scale volume, encode as Opus, and send to network."""
-        mix_limiter_key = voice_chat.audio_limiter_key("musicbot-mix", self)
-        try:
-            if not self.game or not self.game.network:
-                return
-                
-            # Broadcast? The bot broadcast is on, OR the performer enabled "Broadcast to Megaphone" (an
-            # independent toggle, exactly like piano/drums), OR the player hosts an active Party Sync session
-            # (private upload). A stream WITHOUT a bot (jukebox playback) NEVER sends, or the jukebox audio
-            # would be re-broadcast to the whole map as this player's own music bot stream (double audio).
-            if not self.bot or not (
-                self.bot.broadcast_enabled
-                or self.bot.broadcast_to_megaphone
-                or getattr(self.bot, "party_sync_force_upload", False)
-                # A song routed into a cabinet's room is uploaded whatever the Broadcast switch says: the room is
-                # a place other people stand in and the frames are the only way it reaches them (see
-                # libs/audio/cinema/peer.py). The switch itself is untouched and comes back when routing goes off.
-                or getattr(self.bot, "cinema_force_upload", False)
-            ):
-                return
-
-            # Downmix 16-bit stereo → 16-bit mono
-            import audioop
-            mono_data = audioop.tomono(data, 2, 0.5, 0.5)
-
-            # Scale the PCM stream volume according to self.volume and the dynamic ducking multiplier before network broadcast
-            current_volume_scale = (self.volume / 100.0)
-            if self.bot:
-                current_volume_scale *= getattr(self.bot, 'duck_multiplier', 1.0)
-            
-            if current_volume_scale != 1.0:
-                try:
-                    mono_data = audioop.mul(mono_data, 2, current_volume_scale)
-                except Exception:
-                    pass
-
-            target_channel = consts.CHANNEL_MUSICBOT
-            # A Party Sync session shares the bot privately with its guests:
-            # always use the private MUSICBOT leg (never the PA megaphone),
-            # regardless of the user's megaphone toggle, while the session is
-            # active. The server relays that leg only to session guests.
-            if (self.bot and self.bot.broadcast_to_megaphone
-                    and not getattr(self.bot, "party_sync_force_upload", False)):
-                target_channel = consts.CHANNEL_MEGAPHONE
-
-            # Mix queued live input (voice mic and/or line-in guitar) into the
-            # outgoing stream. This happens on BOTH broadcast paths (the 3D
-            # music bot channel and the megaphone), so a guitar strum is heard
-            # either way - always gated by broadcast_enabled above.
-            mic_data = None
-            guitar_data = None
-            if self.bot:
-                try:
-                    if getattr(self.bot, 'mic_pcm_queue', None) and self.bot.mic_pcm_queue:
-                        mic_data = self.bot.mic_pcm_queue.popleft()
-                except Exception:
-                    pass
-                try:
-                    if getattr(self.bot, 'guitar_pcm_queue', None) and self.bot.guitar_pcm_queue:
-                        guitar_data = self.bot.guitar_pcm_queue.popleft()
-                except Exception:
-                    pass
-            # A captured program (a DAW, a player, the whole computer) rides
-            # the same legs as the line-in but keeps its two sides: its own
-            # queue, so the stereo branch can place each side.
-            external_frames = []
-            if self.bot:
-                try:
-                    external_queue = getattr(self.bot, 'external_pcm_queue', None)
-                    while external_queue and len(external_frames) < 2:
-                        external_frames.append(external_queue.popleft())
-                except Exception:
-                    external_frames = []
-            # The live input is kept as its own list as well as being mixed into
-            # mono_data: the stereo branch needs to place it in the centre
-            # without downmixing the song with it (see _mix_live_into_stereo).
-            live_frames = []
-            # What the cabinets play into the owner's own ears, when it is not
-            # simply `mono_data`: a singer who silenced their own voice from the
-            # cabinets hears the same mix without their microphone
-            # (`voice_chat.own_voice_from_cabinets`). The send is untouched.
-            owner_local_pcm = None
-            if (mic_data is not None or guitar_data is not None
-                    or external_frames):
-                try:
-                    def _align(frame):
-                        if len(frame) > len(mono_data):
-                            return frame[:len(mono_data)]
-                        if len(frame) < len(mono_data):
-                            return frame + b'\x00' * (len(mono_data) - len(frame))
-                        return frame
-
-                    mic_part = None
-                    if mic_data is not None:
-                        mic_part = (_align(mic_data), 0.85)
-                        live_frames.append(mic_part)
-                    if guitar_data is not None:
-                        live_frames.append((_align(guitar_data), 0.85))
-                    # The mono legs (public broadcast, PA) have one channel by
-                    # design, so a stereo program is averaged into them here.
-                    mono_live_frames = list(live_frames)
-                    # Party Sync -> cinema: the host's own guitar/mic is not
-                    # in the room yet while a song is playing (the live-only
-                    # relay is parked then), so tap the centre instruments
-                    # here too. External audio is NOT included: its source
-                    # already hands every 10 ms frame to the room mixer.
-                    mixer = getattr(self.bot, 'party_room_mixer', None)
-                    if mixer is not None and live_frames:
-                        host_mix = voice_chat.mix_audio_frames(
-                            list(live_frames),
-                            state_key=voice_chat.audio_limiter_key(
-                                "party-room-host-song", self),
-                        )
-                        if host_mix:
-                            mixer.push("host-instrument", host_mix, stereo=False)
-                    for frame in external_frames:
-                        mono_ext = downmix_to_mono(frame)
-                        if mono_ext:
-                            mono_live_frames.append((_align(mono_ext), 0.85))
-                    # Sum music and live inputs in wide precision, then apply
-                    # one limiter. audioop.add saturates at each intermediate
-                    # addition, so limiting its result cannot repair clipping.
-                    parts = [(mono_data, 0.75)] + mono_live_frames
-                    mixed = voice_chat.mix_audio_frames(
-                        parts,
-                        state_key=mix_limiter_key,
-                    )
-                    if mixed:
-                        # The owner's own ear: the same mix minus their voice,
-                        # built only when they have turned that copy off. The
-                        # room still gets every part of it.
-                        if mic_part is not None \
-                                and not voice_chat.own_voice_from_cabinets() \
-                                and not voice_chat.cabinets_render_for_recording(
-                                    self.bot._find_gameplay(), self.bot):
-                            owner_mix = voice_chat.mix_audio_frames(
-                                [part for part in parts if part is not mic_part],
-                                state_key=voice_chat.audio_limiter_key(
-                                    "own-ear-mix", self),
-                            )
-                            if owner_mix:
-                                owner_local_pcm = bytes(owner_mix)
-                        mono_data = mixed
-                except Exception:
-                    live_frames = []
-
-            # When routing through the megaphone, feed the mixed stream into the local PA sidechain (main
-            # thread) so the broadcaster hears their own music/instruments with zero latency - the server no
-            # longer echoes the broadcast back to the sender. Skipped while a Party Sync session is active.
-            if (self.bot and self.bot.broadcast_to_megaphone
-                    and not getattr(self.bot, "party_sync_force_upload", False)):
-                try:
-                    gp = self.bot._find_gameplay()
-                    if gp is not None:
-                        if hasattr(voice_chat, '_feed_local_megaphone_direct'):
-                            local_pcm = (owner_local_pcm
-                                         if owner_local_pcm is not None
-                                         else bytes(mono_data))
-                            voice_chat._feed_local_megaphone_direct(
-                                gp, local_pcm, producer='music'
-                            )
-                except Exception:
-                    pass
-
-            # Party Sync private leg carries TRUE STEREO so guests hear real
-            # left/right separation instead of the mono downmix; public
-            # broadcasts and the PA megaphone keep the proven mono path.
-            # Live-input (mic/guitar) mixes stay mono (built as one channel).
-            # A live input no longer turns this off: the solo is one source and
-            # goes in the centre of the pair, so the song keeps its image for
-            # everyone in the room while somebody plays over it (see
-            # party_sync.stereo_upload_eligible and _mix_live_into_stereo).
-            use_stereo = stereo_upload_eligible(
-                self.bot,
-                getattr(self, "channels", 2),
-            )
-            if use_stereo:
-                # A streamer built without a bot never reaches here (the gate above needs one),
-                # and that is also the only streamer with no stereo encoder: ask for it so an
-                # object missing one -- a hand-built streamer, an older one -- still uploads
-                # through its mono encoder instead of going silent on this branch.
-                enc = getattr(self, "encoder_stereo", None) or self.encoder
-                payload = bytes(data) if data is not None else b""
-                if current_volume_scale != 1.0 and payload:
-                    try:
-                        payload = audioop.mul(payload, 2, current_volume_scale)
-                    except Exception:
-                        pass
-                if payload and live_frames:
-                    payload = self._mix_live_into_stereo(
-                        payload, live_frames, mix_limiter_key)
-                if payload and external_frames:
-                    payload = self._mix_external_into_stereo(
-                        payload, external_frames, mix_limiter_key)
-            else:
-                enc = self.encoder
-                payload = mono_data
-            if enc is None or not payload:
-                return
-            encoded = enc.encode(bytearray(payload))
-            if (target_channel == consts.CHANNEL_MUSICBOT
-                    and getattr(self.game, 'music_timeline_supported', False)
-                    and timeline_epoch is not None and timeline_seq is not None):
-                target_channel = consts.CHANNEL_MUSICBOT_TIMELINE
-                encoded = struct.pack(
-                    ">BII", 1, int(timeline_epoch) & 0xFFFFFFFF,
-                    int(timeline_seq) & 0xFFFFFFFF,
-                ) + bytes(encoded)
-                with self._timeline_lock:
-                    self._timeline_last_sent_seq = int(timeline_seq) & 0xFFFFFFFF
-
-            # The PA's SEQUENCED upload (channel 31): the same broadcast with
-            # the frame's position in front of it, so a listener conceals a
-            # lost frame (Opus PLC) instead of holding the 120 ms reserve the
-            # legacy payload needs (tools/megaphone_latency_sim.py measured
-            # both). A Server that has not advertised the channel keeps 30.
-            target_channel, encoded = sequence_pa_frame(
-                self, target_channel, encoded)
-
-            self.game.network.send(target_channel, "n/a", encoded, reliable=False)
-        except Exception:
-            pass
-
-
+        """Encode and send one frame (see network.py)."""
+        network.send_to_network_actual(self, data, timeline_epoch, timeline_seq)
 
     def _note_fed_content(self, data):
         """Track the media position already handed to OpenAL (jukebox retire math)."""
@@ -1637,23 +864,8 @@ class AudioStreamer(threading.Thread):
         return function(*args, **kwargs)
 
     def _resolve_playback_info(self, canonical_url, *, use_cache=False):
-        self._media_cache_key = canonical_url
-        self._media_cache_entry = None
-        self._media_cache_candidate = None
-        if not self.running:
-            return None
-        if use_cache and self._media_cache is not None:
-            entry = self._media_cache.get(canonical_url)
-            if entry is not None:
-                self._media_cache_entry = entry
-                return entry.info()
-        # Retries bypass the cache, retaining the original isolated resolver
-        # and cancellation contract. Only successful prebuffering promotes it.
-        fresh = self._diagnostic_startup_call("direct.resolve", YouTubeSearcher.get_stream_info,
-                                             canonical_url, cancelled=lambda: not self.running)
-        if self.running and self._media_cache is not None:
-            self._media_cache_candidate = fresh
-        return fresh
+        """Resolve the page URL through the isolated helper (see transport.py)."""
+        return transport.resolve_playback_info(self, canonical_url, use_cache=use_cache)
 
     def _invalidate_cached_media(self):
         if self._media_cache is not None and self._media_cache_entry is not None:
@@ -1948,123 +1160,12 @@ class AudioStreamer(threading.Thread):
         self._cleanup()
 
     def _resolve_input(self):
-        """The direct stream URL and the headers to read it with.
-
-        Returns ``(target_url, input_headers, canonical_url)``, or ``None`` when
-        the worker was cancelled or the link could not be resolved -- in which case
-        it has already cleaned itself up and ``run`` returns.
-        """
-        canonical_url = self.canonical_url
-        target_url = self.audio_url
-        input_headers = dict(self.http_headers)
-        if "youtube.com" in target_url or "youtu.be" in target_url:
-            canonical_url = target_url
-            target_url = ""
-        if canonical_url and not target_url.startswith(("http://", "https://")):
-            fresh = self._resolve_playback_info(canonical_url, use_cache=True)
-            if not self.running:
-                self._cleanup()
-                return None
-            if fresh:
-                target_url = fresh['url']
-                input_headers = fresh.get('http_headers') or {}
-            else:
-                # A failed/timed-out helper must not fall back to in-process
-                # extraction or launch ffmpeg with an empty input URL.
-                self.failure_reason = "audio link resolution failed"
-                self._cleanup()
-                return None
-        return target_url, input_headers, canonical_url
+        """Resolve the stream URL and headers (see transport.resolve_input)."""
+        return transport.resolve_input(self)
 
     def _build_cmd(self, target_url, input_headers):
-        """The ffmpeg argv for one flight of this stream (see each flag above).
-
-        ``target_url``/``input_headers`` are whatever the last resolve produced, so a
-        command rebuilt after a re-resolve reads the fresh signed URL.
-        """
-        cmd = [FFMPEG_PATH]
-        if target_url.startswith(("http://", "https://")):
-            # Reconnect on mid-stream drops for EVERY network source, including googlevideo: a CDN connection
-            # close near the end of a song used to kill ffmpeg outright (no reconnect flags) and the song ended
-            # early - verified locally: ffmpeg exits with an I/O error on a dropped connection, but with
-            # reconnect flags it reconnects at the last byte offset (range requests) and the full song plays out.
-            if "googlevideo.com" in target_url.lower():
-                # Shorter budget: the startup 403 path (stale signed URL)
-                # must re-resolve a fresh URL quickly instead of burning
-                # the full backoff window before giving up.
-                cmd.extend([
-                    '-reconnect', '1',
-                    '-reconnect_streamed', '1',
-                    '-reconnect_on_http_error', '403,429,5xx',
-                    '-reconnect_delay_max', '2',
-                    '-reconnect_delay_total_max', '6',
-                ])
-            else:
-                cmd.extend([
-                    '-reconnect', '1',
-                    '-reconnect_streamed', '1',
-                    '-reconnect_on_http_error', '403,429,5xx',
-                    '-reconnect_delay_max', '5',
-                    '-reconnect_delay_total_max', '12',
-                ])
-        user_agent = next(
-            (str(value).strip() for name, value in input_headers.items()
-             if str(name).lower() == 'user-agent'),
-            '',
-        )
-        if user_agent and '\r' not in user_agent and '\n' not in user_agent:
-            # ffmpeg has a dedicated option for User-Agent. Using it avoids
-            # a built-in Lavf agent overriding the yt-dlp authorization UA.
-            cmd.extend(['-user_agent', user_agent])
-        header_block = self._ffmpeg_header_block({
-            name: value for name, value in input_headers.items()
-            if str(name).lower() != 'user-agent'
-        })
-        if header_block:
-            cmd.extend(['-headers', header_block])
-        effective_offset = getattr(self, "start_offset", 0.0)
-        # Timeline anchoring (jukebox direct only): a fresh song keeps position 0 and waits out
-        # the shared lead-in (adding resolve time here is what used to skip the intro), while a
-        # mid-song join seeks PAST the projected audible start and waits the exact residual at
-        # prebuffer-complete. Non-anchored workers (personal music bot, livestreams) keep legacy.
-        if self.start_offset_received_at is not None:
-            if self._join_playing_room:
-                # Joining a room that is already playing (the per-listener direct fallback, or this
-                # stream's own one catch-up after a late start): always seek. The seek formula cancels
-                # the offset entirely and lands this machine on the room's clock.
-                effective_offset = max(0.001, effective_offset)
-                effective_offset = self.direct_seek_seconds(
-                    effective_offset, self.start_offset_received_at, time.monotonic(),
-                    aim_ahead_s=self._join_aim_ahead_s,
-                    lead_in=self.room_lead_in_s)
-            elif effective_offset > 0.0:
-                if self._direct_anchor and effective_offset <= self.DIRECT_FRESH_MAX_S:
-                    effective_offset = 0.0
-                elif self._direct_anchor:
-                    effective_offset = self.direct_seek_seconds(
-                        effective_offset, self.start_offset_received_at, time.monotonic())
-                else:
-                    # Only compensate the client's resolve delay when RESUMING
-                    # mid-song (start_offset > 0). A fresh song must start at 0:
-                    # adding the yt-dlp resolve time here made the jukebox skip
-                    # past the intro every time the direct fallback was used.
-                    effective_offset += max(0.0, time.monotonic() - self.start_offset_received_at)
-        self._direct_seek_to = effective_offset if effective_offset > 0.5 else 0.0
-        # Input authorization must precede seek. YouTube's signed range
-        # request can return 403 when -ss is placed before these headers.
-        if effective_offset > 0.5:
-            cmd.extend(['-ss', f"{effective_offset:.2f}"])
-        cmd.extend([
-            '-re',  # Read/decode at media rate; network and OpenAL consume 20 ms frames.
-            '-i', target_url,
-            '-vn',  # Video containers (mp4/mkv/...) must decode audio only.
-            '-f', 's16le',
-            '-ar', '48000',
-            '-ac', str(self.channels),
-            '-loglevel', 'error',
-            'pipe:1'
-        ])
-        return cmd
+        """The ffmpeg argv for one flight (see transport.build_cmd)."""
+        return transport.build_cmd(self, target_url, input_headers)
 
     def _prepare_output(self):
         """The local buffer pool and the paced network sender, before any decode."""
@@ -2588,358 +1689,3 @@ class AudioStreamer(threading.Thread):
                     self.ready_event.set()
             except Exception:
                 pass
-
-
-class LiveRelayStreamer(threading.Thread):
-    """Stand-alone streaming thread for live instrument (guitar/mic) PCM when no MP3 audio is playing."""
-    # The live relay's own PA sequence (channel 31), same shape as the music
-    # bot's: one epoch per relay, stamped on the first PA frame sent.
-    _pa_epoch = None
-    _pa_seq = 0
-
-    def __init__(self, game, bot):
-        super().__init__(daemon=True)
-        self.game = game
-        self.bot = bot
-        self.running = True
-        from pyogg import OpusEncoder
-        self.encoder = OpusEncoder()
-        self.encoder.set_application('audio')
-        self.encoder.set_channels(1)  # Opus network stream is MONO
-        self.encoder.set_sampling_frequency(48000)
-        # The party leg is the one leg that can carry two sides without a
-        # song: a captured program is stereo material, and centring it was
-        # the mix a listener could not tell apart.
-        self.encoder_stereo = OpusEncoder()
-        self.encoder_stereo.set_application('audio')
-        self.encoder_stereo.set_channels(2)
-        self.encoder_stereo.set_sampling_frequency(48000)
-        self.last_send_time = None
-
-    def stop(self):
-        self.running = False
-        voice_chat.reset_audio_limiter(
-            voice_chat.audio_limiter_key("live-relay-mix", self))
-
-    def _pace(self, pace):
-        """Wait for the next IDEAL frame deadline, not for "sleep just ended".
-
-        The relay used to base the next wait on the wall-clock instant after
-        the previous sleep. A Windows sleep that woke 1-2 ms late therefore
-        moved the deadline permanently, and a 10 ms stream ran at about 87
-        frames per second: its queue filled for a few seconds and then dropped
-        a burst (the every-5-7-seconds stutter). Keeping the ideal deadline,
-        as AudioStreamer does, makes the next wait shorter and corrects the
-        overshoot instead of accumulating it. A real stall still starts a new
-        cadence rather than bursting an unbounded catch-up.
-        """
-        now = time.perf_counter()
-        if self.last_send_time is None or now - self.last_send_time > 0.100:
-            if self.last_send_time is not None and audio_trace.enabled():
-                audio_trace.event(
-                    "relay_stall", reason="long",
-                    gap_ms=audio_trace.gap_ms(now, self.last_send_time),
-                    context=audio_trace.party_context(self.game)
-                )
-            deadline = now
-        else:
-            deadline = self.last_send_time + pace
-            if now < deadline:
-                sleep_time = deadline - now
-                if sleep_time > 0.001:
-                    time.sleep(sleep_time - 0.001)
-                while time.perf_counter() < deadline:
-                    pass
-            elif now - deadline > 0.040:
-                if audio_trace.enabled():
-                    audio_trace.event(
-                        "relay_stall", reason="late",
-                        late_ms=round((now - deadline) * 1000.0, 2),
-                        context=audio_trace.party_context(self.game)
-                    )
-                deadline = now
-        self.last_send_time = deadline
-
-    def run(self):
-        import audioop
-        trace_prev_send = None
-        trace_seq = 0
-        trace_started_at = time.perf_counter()
-        trace_last_idle = 0.0
-        audio_trace.event(
-            "relay_start", live_supported=bool(getattr(
-                self.game, "music_live_supported", False)),
-            party_upload=bool(getattr(self.bot, "party_sync_force_upload", False)),
-            megaphone=bool(getattr(self.bot, "broadcast_to_megaphone", False)),
-            context=audio_trace.party_context(self.game)
-        )
-        while self.running and live_relay_needed(self.bot):
-            # If main AudioStreamer MP3 thread is active, let it handle the network stream
-            if self.bot.streamer and self.bot.streamer.is_alive():
-                break
-
-            trace_on = audio_trace.enabled()
-            if trace_on:
-                def _qlen(name):
-                    try:
-                        return len(getattr(self.bot, name, None) or ())
-                    except Exception:
-                        return 0
-                q_live0 = _qlen("external_live_queue")
-                q_song0 = _qlen("external_pcm_queue")
-                q_guitar0 = _qlen("guitar_pcm_queue")
-                q_mic0 = _qlen("mic_pcm_queue")
-            guitar_data = None
-            mic_data = None
-            external_frames = []
-            # The live leg is a Party Sync with no song in THIS machine: the
-            # Server advertised channel 25, and the PA path is excluded (it is
-            # mono by design). A 10 ms frame is used only while no instrument
-            # is playing, because guitar/mic frames are 20 ms -- an instrument
-            # keeps the 20 ms shape and still gets the low-latency channel.
-            live_leg = bool(
-                getattr(self.bot, 'party_sync_force_upload', False)
-                and not self.bot.broadcast_to_megaphone
-                and getattr(self.game, 'music_live_supported', False)
-            )
-            live_10 = False
-            try:
-                if getattr(self.bot, 'guitar_pcm_queue', None) and self.bot.guitar_pcm_queue:
-                    guitar_data = self.bot.guitar_pcm_queue.popleft()
-            except Exception:
-                pass
-            try:
-                if getattr(self.bot, 'mic_pcm_queue', None) and self.bot.mic_pcm_queue:
-                    mic_data = self.bot.mic_pcm_queue.popleft()
-            except Exception:
-                pass
-            try:
-                if live_leg and guitar_data is None and mic_data is None:
-                    live_queue = getattr(self.bot, 'external_live_queue', None)
-                    # ONE 10 ms frame per 10 ms tick. Taking two and mixing
-                    # them would sum two consecutive slices into one and
-                    # swallow half of what the program played.
-                    if live_queue:
-                        external_frames.append(live_queue.popleft())
-                        live_10 = True
-                    if live_10:
-                        # The song path's 20 ms queue is not read on this leg;
-                        # drain it so a song starting later does not inherit a
-                        # half-second of stale audio.
-                        song_queue = getattr(self.bot, 'external_pcm_queue', None)
-                        drained = 0
-                        while song_queue and drained < 2:
-                            song_queue.popleft()
-                            drained += 1
-                if not live_10:
-                    external_queue = getattr(self.bot, 'external_pcm_queue', None)
-                    # One 20 ms frame per 20 ms tick, for the same reason: a
-                    # second frame mixed in here would be a summed slice, not
-                    # a queued one.
-                    if external_queue:
-                        external_frames.append(external_queue.popleft())
-            except Exception:
-                external_frames = []
-                live_10 = False
-
-            if guitar_data is None and mic_data is None and not external_frames:
-                if trace_on:
-                    now = time.monotonic()
-                    if now - trace_last_idle >= 1.0:
-                        trace_last_idle = now
-                        audio_trace.event(
-                            "relay_idle", q_live=q_live0, q_song=q_song0,
-                            q_guitar=q_guitar0, q_mic=q_mic0,
-                            context=audio_trace.party_context(self.game)
-                        )
-                time.sleep(0.010)
-                continue
-
-            # One output frame: 10 ms stereo on a live jam with no instrument,
-            # 20 ms otherwise. Live inputs are aligned and added in wide
-            # precision before compression, never saturating mid-mix.
-            trace_mix_start = time.perf_counter() if trace_on else 0.0
-            frame_bytes = 1920 if live_10 else 3840
-            mono_len = frame_bytes // 2
-            mono_data = b'\x00' * mono_len
-            # What the cabinets play into the owner's own ears when the singer
-            # has silenced their own voice (`own_voice_from_cabinets`).
-            owner_local_pcm = None
-            try:
-                def _align(frame, length=mono_len):
-                    if len(frame) > length:
-                        return frame[:length]
-                    if len(frame) < length:
-                        return frame + b'\x00' * (length - len(frame))
-                    return frame
-
-                mix = []
-                if guitar_data is not None:
-                    mix.append((_align(guitar_data), 0.85))
-                mic_part = None
-                if mic_data is not None:
-                    mic_part = (_align(mic_data), 0.85)
-                    mix.append(mic_part)
-                for frame in external_frames:
-                    mono_ext = downmix_to_mono(frame)
-                    if mono_ext:
-                        mix.append((_align(mono_ext), 0.85))
-                mixed = voice_chat.mix_audio_frames(
-                    mix,
-                    state_key=voice_chat.audio_limiter_key(
-                        "live-relay-mix", self),
-                )
-                if mixed:
-                    mono_data = mixed
-
-                # Stereo whenever the leg allows it: the captured program's
-                # two sides survive, and guitar/voice stay centred.
-                stereo_data = None
-                if stereo_upload_eligible(self.bot, 2):
-                    side_frame = mix_live_stereo(
-                        external_frames,
-                        [frame for frame in (guitar_data, mic_data) if frame],
-                        voice_chat.audio_limiter_key("live-relay-stereo", self),
-                        frame_bytes=frame_bytes,
-                    )
-                    if side_frame:
-                        stereo_data = side_frame
-
-                current_volume_scale = (self.bot.volume / 100.0) * getattr(self.bot, 'duck_multiplier', 1.0)
-                # Party Sync -> cinema: the host's own guitar/mic is not in
-                # external_frames (that capture is tapped at its source), so
-                # add just the centre instruments to the room mixer. This is
-                # what makes "everyone jamming" include the host too.
-                mixer = getattr(self.bot, 'party_room_mixer', None)
-                if mixer is not None and (guitar_data is not None or mic_data is not None):
-                    host_parts = [
-                        (_align(frame), 0.85)
-                        for frame in (guitar_data, mic_data) if frame
-                    ]
-                    host_mix = voice_chat.mix_audio_frames(
-                        host_parts,
-                        state_key=voice_chat.audio_limiter_key(
-                            "party-room-host", self),
-                    )
-                    if host_mix:
-                        mixer.push("host-instrument", host_mix, stereo=False)
-                if current_volume_scale != 1.0:
-                    mono_data = audioop.mul(mono_data, 2, current_volume_scale)
-                    if stereo_data:
-                        stereo_data = audioop.mul(stereo_data, 2, current_volume_scale)
-
-                # This leg is a guitar, a voice and a captured program with no
-                # song, so the singer's switch takes only the microphone out of
-                # what the cabinets play back to them; the send keeps it.
-                if mic_part is not None \
-                        and not voice_chat.own_voice_from_cabinets() \
-                        and not voice_chat.cabinets_render_for_recording(
-                            self.bot._find_gameplay(), self.bot):
-                    owner_mix = voice_chat.mix_audio_frames(
-                        [part for part in mix if part is not mic_part],
-                        state_key=voice_chat.audio_limiter_key(
-                            "own-ear-live", self),
-                    )
-                    if owner_mix:
-                        owner_local_pcm = bytes(owner_mix)
-                        if current_volume_scale != 1.0:
-                            owner_local_pcm = audioop.mul(
-                                owner_local_pcm, 2, current_volume_scale)
-                    else:
-                        # Nothing but the voice was on this leg, so silence is
-                        # the whole of what is left for the owner's ear.
-                        owner_local_pcm = bytes(len(mono_data))
-
-                party_private = bool(getattr(self.bot, 'party_sync_force_upload', False))
-                # The live leg was chosen at the top of the loop (it also
-                # decides the frame size); a Server that has not advertised
-                # channel 25 keeps the proven channel-22 leg.
-                if live_leg:
-                    target_channel = consts.CHANNEL_MUSICBOT_LIVE
-                else:
-                    target_channel = (
-                        consts.CHANNEL_MUSICBOT
-                        if (not self.bot.broadcast_to_megaphone or party_private)
-                        else consts.CHANNEL_MEGAPHONE
-                    )
-
-                # Local zero-latency PA monitoring (the server no longer echoes
-                # the megaphone broadcast back to the sender). Skipped while a
-                # Party Sync session is active (private-to-guests leg).
-                if self.bot.broadcast_to_megaphone and not party_private:
-                    try:
-                        gp = self.bot._find_gameplay()
-                        if gp is not None:
-                            if hasattr(voice_chat, '_feed_local_megaphone_direct'):
-                                local_pcm = (owner_local_pcm
-                                             if owner_local_pcm is not None
-                                             else bytes(mono_data))
-                                voice_chat._feed_local_megaphone_direct(gp, local_pcm, producer='music')
-                    except Exception:
-                        pass
-
-                # Pace at the frame's own length: 10 ms on a live jam, 20 ms
-                # everywhere else. Pacing at 20 ms would halve the jam's rate
-                # and turn two 10 ms frames into an audible 20 ms hold.
-                pace = 0.010 if live_10 else 0.020
-                trace_mix_ms = ((time.perf_counter() - trace_mix_start) * 1000.0
-                                if trace_on else 0.0)
-                self._pace(pace)
-                trace_late_ms = ((time.perf_counter() - self.last_send_time) * 1000.0
-                                 if trace_on else 0.0)
-                trace_encode_start = time.perf_counter() if trace_on else 0.0
-
-                if stereo_data:
-                    encoded = self.encoder_stereo.encode(bytearray(stereo_data))
-                else:
-                    encoded = self.encoder.encode(bytearray(mono_data))
-                trace_encode_ms = ((time.perf_counter() - trace_encode_start) * 1000.0
-                                   if trace_on else 0.0)
-                # The PA's sequenced upload (channel 31), the live counterpart
-                # of the music bot's: position on the frame, so a listener
-                # conceals a hole rather than holding the legacy reserve.
-                target_channel, encoded = sequence_pa_frame(
-                    self, target_channel, encoded)
-                if self.game and self.game.network:
-                    trace_send_start = time.perf_counter() if trace_on else 0.0
-                    self.game.network.send(target_channel, "n/a", encoded,
-                                           reliable=False)
-                    if trace_on:
-                        trace_send_ms = (time.perf_counter() - trace_send_start) * 1000.0
-                        gap_ms = audio_trace.gap_ms(trace_send_start, trace_prev_send)
-                        trace_prev_send = trace_send_start
-                        if live_10:
-                            source = "external_live"
-                        elif external_frames:
-                            source = "external_song"
-                        elif guitar_data is not None or mic_data is not None:
-                            source = "instrument"
-                        else:
-                            source = "none"
-                        audio_trace.event(
-                            "relay_send", seq=trace_seq, source=source,
-                            live=bool(live_10), frame_bytes=frame_bytes,
-                            channel=target_channel, stereo=bool(stereo_data),
-                            q_live=q_live0, q_song=q_song0,
-                            q_guitar=q_guitar0, q_mic=q_mic0,
-                            gap_ms=gap_ms, late_ms=round(trace_late_ms, 2),
-                            pace_ms=round(pace * 1000.0, 2),
-                            mix_ms=round(trace_mix_ms, 2),
-                            encode_ms=round(trace_encode_ms, 2),
-                            send_ms=round(trace_send_ms, 2),
-                            context=audio_trace.party_context(self.game)
-                        )
-                        trace_seq += 1
-            except Exception as exc:
-                audio_trace.event(
-                    "relay_error", error=type(exc).__name__,
-                    context=audio_trace.party_context(self.game)
-                )
-                time.sleep(0.010)
-        audio_trace.event(
-            "relay_stop", sent=trace_seq,
-            elapsed_s=round(time.perf_counter() - trace_started_at, 2),
-            context=audio_trace.party_context(self.game)
-        )
-        voice_chat.reset_audio_limiter(
-            voice_chat.audio_limiter_key("live-relay-mix", self))

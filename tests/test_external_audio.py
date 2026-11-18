@@ -414,17 +414,17 @@ class TestOneMixPerLeg(unittest.TestCase):
     def test_the_mono_mix_keeps_its_own_list(self):
         from pathlib import Path
         source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot"
-                  / "streaming.py").read_text(encoding="utf-8")
+                  / "network.py").read_text(encoding="utf-8")
         source = source.replace("\r\n", "\n")
         self.assertIn("[(mono_data, 0.75)] + mono_live_frames", source)
         self.assertNotIn("[(mono_data, 0.75)] + live_frames", source)
         self.assertIn(
-            "self._mix_live_into_stereo(\n"
-            "                        payload, live_frames, mix_limiter_key)",
+            "stream._mix_live_into_stereo(\n"
+            "                    payload, live_frames, mix_limiter_key)",
             source)
         self.assertIn(
-            "self._mix_external_into_stereo(\n"
-            "                        payload, external_frames, mix_limiter_key)",
+            "stream._mix_external_into_stereo(\n"
+            "                    payload, external_frames, mix_limiter_key)",
             source)
 
 
@@ -964,9 +964,11 @@ class TestTheRelayCarriesItToTheParty(unittest.TestCase):
     def test_both_senders_ask_the_same_question(self):
         from pathlib import Path
         source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot"
-                  / "streaming.py").read_text(encoding="utf-8")
-        self.assertIn("def live_relay_has_input(bot):", source)
-        self.assertIn("if live_relay_has_input(self.bot):", source)
+                  / "network.py").read_text(encoding="utf-8")
+        relay_source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot"
+                        / "live_relay.py").read_text(encoding="utf-8")
+        self.assertIn("def live_relay_has_input(bot):", relay_source)
+        self.assertIn("if live_relay_has_input(stream.bot):", source)
 
 
 class TestTheRelaySendsStereoToTheParty(unittest.TestCase):
@@ -1007,7 +1009,7 @@ class TestTheRelaySendsStereoToTheParty(unittest.TestCase):
     def test_the_relay_owns_a_stereo_encoder_and_asks_the_leg(self):
         from pathlib import Path
         source = (Path(__file__).resolve().parents[1] / "libs" / "music_bot"
-                  / "streaming.py").read_text(encoding="utf-8")
+                  / "live_relay.py").read_text(encoding="utf-8")
         relay = source.split("class LiveRelayStreamer", 1)[1]
         self.assertIn("self.encoder_stereo.set_channels(2)", relay)
         self.assertIn("if stereo_upload_eligible(self.bot, 2):", relay)
@@ -1034,7 +1036,7 @@ class TestTheJamLeg(unittest.TestCase):
         return path.read_text(encoding="utf-8").replace("\r\n", "\n")
 
     def test_the_relay_selects_the_live_channel_for_a_party(self):
-        relay = self._source("libs", "music_bot", "streaming.py").split(
+        relay = self._source("libs", "music_bot", "live_relay.py").split(
             "class LiveRelayStreamer", 1)[1]
         self.assertIn("consts.CHANNEL_MUSICBOT_LIVE", relay)
         self.assertIn("music_live_supported", relay)
@@ -1079,7 +1081,7 @@ class TestTheJamLeg(unittest.TestCase):
         from libs.music_bot.streaming import LiveRelayStreamer
         relay = LiveRelayStreamer.__new__(LiveRelayStreamer)
         relay.last_send_time = 1.000
-        with mock.patch("libs.music_bot.streaming.time.perf_counter",
+        with mock.patch("libs.music_bot.live_relay.time.perf_counter",
                         return_value=1.011):
             relay._pace(0.010)
         self.assertAlmostEqual(relay.last_send_time, 1.010, places=6)
@@ -1088,7 +1090,7 @@ class TestTheJamLeg(unittest.TestCase):
         from libs.music_bot.streaming import LiveRelayStreamer
         relay = LiveRelayStreamer.__new__(LiveRelayStreamer)
         relay.last_send_time = 1.000
-        with mock.patch("libs.music_bot.streaming.time.perf_counter",
+        with mock.patch("libs.music_bot.live_relay.time.perf_counter",
                         return_value=1.250):
             relay._pace(0.010)
         # 250 ms behind: catch up from now instead of bursting 25 frames.

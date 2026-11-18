@@ -8,6 +8,7 @@ working unchanged, e.g. ``from libs import music_bot`` then
 from .media import (DEFAULT_MAP_MUSIC, FALLBACK_PLAYLIST, FFMPEG_PATH,
                     YouTubeSearcher, _find_ffmpeg, _is_youtube_watch_url,
                     clamp_seek_position, format_track_position)
-from .streaming import AudioStreamer, LiveRelayStreamer
+from .streaming import AudioStreamer
+from .live_relay import LiveRelayStreamer
 from .controller import MapMusicBot
 
