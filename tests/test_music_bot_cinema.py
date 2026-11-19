@@ -537,6 +537,105 @@ class CinemaOutputTests(unittest.TestCase):
         # The track keeps playing, restarted at the same position at the ears.
         self.assertEqual(restarts, [12.0])
 
+    def _playing_streamer(self, bot):
+        """A streamer the output upkeep can measure, without a decoder."""
+        streamer = SimpleNamespace(cinema=bot.cinema_bank, source=None,
+                                   is_alive=lambda: True,
+                                   content_position=lambda: 12.0)
+        bot.streamer = streamer
+        bot.playing = True
+        return streamer
+
+    def test_revoking_the_permission_hands_the_room_back_to_the_ears(self):
+        """A rank change mid-song must not leave the stream feeding a dead room.
+
+        The room is released when ``can_use_cinema_speakers`` goes away, but
+        the streamer still points at that bank. Unless the song is restarted
+        into the ear output, every frame is refused by the stopped bank and the
+        player hears silence with no error.
+        """
+        bot = self.routed_bot()
+        bot._create_stream_source()
+        bank = bot.cinema_bank
+        streamer = self._playing_streamer(bot)
+        restarts = []
+        bot._seek_restart = lambda position: restarts.append(position)
+        self.game.gameplay.can_use_cinema_speakers = False
+        bot._update_cinema_output()
+        self.assertIsNone(bot.cinema_bank)
+        self.assertIsNone(streamer.cinema)
+        self.assertTrue(bank._stopped)
+        self.assertEqual(restarts, [12.0])
+
+    def test_turning_cinema_rooms_off_hands_a_routed_song_back(self):
+        """The listener's master switch wins over a saved cabinet choice."""
+        from libs.audio.cinema import plugin as cinema_plugin
+        bot = self.routed_bot()
+        bot._create_stream_source()
+        bank = bot.cinema_bank
+        streamer = self._playing_streamer(bot)
+        restarts = []
+        bot._seek_restart = lambda position: restarts.append(position)
+        self.addCleanup(cinema_plugin.set_rooms_enabled, self.game, True)
+        cinema_plugin.set_rooms_enabled(self.game, False)
+        self.assertIsNone(bot.cinema_active_target())
+        bot._update_cinema_output()
+        self.assertIsNone(bot.cinema_bank)
+        self.assertIsNone(streamer.cinema)
+        self.assertTrue(bank._stopped)
+        self.assertEqual(restarts, [12.0])
+
+    def test_a_room_that_cannot_be_rebuilt_falls_back_only_once(self):
+        """A failed rebuild must not restart the song every frame."""
+        bot = self.routed_bot()
+        bot._create_stream_source()
+        bank = bot.cinema_bank
+        streamer = self._playing_streamer(bot)
+        restarts = []
+        bot._seek_restart = lambda position: restarts.append(position)
+        bank.stop()
+        bank.forget_sources()
+        with mock.patch("libs.music_bot.cinema_handler.cinema_acquire_bank",
+                        return_value=None):
+            bot._update_cinema_output()
+            bot._update_cinema_output()
+            bot._update_cinema_output()
+        self.assertIsNone(bot.cinema_bank)
+        self.assertIsNone(streamer.cinema)
+        self.assertEqual(restarts, [12.0])
+
+    def test_a_restored_cabinet_turns_a_disabled_host_back_on(self):
+        """A saved target is itself a request for the feature.
+
+        The host can be off while the listener's option is on (a map reload
+        that released every room, a fresh client whose host was built before
+        the target was restored). ``_ensure_cinema_bank`` has a retry for that
+        case; a failed first acquisition must not return before it runs.
+        """
+        bot = make_bot(self.game)
+        bot.cinema_target = "box_a"
+        set_enabled(self.game, False)
+        self.assertIsNotNone(bot._ensure_cinema_bank())
+        self.assertTrue(host_for(self.game, create=False).enabled)
+
+    def test_a_room_that_comes_back_restarts_an_ear_stream_into_it(self):
+        """Swapping the pointer alone would play the ear queue beside the room."""
+        bot = self.routed_bot()
+        bot._create_stream_source()
+        bot._release_cinema_bank()
+        streamer = SimpleNamespace(cinema=None, source=None,
+                                   is_alive=lambda: True,
+                                   content_position=lambda: 7.0)
+        bot.streamer = streamer
+        bot.playing = True
+        bot._cinema_ear_fallback = True
+        bot._cinema_retry_at = 0.0
+        restarts = []
+        bot._seek_restart = lambda position: restarts.append(position)
+        bot._update_cinema_output()
+        self.assertIsNotNone(bot.cinema_bank)
+        self.assertEqual(restarts, [7.0])
+
 
 class CinemaRoutingPermissionTests(unittest.TestCase):
     """Developer/Contributor only: everyone else gets a plain Music Bot.

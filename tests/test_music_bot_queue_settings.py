@@ -459,6 +459,23 @@ class TestRepeatMode(unittest.TestCase):
         bot._seek_restart.assert_called_once_with(0.0, announce=False)
         speak.assert_not_called()
 
+    def test_next_in_repeat_one_restarts_a_local_map_song(self):
+        """The local map playlist is a SoundGroup, not a seekable stream."""
+        bot = make_bot(repeat_mode=repeat.REPEAT_ONE)
+        bot.mode = "local"
+        bot.playlist = ["a.mp3", "b.mp3"]
+        bot.playlist_index = 0
+        bot.current_title = "a.mp3"
+        bot.current_target = ""
+        bot.current_source = ""
+        bot.current_local_sound = object()
+        restarted = []
+        bot._play_local_current = lambda: restarted.append(bot.playlist_index)
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            bot.next_track()
+        self.assertEqual(restarted, [0])
+        self.assertIn("Repeating a.mp3", speak.call_args[0][0])
+
     def test_a_failed_load_is_not_repeated_forever(self):
         bot = make_bot(repeat_mode=repeat.REPEAT_ONE)
         bot._seek_restart = mock.MagicMock()

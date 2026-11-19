@@ -49,6 +49,10 @@ class CinemaHandler:
 
     def __init__(self, bot):
         self._bot = bot          # back-reference to MapMusicBot
+        # A stream that had to fall back to the ears after its room could not
+        # be rebuilt: retry the room at the map interval, never every frame.
+        self._cinema_ear_fallback = False
+        self._cinema_retry_at = 0.0
 
     # ------------------------------------------------------------------
     # the whole of what this handler needs from its bot
@@ -214,6 +218,10 @@ class CinemaHandler:
                     A choice saved before a rank change is not acted on: the routing drops back to the
                     listener's ears rather than through a room whose menu line is no longer visible.
                     """
+        if not rooms_enabled():
+            # The listener's master switch is off, so even a saved cabinet
+            # choice must not keep a room (or re-acquire one) until it is on.
+            return None
         if not self.cinema_routing_allowed():
             return None
         return getattr(self, "cinema_target", None)
@@ -413,6 +421,8 @@ class CinemaHandler:
                     heard immediately instead of at the next song.
                     """
         cabinet_id = str(cabinet_id or "") or None
+        self._cinema_ear_fallback = False
+        self._cinema_retry_at = 0.0
         self.cinema_target = cabinet_id
         options.set("music_bot_cinema_target", cabinet_id or "")
         self._release_cinema_bank()
@@ -568,7 +578,13 @@ class CinemaHandler:
                 bank = self.cinema_bank
                 if bank is not None and not bank._stopped and bank.sources:
                     return bank
-                return self._acquire_cinema_room(anchor, room)
+                bank = self._acquire_cinema_room(anchor, room)
+                if bank is not None:
+                    return bank
+                # The retry below is what turns the feature on for a target
+                # restored from settings; returning the failed acquisition
+                # here would make that branch unreachable.
+                break
             if attempt == 0:
                 # A target restored from settings on a fresh client starts
                 # before anything has turned the feature on; selecting a room
@@ -585,6 +601,15 @@ class CinemaHandler:
         self.cinema_bank_key = None
         if bank is None:
             return
+        # A running stream must not keep writing into a bank whose sources
+        # are about to be deleted. Detach it first; the caller that is handing
+        # the song back to the ears rebuilds the output in the same frame.
+        streamer = getattr(self._bot, "streamer", None)
+        if streamer is not None and getattr(streamer, "cinema", None) is bank:
+            try:
+                streamer.cinema = None
+            except Exception:
+                pass
         try:
             bank.stop()
         except Exception:
@@ -607,21 +632,52 @@ class CinemaHandler:
         """Per-frame room upkeep: gains, map changes, recovery from a lost room.
 
                     A jukebox stop, map change or map reload can take the shared bank away; the bot then
-                    rebuilds it around the stream that is already playing rather than going silent.
+                    rebuilds it around the stream that is already playing rather than going silent. If it
+                    cannot rebuild it, the song is handed back to the ears once instead of feeding a
+                    stopped bank, and the room is retried at the map's own interval.
                     """
-        if not self.cinema_active_target():
-            if getattr(self, "cinema_bank", None) is not None:
+        target = self.cinema_active_target()
+        bank = getattr(self, "cinema_bank", None)
+        if not target:
+            if bank is not None:
                 self._release_cinema_bank()
+                self._restart_in_new_output()
+            self._cinema_ear_fallback = False
+            self._cinema_retry_at = 0.0
             return
-        bank = self.cinema_bank
+        streamer = self.streamer
         if bank is None or bank._stopped or not bank.sources:
-            self._release_cinema_bank()
-            bank = self._ensure_cinema_bank()
-            streamer = self.streamer
-            if bank is None or streamer is None:
+            if bank is not None:
+                self._release_cinema_bank()
+            now = time.monotonic()
+            if (getattr(self, "_cinema_ear_fallback", False)
+                    and now < getattr(self, "_cinema_retry_at", 0.0)):
                 return
-            streamer.cinema = bank
-            streamer.source = getattr(bank, "primary_source", None)
+            bank = self._ensure_cinema_bank()
+            if bank is None:
+                # The room cannot be rebuilt (the cabinet was removed, the
+                # map has no speakers, or the feature is off). Leaving the
+                # streamer pointed at the released bank would silence the
+                # song with no error at all; put it back at the ears once.
+                if not getattr(self, "_cinema_ear_fallback", False):
+                    self._cinema_ear_fallback = True
+                    self._cinema_retry_at = (now + self._bot.CINEMA_RESHAPE_INTERVAL)
+                    self._restart_in_new_output()
+                return
+            self._cinema_ear_fallback = False
+            self._cinema_retry_at = 0.0
+            if (streamer is not None and self.playing
+                    and getattr(streamer, "cinema", None) is None):
+                # The running stream was built for the ears. A room has to be
+                # started as a room, not by swapping the pointer under it:
+                # the ear source is still holding its queue and would play
+                # beside the room.
+                self._restart_in_new_output()
+                return
+            if streamer is not None:
+                streamer.cinema = bank
+                streamer.source = getattr(bank, "primary_source", None)
+        self._cinema_ear_fallback = False
         self._follow_cinema_map(bank)
         try:
             bank.update_output()

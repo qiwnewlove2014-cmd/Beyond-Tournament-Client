@@ -1775,6 +1775,16 @@ class MapMusicBot:
 
     def _replay_current_track(self, announce=False):
         """Start the track on air again, keeping the queue and the feed."""
+        # The map's local playlist is a SoundGroup, not a stream: it has no
+        # current_target to seek, so Repeat One/Next must restart its current
+        # entry instead of falling through to "nothing to replay".
+        if (getattr(self, "mode", "") == "local"
+                and getattr(self, "current_local_sound", None) is not None):
+            title = getattr(self, "current_title", "") or "this song"
+            if announce:
+                speak(f"Repeating {title}.")
+            self._play_local_current()
+            return True
         track = self._current_track_dict()
         if track is None:
             return False
