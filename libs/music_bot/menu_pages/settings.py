@@ -85,6 +85,34 @@ class SettingsMenus:
                   else "Underwater muffle disabled.")
             m.speak_current_item()
 
+        def get_song_picture_label():
+            # Read the switch through getattr: the gate's own menu test builds
+            # a bot with only the settings it is exercising, and a label that
+            # cannot answer would take the whole page down.
+            status = "ON" if getattr(self._bot, "song_picture_enabled", True) else "OFF"
+            return f"Song Picture: {status}"
+
+        def toggle_song_picture():
+            if gate.blocked("song_picture"):
+                return
+            self._bot.toggle_song_picture()
+            m.speak_current_item()
+
+        def get_cinematic_screen_label():
+            """The full-screen button's own state, right under Song Picture.
+
+            A blind player needs the label and the short spoken answer to
+            agree: this reads OFF before the press, ON while the switch is on,
+            and OFF again only when the switch itself is turned off.
+            """
+            status = "ON" if getattr(self._bot, "picture_fullscreen", False) else "OFF"
+            return f"Cinematic Screen: {status}"
+
+        def toggle_cinematic_screen():
+            # The bot speaks the short on/off answer itself.  Speaking the
+            # line again here would be the same sentence twice.
+            self._bot.toggle_cinematic_screen()
+
         def get_reverb_label():
             status = "ON" if self._bot.reverb_enabled else "OFF"
             return f"Room Reverb (Realism): {status}"
@@ -289,6 +317,29 @@ class SettingsMenus:
             ("reverb", get_reverb_label, toggle_reverb,
              "Adds the room's own reverb to the song, so a song played inside "
              "a hall sounds like it is in the hall."),
+            ("song_picture", get_song_picture_label, toggle_song_picture,
+             "Shows the playing song's picture beside the Music Bot's lines "
+             "and in the corner of the game screen, and follows the track when "
+             "it changes. YouTube uses its "
+             "thumbnail; a local song uses an image beside it with the same "
+             "name, or the cover inside the file. A still picture stays "
+             "still; an animated GIF or APNG plays while the song does. "
+             "A still WebP is read through ffmpeg; an animated WebP is not "
+             "decoded by this build. Off hides it and stops the picture being "
+             "fetched."),
+            # Deliberately the very next line: the switch belongs to the Song
+            # Picture setting, not to a feature of its own. Its ON/OFF label
+            # and the short spoken answer are what tell a blind player that
+            # the screen really left and really came back; a one-way Expand
+            # line in the Mode menu could not.
+            ("song_picture", get_cinematic_screen_label, toggle_cinematic_screen,
+             "A switch, not a one-way view: ON keeps the playing song's "
+             "picture filling the whole game window, like a cinema screen, "
+             "and OFF brings the normal screen back. A still stays still and "
+             "a GIF or APNG keeps moving. Escape closes the Settings menu and "
+             "leaves this switch exactly as it is, so the picture stays until "
+             "you turn it off here. It can be switched while Song Picture is "
+             "on above; with no song playing it waits for the next song."),
             ("crossfade", get_crossfade_label, toggle_crossfade,
              "Starts the next song before this one ends and blends the two, "
              "so there is no silence between songs. It owns a change you ask "

@@ -153,7 +153,7 @@ def make_bot(**overrides):
 
     def fake_start(audio_url, title, playback_generation=None,
                    http_headers=None, canonical_url=None,
-                   start_offset=0.0, start_paused=False):
+                   start_offset=0.0, start_paused=False, thumbnail_url=""):
         bot.starts.append({
             "url": audio_url,
             "title": title,
@@ -285,7 +285,7 @@ class TestMapMusicBotRemoteSeek(unittest.TestCase):
 
         def fake_start(audio_url, title, playback_generation=None,
                        http_headers=None, canonical_url=None,
-                       start_offset=0.0, start_paused=False):
+                       start_offset=0.0, start_paused=False, thumbnail_url=""):
             results.append({
                 "url": audio_url,
                 "title": title,
@@ -347,7 +347,7 @@ class TestMapMusicBotRemoteSeek(unittest.TestCase):
 
         def fake_start(audio_url, title, playback_generation=None,
                        http_headers=None, canonical_url=None,
-                       start_offset=0.0, start_paused=False):
+                       start_offset=0.0, start_paused=False, thumbnail_url=""):
             results.append({
                 "url": audio_url,
                 "title": title,

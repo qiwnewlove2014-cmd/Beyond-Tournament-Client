@@ -39,6 +39,7 @@ from ..game_audio_recorder import GameAudioRecorderManager
 from .music_downloader import MusicDownloadManager
 from ..speech import speak
 from ..audio_health import probe as audio_health
+from . import artwork
 from . import autotune
 from . import harmony
 from . import output_device
@@ -401,6 +402,23 @@ class MapMusicBot:
         # between its two network steps.
         self._subtitle_generation = 0
         self._subtitle_page = ""
+
+        # The picture of the track that is playing (libs/music_bot/artwork.py).
+        # It is a visual companion only: a still cover or an animated GIF or
+        # APNG, drawn beside the Music Bot's menu lines and in the gameplay
+        # corner. The player's switch is persisted, and the loader owns no audio
+        # state at all.
+        self.song_picture_enabled = bool(options.get(
+            artwork.PICTURE_OPTION, artwork.DEFAULT_ENABLED))
+        self.cover_art = artwork.CoverArt(
+            self.game, enabled=self.song_picture_enabled)
+        # The Cinematic Screen switch. ON keeps the playing song's picture
+        # filling the game window -- behind a menu when one is open -- until
+        # the player turns the switch off or Song Picture itself goes off.
+        self.picture_fullscreen = False
+        # The resolver's own picture URL for the current track, if it named
+        # one; a YouTube page can derive its thumbnail, a Facebook page cannot.
+        self._current_picture_url = ""
 
     def toggle_broadcast(self):
         """Toggle network broadcasting on/off."""
@@ -1634,6 +1652,7 @@ class MapMusicBot:
                         stream_info['url'], title, playback_generation,
                         http_headers=stream_info.get('http_headers'),
                         canonical_url=target,
+                        thumbnail_url=stream_info.get('thumbnail') or "",
                     ))
 
                 threading.Thread(target=do_play, daemon=True).start()
@@ -2077,6 +2096,109 @@ class MapMusicBot:
         self._subtitle_generation += 1
         self._subtitle_page = ""
         self.subtitle_reader.clear()
+
+    @property
+    def song_picture_active(self):
+        """Whether the picture should be on screen right now.
+
+        The player's switch answers first; a Developer's `song_picture` lock
+        then takes it away for everyone, including a page that was already
+        open when the lock landed.
+        """
+        if not getattr(self, "song_picture_enabled", False):
+            return False
+        try:
+            from . import gate
+            return gate.allow("song_picture")
+        except Exception:
+            return False
+
+    def song_picture_label(self):
+        status = "ON" if getattr(self, "song_picture_enabled", False) else "OFF"
+        return f"Song Picture: {status}"
+
+    def toggle_song_picture(self):
+        """Turn the now-playing picture on or off, and say which it is."""
+        from . import gate
+        if gate.blocked("song_picture"):
+            return None
+        self.song_picture_enabled = not getattr(
+            self, "song_picture_enabled", artwork.DEFAULT_ENABLED)
+        options.set(artwork.PICTURE_OPTION, self.song_picture_enabled)
+        art = getattr(self, "cover_art", None)
+        if art is not None:
+            art.set_enabled(self.song_picture_enabled)
+        if self.song_picture_enabled:
+            self._refresh_song_picture()
+            speak("Song picture on. The playing song's picture is shown in the "
+                  "Music Bot menus and in the game screen's corner. An animated "
+                  "GIF or APNG plays while the song does.")
+        else:
+            # A full-screen picture with no picture behind it is a black
+            # window: Song Picture's own switch takes the bigger screen with
+            # it, and the Settings row reads OFF again.
+            self.picture_fullscreen = False
+            speak("Song picture off. The Music Bot menus and the game screen "
+                  "show no picture.")
+        return self.song_picture_enabled
+
+    def toggle_cinematic_screen(self):
+        """Turn the full-window picture on or off, like any other switch.
+
+        The Settings row directly under Song Picture calls this.  It is NOT a
+        one-way overlay: ON stays ON while Song Picture is on, and Escape closes
+        the Settings menu without touching it.  `Game._draw_now_playing` draws
+        the picture behind whatever menu is open, so the switch remains visible
+        and can be pressed again to return to the normal screen.
+        """
+        from . import gate
+        if gate.blocked("song_picture"):
+            speak("The song picture is locked by staff.")
+            return None
+        if not getattr(self, "song_picture_enabled", False):
+            speak("Song Picture is off. Turn it on above this line.")
+            return None
+        self.picture_fullscreen = not getattr(
+            self, "picture_fullscreen", False)
+        if self.picture_fullscreen:
+            if not getattr(self, "playing", False):
+                speak("Cinematic Screen on. The picture will fill the game "
+                      "window when a song plays.")
+            else:
+                speak("Cinematic Screen on.")
+        else:
+            speak("Cinematic Screen off.")
+        return self.picture_fullscreen
+
+    def _refresh_song_picture(self):
+        """Load the picture for the track already playing, after a switch."""
+        art = getattr(self, "cover_art", None)
+        if art is None:
+            return
+        if not self.song_picture_active:
+            art.clear()
+            return
+        target = str(getattr(self, "current_target", "") or "")
+        source = str(getattr(self, "current_source", "") or "")
+        art.set_track(
+            getattr(self, "current_title", "") or "",
+            page_url=target if source == "youtube" else "",
+            local_path=target if source == "local" else "",
+            picture_url=getattr(self, "_current_picture_url", "") or "",
+        )
+
+    def _set_song_picture(self, title, page_url="", local_path="",
+                          picture_url=""):
+        """Attach one track's picture to the loader (main thread)."""
+        art = getattr(self, "cover_art", None)
+        if art is None:
+            return
+        self._current_picture_url = str(picture_url or "")
+        if not self.song_picture_active:
+            art.clear()
+            return
+        art.set_track(title, page_url=page_url, local_path=local_path,
+                      picture_url=picture_url)
 
     def _pump_subtitles(self):
         """Read whatever the song has reached (called every playing frame)."""
@@ -2625,11 +2747,13 @@ class MapMusicBot:
 
     def _start_youtube_stream(self, audio_url, title, playback_generation=None,
                               http_headers=None, canonical_url=None,
-                              start_offset=0.0, start_paused=False):
+                              start_offset=0.0, start_paused=False,
+                              thumbnail_url=""):
         return self._track_source()._start_youtube_stream(
             audio_url, title, playback_generation=playback_generation,
             http_headers=http_headers, canonical_url=canonical_url,
-            start_offset=start_offset, start_paused=start_paused)
+            start_offset=start_offset, start_paused=start_paused,
+            thumbnail_url=thumbnail_url)
 
     # === Seeking (fast-forward / rewind) ===
 
@@ -2689,6 +2813,9 @@ class MapMusicBot:
         outgoing = getattr(self, "streamer", None)
         seek_reuse_url = getattr(outgoing, "audio_url", "") or ""
         seek_reuse_headers = dict(getattr(outgoing, "http_headers", None) or {})
+        # A seek is the same track, so keep the picture across the restart: a
+        # Facebook page cannot derive one from its URL the way YouTube can.
+        picture_url = getattr(self, "_current_picture_url", "") or ""
 
         playback_generation = self._begin_playback_generation()
         if announce:
@@ -2718,6 +2845,7 @@ class MapMusicBot:
                 canonical_url=target,
                 start_offset=position,
                 start_paused=was_paused,
+                thumbnail_url=picture_url,
             )
             return
 
@@ -2739,6 +2867,7 @@ class MapMusicBot:
                 canonical_url=target,
                 start_offset=position,
                 start_paused=was_paused,
+                thumbnail_url=stream_info.get('thumbnail') or picture_url,
             ))
 
         threading.Thread(target=do_seek, daemon=True).start()
@@ -2872,6 +3001,10 @@ class MapMusicBot:
         # fetch still running for them stop here, rather than speak into
         # whatever plays next.
         self._stop_subtitles()
+        art = getattr(self, "cover_art", None)
+        if art is not None:
+            art.clear()
+        self._current_picture_url = ""
         if clear_queue:
             self._clear_track_queue()
             self._clear_next_up_queue()

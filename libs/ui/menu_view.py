@@ -51,6 +51,17 @@ SCROLLBAR_WIDTH = 8
 MIN_WIDTH = 240
 MIN_HEIGHT = 160
 
+# The Music Bot's now-playing picture (`music_bot/artwork.py`).  It takes a
+# column on the right of a music menu, so the rows are laid out beside it
+# rather than under it.  Small windows keep the whole width for the lines: a
+# picture that costs a menu its labels is not worth showing.
+ARTWORK_SIZE = 200
+ARTWORK_GAP = 18
+ARTWORK_MIN_SIZE = 96
+ARTWORK_MIN_WIDTH = 620
+ARTWORK_MIN_HEIGHT = 340
+ARTWORK_CAPTION_HEIGHT = 42
+
 class Theme:
     """One menu family's palette: a page, a header band, rows, a footer.
 
@@ -219,6 +230,29 @@ def has_arrow(item):
 def has_preview(item):
     """Whether focusing this line plays a sound sample."""
     return len(item) > 2 and bool(item[2])
+
+
+def artwork_box(width, height):
+    """The square a music menu may give the picture, or ``None``.
+
+    The row area keeps its own minimum, so a window that is too narrow or too
+    short shows the lines alone.  Both the drawing layer and hit-testing ask
+    this one function, which is why a click cannot land where a row used to be.
+    """
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        return None
+    if width < ARTWORK_MIN_WIDTH or height < ARTWORK_MIN_HEIGHT:
+        return None
+    room_for_rows = width - 400 - PAD * 2 - ARTWORK_GAP
+    room_for_caption = (height - TITLE_HEIGHT - PAD * 2
+                        - ARTWORK_CAPTION_HEIGHT - 90)
+    size = min(ARTWORK_SIZE, room_for_rows, room_for_caption)
+    if size < ARTWORK_MIN_SIZE:
+        return None
+    return int(size)
 
 
 class Layout:
@@ -432,9 +466,49 @@ class MenuView:
     def arrows_of(self, menu):
         return {index for index, item in enumerate(menu.items) if has_arrow(item)}
 
+    def artwork_for(self, menu, size=None):
+        """The playing song's picture and its square, or ``None``.
+
+        Only a music menu gets one, only while the bot is playing, and only
+        when the player left Song Picture on.  The check is deliberately read
+        through attributes rather than by importing the Music Bot: a menu in a
+        headless test has no bot and simply has no picture.
+        """
+        if not enabled():
+            return None
+        if theme_for(menu).name != "music":
+            return None
+        if size is None:
+            screen = getattr(getattr(menu, "game", None), "screen", None)
+            if screen is None:
+                return None
+            size = screen.get_size()
+        try:
+            width, height = size
+        except (TypeError, ValueError):
+            return None
+        try:
+            game = getattr(menu, "game", None)
+            gameplay = getattr(game, "gameplay", None)
+            bot = getattr(gameplay, "music_bot", None)
+            if bot is None or not getattr(bot, "playing", False):
+                return None
+            if not getattr(bot, "song_picture_active", False):
+                return None
+            art = getattr(bot, "cover_art", None)
+            if art is None or getattr(art, "state", None) not in ("loading", "ready"):
+                return None
+        except Exception:
+            return None
+        panel = artwork_box(width, height)
+        return (art, panel) if panel else None
+
     def layout_for(self, menu, size):
         """The layout this view would draw for ``menu`` on a ``size`` window."""
         width, height = size
+        art = self.artwork_for(menu, (width, height))
+        if art is not None:
+            width = max(MIN_WIDTH, width - art[1] - ARTWORK_GAP)
         # `pos` is a real zero more often than not, so it is not allowed to
         # fall through a `or` into "no focus": that turned every first line
         # into a menu with no focused line, and with it no description panel.
@@ -609,6 +683,7 @@ class MenuView:
                               theme.text_focus, bold=True, width=width - PAD * 2)
         screen.blit(title, (PAD, 10))
 
+        art = self.artwork_for(menu, (width, height))
         items = menu.items
         hovered = self.hover_of(menu)
         for index, (rx, ry, rw, rh) in layout.rows:
@@ -660,11 +735,42 @@ class MenuView:
         if layout.scrollable:
             self._scrollbar(screen, layout, theme)
 
+        if art is not None:
+            # A picture is optional; a frame that cannot be drawn must never
+            # take the whole menu (and with it every later menu) down.
+            with contextlib.suppress(Exception):
+                self._draw_artwork(screen, art, width, height, theme)
         self._draw_help(screen, menu, layout, width, height, theme)
         self.draws += 1
         with contextlib.suppress(Exception):
             pygame.display.update()
         return True
+
+    def _draw_artwork(self, screen, art, width, height, theme):
+        """The now-playing picture in its column, still or moving."""
+        import pygame
+
+        picture, size = art
+        x = width - PAD - size
+        y = TITLE_HEIGHT + PAD
+        panel_height = size + ARTWORK_CAPTION_HEIGHT
+        pygame.draw.rect(screen, theme.panel,
+                         pygame.Rect(x, y, size, panel_height), border_radius=8)
+        pygame.draw.rect(screen, theme.border,
+                         pygame.Rect(x, y, size, panel_height), 1, border_radius=8)
+        frame = picture.frame(size)
+        if frame is not None:
+            screen.blit(frame, (x, y))
+        else:
+            loading = self._surface("Loading picture...", 13, theme.text_dim,
+                                    width=size - 16)
+            screen.blit(loading, loading.get_rect(
+                center=(x + size // 2, y + size // 2)))
+        title = str(getattr(picture, "title", "") or "")
+        caption = self._surface("Now playing", 11, theme.accent, width=size - 12)
+        screen.blit(caption, (x + 6, y + size + 3))
+        name = self._surface(title, 13, theme.text, width=size - 12)
+        screen.blit(name, (x + 6, y + size + 18))
 
     def _draw_help(self, screen, menu, layout, width, height, theme):
         rect = layout.help_rect

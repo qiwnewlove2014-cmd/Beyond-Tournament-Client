@@ -381,6 +381,7 @@ class TrackSourceHandler:
                 stream_info['url'], title, playback_generation,
                 http_headers=stream_info.get('http_headers'),
                 canonical_url=webpage_url or direct_url,
+                thumbnail_url=stream_info.get('thumbnail') or "",
             ))
 
         t = threading.Thread(target=do_play, daemon=True)
@@ -388,7 +389,8 @@ class TrackSourceHandler:
 
     def _start_youtube_stream(self, audio_url, title, playback_generation=None,
                               http_headers=None, canonical_url=None,
-                              start_offset=0.0, start_paused=False):
+                              start_offset=0.0, start_paused=False,
+                              thumbnail_url=""):
         """Start streaming from a YouTube audio URL or a local media file.
 
                     start_offset seeks the new decode head to a content position in seconds (ffmpeg input
@@ -439,4 +441,14 @@ class TrackSourceHandler:
         # and the pump reads the new stream's own position, so a seek needs no
         # caption bookkeeping at all.
         self._bot._begin_subtitles(canonical_url)
+        # The picture belongs to the same track. A local file is its own path;
+        # a page is the stable thumbnail (or the resolver's own thumbnail when
+        # it named one). A seek reuses the same key, so the loader is a no-op.
+        local_path = audio_url if os.path.isfile(str(audio_url)) else ""
+        set_picture = getattr(self._bot, "_set_song_picture", None)
+        if callable(set_picture):
+            set_picture(
+                title, page_url=canonical_url or "", local_path=local_path,
+                picture_url=thumbnail_url or "",
+            )
         self._bot._stream_announced = False

@@ -208,6 +208,23 @@ class EveryLineIsDescribedTests(unittest.TestCase):
                 self.assertIn("file", text_of(item))
         self.assertIn("Personal Music Feed", labels)
 
+    def test_the_mode_menu_has_no_one_way_expand_line(self):
+        # The full-screen button belongs beside Song Picture, where its own
+        # ON/OFF label can tell a blind player which state it left them in.
+        self.handler._show_mode_menu()
+        labels = [label_of(item) for item in self.last_menu().items]
+        self.assertNotIn("Expand Song Picture", labels)
+
+    def test_the_cinematic_screen_line_sits_under_song_picture(self):
+        self.bot.picture_fullscreen = False
+        self.handler._open_settings_menu()
+        labels = [label_of(item) for item in self.last_menu().items]
+        at = labels.index("Song Picture: ON")
+        self.assertEqual(labels[at + 1], "Cinematic Screen: OFF")
+        items = {label_of(item): item for item in self.last_menu().items}
+        items["Cinematic Screen: OFF"][1]()
+        self.bot.toggle_cinematic_screen.assert_called_once()
+
     def test_queue_mode_adds_the_skip_lines(self):
         self.bot.queue_mode = True
         self.handler._show_mode_menu()

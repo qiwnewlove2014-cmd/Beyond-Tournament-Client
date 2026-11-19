@@ -185,6 +185,44 @@ class Game:
         lines = [i[0] for i in speech.history[-3:]]
         return [self.font.render(line, True, "white") for line in lines]
 
+    def _draw_now_playing(self):
+        """Draw the playing song's picture on the gameplay screen.
+
+        Two shapes share one loader: the corner panel while no menu covers the
+        screen, and the persistent Cinematic Screen behind a menu.  The
+        full-screen shape is deliberately drawn even when a menu is open --
+        that menu is where its switch lives -- while the corner panel is
+        skipped behind a visual menu so it cannot flash there.
+        """
+        gameplay = getattr(self, "gameplay", None)
+        if gameplay is None:
+            return False
+        stack = getattr(self, "stack", ())
+        if not stack or stack[-1] is not gameplay:
+            return False
+        bot = getattr(gameplay, "music_bot", None)
+        if bot is None or not getattr(bot, "playing", False):
+            return False
+        if not getattr(bot, "song_picture_active", False):
+            return False
+        from .ui import now_playing
+        # The Cinematic Screen switch is drawn BEFORE the menu check: it is a
+        # persistent full-window picture, and a menu drawn over it is how the
+        # player reaches the switch again.  It is not a substate and no key
+        # closes it; only the switch (or Song Picture going off) does.
+        if getattr(bot, "picture_fullscreen", False):
+            return now_playing.draw_expanded(
+                self.screen, getattr(bot, "cover_art", None))
+        # A visual menu is a substate drawn after Game.update; it has its own
+        # picture column, and drawing this first would flash behind it on the
+        # display flip.  With visual menus off the substate draws nothing, so
+        # the corner picture is the only one and stays.
+        if getattr(gameplay, "substates", None):
+            from .ui import menu_view
+            if menu_view.enabled():
+                return False
+        return now_playing.draw(self.screen, getattr(bot, "cover_art", None))
+
     def put(self, value):
         """puts value into the event queue to be processed. value could be one of the following:
         None: breaks the event loop. you can put that before joining the thread.
@@ -1100,6 +1138,8 @@ class Game:
                     )
                 ),
             )
+        with contextlib.suppress(Exception):
+            self._draw_now_playing()
         pygame.display.update()
         try:
             clocks_snapshot = list(self.clocks)

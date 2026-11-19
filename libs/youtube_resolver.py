@@ -85,6 +85,12 @@ def _validated_info(info):
     if type(duration) in (int, float) and not isinstance(duration, bool):
         if 0.0 < float(duration) <= 86400.0:
             result["duration"] = float(duration)
+    # Optional artwork URL (the Music Bot's now-playing picture).  It is
+    # validated like any other URL and dropped when malformed, never fatal to
+    # stream resolution; a resolver from an older build simply omits it.
+    thumbnail = info.get("thumbnail")
+    if type(thumbnail) is str and len(thumbnail) <= _MAX_URL and _valid_url(thumbnail):
+        result["thumbnail"] = thumbnail
     return result
 
 
@@ -279,6 +285,7 @@ def _extract(url, ydl_factory=None):
                 "url": info.get("url"),
                 "http_headers": headers,
                 "duration": info.get("duration"),
+                "thumbnail": info.get("thumbnail"),
             })
     except Exception:
         return None
