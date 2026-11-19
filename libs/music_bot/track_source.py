@@ -183,12 +183,16 @@ class TrackSourceHandler:
         speak("Opening folder list...")
 
     def _start_local_file_stream(self, filepath, title, preserve_queue=False, preserve_feed=False,
-                                 playback_generation=None):
+                                 playback_generation=None, start_offset=None,
+                                 start_paused=False):
         """Start streaming local file"""
         import os
         if not os.path.exists(filepath):
             speak("File not found.")
             return
+        if start_offset is None:
+            # A file this bot left mid-way continues from that place.
+            start_offset = self._bot.resume_offset(filepath)
 
         if playback_generation is None:
             playback_generation = self._bot._begin_playback_generation()
@@ -217,7 +221,10 @@ class TrackSourceHandler:
         )
 
         # Start streaming local file via ffmpeg -> AudioStreamer
-        self._bot._start_youtube_stream(filepath, title, playback_generation)
+        self._bot._start_youtube_stream(
+            filepath, title, playback_generation,
+            start_offset=start_offset, start_paused=start_paused,
+        )
 
     def _open_search_input(self):
         """Open the text input for search query"""
@@ -322,10 +329,15 @@ class TrackSourceHandler:
         self._bot._start_youtube_stream_from_search(title, webpage_url, "")
 
     def _start_youtube_stream_from_search(self, title, webpage_url, direct_url,
-                                          http_headers=None, preserve_queue=False):
+                                          http_headers=None, preserve_queue=False,
+                                          start_offset=None):
         if self._bot.is_loading_stream:
             speak("Please wait, already loading a track.")
             return
+        if start_offset is None:
+            # Picking a song this bot already played continues it; a song it
+            # has never left (or finished) starts at the top.
+            start_offset = self._bot.resume_offset(webpage_url or direct_url)
 
         # A manually selected search result leaves the private feed.
         self._bot._clear_personal_feed()
@@ -381,6 +393,7 @@ class TrackSourceHandler:
                 stream_info['url'], title, playback_generation,
                 http_headers=stream_info.get('http_headers'),
                 canonical_url=webpage_url or direct_url,
+                start_offset=start_offset,
                 thumbnail_url=stream_info.get('thumbnail') or "",
             ))
 
@@ -436,6 +449,17 @@ class TrackSourceHandler:
         # silent and only becomes audible when the bot is resumed.
         self._bot.paused = bool(start_paused)
         self._bot.current_title = title
+        # The new stream is the resume point from its first frame, so a crash
+        # before the first autosave cannot continue the song that just ended.
+        # The identity rides on the streamer that produces the position: a
+        # track change has already pointed `current_target` at the next song.
+        self._bot.streamer.resume_track = {
+            "target": self._bot.current_target or canonical_url or audio_url,
+            "title": title,
+            "source": self._bot.current_source,
+            "duration": self._bot.current_duration,
+        }
+        self._bot._remember_resume(start_offset, start_paused)
         # Captions for the page this stream came from. A seek restarts the same
         # track through here, and that is on purpose: the cues are unchanged
         # and the pump reads the new stream's own position, so a seek needs no

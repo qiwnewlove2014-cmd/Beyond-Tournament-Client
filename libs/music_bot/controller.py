@@ -44,6 +44,7 @@ from . import autotune
 from . import harmony
 from . import output_device
 from . import repeat
+from . import resume
 from . import voice_effects
 from . import song_requests
 from . import subtitles
@@ -356,6 +357,18 @@ class MapMusicBot:
         self.last_track_title = ""
         self.last_track_target = ""
         self.last_track_source = "youtube"
+
+        # Where every track left off, across a closed game (resume.py): the
+        # book is read back into the replay state, written by the loop every
+        # few seconds and whenever the player leaves a track. A bot built by
+        # hand (a test) has no file to write, so `_resume_enabled` gates the
+        # disk only.
+        self._resume_enabled = True
+        self._resume_saved_at = 0.0
+        book = resume.load()
+        self._resume_tracks = book["tracks"]
+        self._resume_last = book["last"]
+        self._adopt_saved_track()
 
         # Search state
         self.searching = False
@@ -1635,10 +1648,18 @@ class MapMusicBot:
     def _show_track_action_menu(self, title, target, source, is_favorite=False, playlist_name=None):
         return self._menus()._show_track_action_menu(title, target, source, is_favorite, playlist_name)
 
-    def play_single_track(self, title, target, source, preserve_queue=False, preserve_feed=False):
-        """Play a single track from playlist/favorites"""
+    def play_single_track(self, title, target, source, preserve_queue=False,
+                          preserve_feed=False, start_offset=None):
+        """Play a single track from playlist/favorites.
+
+        ``start_offset`` begins the track at a content position instead of its
+        first frame.  None asks the resume book, which is what makes coming
+        back to a song continue it; a repeat passes 0.0 to start over.
+        """
         from ..speech import speak
         import threading
+        if start_offset is None:
+            start_offset = self.resume_offset(target)
         if not preserve_queue:
             self._clear_track_queue()
         if not preserve_feed:
@@ -1663,6 +1684,7 @@ class MapMusicBot:
                 preserve_queue=preserve_queue,
                 preserve_feed=preserve_feed,
                 playback_generation=playback_generation,
+                start_offset=start_offset,
             )
         else:
             if target.startswith("http://") or target.startswith("https://"):
@@ -1690,6 +1712,7 @@ class MapMusicBot:
                         stream_info['url'], title, playback_generation,
                         http_headers=stream_info.get('http_headers'),
                         canonical_url=target,
+                        start_offset=start_offset,
                         thumbnail_url=stream_info.get('thumbnail') or "",
                     ))
 
@@ -2877,11 +2900,13 @@ class MapMusicBot:
 
     def _start_local_file_stream(self, filepath, title, preserve_queue=False,
                                  preserve_feed=False,
-                                 playback_generation=None):
+                                 playback_generation=None,
+                                 start_offset=None, start_paused=False):
         return self._track_source()._start_local_file_stream(
             filepath, title, preserve_queue=preserve_queue,
             preserve_feed=preserve_feed,
-            playback_generation=playback_generation)
+            playback_generation=playback_generation,
+            start_offset=start_offset, start_paused=start_paused)
 
     def _open_search_input(self):
         return self._track_source()._open_search_input()
@@ -2929,10 +2954,11 @@ class MapMusicBot:
 
     def _start_youtube_stream_from_search(self, title, webpage_url, direct_url,
                                           http_headers=None,
-                                          preserve_queue=False):
+                                          preserve_queue=False,
+                                          start_offset=None):
         return self._track_source()._start_youtube_stream_from_search(
             title, webpage_url, direct_url, http_headers=http_headers,
-            preserve_queue=preserve_queue)
+            preserve_queue=preserve_queue, start_offset=start_offset)
 
     def _start_youtube_stream(self, audio_url, title, playback_generation=None,
                               http_headers=None, canonical_url=None,
@@ -2943,6 +2969,88 @@ class MapMusicBot:
             http_headers=http_headers, canonical_url=canonical_url,
             start_offset=start_offset, start_paused=start_paused,
             thumbnail_url=thumbnail_url)
+
+    # === Resume where each track stopped (resume.py) ===
+
+    def _adopt_saved_track(self):
+        """Make the last saved track the replay track, so Ctrl+M works after a restart."""
+        point = (getattr(self, "_resume_tracks", None) or {}).get(
+            getattr(self, "_resume_last", ""))
+        if not point:
+            return False
+        self.last_track_title = point["title"]
+        self.last_track_target = point["target"]
+        self.last_track_source = point["source"]
+        if point["source"] == "youtube":
+            self.last_youtube_url = point["target"]
+            self.last_youtube_title = point["title"]
+        return True
+
+    def _keep_resume(self, book):
+        """Keep the book in memory, and on disk when this bot owns a file."""
+        self._resume_tracks = book["tracks"]
+        self._resume_last = book["last"]
+        if getattr(self, "_resume_enabled", False):
+            resume.write(book)
+
+    def _remember_resume(self, position, paused=False):
+        """Store a known position for the streamer that is playing now.
+
+        The track's identity rides on the streamer (`resume_track`), never on
+        the bot: a crossfade swaps `self.streamer` for the incoming song before
+        `current_target` is read again, and the position being saved is the
+        streamer's. Reading both from one object is what keeps a fade's
+        hand-over from writing the new song's place onto the old one.
+        """
+        track = getattr(getattr(self, "streamer", None), "resume_track", None) or {}
+        target = track.get("target") or self.current_target
+        if not target:
+            return False
+        self._keep_resume(resume.add(
+            {"tracks": getattr(self, "_resume_tracks", {}) or {},
+             "last": getattr(self, "_resume_last", "")},
+            {
+                "target": target,
+                "title": track.get("title") or self.current_title,
+                "source": track.get("source") or self.current_source,
+                "position": position,
+                "duration": track.get("duration", self.current_duration),
+                "paused": paused,
+            },
+        ))
+        return True
+
+    def _save_resume(self):
+        """Write the audible position now; a track with no writer is left alone."""
+        position = self.track_position()
+        if position is None:
+            return False
+        return self._remember_resume(position, self.paused)
+
+    def _autosave_resume(self):
+        """The loop's half: at most one small write per resume.SAVE_INTERVAL."""
+        now = time.monotonic()
+        if now - getattr(self, "_resume_saved_at", 0.0) < resume.SAVE_INTERVAL:
+            return
+        self._resume_saved_at = now
+        self._save_resume()
+
+    def _forget_resume(self, target=None):
+        """A track finished: its place is gone, so playing it again starts at the top."""
+        target = target or self.current_target
+        if not target:
+            return False
+        self._keep_resume(resume.without(
+            {"tracks": getattr(self, "_resume_tracks", {}) or {},
+             "last": getattr(self, "_resume_last", "")}, target))
+        return True
+
+    def resume_offset(self, target=None):
+        """Where this track should start again, 0 when there is no place to keep."""
+        if target is None:
+            target = getattr(self, "last_track_target", "") or ""
+        point = (getattr(self, "_resume_tracks", None) or {}).get(target)
+        return resume.offset_for(point) if point else 0.0
 
     # === Seeking (fast-forward / rewind) ===
 
@@ -3012,6 +3120,10 @@ class MapMusicBot:
         # Hard cut (no fade) so the new decode head starts at the target
         # position immediately; the track queue and feed survive the seek.
         self.stop(clear_queue=False, clear_feed=False, invalidate_pending=False)
+        # The seek's target is the resume point from here on: an exit during
+        # the resolve must continue where the player aimed, not where it was
+        # before the stop above wrote the outgoing position.
+        self._remember_resume(position, was_paused)
         self.is_loading_stream = True
 
         if source == "local":
@@ -3066,14 +3178,19 @@ class MapMusicBot:
         return bool(self.last_track_target or self.last_youtube_url)
 
     def _replay_last(self):
-        """Replay the last played track (YouTube, Local, or Playlist)"""
+        """Replay the last played track, continuing it where it stopped."""
         if self.is_loading_stream:
             return
 
+        # A saved point for this very track restarts it at that position; a
+        # different track (or none) plays from the top, exactly as before.
+        offset = self.resume_offset()
         if self.last_track_target:
-            self.play_single_track(self.last_track_title, self.last_track_target, self.last_track_source)
+            self.play_single_track(self.last_track_title, self.last_track_target,
+                                   self.last_track_source, start_offset=offset)
         elif self.last_youtube_url:
-            self.play_single_track(self.last_youtube_title, self.last_youtube_url, "youtube")
+            self.play_single_track(self.last_youtube_title, self.last_youtube_url,
+                                   "youtube", start_offset=offset)
 
     # === Local File Playback (fallback/map music) ===
 
@@ -3145,6 +3262,10 @@ class MapMusicBot:
 
     def stop(self, clear_queue=True, clear_feed=True, invalidate_pending=True, fade=False):
         """Stop all playback and cancel any pending search"""
+        # The streamer still belongs to the outgoing track here, so this is the
+        # one place a skip or a stop can keep that track's place without
+        # crediting it to whatever current_target already points at.
+        self._save_resume()
         self._cancel_crossfade()
         if invalidate_pending:
             self._begin_playback_generation()
@@ -3203,9 +3324,16 @@ class MapMusicBot:
     def toggle_pause(self):
         from ..speech import speak
         if not self.playing:
-            # If we have a last played song, replay it
+            # If we have a last played song, replay it -- at the place it
+            # stopped, which is what the resume book is for.
             if self.has_last_track():
-                speak(f"Replaying: {self.last_track_title or self.last_youtube_title}")
+                title = self.last_track_title or self.last_youtube_title
+                offset = self.resume_offset(self.last_track_target)
+                if offset > 0.0:
+                    speak(f"Continuing {title} from "
+                          f"{format_track_position(offset)}.")
+                else:
+                    speak(f"Replaying: {title}")
                 self._replay_last()
             else:
                 speak("Nothing is playing. Press M to search.")
@@ -3226,6 +3354,9 @@ class MapMusicBot:
                 speak("Paused")
         else:
             speak("Nothing is playing.")
+        # A pause is exactly the moment a player leaves the game, so this
+        # track's place is written now rather than at the next loop tick.
+        self._save_resume()
 
     def next_track(self):
         if self.feed_tracks:
@@ -3452,6 +3583,9 @@ class MapMusicBot:
         if not self.playing or self.paused:
             return
 
+        # Remember where the song is, so an abrupt exit loses only this window.
+        self._autosave_resume()
+
         # Crossfade state machine: pre-roll and overlap the next queued track
         # when the current one is about to end.
         self._update_crossfade()
@@ -3511,9 +3645,12 @@ class MapMusicBot:
             if not self._advance_track_queue(
                     natural=finished_streamer.failure_reason is None):
                 if finished_streamer.failure_reason:
+                    # A failed load keeps the point: the player can try again
+                    # and continue where the song was.
                     speak("Could not load track.")
                 else:
                     speak("Track finished.")
+                    self._forget_resume()
 
     def recover_output(self):
         """Resume buffered local music after a transient UI/output interruption."""
@@ -3630,6 +3767,8 @@ class MapMusicBot:
         self._current_reverb_slot = None
 
     def destroy(self):
+        # `stop` below saves this track's place; a second write here is the
+        # same number over again.
         self.download_mgr.close()
         self.audio_recorder.close()
         self.stop()

@@ -248,6 +248,15 @@ class CrossfadeHandler:
             return
         cand.network_muted = True  # silent until the fade actually hands over
         cand.start()
+        # The candidate owns the incoming track's identity from its first frame:
+        # once it becomes `bot.streamer` the resume book must credit positions
+        # to THIS track, not to the outgoing one still fading beside it.
+        cand.resume_track = {
+            "target": canonical or str(track.get("target", "")),
+            "title": str(track.get("title", "Unknown")),
+            "source": source,
+            "duration": state.get("duration"),
+        }
         state["candidate"] = cand
         state["candidate_source"] = src
         # Keep the candidate source silent while it pre-rolls.
