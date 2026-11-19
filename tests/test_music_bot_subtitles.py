@@ -74,6 +74,8 @@ ROLLING = track([
 
 JSON3 = {"ext": "json3", "url": "https://www.youtube.com/api/timedtext?v=a&lang=th"}
 JSON3_EN = {"ext": "json3", "url": "https://www.youtube.com/api/timedtext?v=a&lang=en"}
+JSON3_JA = {"ext": "json3", "url": "https://www.youtube.com/api/timedtext?v=a&lang=ja"}
+JSON3_AF = {"ext": "json3", "url": "https://www.youtube.com/api/timedtext?v=a&lang=af"}
 SRV3 = {"ext": "srv3", "url": "https://www.youtube.com/api/timedtext?v=a&lang=th"}
 
 PAGE = "https://www.youtube.com/watch?v=abcdefghijk"
@@ -205,6 +207,43 @@ class TrackSelectionTests(unittest.TestCase):
         self.assertIsNone(subtitles.select_track(None, ("th",)))
         self.assertIsNone(subtitles.select_track({"formats": []}, ("th",)))
 
+    def test_auto_takes_the_video_track_and_asks_for_a_translation(self):
+        info = {"language": "ja", "subtitles": {"ja": [JSON3_JA]}}
+        chosen = subtitles.select_track(info, ("th",), translate_to="th")
+        self.assertEqual(chosen.language, "th")
+        self.assertTrue(chosen.translated)
+        self.assertEqual(chosen.source_language, "ja")
+        self.assertIn("tlang=th", chosen.url)
+        self.assertEqual(chosen.source_url, JSON3_JA["url"])
+
+    def test_auto_prefers_a_real_track_in_the_target_language(self):
+        info = {"language": "ja",
+                "subtitles": {"th": [JSON3], "ja": [JSON3_JA]}}
+        chosen = subtitles.select_track(info, ("th",), translate_to="th")
+        self.assertFalse(chosen.translated)
+        self.assertEqual(chosen.language, "th")
+
+    def test_auto_prefers_the_marked_original_over_a_listed_translation(self):
+        info = {"automatic_captions": {"af": [JSON3_AF],
+                                        "ja-orig": [JSON3_JA]}}
+        chosen = subtitles.select_track(info, ("th",), translate_to="th")
+        self.assertEqual(chosen.source_language, "ja")
+        self.assertTrue(chosen.url.startswith(JSON3_JA["url"]))
+
+    def test_a_plain_preference_never_falls_back_to_translation(self):
+        info = {"language": "ja", "subtitles": {"ja": [JSON3_JA]}}
+        self.assertIsNone(subtitles.select_track(info, ("th", "en")))
+
+    def test_an_existing_tlang_is_replaced_not_repeated(self):
+        info = {"subtitles": {"ja": [
+            {"ext": "json3",
+             "url": "https://www.youtube.com/api/timedtext?v=a&lang=ja&tlang=ko"},
+        ]}}
+        chosen = subtitles.select_track(info, ("th",), translate_to="th")
+        self.assertEqual(chosen.url.count("tlang="), 1)
+        self.assertIn("tlang=th", chosen.url)
+        self.assertNotIn("tlang=ko", chosen.url)
+
 
 # ── the fetch, through a yt-dlp stand-in ───────────────────────────────────
 
@@ -250,6 +289,18 @@ class FakeSession:
         if self.url_error is not None:
             raise self.url_error
         return FakeResponse(self.payload)
+
+
+class SequencedSession(FakeSession):
+    """A session whose next reads answer different bodies, in order."""
+
+    def __init__(self, payloads, **kwargs):
+        super().__init__(**kwargs)
+        self.payloads = list(payloads)
+
+    def urlopen(self, url):
+        self.url_calls.append(url)
+        return FakeResponse(self.payloads.pop(0))
 
 
 class FakeYdlModule:
@@ -301,6 +352,30 @@ class CaptionFetcherTests(unittest.TestCase):
         load = self.fetch(FakeSession(payload=b"<html>nope</html>"))
         self.assertEqual(load.reason, subtitles.REASON_NO_TRACK)
 
+    def test_a_translated_track_is_read_through_tlang(self):
+        session = FakeSession(info={"language": "ja",
+                                    "subtitles": {"ja": [JSON3_JA]}})
+        load = (subtitles.CaptionFetcher(FakeYdlModule(session))
+                .fetch(PAGE, ("th",), translate_to="th"))
+        self.assertEqual(load.reason, "")
+        self.assertTrue(load.translated)
+        self.assertEqual(load.source_language, "ja")
+        self.assertEqual(len(session.url_calls), 1)
+        self.assertIn("tlang=th", session.url_calls[0])
+
+    def test_a_translation_that_answers_nothing_reads_the_original(self):
+        session = SequencedSession(
+            [b"", MANUAL],
+            info={"language": "ja", "subtitles": {"ja": [JSON3_JA]}})
+        load = (subtitles.CaptionFetcher(FakeYdlModule(session))
+                .fetch(PAGE, ("th",), translate_to="th"))
+        self.assertEqual(len(session.url_calls), 2)
+        self.assertIn("tlang=th", session.url_calls[0])
+        self.assertNotIn("tlang", session.url_calls[1])
+        self.assertEqual(load.language, "ja")
+        self.assertFalse(load.translated)
+        self.assertTrue(load.cues)
+
     def test_a_page_that_is_not_youtube_is_never_asked(self):
         session = FakeSession()
         load = subtitles.CaptionFetcher(FakeYdlModule(session)).fetch(
@@ -343,18 +418,25 @@ def cue_list(*spans_):
     return tuple(subtitles.Cue(start, end, text) for start, end, text in spans_)
 
 
+def texts(spoken):
+    """The line bodies out of a pump answer, ignoring the replace flags."""
+    return [text for text, _replace in spoken]
+
+
 class SubtitleReaderTests(unittest.TestCase):
     def test_a_line_is_spoken_when_the_song_reaches_it(self):
         reader = subtitles.SubtitleReader()
         reader.load(cue_list((1000, 3000, "Hello"), (5000, 7000, "World")))
         self.assertEqual(reader.pump(0), [])
         self.assertEqual(reader.pump(999), [])
-        self.assertEqual(reader.pump(1000), ["Hello"])
+        spoken = reader.pump(1000)
+        self.assertEqual(texts(spoken), ["Hello"])
+        self.assertFalse(spoken[0][1])
 
     def test_the_same_line_is_not_spoken_twice(self):
         reader = subtitles.SubtitleReader()
         reader.load(cue_list((1000, 3000, "Hello")))
-        self.assertEqual(reader.pump(1000), ["Hello"])
+        self.assertEqual(texts(reader.pump(1000)), ["Hello"])
         self.assertEqual(reader.pump(1200), [])
         self.assertEqual(reader.pump(2999), [])
         self.assertEqual(reader.spoken, 1)
@@ -369,7 +451,7 @@ class SubtitleReaderTests(unittest.TestCase):
         reader = subtitles.SubtitleReader()
         reader.load(cue_list((0, 1000, "One"), (1000, 2000, "Two"),
                              (2000, 3000, "Three")))
-        self.assertEqual(reader.pump(2600), ["Three"])
+        self.assertEqual(texts(reader.pump(2600)), ["Three"])
         self.assertEqual(reader.spoken, 1)
         self.assertEqual(reader.dropped, 2)
 
@@ -377,7 +459,7 @@ class SubtitleReaderTests(unittest.TestCase):
         reader = subtitles.SubtitleReader()
         reader.load(cue_list((0, 1000, "One"), (20000, 21000, "Two"),
                              (40000, 41000, "Three")))
-        self.assertEqual(reader.pump(0), ["One"])
+        self.assertEqual(texts(reader.pump(0)), ["One"])
         self.assertEqual(reader.pump(60000), [])
         self.assertEqual(reader.pump(60010), [])
         self.assertEqual(reader.spoken, 1)
@@ -385,29 +467,44 @@ class SubtitleReaderTests(unittest.TestCase):
     def test_a_rewind_re_arms_the_lines_the_song_will_sing_again(self):
         reader = subtitles.SubtitleReader()
         reader.load(cue_list((1000, 3000, "Hello"), (5000, 7000, "World")))
-        self.assertEqual(reader.pump(1000), ["Hello"])
-        self.assertEqual(reader.pump(6000), ["World"])
-        self.assertEqual(reader.pump(1000), ["Hello"])
+        self.assertEqual(texts(reader.pump(1000)), ["Hello"])
+        self.assertEqual(texts(reader.pump(6000)), ["World"])
+        self.assertEqual(texts(reader.pump(1000)), ["Hello"])
+
+    def test_a_chorus_line_repeated_on_its_own_clock_is_read_again(self):
+        # Two cues with the same words are two lines of the song, not a
+        # duplicate of the first: a chorus must be heard every time.
+        reader = subtitles.SubtitleReader()
+        reader.load(cue_list((0, 1500, "Yeah yeah yeah"),
+                             (1500, 3000, "Yeah yeah yeah")))
+        self.assertEqual(texts(reader.pump(0)), ["Yeah yeah yeah"])
+        self.assertEqual(texts(reader.pump(1600)), ["Yeah yeah yeah"])
+        self.assertEqual(reader.spoken, 2)
+
+    def test_a_line_due_while_the_last_is_still_speaking_asks_to_replace_it(self):
+        reader = subtitles.SubtitleReader()
+        reader.load(cue_list((0, 2000, "This is the first line"),
+                             (1000, 3000, "This is the second line")))
+        first = reader.pump(0)
+        second = reader.pump(1000)
+        self.assertFalse(first[0][1])
+        self.assertTrue(second[0][1])
 
     def test_the_sync_offset_moves_the_moment_either_way(self):
         early = subtitles.SubtitleReader()
         early.load(cue_list((1000, 3000, "Hello")))
-        self.assertEqual(early.pump(600, offset_ms=500), ["Hello"])
+        self.assertEqual(texts(early.pump(600, offset_ms=500)), ["Hello"])
         late = subtitles.SubtitleReader()
         late.load(cue_list((1000, 3000, "Hello")))
-        self.assertEqual(late.pump(1000), ["Hello"])
+        self.assertEqual(texts(late.pump(1000)), ["Hello"])
 
-    def test_a_reader_that_cannot_keep_up_stops_being_fed(self):
-        # Cues that fire every half second but claim two seconds of the
-        # reader's time each: the backlog passes MAX_LAG_MS and the line that
-        # would go past it is skipped rather than queued.
+    def test_a_very_long_line_is_read_with_its_budget_capped(self):
         reader = subtitles.SubtitleReader()
-        reader.load(cue_list(*[(start, start + 2000, f"L{start}")
-                               for start in range(0, 3000, 500)]))
-        spoken = [reader.pump(position) for position in range(0, 3000, 500)]
-        self.assertEqual(sum(len(lines) for lines in spoken), 5)
-        self.assertEqual(reader.spoken, 5)
-        self.assertEqual(reader.dropped, 1)
+        reader.load(cue_list((0, 3000, "x" * 200), (3000, 4000, "Next")))
+        self.assertEqual(texts(reader.pump(500)), ["x" * 200])
+        nxt = reader.pump(3000)
+        self.assertEqual(texts(nxt), ["Next"])
+        self.assertTrue(nxt[0][1])
 
     def test_nothing_is_read_before_a_track_is_loaded(self):
         reader = subtitles.SubtitleReader()
@@ -429,13 +526,28 @@ class SubtitleReaderTests(unittest.TestCase):
         reader.pump(1000)
         self.assertEqual(reader.status(), "Thai captions: 2 lines, 1 read, 0 skipped.")
 
+    def test_the_status_line_names_the_language_it_was_translated_from(self):
+        reader = subtitles.SubtitleReader()
+        reader.load(cue_list((0, 1000, "Hello")), "th", automatic=True,
+                    translated=True, source_language="ja")
+        self.assertIn("translated from Japanese", reader.status())
+
 
 class SettingLabelTests(unittest.TestCase):
     def test_a_preference_is_a_language_order(self):
         self.assertEqual(subtitles.languages_for("th"), ("th", "en"))
         self.assertEqual(subtitles.languages_for("en"), ("en", "th"))
         self.assertEqual(subtitles.languages_for("th-only"), ("th",))
-        self.assertEqual(subtitles.languages_for("something else"), ("th", "en"))
+        self.assertEqual(subtitles.languages_for("auto"), ("th",))
+        self.assertEqual(subtitles.languages_for("auto-en"), ("en",))
+        self.assertEqual(subtitles.languages_for("something else"), ("th",))
+
+    def test_only_an_auto_preference_names_a_translation_target(self):
+        self.assertEqual(subtitles.translate_target("auto"), "th")
+        self.assertEqual(subtitles.translate_target("auto-en"), "en")
+        self.assertEqual(subtitles.translate_target("th"), "")
+        self.assertEqual(subtitles.translate_target("th-only"), "")
+        self.assertEqual(subtitles.translate_target("klingon"), "th")
 
     def test_a_stored_preference_that_is_not_ours_falls_back(self):
         self.assertEqual(subtitles.normalize_preference("th-only"), "th-only")
@@ -547,7 +659,7 @@ class TheSwitchTests(unittest.TestCase):
         self.assertEqual(bot.subtitle_label(), "Subtitles: OFF")
         bot.subtitles_enabled = True
         self.assertEqual(bot.subtitle_label(),
-                         "Subtitles: Thai first, then English")
+                         "Subtitles: Auto translate into Thai")
 
     def test_it_persists_and_says_which_way_it_went(self):
         bot = make_bot()
@@ -591,7 +703,8 @@ class TheFetchTests(unittest.TestCase):
         bot._caption_fetcher.fetch.assert_called_once()
         args, kwargs = bot._caption_fetcher.fetch.call_args
         self.assertEqual(args[0], PAGE)
-        self.assertEqual(args[1], ("th", "en"))
+        self.assertEqual(args[1], ("th",))
+        self.assertEqual(kwargs["translate_to"], "th")
         self.assertTrue(callable(kwargs["cancelled"]))
 
     def test_nothing_is_fetched_while_the_switch_is_off(self):
@@ -621,6 +734,24 @@ class TheFetchTests(unittest.TestCase):
         self.assertEqual(bot.subtitle_reader.language, "th")
         self.assertIn("Thai captions for this track", speak.call_args[0][0])
         self.assertIn("2 lines", speak.call_args[0][0])
+
+    def test_a_plain_preference_never_asks_for_a_translation(self):
+        bot = make_bot(subtitles_enabled=True, subtitle_language="th")
+        self.begin(bot, subtitles.CaptionLoad())
+        kwargs = bot._caption_fetcher.fetch.call_args.kwargs
+        self.assertEqual(kwargs["translate_to"], "")
+
+    def test_a_translated_track_says_what_it_was_translated_from(self):
+        bot = make_bot(subtitles_enabled=True)
+        delivered = self.begin(bot, subtitles.CaptionLoad(
+            cues=tuple(subtitles.parse_json3(MANUAL)), language="th",
+            automatic=True, reason=subtitles.REASON_NONE,
+            translated=True, source_language="ja"))
+        with mock.patch.object(bot_module, "speak") as speak:
+            delivered[0]()
+        self.assertTrue(bot.subtitle_reader.translated)
+        self.assertEqual(bot.subtitle_reader.source_language, "ja")
+        self.assertIn("translated from Japanese", speak.call_args[0][0])
 
     def test_a_track_with_no_captions_says_so_out_loud(self):
         bot = make_bot(subtitles_enabled=True)
@@ -682,7 +813,38 @@ class ThePumpTests(unittest.TestCase):
         bot.subtitle_reader.load(cue_list((1000, 3000, "Hello")))
         with mock.patch.object(bot_module, "speak") as speak:
             bot._pump_subtitles()
-        speak.assert_called_once_with("Hello", interupt=False)
+        speak.assert_called_once_with("Hello", interupt=False,
+                                      id=subtitles.SUBTITLE_SPEECH_ID)
+
+    def test_a_new_line_cuts_off_the_previous_caption_only(self):
+        bot = make_bot(subtitles_enabled=True)
+        bot.subtitle_reader.load(cue_list((0, 5000, "This is the first line"),
+                                          (500, 6000, "This is the second line")))
+        positions = iter([0.0, 0.6])
+        bot.track_position = lambda: next(positions)
+        with mock.patch.object(bot_module, "speak") as speak, \
+                mock.patch.object(bot_module.speech, "history",
+                                  [("first", subtitles.SUBTITLE_SPEECH_ID)]):
+            bot._pump_subtitles()
+            bot._pump_subtitles()
+        first, second = speak.call_args_list
+        self.assertFalse(first.kwargs["interupt"])
+        self.assertTrue(second.kwargs["interupt"])
+        self.assertEqual(second.args[0], "This is the second line")
+
+    def test_a_menu_line_is_not_cut_off_by_a_caption(self):
+        bot = make_bot(subtitles_enabled=True)
+        bot.subtitle_reader.load(cue_list(
+            (0, 5000, "This is the first line"),
+            (500, 6000, "This is the second line")))
+        positions = iter([0.0, 0.6])
+        bot.track_position = lambda: next(positions)
+        with mock.patch.object(bot_module, "speak") as speak, \
+                mock.patch.object(bot_module.speech, "history",
+                                  [("a menu line", None)]):
+            bot._pump_subtitles()
+            bot._pump_subtitles()
+        self.assertFalse(speak.call_args.kwargs["interupt"])
 
     def test_nothing_is_read_while_the_switch_is_off(self):
         bot = make_bot()
@@ -706,7 +868,8 @@ class ThePumpTests(unittest.TestCase):
         bot.subtitle_reader.load(cue_list((1000, 3000, "Hello")))
         with mock.patch.object(bot_module, "speak") as speak:
             bot._pump_subtitles()
-        speak.assert_called_once_with("Hello", interupt=False)
+        speak.assert_called_once_with("Hello", interupt=False,
+                                      id=subtitles.SUBTITLE_SPEECH_ID)
 
 
 class TheSubtitleMenuTests(unittest.TestCase):
@@ -722,7 +885,7 @@ class TheSubtitleMenuTests(unittest.TestCase):
         bot = make_bot()
         labels = [norm(item[0]) for item in self.open_menu(bot).items]
         self.assertIn("Subtitles: OFF", labels)
-        self.assertIn("Language: Thai first, then English", labels)
+        self.assertIn("Language: Auto translate into Thai", labels)
         self.assertIn("Timing: as the video timed it", labels)
         self.assertIn("No captions loaded.", labels)
         self.assertIn("Back", labels)

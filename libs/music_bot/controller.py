@@ -19,7 +19,7 @@ from collections import deque
 import cyal
 import cyal.exceptions
 
-from .. import options
+from .. import options, speech
 from ..audio.cinema import (ROOM_MAX_DISTANCE, ROOM_REFERENCE_DISTANCE,
                             acquire_bank as cinema_acquire_bank,
                             live_instruments_enabled, plan_reach,
@@ -43,6 +43,7 @@ from . import artwork
 from . import autotune
 from . import harmony
 from . import output_device
+from . import repeat
 from . import voice_effects
 from . import song_requests
 from . import subtitles
@@ -186,6 +187,12 @@ class MapMusicBot:
         # automatically when the current track ends, BEFORE the favorites /
         # playlist queue continues. Explicit Stop clears it too.
         self.next_up_queue = []
+        # How every advance wraps: off, all songs, or this song (repeat.py).
+        # `_repeat_cycle` keeps the play-next songs already consumed in this
+        # pass, so Repeat All can loop a queue that has no playlist under it.
+        self.repeat_mode = repeat.normalize_mode(
+            options.get("music_bot_repeat_mode", repeat.REPEAT_OFF))
+        self._repeat_cycle = []
 
         # Music Bot settings (persisted in client options)
         self.queue_mode = options.get("music_bot_queue_mode", False)
@@ -1519,6 +1526,9 @@ class MapMusicBot:
         return self._menus()._show_personal_feed_menu()
 
     def _clear_personal_feed(self):
+        # The queue-only Repeat All cycle is not the feed's: clearing a feed
+        # must not erase the songs a queued track is looping through (the
+        # start helpers clear the feed on every queued track).
         self.feed_tracks = []
         self.feed_index = -1
 
@@ -1531,23 +1541,51 @@ class MapMusicBot:
         random.shuffle(favorites)
         self.feed_tracks = favorites
         self.feed_index = 0
+        self._repeat_cycle = []
         speak(f"Personal Music Feed started. {len(favorites)} songs from Favorites.")
         self._play_personal_feed_track()
 
-    def _next_personal_feed(self):
+    def _next_personal_feed(self, natural=True):
+        """Move the feed on one song, under the repeat mode.
+
+        ``natural`` is the end of a song; a failed load passes False so This
+        song moves on instead of retrying a bad URL forever.
+        """
         if not self.feed_tracks:
             self._start_personal_feed()
-            return
-        self.feed_index = (self.feed_index + 1) % len(self.feed_tracks)
+            return True
+        mode = self._repeat_state()
+        if mode == repeat.REPEAT_ONE and natural:
+            self._replay_current_track(announce=True)
+            return True
+        index = self.feed_index + 1
+        if index >= len(self.feed_tracks):
+            if mode != repeat.REPEAT_ALL:
+                speak("Personal Music Feed finished.")
+                self._clear_personal_feed()
+                return False
+            index = 0
+        self.feed_index = index
         self._play_personal_feed_track()
+        return True
 
     def previous_feed_track(self):
         """Return to the prior song in an active Personal Music Feed."""
         if not self.feed_tracks:
             speak("Personal Music Feed is not active.")
-            return
-        self.feed_index = (self.feed_index - 1) % len(self.feed_tracks)
+            return False
+        mode = self._repeat_state()
+        if mode == repeat.REPEAT_ONE:
+            return self._replay_current_track(announce=True)
+        index = self.feed_index - 1
+        if index < 0:
+            if mode != repeat.REPEAT_ALL:
+                speak("This is the first song in the feed.")
+                return False
+            index = len(self.feed_tracks) - 1
+        self.feed_index = index
         self._play_personal_feed_track()
+        return True
 
     def next_feed_track(self):
         """Advance an active Personal Music Feed without changing normal playlists."""
@@ -1663,6 +1701,7 @@ class MapMusicBot:
         self.play_queue = []
         self.play_queue_index = -1
         self.play_queue_label = ""
+        self._repeat_cycle = []
 
     def _start_track_queue(self, tracks, label):
         """Start a personal playlist/favorites queue without mixing map music."""
@@ -1680,6 +1719,9 @@ class MapMusicBot:
     def _play_queued_track(self):
         if not (0 <= self.play_queue_index < len(self.play_queue)):
             return
+        # A playlist is the collection now; a queue-only cycle from before it
+        # must not come back at the end of the playlist.
+        self._repeat_cycle = []
         track = self.play_queue[self.play_queue_index]
         self.play_single_track(
             track.get("title", "Unknown"),
@@ -1688,21 +1730,124 @@ class MapMusicBot:
             preserve_queue=True,
         )
 
-    def _advance_track_queue(self):
+    # === Repeat mode (every way a song can advance) ===
+
+    def _repeat_state(self):
+        """The mode in force, with a fixture's missing value reading Off."""
+        return repeat.normalize_mode(
+            getattr(self, "repeat_mode", repeat.REPEAT_OFF))
+
+    def repeat_label(self):
+        return f"Repeat: {repeat.label(self._repeat_state())}"
+
+    def toggle_repeat_mode(self):
+        """Cycle Off -> All songs -> This song and say which is in force.
+
+        A pre-roll started under the old mode is dropped: its candidate is a
+        song the new mode may no longer choose.
+        """
+        mode = repeat.next_mode(self._repeat_state())
+        self.repeat_mode = mode
+        options.set("music_bot_repeat_mode", mode)
+        if mode != repeat.REPEAT_ALL:
+            self._repeat_cycle = []
+        # A pre-roll made under the old mode is dropped; a fade already
+        # underway finishes with the candidate it chose, and the new mode
+        # takes over at the next advance.
+        state = getattr(self, "_crossfade", None)
+        if not state or state.get("phase") != "fading":
+            self._cancel_crossfade()
+        speak(repeat.sentence(mode))
+        return mode
+
+    def _current_track_dict(self):
+        """The song on air as a queue entry, for a repeat that replays it."""
+        target = str(getattr(self, "current_target", "") or "")
+        if not target:
+            return None
+        source = getattr(self, "current_source", "youtube") or "youtube"
+        return {
+            "title": getattr(self, "current_title", "") or "Unknown",
+            "target": target,
+            "source": source,
+            "webpage_url": target if source != "local" else "",
+        }
+
+    def _replay_current_track(self, announce=False):
+        """Start the track on air again, keeping the queue and the feed."""
+        track = self._current_track_dict()
+        if track is None:
+            return False
+        if announce:
+            speak(f"Repeating {track['title']}.")
+        self._seek_restart(0.0, announce=False)
+        return True
+
+    def _pop_next_up_track(self):
+        """Take the next waiting song, and keep it for a Repeat All pass."""
+        track = self.next_up_queue.pop(0)
+        cycle = getattr(self, "_repeat_cycle", None)
+        if cycle is None:
+            cycle = self._repeat_cycle = []
+        cycle.append(dict(track))
+        return track
+
+    def _refill_repeat_cycle(self):
+        """Put the songs already played from a queue back in the queue."""
+        cycle = [dict(track) for track in
+                 (getattr(self, "_repeat_cycle", None) or ())
+                 if track.get("target")]
+        self._repeat_cycle = []
+        if not cycle:
+            return False
+        self.next_up_queue = cycle
+        return True
+
+    def _advance_track_queue(self, natural=True):
+        """Play what comes after the song that just ended.
+
+        Repeat mode is read here, in the one order every advance uses: This
+        song asks for the same track again (only after a natural end, so a bad
+        URL cannot loop forever), an explicitly queued song goes next because
+        it is what the player asked to hear, the Personal Music Feed advances,
+        and All songs wraps the playlist/local batch -- or the queue-only cycle
+        when there is no playlist under it.
+        """
+        mode = self._repeat_state()
+        if mode == repeat.REPEAT_ONE and natural:
+            return self._replay_current_track()
         # Songs the player queued explicitly (Queue Mode / Add to Queue) play
-        # BEFORE the favorites/playlist queue continues.
+        # BEFORE the collection that is playing -- including a Personal Music
+        # Feed, which a queued song takes over from.
         if self.next_up_queue:
             self._play_queued_next()
             return True
-        if not self.play_queue:
-            return False
-        self.play_queue_index += 1
-        if self.play_queue_index >= len(self.play_queue):
-            speak(f"{self.play_queue_label} finished.")
-            self._clear_track_queue()
-            return False
-        self._play_queued_track()
-        return True
+        if getattr(self, "feed_tracks", None):
+            # The feed speaks its own ending; True keeps the loop from adding
+            # "Track finished." over it.
+            self._next_personal_feed(natural=natural)
+            return True
+        if self.play_queue:
+            index = self.play_queue_index + 1
+            if index >= len(self.play_queue):
+                if mode != repeat.REPEAT_ALL:
+                    speak(f"{self.play_queue_label} finished.")
+                    self._clear_track_queue()
+                    return False
+                index = 0
+            self.play_queue_index = index
+            self._play_queued_track()
+            return True
+        if mode == repeat.REPEAT_ALL:
+            if self._refill_repeat_cycle():
+                self._play_queued_next()
+                return True
+            if natural:
+                return self._replay_current_track()
+        # Nothing is left to play: a queue-only cycle from an ended Off pass
+        # must not be revived by toggling All songs later.
+        self._repeat_cycle = []
+        return False
 
     def _enqueue_track(self, title, target, source="youtube", http_headers=None,
                        webpage_url="", direct_url="", requested_by=""):
@@ -1736,12 +1881,17 @@ class MapMusicBot:
         """Start the first queued track (or a specific one) and remove it from
         the queue, preserving any favorites/playlist queue underneath so it
         resumes after the queued song ends."""
+        if track is None and not self.next_up_queue:
+            return False
+        # A queued song is an explicit request: it takes over from a feed.
+        # Clearing before the pop keeps this song in `_repeat_cycle` for a
+        # Repeat All pass.
+        if getattr(self, "feed_tracks", None):
+            self._clear_personal_feed()
         if track is None:
-            if not self.next_up_queue:
-                return False
-            track = self.next_up_queue.pop(0)
+            track = self._pop_next_up_track()
         elif self.next_up_queue and self.next_up_queue[0] is track:
-            self.next_up_queue.pop(0)
+            self._pop_next_up_track()
         source = track.get("source", "youtube")
         title = track.get("title", "Unknown")
         target = track.get("target", "")
@@ -1759,6 +1909,7 @@ class MapMusicBot:
 
     def _clear_next_up_queue(self):
         self.next_up_queue = []
+        self._repeat_cycle = []
 
     # === Picks: local files marked while listening ===
     def _save_picks(self):
@@ -2064,10 +2215,14 @@ class MapMusicBot:
         if not getattr(self, "subtitles_enabled", False) or not self._subtitle_page:
             return
         languages = subtitles.languages_for(self.subtitle_language)
+        # An Auto preference names a language to translate INTO: the track in
+        # that language is preferred, and the video's own track is translated
+        # when there is none, so nothing has to be switched by hand.
+        translate_to = subtitles.translate_target(self.subtitle_language)
 
         def load():
             result = self._caption_fetcher.fetch(
-                self._subtitle_page, languages,
+                self._subtitle_page, languages, translate_to=translate_to,
                 cancelled=lambda: generation != self._subtitle_generation)
             self.game.put(lambda: self._on_subtitles_loaded(generation, result))
 
@@ -2086,8 +2241,20 @@ class MapMusicBot:
             # track that could not be read says so (once per track).
             speak(subtitles.reason_sentence(load.reason))
             return
-        self.subtitle_reader.load(load.cues, load.language, load.automatic)
+        self.subtitle_reader.load(load.cues, load.language, load.automatic,
+                                  translated=load.translated,
+                                  source_language=load.source_language)
         kind = "automatic captions" if load.automatic else "captions"
+        origin = subtitles.language_label(load.source_language)
+        if load.translated and origin:
+            speak(f"{subtitles.language_label(load.language)} {kind}, "
+                  f"translated from {origin}, for this track. "
+                  f"{len(load.cues)} lines.")
+            return
+        if load.translated:
+            speak(f"{subtitles.language_label(load.language)} {kind}, "
+                  f"translated, for this track. {len(load.cues)} lines.")
+            return
         speak(f"{subtitles.language_label(load.language)} {kind} for this "
               f"track. {len(load.cues)} lines.")
 
@@ -2210,12 +2377,24 @@ class MapMusicBot:
         position = self.track_position()
         if position is None:
             return
-        # Queued, never interrupting: a caption must not cut off the menu or a
-        # game announcement, and the reader's own bound is what keeps the queue
-        # from growing (subtitles.SubtitleReader.pump).
-        for line in reader.pump(position * 1000.0,
-                                offset_ms=self.subtitle_offset):
-            speak(line, interupt=False)
+        for line, replace in reader.pump(position * 1000.0,
+                                         offset_ms=self.subtitle_offset):
+            self._speak_subtitle(line, replace)
+
+    def _speak_subtitle(self, line, replace=False):
+        """Read one caption line, replacing the previous one when it is due.
+
+        A screen reader queues whatever it is handed, so a reader slower than
+        the lyrics would read a pile of old lines. The line the song is on now
+        is the one that matters: when the previous caption is estimated to
+        still be speaking, it is cut off. Speech from anywhere else is never
+        cut -- `speech.history`'s last entry tells this feature whether the
+        line it would replace is a caption of its own.
+        """
+        last = speech.history[-1] if speech.history else None
+        interrupt = bool(replace and last and
+                         last[1] == subtitles.SUBTITLE_SPEECH_ID)
+        speak(line, interupt=interrupt, id=subtitles.SUBTITLE_SPEECH_ID)
 
     def _open_subtitle_menu(self):
         return self._menus()._open_subtitle_menu()
@@ -3043,7 +3222,17 @@ class MapMusicBot:
             self._next_personal_feed()
             return
         if self.mode == "local" and self.playlist:
-            self.playlist_index = (self.playlist_index + 1) % len(self.playlist)
+            mode = self._repeat_state()
+            if mode == repeat.REPEAT_ONE:
+                self._replay_current_track(announce=True)
+                return
+            index = self.playlist_index + 1
+            if index >= len(self.playlist):
+                if mode != repeat.REPEAT_ALL:
+                    speak("Local playlist finished.")
+                    return
+                index = 0
+            self.playlist_index = index
             self._play_local_current()
             speak(f"Next: {self.current_title}")
 
@@ -3057,7 +3246,10 @@ class MapMusicBot:
         batch. Previous only walks that batch: a play-next entry is removed
         when it starts, so there is nothing behind it to return to.
         """
+        mode = self._repeat_state()
         if direction >= 0:
+            if mode == repeat.REPEAT_ONE:
+                return self._replay_current_track(announce=True)
             if self.next_up_queue:
                 # A manual skip may leave a track that is still resolving; the
                 # new stream bumps the playback generation, so the old resolve
@@ -3065,17 +3257,38 @@ class MapMusicBot:
                 self.is_loading_stream = False
                 self._play_queued_next()
                 return True
-            if (self.play_queue
-                    and 0 <= self.play_queue_index < len(self.play_queue) - 1):
-                self.play_queue_index += 1
+            if self.play_queue:
+                index = self.play_queue_index + 1
+                if index >= len(self.play_queue):
+                    if mode != repeat.REPEAT_ALL:
+                        speak("Nothing to skip to.")
+                        return False
+                    index = 0
+                self.play_queue_index = index
                 self._play_queued_track()
                 return True
+            if mode == repeat.REPEAT_ALL:
+                if self._refill_repeat_cycle():
+                    self.is_loading_stream = False
+                    self._play_queued_next()
+                    return True
+                return self._replay_current_track(announce=True)
             speak("Nothing to skip to.")
             return False
-        if self.play_queue and 0 < self.play_queue_index < len(self.play_queue):
-            self.play_queue_index -= 1
+        if mode == repeat.REPEAT_ONE:
+            return self._replay_current_track(announce=True)
+        if self.play_queue and 0 <= self.play_queue_index:
+            index = self.play_queue_index - 1
+            if index < 0:
+                if mode != repeat.REPEAT_ALL:
+                    speak("No previous song in this queue.")
+                    return False
+                index = len(self.play_queue) - 1
+            self.play_queue_index = index
             self._play_queued_track()
             return True
+        if mode == repeat.REPEAT_ALL:
+            return self._replay_current_track(announce=True)
         speak("No previous song in this queue.")
         return False
 
@@ -3258,7 +3471,21 @@ class MapMusicBot:
                 pass
             try:
                 if self.current_local_sound.source.state == cyal.SourceState.STOPPED:
-                    self.playlist_index = (self.playlist_index + 1) % len(self.playlist)
+                    mode = self._repeat_state()
+                    next_index = self.playlist_index + 1
+                    if next_index >= len(self.playlist):
+                        if mode == repeat.REPEAT_ONE:
+                            next_index = self.playlist_index
+                        elif mode == repeat.REPEAT_ALL:
+                            next_index = 0
+                        else:
+                            # Off: the local map playlist ends here.
+                            self.playing = False
+                            self.paused = False
+                            self.mode = "idle"
+                            self._stop_local()
+                            return
+                    self.playlist_index = next_index
                     self._play_local_current()
             except Exception:
                 pass
@@ -3271,7 +3498,8 @@ class MapMusicBot:
             self.streamer = None
             self.playing = False
             self.mode = "idle"
-            if not self._advance_track_queue():
+            if not self._advance_track_queue(
+                    natural=finished_streamer.failure_reason is None):
                 if finished_streamer.failure_reason:
                     speak("Could not load track.")
                 else:

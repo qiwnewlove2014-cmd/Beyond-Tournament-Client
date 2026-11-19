@@ -1635,7 +1635,7 @@ class TestMusicBotStreamMetadata(unittest.TestCase):
         bot._stream_announced = False
         bot._find_gameplay = lambda: None
         bot._ensure_live_relay_streamer = lambda: None
-        bot._advance_track_queue = lambda: False
+        bot._advance_track_queue = lambda natural=True: False
 
         with mock.patch.object(mb_ctrl, "speak") as speak:
             bot.loop()

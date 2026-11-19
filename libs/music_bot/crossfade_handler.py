@@ -38,6 +38,7 @@ import threading
 import time
 
 from .. import options
+from . import repeat
 from .media import YouTubeSearcher
 from .streaming import AudioStreamer
 
@@ -61,22 +62,66 @@ class CrossfadeHandler:
             return None
         return float(self._bot.current_duration) - position
 
+    def _next_track_selection(self):
+        """(kind, track, index) for the song an advance would play next.
+
+        The pre-roll and the commit read this one answer, so the crossfade
+        cannot choose a different song or repeat mode from the end-of-song
+        path. The order is the same one `_advance_track_queue` uses: This
+        song, the play-next queue, the feed, the playlist/local batch, then a
+        Repeat All cycle.
+        """
+        bot = self._bot
+        mode = bot._repeat_state()
+        if mode == repeat.REPEAT_ONE:
+            return "same", bot._current_track_dict(), None
+        if bot.next_up_queue:
+            return "queue", bot.next_up_queue[0], None
+        if getattr(bot, "feed_tracks", None):
+            index = bot.feed_index + 1
+            if index < len(bot.feed_tracks):
+                return "feed", bot.feed_tracks[index], index
+            if mode == repeat.REPEAT_ALL:
+                return "feed", bot.feed_tracks[0], 0
+            return None, None, None
+        if bot.play_queue:
+            index = bot.play_queue_index + 1
+            if index < len(bot.play_queue):
+                return "playlist", bot.play_queue[index], index
+            if mode == repeat.REPEAT_ALL:
+                return "playlist", bot.play_queue[0], 0
+        if mode == repeat.REPEAT_ALL:
+            cycle = getattr(bot, "_repeat_cycle", None) or ()
+            if cycle:
+                return "cycle", dict(cycle[0]), None
+            return "same", bot._current_track_dict(), None
+        return None, None, None
+
     def _peek_next_track(self):
         """The track the normal end-of-song path would play next (no consume)."""
-        if self._bot.next_up_queue:
-            return self._bot.next_up_queue[0]
-        if self._bot.play_queue and 0 <= self._bot.play_queue_index + 1 < len(self._bot.play_queue):
-            return self._bot.play_queue[self._bot.play_queue_index + 1]
-        return None
+        return self._next_track_selection()[1]
 
     def _consume_next_track(self):
         """Consume the next track exactly like the end-of-song advance does."""
-        if self._bot.next_up_queue:
-            return self._bot.next_up_queue.pop(0)
-        if self._bot.play_queue and 0 <= self._bot.play_queue_index + 1 < len(self._bot.play_queue):
-            self._bot.play_queue_index += 1
-            return self._bot.play_queue[self._bot.play_queue_index]
-        return None
+        bot = self._bot
+        kind, track, index = self._next_track_selection()
+        if kind == "queue":
+            # A queued song takes a feed over; clear it before the pop so the
+            # song stays in `_repeat_cycle` for a Repeat All pass.
+            if getattr(bot, "feed_tracks", None):
+                bot._clear_personal_feed()
+            return bot._pop_next_up_track()
+        if kind == "playlist":
+            bot.play_queue_index = index
+            return track
+        if kind == "feed":
+            bot.feed_index = index
+            return track
+        if kind == "cycle":
+            if bot._refill_repeat_cycle():
+                return bot._pop_next_up_track()
+            return bot._current_track_dict()
+        return track
 
     def _cancel_crossfade(self):
         """Abandon any pre-roll / in-progress fade and free its resources.

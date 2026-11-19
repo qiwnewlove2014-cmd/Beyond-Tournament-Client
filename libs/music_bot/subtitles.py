@@ -28,6 +28,14 @@ Three measured facts shape it, and each has exactly one home here:
   and a reader that has fallen too far behind the music stops being fed
   (:class:`SubtitleReader`) -- the same "skip once, never drift" rule the
   guitar monitor's queue lives by.
+* **Two listening problems decide the rest.** A player who does not want to
+  pick a language gets *Auto*: the target language's track when there is one,
+  and otherwise the video's own track machine-translated through YouTube's
+  ``tlang`` parameter -- the same captions endpoint, so no API key and no
+  second network stack. And because a screen reader queues whatever it is
+  given, the line due NOW replaces the line before it instead of waiting
+  behind it: a reader that cannot keep up reads the current lyric, never a
+  pile of old ones.
 
 Nothing here touches the game, OpenAL, or the network at import time: the
 fetch is the only I/O and it runs on the caller's worker thread.
@@ -41,7 +49,7 @@ import importlib
 import json
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from .. import logger
 from ..youtube_resolver import _valid_url
@@ -53,17 +61,35 @@ from ..youtube_resolver import _valid_url
 #: single tag: a Thai player watching a Thai video wants the uploader's Thai
 #: track, and the same player on an English documentary wants English rather
 #: than silence. The ``*-only`` entries exist for the player who wants nothing
-#: else read over the music.
+#: else read over the music. The ``auto`` entries are the lazy player's: they
+#: take the language's own track when there is one and have YouTube translate
+#: the video's own track otherwise, so a song in Japanese still reads in Thai
+#: without anyone opening this menu.
 LANGUAGE_PREFERENCES = (
+    ("auto", "Auto translate into Thai", ("th",)),
+    ("auto-en", "Auto translate into English", ("en",)),
     ("th", "Thai first, then English", ("th", "en")),
     ("en", "English first, then Thai", ("en", "th")),
     ("th-only", "Thai only", ("th",)),
     ("en-only", "English only", ("en",)),
 )
-DEFAULT_LANGUAGE_PREFERENCE = "th"
+DEFAULT_LANGUAGE_PREFERENCE = "auto"
+
+#: The language an Auto preference machine-translates into. An ordinary
+#: preference is only an order and never translates.
+TRANSLATE_TARGETS = {"auto": "th", "auto-en": "en"}
 
 #: The names of the languages a player hears in the spoken confirmations.
-LANGUAGE_LABELS = {"th": "Thai", "en": "English"}
+#: Only the names a song is likely to be spoken in need to be here; anything
+#: else is spoken as its own tag rather than guessed at.
+LANGUAGE_LABELS = {
+    "th": "Thai", "en": "English", "ja": "Japanese", "ko": "Korean",
+    "zh": "Chinese", "fr": "French", "es": "Spanish", "de": "German",
+    "pt": "Portuguese", "ru": "Russian", "vi": "Vietnamese",
+    "id": "Indonesian", "ms": "Malay", "hi": "Hindi", "ar": "Arabic",
+    "it": "Italian", "nl": "Dutch", "pl": "Polish", "tr": "Turkish",
+    "sv": "Swedish",
+}
 
 #: How far a player may shift the captions against the audio, and by how much
 #: one press moves them. Positive speaks EARLIER (the cue clock is read that
@@ -78,6 +104,11 @@ def languages_for(preference):
         if key == preference:
             return languages
     return LANGUAGE_PREFERENCES[0][2]
+
+
+def translate_target(preference):
+    """The language to machine-translate into, or ``""`` for a plain order."""
+    return TRANSLATE_TARGETS.get(normalize_preference(preference), "")
 
 
 def preference_label(preference):
@@ -300,14 +331,25 @@ def _fold_rolling(cues):
 
 @dataclass(frozen=True, slots=True)
 class CaptionTrack:
-    """One caption track, and where to read it from."""
+    """One caption track, and where to read it from.
+
+    ``language`` is what the listener will HEAR. When ``translated`` is true
+    the body comes from ``url`` (the original path plus YouTube's ``tlang``),
+    ``source_language`` names the track it was translated from, and
+    ``source_url`` is that track's own URL, kept for the one fallback that
+    matters: a machine translation that answers with nothing is read as the
+    original rather than as silence.
+    """
 
     language: str
     url: str
     automatic: bool
+    translated: bool = False
+    source_language: str = ""
+    source_url: str = ""
 
 
-def select_track(info, languages):
+def select_track(info, languages, translate_to=""):
     """The caption track to read for a language order, or ``None``.
 
     An uploader's own track wins over an automatic one in *every* language: it
@@ -315,6 +357,13 @@ def select_track(info, languages):
     song are where the nonsense lives. Within a language the ``json3`` entry is
     the one this module reads (``srv1``/``srv3``/``ttml``/``srt`` sit beside
     it, and an entry whose URL is not a usable https URL is not one at all).
+
+    ``translate_to`` is ``""`` for an ordinary preference, which only ever
+    chooses a track. When it names a language and no track in ``languages``
+    exists, the video's own track is taken and its URL is asked for a machine
+    translation into that language -- YouTube builds one on the same
+    ``timedtext`` endpoint from the ``tlang`` parameter, so Auto costs no key
+    and no second API.
     """
     if not isinstance(info, dict):
         return None
@@ -323,14 +372,110 @@ def select_track(info, languages):
         if not isinstance(table, dict):
             continue
         for language in languages:
-            for entry in table.get(language) or ():
-                if not isinstance(entry, dict):
-                    continue
-                if str(entry.get("ext") or "").lower() != "json3":
-                    continue
-                if _valid_url(entry.get("url")):
-                    return CaptionTrack(language, entry["url"], automatic)
+            url = _json3_url(table.get(language))
+            if not url:
+                continue
+            translated = _is_translation(info, automatic, language)
+            source_url = ""
+            if translated:
+                source = _original_track(info, table)
+                if source and source[1] != url:
+                    source_url = source[1]
+            return CaptionTrack(
+                language, url, automatic,
+                translated=translated,
+                source_language=_spoken_language(info) if translated else "",
+                source_url=source_url,
+            )
+    if not translate_to:
+        return None
+    for automatic in (False, True):
+        table = info.get("automatic_captions" if automatic else "subtitles")
+        if not isinstance(table, dict):
+            continue
+        source = _original_track(info, table)
+        if source is None:
+            continue
+        language, url = source
+        return CaptionTrack(
+            translate_to, _with_tlang(url, translate_to), automatic,
+            translated=True, source_language=language, source_url=url,
+        )
     return None
+
+
+def _json3_url(entries):
+    """The readable ``json3`` URL among a language's caption formats."""
+    for entry in entries or ():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("ext") or "").lower() != "json3":
+            continue
+        if _valid_url(entry.get("url")):
+            return entry["url"]
+    return ""
+
+
+def _spoken_language(info):
+    """The language YouTube says the audio is in, when it says."""
+    return str(info.get("language") or "").strip().lower()
+
+
+def _is_translation(info, automatic, language):
+    """Whether an automatic entry is already a machine translation.
+
+    yt-dlp lists a translation for every language in the player response and
+    marks the original audio language's own track as ``<lang>-orig`` too. A
+    track whose language is not the spoken one is a translation even though
+    its URL is the one that will be read.
+    """
+    if not automatic:
+        return False
+    spoken = _spoken_language(info)
+    if not spoken:
+        return False
+    base = spoken.split("-")[0]
+    return str(language).lower().split("-")[0] not in (spoken, base)
+
+
+def _original_track(info, table):
+    """The video's own track, for the one case where it must be translated.
+
+    The spoken language is asked for first, then a key yt-dlp marked as the
+    original (``-orig``), and only then the first readable entry -- which, on
+    a translation table, is better than silence and is usually the original
+    anyway.
+    """
+    spoken = _spoken_language(info)
+    candidates = []
+    if spoken:
+        candidates.extend((spoken, spoken.split("-")[0], f"{spoken}-orig"))
+    candidates.extend(key for key in table if str(key).endswith("-orig"))
+    candidates.extend(table)
+    seen = set()
+    for key in candidates:
+        key = str(key)
+        if key in seen:
+            continue
+        seen.add(key)
+        url = _json3_url(table.get(key))
+        if url:
+            return (key[:-5] if key.endswith("-orig") else key), url
+    return None
+
+
+def _with_tlang(url, language):
+    """The same caption URL, asking YouTube for a machine translation.
+
+    ``tlang`` is appended (or replaced) in the raw query rather than rebuilt
+    from parsed pairs: a signed caption URL is bytes someone else computed,
+    and only the one parameter is ours to change.
+    """
+    parts = urlsplit(url)
+    pieces = [piece for piece in parts.query.split("&")
+              if piece and piece.split("=", 1)[0].lower() != "tlang"]
+    pieces.append(f"tlang={language}")
+    return urlunsplit(parts._replace(query="&".join(pieces)))
 
 
 # ── Fetching one track per page, once ───────────────────────────────────────
@@ -380,6 +525,8 @@ class CaptionLoad:
     language: str = ""
     automatic: bool = False
     reason: str = REASON_NO_TRACK
+    translated: bool = False
+    source_language: str = ""
 
 
 class CaptionFetcher:
@@ -398,20 +545,23 @@ class CaptionFetcher:
         self._cache = OrderedDict()
         self._lock = threading.Lock()
 
-    def fetch(self, page_url, languages, *, cancelled=None):
+    def fetch(self, page_url, languages, translate_to="", *, cancelled=None):
         """The cues for ``page_url``, or a :class:`CaptionLoad` saying why not.
 
         ``languages`` is the order to look in (see :func:`languages_for`).
-        ``cancelled`` is polled between the two network steps, so a player who
-        skipped the song is not kept waiting for a track nobody will hear.
+        ``translate_to`` asks YouTube for a machine translation when the order
+        finds no track; it is part of the cache key because the same page then
+        answers different text. ``cancelled`` is polled between the two
+        network steps, so a player who skipped the song is not kept waiting
+        for a track nobody will hear.
         """
         if not is_caption_page(page_url):
             return CaptionLoad(reason=REASON_FAILED)
-        key = (page_url, tuple(languages))
+        key = (page_url, tuple(languages), translate_to or "")
         cached = self._cached(key)
         if cached is not None:
             return cached
-        load = self._read(page_url, tuple(languages), cancelled)
+        load = self._read(page_url, tuple(languages), translate_to, cancelled)
         # Only a real answer is kept for the long TTL: a network wobble must
         # not hide a track for the session, while a "no subtitles here" answer
         # is held briefly so a skipped song is not asked for in a loop (and a
@@ -449,7 +599,7 @@ class CaptionFetcher:
             self._ydl_module = module
         return module
 
-    def _read(self, page_url, languages, cancelled):
+    def _read(self, page_url, languages, translate_to, cancelled):
         try:
             yt_dlp = self._module()
         except Exception as error:
@@ -466,7 +616,7 @@ class CaptionFetcher:
                 info = ydl.extract_info(page_url, download=False)
                 if _cancelled(cancelled):
                     return CaptionLoad(reason=REASON_CANCELLED)
-                track = select_track(info, languages)
+                track = select_track(info, languages, translate_to)
                 if track is None:
                     return CaptionLoad(reason=REASON_NO_TRACK)
                 payload = _read_url(ydl, track.url)
@@ -474,10 +624,24 @@ class CaptionFetcher:
             logger.log_exception(error, "music_bot.captions")
             return CaptionLoad(reason=_failure_reason(error))
         cues = parse_json3(payload)
+        if not cues and track.translated and track.source_url:
+            # A machine translation can answer with nothing (an unsupported
+            # pair, a track YouTube will not translate). The original is still
+            # a caption track: read it rather than report the video as having
+            # none.
+            payload = _read_url(ydl, track.source_url)
+            cues = parse_json3(payload)
+            if cues:
+                return CaptionLoad(cues=tuple(cues),
+                                   language=track.source_language,
+                                   automatic=track.automatic,
+                                   reason=REASON_NONE)
         if not cues:
             return CaptionLoad(reason=REASON_NO_TRACK)
         return CaptionLoad(cues=tuple(cues), language=track.language,
-                           automatic=track.automatic, reason=REASON_NONE)
+                           automatic=track.automatic, reason=REASON_NONE,
+                           translated=track.translated,
+                           source_language=track.source_language)
 
 
 def _cancelled(cancelled):
@@ -521,14 +685,34 @@ def _failure_reason(error):
 #: stream of captions turns into a stream of captions that are always behind.
 LATE_DROP_MS = 2500
 
-#: How far behind the music the reader may fall before lines start being
-#: skipped instead of queued. Speech left waiting is heard late for the rest of
-#: the track and never catches up, so a bound is the only honest answer -- and
-#: it is deliberately generous, because a skipped line is lost content.
+#: The longest a single line's speech is estimated to occupy the reader.
+#: The bound keeps one malformed or very long cue from pushing every later
+#: line into "replace" for the rest of the song; the line itself is still read.
 MAX_LAG_MS = 8000
 
 #: A cue with no window of its own still gets this much of the reader's time.
 MIN_CUE_SPEECH_MS = 1200
+
+#: Roughly how long a line takes the reader. The screen reader's rate is the
+#: player's own setting and is invisible from here, so this is a plain
+#: estimate used for exactly one decision -- whether the previous caption is
+#: still being spoken when the next is due. Being wrong costs one replaced
+#: line, never a queue.
+SPEECH_BASE_MS = 300
+SPEECH_MS_PER_CHAR = 70
+
+#: The speech-history id a caption is stored under (`speech.speak(id=...)`).
+#: A new line can then tell whether the speech it is replacing is another
+#: caption -- and only then cut the reader off; a menu line or a game
+#: announcement is never interrupted.
+SUBTITLE_SPEECH_ID = "music_bot_subtitle"
+
+
+def speech_budget_ms(text):
+    """How long this line is estimated to take the reader."""
+    return max(MIN_CUE_SPEECH_MS,
+               SPEECH_BASE_MS + len(text) * SPEECH_MS_PER_CHAR)
+
 
 #: A position jump this large is a seek, not jitter: the cues around it are
 #: re-aimed (backward re-arms the lines the song is about to sing again).
@@ -552,27 +736,30 @@ class SubtitleReader:
         self.cues = ()
         self.language = ""
         self.automatic = False
+        self.translated = False
+        self.source_language = ""
         self.spoken = 0
         self.dropped = 0
         self._starts = []
         self._index = 0
         self._last_position_ms = None
-        self._last_spoken = None
         self._reader_free_at_ms = 0
 
     # -- what is loaded ----------------------------------------------------
 
-    def load(self, cues, language="", automatic=False):
+    def load(self, cues, language="", automatic=False, translated=False,
+             source_language=""):
         """Hold a track's cues, aimed at the start of the song."""
         self.cues = tuple(cues or ())
         self._starts = [cue.start_ms for cue in self.cues]
         self.language = language
         self.automatic = automatic
+        self.translated = bool(translated)
+        self.source_language = source_language if translated else ""
         self.spoken = 0
         self.dropped = 0
         self._index = 0
         self._last_position_ms = None
-        self._last_spoken = None
         self._reader_free_at_ms = 0
 
     def clear(self):
@@ -585,11 +772,14 @@ class SubtitleReader:
     # -- what is due -------------------------------------------------------
 
     def pump(self, position_ms, *, offset_ms=0):
-        """Speak what the song has reached; return the lines spoken.
+        """Speak what the song has reached; return ``(line, replace)`` pairs.
 
-        ``[]`` is the ordinary quiet frame: nothing is due yet, the due line
-        was already spoken, it had gone past (dropped), or the reader is too
-        far behind the music to be handed another one.
+        ``replace`` is true when the previous caption was still estimated to be
+        speaking, and tells the caller that this line is the one that must be
+        heard NOW -- the speech layer is interrupted rather than queued. That
+        is what keeps a slow reader on the current lyric instead of reading a
+        pile of old ones. ``[]`` is the ordinary quiet frame: nothing is due
+        yet, the due line was already spoken, or it had gone past (dropped).
         """
         if not self.cues or position_ms is None:
             return []
@@ -606,20 +796,17 @@ class SubtitleReader:
         # Everything the song ran past on the way here is a superseded line:
         # the caption being sung is the last one, not the first one owed.
         self.dropped += len(due) - 1
-        if cue.text == self._last_spoken:
-            return []
         if target - cue.start_ms > LATE_DROP_MS:
             self.dropped += 1
             return []
-        budget = max(MIN_CUE_SPEECH_MS, cue.end_ms - cue.start_ms)
-        free_at = max(target, self._reader_free_at_ms) + budget
-        if free_at - target > MAX_LAG_MS:
-            self.dropped += 1
-            return []
-        self._last_spoken = cue.text
-        self._reader_free_at_ms = free_at
+        budget = min(speech_budget_ms(cue.text), MAX_LAG_MS)
+        # A line always starts from where the song is now. It replaces the
+        # previous caption instead of waiting behind it, so the reader's queue
+        # can never grow past one line however fast the lyrics come.
+        replace = target < self._reader_free_at_ms
+        self._reader_free_at_ms = target + budget
         self.spoken += 1
-        return [cue.text]
+        return [(cue.text, replace)]
 
     def _rebase(self, target):
         """Follow the song, including a seek.
@@ -627,8 +814,8 @@ class SubtitleReader:
         The index counts positions in the track, not progress through it: a
         rewind re-arms the lines the player is about to hear again, and a jump
         forward skips the ones it went past. A cue already spoken is not
-        repeated by a still frame either, because the pump keeps the last line
-        it spoke -- pausing the bot stops the pump entirely instead.
+        repeated by a still frame either: the pump's index has already moved
+        past it, and pausing the bot stops the pump entirely instead.
         """
         previous = self._last_position_ms
         self._last_position_ms = target
@@ -646,7 +833,6 @@ class SubtitleReader:
         if target < previous - SEEK_BACK_MS:
             self.dropped += max(0, self._index)
             self._index = max(0, bisect_right(self._starts, target) - 1)
-            self._last_spoken = None
             self._reader_free_at_ms = 0
         elif target > previous + SEEK_FORWARD_MS:
             self._index = max(self._index,
@@ -658,6 +844,8 @@ class SubtitleReader:
         if not self.cues:
             return "No captions loaded."
         source = "automatic captions" if self.automatic else "captions"
-        return (f"{language_label(self.language)} {source}: "
+        origin = (f", translated from {language_label(self.source_language)}"
+                  if self.translated and self.source_language else "")
+        return (f"{language_label(self.language)} {source}{origin}: "
                 f"{len(self.cues)} lines, {self.spoken} read, "
                 f"{self.dropped} skipped.")

@@ -358,6 +358,16 @@ class MusicBotMenus(SettingsMenus, AutoTuneMenus, SubtitleMenus,
             ("queue", get_queue_count_label, go_queue,
              "The songs waiting behind the one that is playing. Enter opens "
              "the list to read them, or to clear it."),
+            # Right beside the queue it governs: one press cycles Off -> All
+            # songs -> This song, and every advance obeys it -- the end of a
+            # song, Next/Previous, the play-next queue, the playlist/local
+            # batch, the feed and the crossfade's pre-roll.
+            ("queue", self._bot.repeat_label, self._bot.toggle_repeat_mode,
+             "What happens at the end of a song or a list. Off plays each "
+             "song once; All songs starts the queue, playlist, local batch "
+             "or feed again at the end; This song repeats the one that is "
+             "playing, and Next or Previous restart it. Press it again to "
+             "move to the next mode."),
             ("subtitles", self._bot.subtitle_label, self._open_subtitle_menu,
              "Reads the song's own words out loud as the song reaches them, "
              "for a player who cannot see the screen. Songs often have none."),

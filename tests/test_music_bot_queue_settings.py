@@ -41,6 +41,7 @@ from libs import music_bot
 from libs.camera import _apply_music_water_filter
 from libs.gameplay import Gameplay
 from libs.music_bot import MapMusicBot
+from libs.music_bot import repeat
 from libs.music_bot import subtitles
 from libs.music_bot.track_source import TrackSourceHandler
 
@@ -78,6 +79,8 @@ def make_bot(**overrides):
     bot.play_queue_label = ""
     bot.next_up_queue = []
     bot.queue_mode = False
+    bot.repeat_mode = repeat.REPEAT_OFF
+    bot._repeat_cycle = []
     bot.water_muffle_enabled = True
     bot.reverb_enabled = True
     # Where this bot's own stream is heard: empty is the game's own device.
@@ -380,6 +383,251 @@ class TestSkipTrack(unittest.TestCase):
             self.assertFalse(bot.skip_track(-1))
         self.assertEqual(bot.play_queue_index, 0)
         speak.assert_called_once_with("No previous song in this queue.")
+
+
+class TestRepeatMode(unittest.TestCase):
+    """One line, three modes, and every way a song can advance."""
+
+    def track(self, title):
+        return {"title": title, "target": title, "source": "youtube"}
+
+    def bot_with_playlist(self, count=3, index=0):
+        bot = make_bot()
+        bot.play_queue = [self.track(f"P{i}") for i in range(count)]
+        bot.play_queue_index = index
+        bot.play_queue_label = "Favorites"
+        return bot
+
+    def test_the_line_cycles_off_all_one_and_persists(self):
+        bot = make_bot()
+        self.assertEqual(bot.repeat_label(), "Repeat: Off")
+        with mock.patch("libs.music_bot.controller.options.set") as opt_set, \
+                mock.patch("libs.music_bot.controller.speak") as speak, \
+                mock.patch.object(bot, "_cancel_crossfade"):
+            self.assertEqual(bot.toggle_repeat_mode(), repeat.REPEAT_ALL)
+            self.assertEqual(bot.repeat_label(), "Repeat: All songs")
+            self.assertEqual(bot.toggle_repeat_mode(), repeat.REPEAT_ONE)
+            self.assertEqual(bot.repeat_label(), "Repeat: This song")
+            self.assertEqual(bot.toggle_repeat_mode(), repeat.REPEAT_OFF)
+        self.assertEqual([call.args for call in opt_set.call_args_list], [
+            ("music_bot_repeat_mode", repeat.REPEAT_ALL),
+            ("music_bot_repeat_mode", repeat.REPEAT_ONE),
+            ("music_bot_repeat_mode", repeat.REPEAT_OFF),
+        ])
+        self.assertIn("Repeat off", speak.call_args[0][0])
+
+    def test_toggling_drops_a_pre_roll_but_not_a_fade_already_underway(self):
+        bot = make_bot()
+        with mock.patch.object(bot, "_cancel_crossfade") as cancel, \
+                mock.patch("libs.music_bot.controller.options.set"), \
+                mock.patch("libs.music_bot.controller.speak"):
+            bot._crossfade = {"phase": "resolving"}
+            bot.toggle_repeat_mode()
+            cancel.assert_called_once()
+
+            bot._crossfade = {"phase": "fading"}
+            cancel.reset_mock()
+            bot.toggle_repeat_mode()
+            cancel.assert_not_called()
+
+    def test_an_unknown_stored_mode_reads_off(self):
+        bot = make_bot(repeat_mode="sometimes")
+        self.assertEqual(bot.repeat_label(), "Repeat: Off")
+
+    def test_repeat_all_wraps_the_playlist_at_the_end(self):
+        bot = self.bot_with_playlist(index=2)
+        bot.repeat_mode = repeat.REPEAT_ALL
+        played = []
+        bot._play_queued_track = lambda: played.append(bot.play_queue_index)
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertTrue(bot._advance_track_queue())
+        self.assertEqual(played, [0])
+        speak.assert_not_called()
+
+    def test_repeat_off_still_finishes_the_playlist(self):
+        bot = self.bot_with_playlist(index=2)
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertFalse(bot._advance_track_queue())
+        speak.assert_called_once_with("Favorites finished.")
+        self.assertEqual(bot.play_queue, [])
+
+    def test_repeat_one_replays_the_song_at_the_end(self):
+        bot = make_bot(repeat_mode=repeat.REPEAT_ONE)
+        bot._seek_restart = mock.MagicMock()
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertTrue(bot._advance_track_queue())
+        bot._seek_restart.assert_called_once_with(0.0, announce=False)
+        speak.assert_not_called()
+
+    def test_a_failed_load_is_not_repeated_forever(self):
+        bot = make_bot(repeat_mode=repeat.REPEAT_ONE)
+        bot._seek_restart = mock.MagicMock()
+        self.assertFalse(bot._advance_track_queue(natural=False))
+        bot._seek_restart.assert_not_called()
+
+    def test_repeat_all_loops_a_play_next_queue_with_no_playlist(self):
+        bot = make_bot(repeat_mode=repeat.REPEAT_ALL)
+        bot._repeat_cycle = [self.track("Q0"), self.track("Q1")]
+        started = []
+        bot._start_youtube_stream_from_search = (
+            lambda title, webpage_url, direct_url,
+                   http_headers=None, preserve_queue=False:
+            started.append(title))
+        with mock.patch("libs.music_bot.controller.speak"):
+            self.assertTrue(bot._advance_track_queue())
+        self.assertEqual(started, ["Q0"])
+        self.assertEqual([t["title"] for t in bot.next_up_queue], ["Q1"])
+        self.assertEqual([t["title"] for t in bot._repeat_cycle], ["Q0"])
+
+    def test_next_wraps_the_playlist_in_repeat_all(self):
+        bot = self.bot_with_playlist(index=2)
+        bot.repeat_mode = repeat.REPEAT_ALL
+        played = []
+        bot._play_queued_track = lambda: played.append(bot.play_queue_index)
+        with mock.patch("libs.music_bot.controller.speak"):
+            self.assertTrue(bot.skip_track(1))
+        self.assertEqual(played, [0])
+
+    def test_previous_wraps_to_the_last_in_repeat_all(self):
+        bot = self.bot_with_playlist(index=0)
+        bot.repeat_mode = repeat.REPEAT_ALL
+        played = []
+        bot._play_queued_track = lambda: played.append(bot.play_queue_index)
+        with mock.patch("libs.music_bot.controller.speak"):
+            self.assertTrue(bot.skip_track(-1))
+        self.assertEqual(played, [2])
+
+    def test_next_and_previous_restart_the_song_in_repeat_one(self):
+        bot = make_bot(repeat_mode=repeat.REPEAT_ONE)
+        bot._seek_restart = mock.MagicMock()
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertTrue(bot.skip_track(1))
+            self.assertTrue(bot.skip_track(-1))
+        self.assertEqual(bot._seek_restart.call_count, 2)
+        speak.assert_any_call("Repeating Test Track.")
+
+    def test_the_feed_wraps_in_repeat_all_and_stops_off(self):
+        bot = make_bot(repeat_mode=repeat.REPEAT_ALL)
+        bot.feed_tracks = [self.track("F1"), self.track("F2")]
+        bot.feed_index = 1
+        played = []
+        bot._play_personal_feed_track = lambda: played.append(bot.feed_index)
+        self.assertTrue(bot._next_personal_feed())
+        self.assertEqual(played, [0])
+        # The wrapped-to song is first, so put the cursor on the last one to
+        # test what Off does at the end of the feed.
+        bot.repeat_mode = repeat.REPEAT_OFF
+        bot.feed_index = 1
+        cleared = []
+        bot._clear_personal_feed = lambda: cleared.append(True)
+        with mock.patch("libs.music_bot.controller.speak") as speak:
+            self.assertFalse(bot._next_personal_feed())
+        speak.assert_called_once_with("Personal Music Feed finished.")
+        self.assertEqual(cleared, [True])
+
+    def test_the_crossfade_pre_rolls_the_wrapped_track(self):
+        bot = self.bot_with_playlist(index=2)
+        bot.repeat_mode = repeat.REPEAT_ALL
+        machine = bot._crossfade_machine()
+        self.assertEqual(machine._peek_next_track()["title"], "P0")
+        self.assertEqual(machine._consume_next_track()["title"], "P0")
+        self.assertEqual(bot.play_queue_index, 0)
+
+    def test_the_crossfade_pre_rolls_the_song_itself_in_repeat_one(self):
+        bot = make_bot(repeat_mode=repeat.REPEAT_ONE)
+        machine = bot._crossfade_machine()
+        self.assertEqual(machine._peek_next_track()["title"], "Test Track")
+        self.assertEqual(machine._consume_next_track()["title"], "Test Track")
+
+    def test_a_queued_song_plays_before_the_next_feed_song(self):
+        bot = make_bot()
+        bot.feed_tracks = [self.track("F1"), self.track("F2")]
+        bot.feed_index = 0
+        bot.next_up_queue = [self.track("Q1")]
+        played = []
+        bot._play_queued_next = lambda: played.append("Q1")
+        bot._next_personal_feed = lambda natural=True: played.append("F2")
+        self.assertTrue(bot._advance_track_queue())
+        self.assertEqual(played, ["Q1"])
+
+    def test_a_queued_song_takes_the_feed_over(self):
+        bot = make_bot()
+        bot.feed_tracks = [self.track("F1"), self.track("F2")]
+        bot.feed_index = 0
+        bot.next_up_queue = [self.track("Q1")]
+        bot._clear_personal_feed = mock.MagicMock()
+        bot._start_youtube_stream_from_search = lambda *args, **kwargs: None
+        self.assertTrue(bot._play_queued_next())
+        bot._clear_personal_feed.assert_called_once()
+        self.assertEqual(bot.next_up_queue, [])
+
+    def test_a_queued_song_keeps_the_repeat_all_cycle(self):
+        bot = make_bot(repeat_mode=repeat.REPEAT_ALL)
+        bot._clear_personal_feed = lambda: MapMusicBot._clear_personal_feed(bot)
+        bot.next_up_queue = [self.track("Q1")]
+
+        def start(*args, **kwargs):
+            # What `_start_youtube_stream_from_search` does on every queued
+            # track; it must not erase the queue-only cycle.
+            bot._clear_personal_feed()
+
+        bot._start_youtube_stream_from_search = start
+        self.assertTrue(bot._play_queued_next())
+        self.assertEqual([t["title"] for t in bot._repeat_cycle], ["Q1"])
+
+    def test_off_clears_a_finished_queue_only_cycle(self):
+        bot = make_bot()
+        bot._repeat_cycle = [self.track("Q0")]
+        self.assertFalse(bot._advance_track_queue())
+        self.assertEqual(bot._repeat_cycle, [])
+
+    def test_the_crossfade_follows_the_feed_and_wraps_it(self):
+        bot = make_bot(repeat_mode=repeat.REPEAT_ALL)
+        bot.feed_tracks = [self.track("F1"), self.track("F2")]
+        bot.feed_index = 1
+        machine = bot._crossfade_machine()
+        self.assertEqual(machine._peek_next_track()["title"], "F1")
+        self.assertEqual(machine._consume_next_track()["title"], "F1")
+        self.assertEqual(bot.feed_index, 0)
+
+    def test_the_crossfade_repeats_the_feed_song_in_repeat_one(self):
+        bot = make_bot(repeat_mode=repeat.REPEAT_ONE)
+        bot.feed_tracks = [self.track("F1"), self.track("F2")]
+        bot.feed_index = 1
+        machine = bot._crossfade_machine()
+        self.assertEqual(machine._peek_next_track()["title"], "Test Track")
+        self.assertEqual(machine._consume_next_track()["title"], "Test Track")
+        self.assertEqual(bot.feed_index, 1)
+
+    def test_the_crossfade_has_no_next_at_the_feed_end_in_off(self):
+        bot = make_bot()
+        bot.feed_tracks = [self.track("F1"), self.track("F2")]
+        bot.feed_index = 1
+        machine = bot._crossfade_machine()
+        self.assertIsNone(machine._peek_next_track())
+        self.assertIsNone(machine._consume_next_track())
+        self.assertEqual(bot.feed_index, 1)
+
+    def test_the_crossfade_hands_the_feed_to_a_queued_song(self):
+        bot = make_bot()
+        bot.feed_tracks = [self.track("F1"), self.track("F2")]
+        bot.feed_index = 0
+        bot.next_up_queue = [self.track("Q1")]
+        bot._clear_personal_feed = mock.MagicMock()
+        machine = bot._crossfade_machine()
+        self.assertEqual(machine._peek_next_track()["title"], "Q1")
+        self.assertEqual(machine._consume_next_track()["title"], "Q1")
+        bot._clear_personal_feed.assert_called_once()
+        self.assertEqual(bot.next_up_queue, [])
+
+    def test_the_repeat_line_sits_under_the_open_queue_line(self):
+        import inspect
+        from libs.music_bot.menus import MusicBotMenus
+        source = inspect.getsource(MusicBotMenus._show_mode_menu)
+        self.assertIn("self._bot.repeat_label", source)
+        self.assertIn("self._bot.toggle_repeat_mode", source)
+        self.assertLess(source.index("get_queue_count_label"),
+                        source.index("self._bot.repeat_label"))
 
 
 class TestStopClearsNextUp(unittest.TestCase):

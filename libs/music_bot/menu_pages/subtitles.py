@@ -46,8 +46,10 @@ class SubtitleMenus:
             self._say(self._bot.subtitle_reader.status() +
                   " Subtitles come from the video on YouTube: the uploader's "
                   "own track when there is one, otherwise the automatic "
-                  "captions. Songs often have none, because the words of a "
-                  "song are rarely a caption track.")
+                  "captions. Auto takes the song's own track and has YouTube "
+                  "translate it, so a song in another language is still read "
+                  "in yours. Songs often have no track at all, because the "
+                  "words of a song are rarely a caption track.")
 
         m = menu_mod.Menu(self._bot.game, "Subtitles", parrent=gp)
         menu_prefs.build(m, [
@@ -55,15 +57,17 @@ class SubtitleMenus:
              "Turns the spoken subtitles on or off: the song's own words, "
              "read out as the song reaches them."),
             ("subtitle_language", self._bot.subtitle_language_label, go_language,
-             "Which language YouTube is asked for a caption track in. The "
-             "first language with a track is the one spoken."),
+             "Which language the words are read in. Auto takes the song's own "
+             "track and has YouTube translate it into your language, so "
+             "nothing has to be switched by hand."),
             ("subtitle_timing", self._bot.subtitle_timing_label, go_timing,
              "Moves the spoken line earlier or later against the song, if "
              "the screen reader falls behind or runs ahead."),
             ("subtitle_status", lambda: self._bot.subtitle_reader.status(),
              read_status,
              "How far the reader has got, and where the words come from: "
-             "the uploader's own caption track, or YouTube's automatic one."),
+             "the uploader's own caption track, YouTube's automatic one, or "
+             "a translation of the song's own track into your language."),
             (None, "Back", go_back,
              "Returns to the Music Bot menu."),
         ])
@@ -103,9 +107,9 @@ class SubtitleMenus:
 
         m = menu_mod.Menu(self._bot.game, "Subtitle Language", parrent=gp)
         items = [(make_label(key, label), make_pick(key, label), None,
-                  "The order YouTube is asked for a caption track in. The "
-                  "first language with a track is the one read out; songs "
-                  "often have none at all.")
+                  "Auto translates a song that has no track in your "
+                  "language; the other lines pick a language order and "
+                  "never translate. Songs often have no track at all.")
                  for key, label, _languages in subtitles.LANGUAGE_PREFERENCES]
         items.append(("Back", go_back, None,
                       "Returns to the Subtitles menu."))
