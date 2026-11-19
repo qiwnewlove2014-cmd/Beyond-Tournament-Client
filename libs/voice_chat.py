@@ -12,6 +12,7 @@ from .speech import speak
 from . import options
 from . import logger
 from . import audio_trace
+from . import sync_monitor
 # A note held for a song waits on the audio the listener is *hearing*, and that
 # rule has one home (``libs/jukebox_clock.py``): a member's music feed is an
 # output exactly as a cabinet's pair is, so it builds the same clock.
@@ -1911,6 +1912,16 @@ class voice_chat_compression(threading.Thread):
                 'last_packet_monotonic': time.monotonic(),
                 'sequenced': frame_seq is not None,
             }
+            buffer_level = getattr(jb, "get_buffer_level", None)
+            buffer_frames = buffer_level() if callable(buffer_level) else 0
+            sync_monitor.record(
+                self.game, sync_monitor.PA,
+                jitter_ms=_speaker_jitter_ms.get(sender_id, 0.0),
+                buffer_ms=buffer_frames * 20.0,
+                channel=channelID,
+                sender=sender_id,
+                sequenced=frame_seq is not None,
+            )
             return  # Megaphone handled, skip normal processing
                 
         # NORMAL VOICE CHAT: direct playback with an adaptive jitter margin. The old fixed 5 x 20 ms pad
@@ -1930,6 +1941,13 @@ class voice_chat_compression(threading.Thread):
         elif _last_pkt:
             _measure_speaker_jitter(vc_key, _last_pkt, _now)
         margin_frames = _adaptive_margin_frames(vc_key)
+        sync_monitor.record(
+            self.game, sync_monitor.VOICE,
+            jitter_ms=_speaker_jitter_ms.get(vc_key, 0.0),
+            buffer_ms=margin_frames * VOICE_FRAME_MS,
+            channel=channelID,
+            sender=sender_id,
+        )
 
         # All OpenAL below (recycle/fill/queue/play for voice + radio) runs
         # on the MAIN thread via the audio inbox.
@@ -2770,6 +2788,17 @@ def carry_output(old_source, new_source, guard=512):
     return moved, was_playing
 
 
+def _pcm_frame_ms(pcm, stereo):
+    """Duration of one decoded PCM frame in ms, for telemetry and thresholds."""
+    try:
+        return max(
+            1.0,
+            len(pcm) / (48000.0 * 2 * (2 if stereo else 1)) * 1000.0,
+        )
+    except Exception:
+        return 20.0
+
+
 class MusicCompression(threading.Thread):
     PRE_BUFFER_FRAMES = 12  # 240ms before first play (increased from 8 to
                             # prevent underruns on real networks)
@@ -3255,13 +3284,13 @@ class MusicCompression(threading.Thread):
             lambda: self._play_music_frame(
                 music_source, pcm, epoch, frame_seq, gameplay,
                 generation=generation, stereo=stereo, live=live,
-                flush_generation=flush_generation,
+                flush_generation=flush_generation, channel_id=channelID,
             )
         )
 
     def _play_music_frame(self, music_source, pcm, epoch, frame_seq, gameplay,
                           generation=None, stereo=None, live=False,
-                          flush_generation=None):
+                          flush_generation=None, channel_id=None):
         """MAIN THREAD ONLY: session recovery + buffer queue/play for one
         decoded music-bot frame. Runs via AudioManager.defer_audio() inside
         the main thread's frame batch; the batch below nests safely because
@@ -3312,7 +3341,7 @@ class MusicCompression(threading.Thread):
                 )
                 if is_new_session and trace_on:
                     audio_trace.event(
-                        "party_live_session", channel=channelID,
+                        "party_live_session", channel=channel_id,
                         first=bool(previous_recv is None),
                         gap_ms=audio_trace.gap_ms(now, previous_recv),
                         timeline=bool(timeline_changed),
@@ -3361,12 +3390,27 @@ class MusicCompression(threading.Thread):
                 if room_feed is not None:
                     if trace_on:
                         audio_trace.event(
-                            "party_live_play", channel=channelID, queued=0,
+                            "party_live_play", channel=channel_id, queued=0,
                             room_feed=True, started=bool(self._has_started),
                             stereo=bool(stereo), underrun=trace_underrun,
                             context=audio_trace.party_context(self.game)
                         )
                     self._play_room_frame(room_feed, pcm, epoch, frame_seq, stereo)
+                    room_buffer_ms = None
+                    try:
+                        room_buffer_ms = float(room_feed.bank.buffered_ms())
+                    except Exception:
+                        pass
+                    sync_monitor.record(
+                        self.game,
+                        sync_monitor.MUSIC_LIVE if live else sync_monitor.MUSIC,
+                        buffer_ms=room_buffer_ms,
+                        frame_ms=_pcm_frame_ms(pcm, stereo),
+                        live=bool(live),
+                        started=bool(self._has_started),
+                        room_feed=True,
+                        channel=channel_id,
+                    )
                     self._dispatch_timeline_events()
                     return
 
@@ -3380,6 +3424,10 @@ class MusicCompression(threading.Thread):
                 # comment stood where it belonged and the suite sat at the handler's own
                 # indentation, so it was dead and a stopped source was rebuilt one frame at a time.)
                 if self._has_started and state == cyal.SourceState.STOPPED:
+                    # An underrun is a real observation for both a song and a
+                    # live jam; the live branch below uses the same flag for
+                    # its trace and target growth.
+                    trace_underrun = True
                     if live:
                         # An underrun on a live jam is a jittery link, not a
                         # missing song: grow the target instead of cutting
@@ -3392,10 +3440,9 @@ class MusicCompression(threading.Thread):
                             + 10.0,
                         )
                         self._trace_underruns += 1
-                        trace_underrun = True
                         if trace_on:
                             audio_trace.event(
-                                "party_live_underrun", channel=channelID,
+                                "party_live_underrun", channel=channel_id,
                                 queued=int(getattr(music_source, "buffers_queued", 0) or 0),
                                 target_before=round(before_target, 1),
                                 target_after=round(self._live_target_ms, 1),
@@ -3465,13 +3512,10 @@ class MusicCompression(threading.Thread):
                     return
 
                 queued = getattr(music_source, 'buffers_queued', 0)
+                frame_ms = _pcm_frame_ms(pcm, stereo)
                 trace_frame_ms = trace_target = trace_threshold = None
                 if trace_on:
-                    trace_frame_ms = max(
-                        1.0,
-                        len(pcm) / (48000.0 * 2 * (2 if stereo else 1))
-                        * 1000.0,
-                    )
+                    trace_frame_ms = frame_ms
                     trace_target = max(
                         self.PRE_BUFFER_MS_LIVE,
                         float(getattr(self, "_live_target_ms", 0.0) or 0.0),
@@ -3485,11 +3529,6 @@ class MusicCompression(threading.Thread):
                     # A live jam starts on the small buffer; a song keeps the
                     # alignment window every listener is scheduled against.
                     if live:
-                        frame_ms = max(
-                            1.0,
-                            len(pcm) / (48000.0 * 2 * (2 if stereo else 1))
-                            * 1000.0,
-                        )
                         target = max(
                             self.PRE_BUFFER_MS_LIVE,
                             float(getattr(self, "_live_target_ms", 0.0) or 0.0),
@@ -3512,9 +3551,25 @@ class MusicCompression(threading.Thread):
                         except Exception:
                             pass
 
+                # One observation per queued frame, after the start gate so
+                # `started` describes this frame's outcome. `buffer_ms` is the
+                # source queue at queue time; it is not a second sample of the
+                # same frame.
+                sync_monitor.record(
+                    self.game,
+                    sync_monitor.MUSIC_LIVE if live else sync_monitor.MUSIC,
+                    buffer_ms=float(queued or 0) * frame_ms,
+                    frame_ms=frame_ms,
+                    underruns=1 if trace_underrun else 0,
+                    live=bool(live),
+                    started=bool(self._has_started),
+                    room_feed=False,
+                    channel=channel_id,
+                )
+
                 if trace_on:
                     audio_trace.event(
-                        "party_live_play", channel=channelID, queued=int(queued or 0),
+                        "party_live_play", channel=channel_id, queued=int(queued or 0),
                         room_feed=False, started=bool(self._has_started),
                         stereo=bool(stereo), underrun=trace_underrun,
                         target_ms=None if trace_target is None else round(trace_target, 1),

@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import cyal  # noqa: E402
 
+from libs import sync_monitor  # noqa: E402
 from libs.voice_chat import MusicCompression  # noqa: E402
 
 from test_cinema_peer_room import (FRAME, FakeContext, FakeSource,  # noqa: E402
@@ -94,6 +95,21 @@ class AStoppedSourceRestartsThePreBufferTests(unittest.TestCase):
         play(compression, source, game, 1)
         self.assertTrue(compression._has_started)
         self.assertEqual(source.state, cyal.SourceState.PLAYING)
+
+    def test_monitor_sees_one_sample_per_queued_frame_after_the_start_gate(self):
+        game = make_game()
+        game.sync_monitor = sync_monitor.SyncMonitor()
+        compression = make_compression(game)
+        source = FakeSource(game.audio_mngr.context)
+        play(compression, source, game, 1)
+        stats = game.sync_monitor.snapshot("music")
+        self.assertEqual(stats["samples"], 1)
+        self.assertFalse(stats["extra"]["started"])
+        self.assertEqual(stats["buffer_ms"], 20.0)
+        play(compression, source, game, PRE_BUFFER - 1)
+        stats = game.sync_monitor.snapshot("music")
+        self.assertEqual(stats["samples"], PRE_BUFFER)
+        self.assertTrue(stats["extra"]["started"])
 
 
 if __name__ == "__main__":

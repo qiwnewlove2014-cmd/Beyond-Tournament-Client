@@ -11,6 +11,7 @@ import webbrowser
 import cyal
 from . import audio_manager, buffer, gameplay, local_player_documents, menu, menus, options, consts
 from . import party_sync_audio
+from . import sync_monitor
 from . import audio_trace
 from .speech import speak
 from .weapons import weapon
@@ -442,6 +443,18 @@ class EventHandeler:
     def ping(self, data):
         if self.gameplay:
             rtt_ms = int((time.time() - self.gameplay.last_ping_time) * 1000)
+            # Phase 1 clock probe: the Server answers the existing ping with
+            # its receive/send instants, so the monitor can keep a min-RTT
+            # offset sample without a second packet or a second timer.
+            sent_at_ms = float(getattr(self.gameplay, "last_ping_time", 0.0) or 0.0) * 1000.0
+            if isinstance(data, dict) and sent_at_ms > 0.0:
+                sync_monitor.clock_sample(
+                    self.game,
+                    sent_at_ms,
+                    data.get("received_at"),
+                    data.get("server_time"),
+                    time.time() * 1000.0,
+                )
             # Record the RTT for the song/cover sync compensation (auto sampler
             # + manual F3 ping both feed it).
             try:
@@ -2171,6 +2184,25 @@ class EventHandeler:
         # the line below: that line is built from the detail, and a number nobody can read is not a
         # measurement. A room's own figure is already in its detail, so this adds only the pair's.
         spawn_ms = self._instrument_note_spawn_ms(instrument)
+        # Drift is the playhead gap this note arrived with (listener minus the
+        # performer's stamp), not the hold we are about to apply. Adding the
+        # queue to expected would make a perfectly healthy note report a drift
+        # equal to its buffer, which is the latency metric below, not drift.
+        sync_monitor.record(
+            self.game,
+            (sync_monitor.CINEMA
+             if getattr(self, "_jam_buffer_kind", None) == "room"
+             else sync_monitor.JAM),
+            buffer_ms=buffer_ms,
+            expected_ms=position_stamp,
+            actual_ms=my_position,
+            delay_ms=delay,
+            sender_lag_ms=sender_lag_ms,
+            aim=self._jam_aim,
+            position_stamp=position_stamp,
+            my_position=my_position,
+            spawn_ms=spawn_ms,
+        )
         if (spawn_ms
                 and getattr(self, "_jam_buffer_kind", None) in ("relay", "direct")
                 and getattr(self, "_jam_buffer_detail", None)):

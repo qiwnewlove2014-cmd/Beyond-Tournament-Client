@@ -18,6 +18,7 @@ import requests
 from .version import version
 
 from . import clock, consts, event_handeler, menus
+from . import sync_monitor
 from . import (
     menu,
     networking,
@@ -115,6 +116,8 @@ class Game:
         }
         
         self.audio_mngr = audio_manager.AudioManager()
+        # Read-only Phase 1 telemetry: clock samples and per-path timing.
+        self.sync_monitor = sync_monitor.SyncMonitor()
         # Game owns the sole PortMidi worker for the entire process lifetime.
         self.midi_hub = MidiHub(announce=speak)
         self.device_clock = self.new_clock()
