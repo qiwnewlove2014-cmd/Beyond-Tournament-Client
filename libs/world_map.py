@@ -1372,6 +1372,10 @@ class MinigameTable(BaseMapObj):
         self.game_type = game_type or "pong"
         if self.game_type == "blackjack":
             self.label = "Blackjack Arcade Table"
+        elif self.game_type == "slots":
+            self.label = "Slot Machine Cabinet"
+        elif self.game_type == "roulette":
+            self.label = "Roulette Arcade Table"
         elif self.game_type == "all":
             self.label = "Multi-Game Arcade Cabinet"
         else:
@@ -1562,6 +1566,10 @@ class MinigameTable(BaseMapObj):
         self.game_type = game_type or "pong"
         if self.game_type == "blackjack":
             self.label = "Blackjack Arcade Table"
+        elif self.game_type == "slots":
+            self.label = "Slot Machine Cabinet"
+        elif self.game_type == "roulette":
+            self.label = "Roulette Arcade Table"
         elif self.game_type == "all":
             self.label = "Multi-Game Arcade Cabinet"
         else:

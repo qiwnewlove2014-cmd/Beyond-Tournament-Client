@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from libs import menus
 from libs.audio.sound import Sound
-from libs.audio_manager import AudioManager
+from libs.audio_manager import AudioManager, panned_position
 
 CLIENT = Path(__file__).resolve().parents[1]
 TEST_SOUNDS = {"left": "ui/speaker_test_left.ogg",
@@ -490,6 +490,59 @@ class ThePanIsThePlacementAndNothingElseTests(unittest.TestCase):
     def test_a_sample_that_cannot_be_decoded_plays_nothing(self):
         audio = fake_manager(raises=True)
         self.assertEqual(audio.play_headphone_test(TEST_SOUNDS["left"], "left"), 0.0)
+        self.assertEqual(audio.context.created, [])
+
+
+class TheCabinetPanUsesTheSameRelativeSourceTests(unittest.TestCase):
+    """The slot machine's reel stops are a continuous pan, not a second system.
+
+    They share the speaker test's relative source: the placement is the
+    listener's own left/right, distance never changes the volume, and the point
+    stays one unit away at every angle so a middle stop is straight ahead
+    rather than a quieter side.
+    """
+
+    def test_the_point_stays_on_the_front_unit_arc(self):
+        for pan in (-1.0, -0.5, 0.0, 0.5, 1.0):
+            x, y, z = panned_position(pan)
+            self.assertEqual(y, 0.0)
+            self.assertAlmostEqual((x * x + y * y + z * z) ** 0.5, 1.0)
+
+    def test_the_ends_are_the_sides_and_zero_is_straight_ahead(self):
+        self.assertEqual(panned_position(-1.0), (-1.0, 0.0, 0.0))
+        self.assertEqual(panned_position(0.0), (0.0, 0.0, -1.0))
+        self.assertEqual(panned_position(1.0), (1.0, 0.0, 0.0))
+
+    def test_out_of_range_and_bad_values_are_clamped(self):
+        self.assertEqual(panned_position(9), panned_position(1.0))
+        self.assertEqual(panned_position(-9), panned_position(-1.0))
+        self.assertEqual(panned_position("nonsense"), panned_position(0.0))
+
+    def test_the_cabinet_announcement_is_relative_and_does_not_fade(self):
+        audio = fake_manager()
+        sound = audio.play_panned(TEST_SOUNDS["right"], 1.0)
+        self.assertIsNotNone(sound)
+        source = audio.context.created[0]
+        self.assertTrue(source.relative)
+        self.assertTrue(source.spatialize)
+        self.assertFalse(source.direct_channels)
+        self.assertEqual(source.position, (1.0, 0.0, 0.0))
+        self.assertEqual(source.reference_distance, 1.0)
+        self.assertEqual(source.rolloff_factor, 0.0)
+        self.assertTrue(source.played)
+        self.assertEqual(sound.cat, "miscelaneous")
+
+    def test_a_new_stop_does_not_cut_off_the_one_before_it(self):
+        audio = fake_manager()
+        audio.play_panned(TEST_SOUNDS["left"], -1.0)
+        first = audio.context.created[0]
+        audio.play_panned(TEST_SOUNDS["centre"], 0.0)
+        self.assertFalse(first.stopped)
+        self.assertEqual(len(audio.unbound_sources), 2)
+
+    def test_a_muted_game_plays_no_pan(self):
+        audio = fake_manager(muted=True)
+        self.assertIsNone(audio.play_panned(TEST_SOUNDS["left"], -1.0))
         self.assertEqual(audio.context.created, [])
 
 

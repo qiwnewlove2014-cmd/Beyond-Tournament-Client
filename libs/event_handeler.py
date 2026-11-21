@@ -1069,6 +1069,25 @@ class EventHandeler:
             data["sound"], data["looping"], data["id"], volume=data["volume"], cat=data.get("cat", "miscelaneous")
         )
 
+    def play_panned(self, data):
+        # The OpenAL context is only current on the main thread, exactly like
+        # play_direct and play_unbound.
+        if not data.get("_main_thread"):
+            sound_data = dict(data)
+            sound_data["_main_thread"] = True
+            self.game.put(
+                lambda sound_data=sound_data: self.play_panned(sound_data)
+            )
+            return
+        sound = data.get("sound")
+        if not sound:
+            return
+        self.game.audio_mngr.play_panned(
+            sound,
+            data.get("pan", 0.0),
+            volume=data.get("volume", 100),
+        )
+
     def play_unbound(self, data):
         if ((data.get("piano_note") or data.get("guitar_note"))
                 and self._instrument_peer_is_silenced(data)):

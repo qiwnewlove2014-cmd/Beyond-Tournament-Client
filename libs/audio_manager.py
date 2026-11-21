@@ -101,6 +101,23 @@ def preload_instrument_samples(audio):
             pass
 
 
+def panned_position(pan):
+    """Where a pan of -1..1 sits on the listener's own front unit circle.
+
+    OpenAL's forward is -z, so 0 is straight ahead, -1 is hard left and +1 is
+    hard right. The point stays one unit away at every angle: only the side
+    changes, never the distance, which is what makes this a pan and not a
+    volume change. A relative source means the listener's own facing, wherever
+    they stand.
+    """
+    try:
+        value = float(pan)
+    except (TypeError, ValueError):
+        value = 0.0
+    value = max(-1.0, min(1.0, value))
+    return (value, 0.0, -math.sqrt(max(0.0, 1.0 - value * value)))
+
+
 class AudioManager():
     @staticmethod
     def _open_context(cyal_device):
@@ -712,6 +729,58 @@ class AudioManager():
             pass
         return True
 
+
+    def play_panned(self, path, pan, volume=100, cat="miscelaneous"):
+        """Play a mono sample on the listener's left-to-right arc.
+
+        This is the cabinet announcement path: ``pan`` is -1 hard left, 0
+        straight ahead and +1 hard right, and the source is relative so every
+        player hears it on their own side of the cabinet regardless of facing.
+        Nothing is stopped first -- a reel's three stops are allowed to overlap
+        the way the machine's own mechanical sounds do.
+        """
+        if self.muted:
+            return None
+        if cat not in self.volume_categories:
+            cat = "miscelaneous"
+        if not self.volume_categories.get(cat):
+            return None
+        position = panned_position(pan)
+        try:
+            buffer = self.load_buffer(path, as_mono=True)
+        except Exception:
+            buffer = None
+        if not buffer:
+            return None
+        try:
+            source = self.context.gen_source(
+                relative=True,
+                spatialize=True,
+                direct_channels=False,
+                position=position,
+                gain=(volume / 100) * (self.volume_categories[cat][0] / 100),
+                pitch=1.0,
+                reference_distance=1.0,
+                rolloff_factor=0.0,
+            )
+            source.buffer = buffer
+        except Exception:
+            return None
+        snd = Sound(source, volume, False, cat=cat)
+        self.unbound_sources.append(snd)
+        try:
+            source.play()
+        except Exception:
+            with contextlib.suppress(Exception):
+                source.stop()
+            return None
+        gc.disable()
+        try:
+            self.volume_categories["master"][1].add(snd)
+            self.volume_categories[cat][1].add(snd)
+        finally:
+            gc.enable()
+        return snd
 
     def play_unbound_stereo_spatial(self, path, x, y, z, listener_x, listener_y, listener_z, volume=200, cat="miscelaneous", max_distance=25.0, facing_angle=0.0, as_mono=False, as_3d_stereo=False, occluded=False, direct_filter=None, stereo_provider=None, stereo_offset=2.5, stereo_reference_distance=6.0, stereo_rolloff=0.6, stereo_gain_l=1.15, stereo_gain_r=1.0):
         if self.muted:
